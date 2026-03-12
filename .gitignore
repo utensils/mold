@@ -1,0 +1,12 @@
+/target
+**/target
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+*.png
+*.jpeg
+*.jpg
+!docs/**/*.png

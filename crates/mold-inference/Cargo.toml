@@ -1,0 +1,20 @@
+[package]
+name = "mold-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Candle-based FLUX inference engine for mold"
+
+[dependencies]
+mold-core = { path = "../mold-core" }
+anyhow = "1"
+candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
+hf-hub = { version = "0.4", features = ["tokio"] }
+image = "0.25"
+tokenizers = "0.21"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"

@@ -1,0 +1,18 @@
+[package]
+name = "mold-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared types, API protocol, and HTTP client for mold"
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
