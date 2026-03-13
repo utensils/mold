@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{clip, flux, t5};
+use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, OutputFormat};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -14,10 +15,40 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
 }
 
+/// BF16 or quantized (GGUF) FLUX transformer.
+enum FluxTransformer {
+    BF16(flux::model::Flux),
+    Quantized(flux::quantized_model::Flux),
+}
+
+impl FluxTransformer {
+    fn denoise(
+        &self,
+        img: &Tensor,
+        img_ids: &Tensor,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        vec_: &Tensor,
+        timesteps: &[f64],
+        guidance: f64,
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(m) => {
+                flux::sampling::denoise(m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance)
+                    .map_err(anyhow::Error::from)
+            }
+            Self::Quantized(m) => {
+                flux::sampling::denoise(m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance)
+                    .map_err(anyhow::Error::from)
+            }
+        }
+    }
+}
+
 /// Loaded FLUX model components, ready for inference.
 /// T5 and CLIP run on CPU to save VRAM; FLUX transformer and VAE run on GPU.
 struct LoadedFlux {
-    flux_model: flux::model::Flux,
+    flux_model: FluxTransformer,
     t5_model: t5::T5EncoderModel,
     t5_tokenizer: Tokenizer,
     clip_model: clip::text_model::ClipTextTransformer,
@@ -29,6 +60,8 @@ struct LoadedFlux {
     device: Device,
     dtype: DType,
     is_schnell: bool,
+    /// True if using quantized GGUF model (state tensors must be F32)
+    is_quantized: bool,
 }
 
 /// FLUX inference engine backed by candle.
@@ -144,21 +177,41 @@ impl FluxEngine {
         let clip_tokenizer = Tokenizer::from_file(&self.clip_tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
 
-        // Load FLUX transformer on GPU (23GB BF16 — fits in 24GB VRAM)
-        tracing::info!(path = %self.paths.transformer.display(), "loading FLUX transformer on GPU...");
+        // Load FLUX transformer on GPU — GGUF quantized or BF16 safetensors
+        let is_quantized = self
+            .paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false);
+
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
         } else {
             flux::model::Config::dev()
         };
-        let flux_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.transformer),
-                gpu_dtype,
-                &device,
-            )?
+
+        tracing::info!(
+            path = %self.paths.transformer.display(),
+            quantized = is_quantized,
+            "loading FLUX transformer on GPU..."
+        );
+
+        let flux_model = if is_quantized {
+            let vb =
+                quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
+            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+        } else {
+            let flux_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&self.paths.transformer),
+                    gpu_dtype,
+                    &device,
+                )?
+            };
+            FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
-        let flux_model = flux::model::Flux::new(&flux_cfg, flux_vb)?;
         tracing::info!("FLUX transformer loaded on GPU");
 
         // Load VAE on GPU (small, ~300MB)
@@ -189,6 +242,7 @@ impl FluxEngine {
             device,
             dtype: gpu_dtype,
             is_schnell,
+            is_quantized,
         });
 
         tracing::info!(model = %self.model_name, "all model components loaded successfully");
@@ -250,12 +304,28 @@ impl InferenceEngine for FluxEngine {
         };
         tracing::info!("CLIP encoding complete (moved to GPU)");
 
-        // 3. Generate initial noise
+        // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
+        let noise_dtype = if loaded.is_quantized {
+            DType::F32
+        } else {
+            loaded.dtype
+        };
         let img =
-            flux::sampling::get_noise(1, height, width, &loaded.device)?.to_dtype(loaded.dtype)?;
+            flux::sampling::get_noise(1, height, width, &loaded.device)?.to_dtype(noise_dtype)?;
+
+        // For quantized model, state tensors must be F32
+        let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
+            (
+                t5_emb.to_dtype(DType::F32)?,
+                clip_emb.to_dtype(DType::F32)?,
+                img.to_dtype(DType::F32)?,
+            )
+        } else {
+            (t5_emb.clone(), clip_emb.clone(), img.clone())
+        };
 
         // 4. Build sampling state
-        let state = flux::sampling::State::new(&t5_emb, &clip_emb, &img)?;
+        let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
 
         // 5. Get timestep schedule
         let timesteps = if loaded.is_schnell {
@@ -264,11 +334,14 @@ impl InferenceEngine for FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
-        tracing::info!(steps = timesteps.len(), "running denoising loop...");
+        tracing::info!(
+            steps = timesteps.len(),
+            quantized = loaded.is_quantized,
+            "running denoising loop..."
+        );
 
         // 6. Denoise
-        let img = flux::sampling::denoise(
-            &loaded.flux_model,
+        let img = loaded.flux_model.denoise(
             &state.img,
             &state.img_ids,
             &state.txt,
