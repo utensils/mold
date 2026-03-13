@@ -87,23 +87,26 @@ impl FluxEngine {
             )?
         };
         let t5_config_text = r#"{
-            "d_ff": 10240,
-            "d_kv": 64,
+            "vocab_size": 32128,
             "d_model": 4096,
-            "decoder_start_token_id": 0,
-            "eos_token_id": 1,
-            "initializer_factor": 1.0,
-            "is_encoder_decoder": true,
-            "is_gated_act": true,
-            "model_type": "t5",
-            "num_decoder_layers": 24,
+            "d_kv": 64,
+            "d_ff": 10240,
             "num_heads": 64,
             "num_layers": 24,
-            "pad_token_id": 0,
-            "relative_attention_max_distance": 128,
+            "num_decoder_layers": 24,
             "relative_attention_num_buckets": 32,
-            "vocab_size": 32128,
-            "dense_act_fn": "gelu_new"
+            "relative_attention_max_distance": 128,
+            "dropout_rate": 0.1,
+            "layer_norm_epsilon": 1e-6,
+            "initializer_factor": 1.0,
+            "feed_forward_proj": "gated-gelu",
+            "tie_word_embeddings": false,
+            "is_decoder": false,
+            "is_encoder_decoder": true,
+            "use_cache": true,
+            "pad_token_id": 0,
+            "eos_token_id": 1,
+            "decoder_start_token_id": 0
         }"#;
         let t5_config: t5::Config = serde_json::from_str(t5_config_text)?;
         let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config)?;
