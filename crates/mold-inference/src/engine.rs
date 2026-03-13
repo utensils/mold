@@ -355,8 +355,8 @@ impl InferenceEngine for FluxEngine {
         let img = flux::sampling::unpack(&img, height, width)?;
         tracing::info!("denoising complete, decoding VAE...");
 
-        // 8. Decode with VAE
-        let img = loaded.vae.decode(&img)?;
+        // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
+        let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
