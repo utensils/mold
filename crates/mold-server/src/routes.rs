@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use mold_core::{GenerateRequest, GpuInfo, ModelInfo, OutputFormat, ServerStatus};
-use mold_inference::{model_registry, InferenceEngine};
+use mold_inference::model_registry;
 
 use crate::state::AppState;
 
@@ -27,8 +27,6 @@ async fn generate(
     if let Err(e) = validate_generate_request(&req) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
     }
-
-    let output_format = req.output_format;
 
     // Load on first request (holds lock only during load, not inference)
     {
@@ -160,7 +158,20 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 
 /// Query GPU info via nvidia-smi. Returns None if not available or on non-NVIDIA hardware.
 fn query_gpu_info() -> Option<GpuInfo> {
-    let output = std::process::Command::new("nvidia-smi")
+    // Try PATH first, then NixOS well-known location.
+    let nvidia_smi = ["nvidia-smi", "/run/current-system/sw/bin/nvidia-smi"]
+        .iter()
+        .find(|p| {
+            if p.starts_with('/') {
+                std::path::Path::new(p).exists()
+            } else {
+                true // let Command::new try PATH
+            }
+        })
+        .copied()
+        .unwrap_or("nvidia-smi");
+
+    let output = std::process::Command::new(nvidia_smi)
         .args([
             "--query-gpu=name,memory.total,memory.used",
             "--format=csv,noheader,nounits",
