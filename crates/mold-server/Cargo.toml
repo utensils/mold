@@ -6,6 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "HTTP inference server for mold"
 
+[[bin]]
+name = "mold-server"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["mold-inference/cuda"]
+metal = ["mold-inference/metal"]
+
 [dependencies]
 mold-core = { path = "../mold-core" }
 mold-inference = { path = "../mold-inference" }
@@ -16,5 +25,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
+clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

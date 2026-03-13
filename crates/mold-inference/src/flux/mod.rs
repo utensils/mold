@@ -1,16 +1,10 @@
-pub mod scheduler;
-pub mod tokenizer;
-
-// FLUX model loading and sampling.
+// FLUX inference pipeline — implemented via candle_transformers::models::flux.
 //
-// This module will implement the full FLUX diffusion pipeline using candle.
-// Reference: candle/candle-examples/examples/flux/
+// The actual model loading, sampling, and VAE decoding is handled by the
+// FluxEngine in engine.rs using candle's built-in FLUX support:
 //
-// Pipeline stages:
-//   1. Encode prompt via T5 + CLIP tokenizers
-//   2. Create latent noise tensor
-//   3. Run denoising loop (Euler scheduler)
-//   4. Decode latents through VAE
-//   5. Convert to RGB image
-//
-// For now, actual inference is stubbed in engine.rs.
+//   - flux::model::Flux — the transformer
+//   - flux::sampling — noise generation, State, get_schedule, denoise, unpack
+//   - flux::autoencoder::AutoEncoder — VAE decoder
+//   - t5::T5EncoderModel — text encoder
+//   - clip::text_model::ClipTextTransformer — CLIP encoder

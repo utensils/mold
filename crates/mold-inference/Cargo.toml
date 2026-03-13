@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Candle-based FLUX inference engine for mold"
 
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
 [dependencies]
 mold-core = { path = "../mold-core" }
 anyhow = "1"
@@ -14,6 +19,9 @@ candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
 candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
 hf-hub = { version = "0.4", features = ["tokio"] }
 image = "0.25"
+safetensors = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokenizers = "0.21"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

@@ -1,5 +1,65 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Per-model file path configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelConfig {
+    pub transformer: Option<String>,
+    pub vae: Option<String>,
+    pub t5_encoder: Option<String>,
+    pub clip_encoder: Option<String>,
+}
+
+/// Resolved model file paths (all required).
+#[derive(Debug, Clone)]
+pub struct ModelPaths {
+    pub transformer: PathBuf,
+    pub vae: PathBuf,
+    pub t5_encoder: PathBuf,
+    pub clip_encoder: PathBuf,
+}
+
+impl ModelPaths {
+    /// Resolve paths for a model. Checks config, then env vars, then defaults.
+    pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
+        let model_cfg = config.models.get(model_name);
+
+        let transformer = Self::resolve_path(
+            model_cfg.and_then(|m| m.transformer.as_deref()),
+            "MOLD_TRANSFORMER_PATH",
+        )?;
+        let vae = Self::resolve_path(
+            model_cfg.and_then(|m| m.vae.as_deref()),
+            "MOLD_VAE_PATH",
+        )?;
+        let t5_encoder = Self::resolve_path(
+            model_cfg.and_then(|m| m.t5_encoder.as_deref()),
+            "MOLD_T5_PATH",
+        )?;
+        let clip_encoder = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_encoder.as_deref()),
+            "MOLD_CLIP_PATH",
+        )?;
+
+        Some(Self {
+            transformer,
+            vae,
+            t5_encoder,
+            clip_encoder,
+        })
+    }
+
+    fn resolve_path(config_val: Option<&str>, env_var: &str) -> Option<PathBuf> {
+        if let Some(path) = config_val {
+            return Some(PathBuf::from(path));
+        }
+        if let Ok(path) = std::env::var(env_var) {
+            return Some(PathBuf::from(path));
+        }
+        None
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -20,6 +80,10 @@ pub struct Config {
 
     #[serde(default = "default_dimension")]
     pub default_height: u32,
+
+    /// Per-model path overrides, keyed by model name.
+    #[serde(default)]
+    pub models: HashMap<String, ModelConfig>,
 }
 
 fn default_model() -> String {
@@ -51,6 +115,7 @@ impl Default for Config {
             output_dir: default_output_dir(),
             default_width: default_dimension(),
             default_height: default_dimension(),
+            models: HashMap::new(),
         }
     }
 }

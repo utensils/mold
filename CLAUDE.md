@@ -17,10 +17,13 @@ mold is a CLI/TUI tool for AI image generation using FLUX models via the [candle
 ```
 mold/
 ├── Cargo.toml                    # Workspace root
+├── scripts/
+│   ├── deploy.sh                 # Build + deploy to hal9000
+│   └── fetch-tokenizers.sh       # Download tokenizer files
 ├── crates/
 │   ├── mold-core/                # Shared types, API protocol, HTTP client, config
 │   ├── mold-inference/           # Candle-based FLUX inference engine
-│   ├── mold-server/              # Axum HTTP inference server
+│   ├── mold-server/              # Axum HTTP inference server (lib + binary)
 │   └── mold-cli/                 # Main binary — CLI (clap) + TUI (ratatui)
 ```
 
@@ -30,7 +33,7 @@ Shared library used by all other crates. Contains:
 
 - **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, etc.)
 - **`client.rs`** — `MoldClient` HTTP client for communicating with mold-server
-- **`config.rs`** — `Config` struct, loads from `~/.mold/config.toml`
+- **`config.rs`** — `Config` struct, `ModelConfig`, `ModelPaths`; loads from `~/.mold/config.toml`
 - **`error.rs`** — `MoldError` enum with thiserror
 
 Key types:
@@ -44,6 +47,8 @@ ModelInfo           // name, family, size_gb, is_loaded, last_used, hf_repo
 ServerStatus        // version, models_loaded, gpu_info, uptime_secs
 GpuInfo             // name, vram_total_mb, vram_used_mb
 LoadModelRequest    // model name
+ModelConfig         // per-model path overrides (transformer, vae, t5_encoder, clip_encoder)
+ModelPaths          // resolved PathBufs for all model components
 ```
 
 ### mold-inference
@@ -57,26 +62,37 @@ src/
 ├── error.rs            # InferenceError enum
 ├── model_registry.rs   # Known models → HF repo mapping
 └── flux/
-    ├── mod.rs           # FLUX pipeline (stubbed)
-    ├── scheduler.rs     # Euler discrete scheduler
-    └── tokenizer.rs     # T5/CLIP tokenizer wrappers
+    └── mod.rs           # Module docs (pipeline uses candle_transformers directly)
 ```
 
 The `InferenceEngine` trait:
 ```rust
 pub trait InferenceEngine: Send + Sync {
-    fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse>;
-    fn load_model(&mut self, model: &str) -> Result<()>;
-    fn unload_model(&mut self, model: &str) -> Result<()>;
-    fn loaded_models(&self) -> Vec<String>;
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
+    fn model_name(&self) -> &str;
+    fn is_loaded(&self) -> bool;
 }
 ```
 
-Currently `FluxEngine` returns placeholder gradient images. The real implementation will use candle-transformers' FLUX pipeline (reference: candle/candle-examples/examples/flux/).
+**`FluxEngine`** implements real FLUX.1 inference using candle-transformers:
+
+1. **T5 encoding** — `candle_transformers::models::t5::T5EncoderModel` encodes prompt to 4096-dim embeddings (padded to 256 tokens)
+2. **CLIP encoding** — `candle_transformers::models::clip::text_model::ClipTextTransformer` encodes prompt to 768-dim embeddings
+3. **Noise generation** — `flux::sampling::get_noise()` creates initial latent noise
+4. **State construction** — `flux::sampling::State::new()` packages text + image embeddings
+5. **Timestep scheduling** — `flux::sampling::get_schedule()` (4 steps for schnell, configurable for dev with shift)
+6. **Denoising** — `flux::sampling::denoise()` runs the FLUX transformer with Euler sampling
+7. **Unpacking** — `flux::sampling::unpack()` converts packed latents to spatial layout
+8. **VAE decoding** — `flux::autoencoder::AutoEncoder::decode()` converts latents to pixels
+9. **Image encoding** — Tensor → RGB → PNG/JPEG bytes via the `image` crate
+
+Model loading is **lazy** (on first generation request) and uses **mmap** for safetensors files.
+
+Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
 
 ### mold-server
 
-Axum-based HTTP server that wraps the inference engine. Runs on the GPU host.
+Axum-based HTTP server that wraps the inference engine. Runs on the GPU host. Has both a library crate and a standalone binary (`mold-server`).
 
 Routes:
 | Method | Path | Description |
@@ -84,11 +100,9 @@ Routes:
 | `POST` | `/api/generate` | Generate images from prompt |
 | `GET` | `/api/models` | List available models |
 | `GET` | `/api/status` | Server health + status |
-| `POST` | `/api/models/load` | Preload a model into memory |
-| `DELETE` | `/api/models/{name}` | Unload a model |
 | `GET` | `/health` | Simple 200 OK health check |
 
-State is managed via `AppState` which holds a `Mutex<FluxEngine>`.
+State is managed via `AppState` which holds a `tokio::sync::Mutex<FluxEngine>`. Model is loaded lazily on first `/api/generate` request.
 
 ### mold-cli
 
@@ -128,30 +142,79 @@ mold version                    Show version information
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port (used by `mold serve`) |
 | `MOLD_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `MOLD_TRANSFORMER_PATH` | — | Path to FLUX transformer safetensors |
+| `MOLD_VAE_PATH` | — | Path to VAE safetensors |
+| `MOLD_T5_PATH` | — | Path to T5-XXL encoder safetensors |
+| `MOLD_CLIP_PATH` | — | Path to CLIP-L encoder safetensors |
+| `MOLD_T5_TOKENIZER_PATH` | — | Path to T5 tokenizer.json |
+| `MOLD_CLIP_TOKENIZER_PATH` | — | Path to CLIP tokenizer.json |
 
 ## Config File
 
 Location: `~/.mold/config.toml`
 
 ```toml
-default_model = "flux-schnell"
+default_model = "flux-dev"
 models_dir = "~/.mold/models"
 server_port = 7680
 output_dir = "."
 default_width = 1024
 default_height = 1024
+
+[models.flux-dev]
+transformer = "/path/to/flux1-dev.safetensors"
+vae = "/path/to/ae.safetensors"
+t5_encoder = "/path/to/t5xxl_fp16.safetensors"
+clip_encoder = "/path/to/clip_l.safetensors"
 ```
 
-Loaded via `Config::load_or_default()` — falls back to defaults if the file doesn't exist.
+Loaded via `Config::load_or_default()` — falls back to defaults if the file doesn't exist. Model paths can also be set via env vars (see above).
 
 ## Remote Rendering
 
 mold supports a client-server architecture for remote GPU rendering:
 
-1. On the GPU host: `mold serve --port 7680`
+1. On the GPU host: `mold-server serve --port 7680`
 2. On any client: `MOLD_HOST=http://gpu-host:7680 mold generate "a sunset"`
 
 The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receives the generated image bytes in the response. All CLI commands (`generate`, `list`, `ps`) communicate through the same HTTP API.
+
+## Deployment to hal9000
+
+Model files on hal9000 (already downloaded):
+```
+Transformer:  /home/jamesbrink/AI/models/unet/flux1-dev.safetensors
+VAE:          /home/jamesbrink/AI/models/vae/ae.safetensors
+T5 encoder:   /home/jamesbrink/AI/models/text_encoders/t5xxl_fp16.safetensors
+CLIP-L:       /home/jamesbrink/AI/models/clip/clip_l.safetensors
+```
+
+### First-time setup
+
+```bash
+# On hal9000: download tokenizer files
+ssh jamesbrink@hal9000.home.urandom.io
+bash /home/jamesbrink/mold/scripts/fetch-tokenizers.sh
+```
+
+### Deploy
+
+```bash
+# From the mold project root on your local machine:
+./scripts/deploy.sh
+```
+
+This will:
+1. rsync source to hal9000
+2. Build with CUDA on hal9000
+3. Stop any running mold-server
+4. Start mold-server with model paths configured via env vars
+
+### Test after deploy
+
+```bash
+MOLD_HOST=http://hal9000.home.urandom.io:7680 mold generate "a rusty robot on a beach"
+```
 
 ## Known Models
 
@@ -190,6 +253,7 @@ Planned support for distributing models via OCI-compatible registries (similar t
 cargo build                     # Debug build (all crates)
 cargo build --release           # Release build
 cargo build -p mold-cli         # Just the CLI binary
+cargo build -p mold-server --features cuda  # Server with CUDA
 ```
 
 ### Running
@@ -224,8 +288,12 @@ cargo test -p mold-core         # Test specific crate
 
 3. **Axum for the server**: Modern, ergonomic, and built on tokio/tower. Natural fit for the async Rust ecosystem.
 
-4. **Stubbed inference**: The inference engine returns placeholder images so the full CLI/server flow can be developed and tested without requiring GPU hardware or large model downloads.
+4. **Lazy model loading**: Model components (transformer, T5, CLIP, VAE) are loaded on first request rather than at startup, so the server starts fast and only uses VRAM when needed.
 
 5. **`InferenceEngine` trait**: Allows swapping backends (e.g., candle CUDA vs CPU, or future ONNX backend) without changing server/CLI code.
 
-6. **Mutex for engine state**: Simple and correct for the current single-model-at-a-time design. Can be upgraded to RwLock or actor model if concurrent generation is needed.
+6. **`tokio::sync::Mutex` for engine state**: Async-aware mutex prevents blocking the tokio runtime during generation. Single-model-at-a-time design is appropriate for GPU workloads.
+
+7. **mmap for safetensors**: Model weights are memory-mapped rather than read into memory, allowing the OS to manage paging efficiently.
+
+8. **Env var + config file model paths**: Supports both deployment-friendly env vars and local config file paths. Env vars take precedence over config.
