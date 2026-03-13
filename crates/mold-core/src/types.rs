@@ -11,12 +11,17 @@ pub struct GenerateRequest {
     #[serde(default = "default_guidance")]
     pub guidance: f64,
     pub seed: Option<u64>,
+    #[serde(default = "default_batch_size")]
     pub batch_size: u32,
     pub output_format: OutputFormat,
 }
 
 fn default_guidance() -> f64 {
     3.5
+}
+
+fn default_batch_size() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
