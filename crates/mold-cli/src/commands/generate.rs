@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use mold_core::{GenerateRequest, MoldClient, OutputFormat};
+use mold_core::{Config, GenerateRequest, MoldClient, OutputFormat};
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
@@ -9,9 +9,10 @@ pub async fn run(
     prompt: &str,
     model: &str,
     output: Option<String>,
-    width: u32,
-    height: u32,
+    width: Option<u32>,
+    height: Option<u32>,
     steps: Option<u32>,
+    guidance: Option<f64>,
     seed: Option<u64>,
     batch: u32,
     host: Option<String>,
@@ -19,10 +20,14 @@ pub async fn run(
 ) -> Result<()> {
     let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
-    let default_steps = match model {
-        "flux-dev" => 25,
-        _ => 4,
-    };
+    // Load config and pull model-specific defaults.
+    let config = Config::load_or_default();
+    let model_cfg = config.model_config(model);
+
+    let effective_width = width.unwrap_or_else(|| model_cfg.effective_width(&config));
+    let effective_height = height.unwrap_or_else(|| model_cfg.effective_height(&config));
+    let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
+    let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
 
     let client = match &host {
         Some(h) => MoldClient::new(h),
@@ -32,21 +37,25 @@ pub async fn run(
     let req = GenerateRequest {
         prompt: prompt.to_string(),
         model: model.to_string(),
-        width,
-        height,
-        steps: steps.unwrap_or(default_steps),
+        width: effective_width,
+        height: effective_height,
+        steps: effective_steps,
+        guidance: effective_guidance,
         seed,
         batch_size: batch,
         output_format,
     };
 
+    if let Some(desc) = &model_cfg.description {
+        println!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
+    }
     println!(
-        "{} Generating with {} ({}x{}, {} steps)...",
-        "●".green(),
-        model.bold(),
-        width,
-        height,
-        req.steps,
+        "{} Generating {}x{} ({} steps, guidance {:.1})...",
+        "●".cyan(),
+        effective_width,
+        effective_height,
+        effective_steps,
+        effective_guidance,
     );
 
     let pb = ProgressBar::new_spinner();
@@ -79,9 +88,9 @@ pub async fn run(
                     .as_secs();
                 let ext = output_format.to_string();
                 if batch == 1 {
-                    format!("mold-output-{timestamp}.{ext}")
+                    format!("mold-{model}-{timestamp}.{ext}")
                 } else {
-                    format!("mold-output-{timestamp}-{}.{ext}", img.index)
+                    format!("mold-{model}-{timestamp}-{}.{ext}", img.index)
                 }
             }
         };

@@ -1,7 +1,34 @@
 use anyhow::Result;
 use reqwest::Client;
+use serde::Deserialize;
 
 use crate::types::{GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus};
+
+/// Extended model info returned by /api/models, includes generation defaults.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelInfoExtended {
+    #[serde(flatten)]
+    pub info: ModelInfo,
+    #[serde(flatten)]
+    pub defaults: ModelDefaults,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelDefaults {
+    pub default_steps: u32,
+    pub default_guidance: f64,
+    pub default_width: u32,
+    pub default_height: u32,
+    pub description: String,
+}
+
+// Delegate the basic ModelInfo fields for ergonomic access.
+impl std::ops::Deref for ModelInfoExtended {
+    type Target = ModelInfo;
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
 
 pub struct MoldClient {
     base_url: String,
@@ -66,13 +93,18 @@ impl MoldClient {
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let models = self.list_models_extended().await?;
+        Ok(models.into_iter().map(|m| m.info).collect())
+    }
+
+    pub async fn list_models_extended(&self) -> Result<Vec<ModelInfoExtended>> {
         let resp = self
             .client
             .get(format!("{}/api/models", self.base_url))
             .send()
             .await?
             .error_for_status()?
-            .json::<Vec<ModelInfo>>()
+            .json::<Vec<ModelInfoExtended>>()
             .await?;
         Ok(resp)
     }

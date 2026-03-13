@@ -7,9 +7,16 @@ pub struct GenerateRequest {
     pub width: u32,
     pub height: u32,
     pub steps: u32,
+    /// Guidance scale. 0.0 for schnell (distilled), ~3.5 for dev/finetuned models.
+    #[serde(default = "default_guidance")]
+    pub guidance: f64,
     pub seed: Option<u64>,
     pub batch_size: u32,
     pub output_format: OutputFormat,
+}
+
+fn default_guidance() -> f64 {
+    3.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +136,7 @@ mod tests {
             width: 768,
             height: 768,
             steps: 4,
+            guidance: 0.0,
             seed: Some(42),
             batch_size: 1,
             output_format: OutputFormat::Png,
@@ -145,5 +153,14 @@ mod tests {
         let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert!(req.seed.is_none());
+        // guidance should default to 3.5 when omitted
+        assert!((req.guidance - 3.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn generate_request_explicit_guidance() {
+        let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"guidance":0.0,"batch_size":1,"output_format":"png"}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.guidance, 0.0);
     }
 }

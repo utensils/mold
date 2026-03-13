@@ -2,13 +2,56 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Per-model file path configuration.
-#[derive(Debug, Clone, Deserialize)]
+/// Per-model file path + default settings configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ModelConfig {
+    // --- paths ---
     pub transformer: Option<String>,
     pub vae: Option<String>,
     pub t5_encoder: Option<String>,
     pub clip_encoder: Option<String>,
+    pub t5_tokenizer: Option<String>,
+    pub clip_tokenizer: Option<String>,
+
+    // --- generation defaults ---
+    /// Default inference steps (e.g. 4 for schnell, 25 for dev)
+    pub default_steps: Option<u32>,
+    /// Default guidance scale (0.0 for schnell, 3.5 for dev finetuned)
+    pub default_guidance: Option<f64>,
+    /// Default output width
+    pub default_width: Option<u32>,
+    /// Default output height
+    pub default_height: Option<u32>,
+    /// Whether this model uses the schnell (distilled) timestep schedule.
+    /// If None, auto-detected from the transformer filename.
+    pub is_schnell: Option<bool>,
+
+    // --- metadata ---
+    pub description: Option<String>,
+    pub family: Option<String>,
+}
+
+impl ModelConfig {
+    /// Effective steps: model default → global fallback → hardcoded default.
+    pub fn effective_steps(&self, global_cfg: &Config) -> u32 {
+        self.default_steps
+            .unwrap_or_else(|| global_cfg.default_steps)
+    }
+
+    /// Effective guidance.
+    pub fn effective_guidance(&self) -> f64 {
+        self.default_guidance.unwrap_or(3.5)
+    }
+
+    /// Effective width.
+    pub fn effective_width(&self, global_cfg: &Config) -> u32 {
+        self.default_width.unwrap_or(global_cfg.default_width)
+    }
+
+    /// Effective height.
+    pub fn effective_height(&self, global_cfg: &Config) -> u32 {
+        self.default_height.unwrap_or(global_cfg.default_height)
+    }
 }
 
 /// Resolved model file paths (all required).
@@ -18,10 +61,13 @@ pub struct ModelPaths {
     pub vae: PathBuf,
     pub t5_encoder: PathBuf,
     pub clip_encoder: PathBuf,
+    pub t5_tokenizer: PathBuf,
+    pub clip_tokenizer: PathBuf,
 }
 
 impl ModelPaths {
-    /// Resolve paths for a model. Checks config, then env vars, then defaults.
+    /// Resolve paths for a model. Checks config, then env vars.
+    /// Returns None if any required path is unresolvable.
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
         let model_cfg = config.models.get(model_name);
 
@@ -38,12 +84,22 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.clip_encoder.as_deref()),
             "MOLD_CLIP_PATH",
         )?;
+        let t5_tokenizer = Self::resolve_path(
+            model_cfg.and_then(|m| m.t5_tokenizer.as_deref()),
+            "MOLD_T5_TOKENIZER_PATH",
+        )?;
+        let clip_tokenizer = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_tokenizer.as_deref()),
+            "MOLD_CLIP_TOKENIZER_PATH",
+        )?;
 
         Some(Self {
             transformer,
             vae,
             t5_encoder,
             clip_encoder,
+            t5_tokenizer,
+            clip_tokenizer,
         })
     }
 
@@ -78,7 +134,10 @@ pub struct Config {
     #[serde(default = "default_dimension")]
     pub default_height: u32,
 
-    /// Per-model path overrides, keyed by model name.
+    #[serde(default = "default_steps")]
+    pub default_steps: u32,
+
+    /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
 }
@@ -100,7 +159,11 @@ fn default_output_dir() -> String {
 }
 
 fn default_dimension() -> u32 {
-    1024
+    768
+}
+
+fn default_steps() -> u32 {
+    4
 }
 
 impl Default for Config {
@@ -112,6 +175,7 @@ impl Default for Config {
             output_dir: default_output_dir(),
             default_width: default_dimension(),
             default_height: default_dimension(),
+            default_steps: default_steps(),
             models: HashMap::new(),
         }
     }
@@ -170,5 +234,10 @@ impl Config {
             );
             PathBuf::from(expanded)
         }
+    }
+
+    /// Return the ModelConfig for a given model name, or an empty default.
+    pub fn model_config(&self, name: &str) -> ModelConfig {
+        self.models.get(name).cloned().unwrap_or_default()
     }
 }

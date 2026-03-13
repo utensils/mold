@@ -4,7 +4,7 @@ pub mod state;
 #[cfg(test)]
 mod routes_test;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use mold_core::{Config, ModelPaths};
 use mold_inference::FluxEngine;
 use std::net::SocketAddr;
@@ -19,25 +19,27 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
 
     let paths = ModelPaths::resolve(&model_name, &config).ok_or_else(|| {
         anyhow::anyhow!(
-            "no model paths configured for '{}'. Set MOLD_TRANSFORMER_PATH, MOLD_VAE_PATH, \
-             MOLD_T5_PATH, MOLD_CLIP_PATH env vars or add [models.{}] to config.",
+            "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
+             or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
+             / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
             model_name,
             model_name,
         )
     })?;
 
-    // Resolve tokenizer paths from env vars
-    let t5_tokenizer = resolve_tokenizer_path("MOLD_T5_TOKENIZER_PATH")?;
-    let clip_tokenizer = resolve_tokenizer_path("MOLD_CLIP_TOKENIZER_PATH")?;
+    let model_cfg = config.model_config(&model_name);
+    let is_schnell_override = model_cfg.is_schnell;
 
-    info!(model = %model_name, "configured model paths");
+    info!(model = %model_name, "configured model");
     info!(transformer = %paths.transformer.display());
     info!(vae = %paths.vae.display());
     info!(t5 = %paths.t5_encoder.display());
     info!(clip = %paths.clip_encoder.display());
+    info!(t5_tok = %paths.t5_tokenizer.display());
+    info!(clip_tok = %paths.clip_tokenizer.display());
 
-    let engine = FluxEngine::new(model_name, paths, t5_tokenizer, clip_tokenizer);
-    let state = state::AppState::new(engine);
+    let engine = FluxEngine::new(model_name, paths, is_schnell_override);
+    let state = state::AppState::new(engine, config);
     let app = routes::create_router(state).layer(CorsLayer::permissive());
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
@@ -47,11 +49,4 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-fn resolve_tokenizer_path(env_var: &str) -> Result<PathBuf> {
-    match std::env::var(env_var) {
-        Ok(path) => Ok(PathBuf::from(path)),
-        Err(_) => bail!("{} not set. Point it at the tokenizer.json file.", env_var),
-    }
 }

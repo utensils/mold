@@ -73,8 +73,9 @@ mod tests {
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
+        // Use "mock-model" to match MockEngine::model_name() — avoids hot-swap path.
         format!(
-            r#"{{"prompt":"{prompt}","model":"flux-schnell","width":{width},"height":{height},"steps":4,"batch_size":1,"output_format":"png"}}"#
+            r#"{{"prompt":"{prompt}","model":"mock-model","width":{width},"height":{height},"steps":4,"batch_size":1,"output_format":"png"}}"#
         )
     }
 
@@ -205,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn generate_zero_steps_returns_422() {
         let app = app_with(MockEngine::ready());
-        let body = r#"{"prompt":"a cat","model":"flux-schnell","width":768,"height":768,"steps":0,"batch_size":1,"output_format":"png"}"#;
+        let body = r#"{"prompt":"a cat","model":"mock-model","width":768,"height":768,"steps":0,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
                 Request::post("/api/generate")

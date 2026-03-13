@@ -5,34 +5,59 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mold_core::{GenerateRequest, GpuInfo, ModelInfo, OutputFormat, ServerStatus};
-use mold_inference::model_registry;
+use mold_core::{GpuInfo, ModelInfo, OutputFormat, ServerStatus};
+use mold_inference::{model_registry, FluxEngine};
+use serde::{Deserialize, Serialize};
 
-use crate::state::AppState;
+use crate::state::{resolve_paths_for, AppState};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/models", get(list_models))
+        .route("/api/models/load", post(load_model))
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
 }
 
+// ── /api/generate ─────────────────────────────────────────────────────────────
+
 async fn generate(
     State(state): State<AppState>,
-    Json(req): Json<GenerateRequest>,
+    Json(req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate request before touching the engine
     if let Err(e) = validate_generate_request(&req) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
     }
 
-    // Load on first request (holds lock only during load, not inference)
+    // If the requested model differs from the currently loaded one, hot-swap.
     {
         let mut engine = state.engine.lock().await;
+        let current = engine.model_name().to_string();
+        if current != req.model {
+            tracing::info!(
+                from = %current,
+                to = %req.model,
+                "hot-swapping model"
+            );
+            let (paths, is_schnell) =
+                resolve_paths_for(&req.model, &state.config).ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "no paths configured for model '{}'. Add [models.{}] to config.",
+                            req.model, req.model
+                        ),
+                    )
+                })?;
+            *engine = Box::new(FluxEngine::new(req.model.clone(), paths, is_schnell));
+        }
+
+        // Load on first request (or after hot-swap)
         if !engine.is_loaded() {
-            tracing::info!("first request — loading model...");
+            tracing::info!(model = %req.model, "loading model...");
             engine.load().map_err(|e| {
                 tracing::error!("model load failed: {e:#}");
                 (
@@ -43,9 +68,7 @@ async fn generate(
         }
     }
 
-    // Run inference in a blocking task to avoid starving the async executor.
-    // Using Arc<Mutex> so the lock is held only during the blocking work, and
-    // panics are caught and converted to proper error responses.
+    // Run inference in a blocking task — panics caught → 500 with body.
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -85,17 +108,15 @@ async fn generate(
         }
     };
 
-    // Return raw image bytes with correct Content-Type
     let img = response.images.remove(0);
     let content_type = match img.format {
         OutputFormat::Png => "image/png",
         OutputFormat::Jpeg => "image/jpeg",
     };
-    let headers = [(header::CONTENT_TYPE, content_type)];
-    Ok((headers, img.data))
+    Ok(([(header::CONTENT_TYPE, content_type)], img.data))
 }
 
-fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
+fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
     if req.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -123,30 +144,108 @@ fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     Ok(())
 }
 
-async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfo>> {
+// ── /api/models ───────────────────────────────────────────────────────────────
+
+/// Extended model info including generation defaults.
+#[derive(Debug, Serialize)]
+pub struct ModelInfoExtended {
+    #[serde(flatten)]
+    pub info: ModelInfo,
+    pub default_steps: u32,
+    pub default_guidance: f64,
+    pub default_width: u32,
+    pub default_height: u32,
+    pub description: String,
+}
+
+async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtended>> {
     let engine = state.engine.lock().await;
     let loaded_name = engine.model_name().to_string();
     let is_loaded = engine.is_loaded();
+    drop(engine);
 
-    let models: Vec<ModelInfo> = model_registry::known_models()
+    // Start with known static models, merge with config-defined models.
+    let mut known: std::collections::HashMap<String, ModelInfo> = model_registry::known_models()
         .into_iter()
+        .map(|m| (m.name.clone(), m))
+        .collect();
+
+    // Add any models from config that aren't in the static registry.
+    for (name, mcfg) in &state.config.models {
+        known.entry(name.clone()).or_insert_with(|| ModelInfo {
+            name: name.clone(),
+            family: mcfg.family.clone().unwrap_or_else(|| "flux".to_string()),
+            size_gb: 0.0,
+            is_loaded: false,
+            last_used: None,
+            hf_repo: String::new(),
+        });
+    }
+
+    let models: Vec<ModelInfoExtended> = known
+        .into_values()
         .map(|mut m| {
             m.is_loaded = is_loaded && m.name == loaded_name;
-            m
+            let mcfg = state.config.model_config(&m.name);
+            ModelInfoExtended {
+                default_steps: mcfg.effective_steps(&state.config),
+                default_guidance: mcfg.effective_guidance(),
+                default_width: mcfg.effective_width(&state.config),
+                default_height: mcfg.effective_height(&state.config),
+                description: mcfg.description.clone().unwrap_or_else(|| m.name.clone()),
+                info: m,
+            }
         })
         .collect();
 
     Json(models)
 }
 
+// ── /api/models/load ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct LoadModelBody {
+    pub model: String,
+}
+
+async fn load_model(
+    State(state): State<AppState>,
+    Json(body): Json<LoadModelBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let (paths, is_schnell) = resolve_paths_for(&body.model, &state.config).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no paths configured for model '{}'. Add [models.{}] to config.",
+                body.model, body.model
+            ),
+        )
+    })?;
+
+    let mut engine = state.engine.lock().await;
+    *engine = Box::new(FluxEngine::new(body.model.clone(), paths, is_schnell));
+    engine.load().map_err(|e| {
+        tracing::error!("model load failed: {e:#}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load {}: {e}", body.model),
+        )
+    })?;
+
+    tracing::info!(model = %body.model, "model loaded via API");
+    Ok(StatusCode::OK)
+}
+
+// ── /api/status ───────────────────────────────────────────────────────────────
+
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     let engine = state.engine.lock().await;
-
     let models_loaded = if engine.is_loaded() {
         vec![engine.model_name().to_string()]
     } else {
         vec![]
     };
+    drop(engine);
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -156,10 +255,15 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     })
 }
 
-/// Query GPU info via nvidia-smi. Returns None if not available or on non-NVIDIA hardware.
+// ── /health ───────────────────────────────────────────────────────────────────
+
+async fn health() -> impl IntoResponse {
+    StatusCode::OK
+}
+
+// ── GPU info ──────────────────────────────────────────────────────────────────
+
 fn query_gpu_info() -> Option<GpuInfo> {
-    // Prefer absolute path (reliable in restricted service environments like NixOS systemd units).
-    // Fall back to PATH lookup if the well-known absolute path doesn't exist.
     let nvidia_smi = if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
         "/run/current-system/sw/bin/nvidia-smi"
     } else {
@@ -185,17 +289,9 @@ fn query_gpu_info() -> Option<GpuInfo> {
         return None;
     }
 
-    let name = parts[0].to_string();
-    let vram_total_mb = parts[1].parse::<u64>().ok()?;
-    let vram_used_mb = parts[2].parse::<u64>().ok()?;
-
     Some(GpuInfo {
-        name,
-        vram_total_mb,
-        vram_used_mb,
+        name: parts[0].to_string(),
+        vram_total_mb: parts[1].parse().ok()?,
+        vram_used_mb: parts[2].parse().ok()?,
     })
-}
-
-async fn health() -> impl IntoResponse {
-    StatusCode::OK
 }

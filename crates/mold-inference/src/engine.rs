@@ -4,7 +4,6 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::{clip, flux, t5};
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, OutputFormat};
-use std::path::PathBuf;
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
@@ -67,24 +66,19 @@ pub struct FluxEngine {
     loaded: Option<LoadedFlux>,
     model_name: String,
     paths: ModelPaths,
-    t5_tokenizer_path: PathBuf,
-    clip_tokenizer_path: PathBuf,
+    /// Optional explicit override for is_schnell; if None, auto-detect from transformer filename.
+    is_schnell_override: Option<bool>,
 }
 
 impl FluxEngine {
     /// Create a new FluxEngine. Does not load models until `load()` is called.
-    pub fn new(
-        model_name: String,
-        paths: ModelPaths,
-        t5_tokenizer_path: PathBuf,
-        clip_tokenizer_path: PathBuf,
-    ) -> Self {
+    /// `is_schnell_override` lets callers explicitly set the scheduler family.
+    pub fn new(model_name: String, paths: ModelPaths, is_schnell_override: Option<bool>) -> Self {
         Self {
             loaded: None,
             model_name,
             paths,
-            t5_tokenizer_path,
-            clip_tokenizer_path,
+            is_schnell_override,
         }
     }
 
@@ -94,15 +88,17 @@ impl FluxEngine {
             return Ok(());
         }
 
-        // Detect model family from name or transformer filename
-        let is_schnell = self.model_name.contains("schnell")
-            || self
-                .paths
-                .transformer
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.contains("schnell"))
-                .unwrap_or(false);
+        // Detect model family: explicit override → name → transformer filename
+        let is_schnell = self.is_schnell_override.unwrap_or_else(|| {
+            self.model_name.contains("schnell")
+                || self
+                    .paths
+                    .transformer
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.contains("schnell"))
+                    .unwrap_or(false)
+        });
         tracing::info!(model = %self.model_name, "loading FLUX model components...");
 
         let cpu = Device::Cpu;
@@ -122,8 +118,8 @@ impl FluxEngine {
             ("vae", &self.paths.vae),
             ("t5_encoder", &self.paths.t5_encoder),
             ("clip_encoder", &self.paths.clip_encoder),
-            ("t5_tokenizer", &self.t5_tokenizer_path),
-            ("clip_tokenizer", &self.clip_tokenizer_path),
+            ("t5_tokenizer", &self.paths.t5_tokenizer),
+            ("clip_tokenizer", &self.paths.clip_tokenizer),
         ] {
             if !path.exists() {
                 bail!("{label} file not found: {}", path.display());
@@ -169,7 +165,7 @@ impl FluxEngine {
         tracing::info!("T5 encoder loaded on CPU");
 
         // Load T5 tokenizer
-        let t5_tokenizer = Tokenizer::from_file(&self.t5_tokenizer_path)
+        let t5_tokenizer = Tokenizer::from_file(&self.paths.t5_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
 
         // Load CLIP encoder on CPU (small, but keeps all text encoding on CPU)
@@ -197,7 +193,7 @@ impl FluxEngine {
         tracing::info!("CLIP encoder loaded on CPU");
 
         // Load CLIP tokenizer
-        let clip_tokenizer = Tokenizer::from_file(&self.clip_tokenizer_path)
+        let clip_tokenizer = Tokenizer::from_file(&self.paths.clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
 
         // Load FLUX transformer on GPU — GGUF quantized or BF16 safetensors
@@ -364,7 +360,7 @@ impl InferenceEngine for FluxEngine {
             "running denoising loop..."
         );
 
-        // 6. Denoise
+        // 6. Denoise — guidance from request (0.0 for schnell, 3.5+ for dev/finetuned)
         let img = loaded.flux_model.denoise(
             &state.img,
             &state.img_ids,
@@ -372,7 +368,7 @@ impl InferenceEngine for FluxEngine {
             &state.txt_ids,
             &state.vec,
             &timesteps,
-            4.0,
+            req.guidance,
         )?;
 
         // 7. Unpack latent to spatial

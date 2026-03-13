@@ -29,17 +29,21 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Image width (max 768 — 1024+ causes VAE OOM on RTX 4090 with current GGUF models)
-        #[arg(long, default_value = "768")]
-        width: u32,
+        /// Image width — defaults to model config value (768 for schnell, 896 for portrait models)
+        #[arg(long)]
+        width: Option<u32>,
 
-        /// Image height (max 768 — 1024+ causes VAE OOM on RTX 4090 with current GGUF models)
-        #[arg(long, default_value = "768")]
-        height: u32,
+        /// Image height — defaults to model config value
+        #[arg(long)]
+        height: Option<u32>,
 
-        /// Number of inference steps
+        /// Number of inference steps — defaults to model config value
         #[arg(long)]
         steps: Option<u32>,
+
+        /// Guidance scale — defaults to model config value (0.0 for schnell, 3.5 for dev)
+        #[arg(long)]
+        guidance: Option<f64>,
 
         /// Random seed
         #[arg(long)]
@@ -108,13 +112,14 @@ async fn main() -> anyhow::Result<()> {
             width,
             height,
             steps,
+            guidance,
             seed,
             batch,
             host,
             format,
         } => {
             commands::generate::run(
-                &prompt, &model, output, width, height, steps, seed, batch, host, &format,
+                &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format,
             )
             .await?;
         }
