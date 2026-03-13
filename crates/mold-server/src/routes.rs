@@ -158,18 +158,13 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 
 /// Query GPU info via nvidia-smi. Returns None if not available or on non-NVIDIA hardware.
 fn query_gpu_info() -> Option<GpuInfo> {
-    // Try PATH first, then NixOS well-known location.
-    let nvidia_smi = ["nvidia-smi", "/run/current-system/sw/bin/nvidia-smi"]
-        .iter()
-        .find(|p| {
-            if p.starts_with('/') {
-                std::path::Path::new(p).exists()
-            } else {
-                true // let Command::new try PATH
-            }
-        })
-        .copied()
-        .unwrap_or("nvidia-smi");
+    // Prefer absolute path (reliable in restricted service environments like NixOS systemd units).
+    // Fall back to PATH lookup if the well-known absolute path doesn't exist.
+    let nvidia_smi = if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
+        "/run/current-system/sw/bin/nvidia-smi"
+    } else {
+        "nvidia-smi"
+    };
 
     let output = std::process::Command::new(nvidia_smi)
         .args([
