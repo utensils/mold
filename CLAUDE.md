@@ -86,6 +86,12 @@ pub trait InferenceEngine: Send + Sync {
 8. **VAE decoding** — `flux::autoencoder::AutoEncoder::decode()` converts latents to pixels
 9. **Image encoding** — Tensor → RGB → PNG/JPEG bytes via the `image` crate
 
+**Device split** — T5 and CLIP encoders load on **CPU** (9.2GB combined), while the FLUX transformer and VAE load on **GPU**. This is required because FLUX dev BF16 (23GB) + T5 (9.2GB) exceeds 24GB VRAM.
+
+**GGUF quantized models** — the engine auto-detects `.gguf` extension on `MOLD_TRANSFORMER_PATH` and uses `candle_transformers::quantized_var_builder` + `flux::quantized_model::Flux`. GGUF quantized models (Q4_1 = 7GB, Q8_0 = 12GB) leave plenty of VRAM for activations. When quantized, state tensors use F32; when BF16, they use BF16.
+
+**FluxTransformer enum** wraps either `flux::model::Flux` (BF16) or `flux::quantized_model::Flux` (GGUF quantized). Both implement `flux::WithForward` so the same `denoise()` call works for both.
+
 Model loading is **lazy** (on first generation request) and uses **mmap** for safetensors files.
 
 Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
@@ -181,47 +187,94 @@ The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receiv
 
 ## Deployment to hal9000
 
-Model files on hal9000 (already downloaded):
+### Hardware
+- NixOS, RTX 4090 (24GB VRAM)
+- SSH: `jamesbrink@hal9000.home.urandom.io`
+- If direct TCP fails: `ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206`
+
+### Model files on hal9000 (already on disk)
 ```
-Transformer:  /home/jamesbrink/AI/models/unet/flux1-dev.safetensors
+# GGUF quantized (recommended — fits in 24GB with room for activations)
+flux1-schnell-Q8_0.gguf   /home/jamesbrink/AI/models/unet/flux1-schnell-Q8_0.gguf   (12GB) ← ACTIVE
+flux1-dev-Q8_0.gguf       /home/jamesbrink/AI/models/unet/flux1-dev-Q8_0.gguf       (12GB)
+flux1-dev-Q4_1.gguf       /home/jamesbrink/AI/models/unet/flux1-dev-Q4_1.gguf       (7GB)
+
+# BF16 safetensors (23GB — causes CUDA OOM during denoising, avoid)
+flux1-dev.safetensors      /home/jamesbrink/AI/models/unet/flux1-dev.safetensors     (23GB)
+
+# Shared components (used regardless of transformer choice)
 VAE:          /home/jamesbrink/AI/models/vae/ae.safetensors
 T5 encoder:   /home/jamesbrink/AI/models/text_encoders/t5xxl_fp16.safetensors
 CLIP-L:       /home/jamesbrink/AI/models/clip/clip_l.safetensors
+T5 tokenizer: /home/jamesbrink/AI/models/tokenizers/t5-v1_1-xxl.tokenizer.json
+CLIP tokenizer: /home/jamesbrink/AI/models/tokenizers/clip-vit-large-patch14.tokenizer.json
 ```
 
-### First-time setup
+### Building with CUDA (Nix devshell)
+
+The `flake.nix` provides a devshell with all CUDA 12.8 dependencies:
 
 ```bash
-# On hal9000: download tokenizer files
+# On hal9000:
+cd /home/jamesbrink/mold
+git pull
+nix develop --command cargo build --release -p mold-server --features cuda
+```
+
+### Systemd user service
+
+The server runs as a systemd user service on hal9000:
+
+```bash
+# Check status
+systemctl --user is-active mold-server
+journalctl --user -u mold-server -f
+
+# Restart
+systemctl --user restart mold-server
+
+# Service file location
+~/.config/systemd/user/mold-server.service
+```
+
+The service is configured with all required env vars including `LD_LIBRARY_PATH=/run/opengl-driver/lib` for CUDA driver access.
+
+### First-time tokenizer setup
+
+```bash
 ssh jamesbrink@hal9000.home.urandom.io
 bash /home/jamesbrink/mold/scripts/fetch-tokenizers.sh
 ```
 
-### Deploy
+### Deploy from local
 
 ```bash
-# From the mold project root on your local machine:
+# From the mold project root:
 ./scripts/deploy.sh
 ```
 
-This will:
-1. rsync source to hal9000
-2. Build with CUDA on hal9000
-3. Stop any running mold-server
-4. Start mold-server with model paths configured via env vars
-
-### Test after deploy
+### Test
 
 ```bash
-MOLD_HOST=http://hal9000.home.urandom.io:7680 mold generate "a rusty robot on a beach"
+# Direct HTTP test
+curl -X POST http://hal9000.home.urandom.io:7680/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"a cat on Mars","model":"flux-schnell","width":512,"height":512,"steps":4,"batch_size":1,"output_format":"png"}' \
+  -o output.png
+
+# Or via ProxyJump if local TCP is broken:
+ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
+  'curl -X POST http://localhost:7680/api/generate ...'
 ```
 
 ## Known Models
 
-| Name | HuggingFace Repo | Size |
+| Name | HuggingFace Repo | Recommended File |
 |------|-----------------|------|
-| `flux-schnell` | `black-forest-labs/FLUX.1-schnell` | ~23.8 GB |
-| `flux-dev` | `black-forest-labs/FLUX.1-dev` | ~23.8 GB |
+| `flux-schnell` | `black-forest-labs/FLUX.1-schnell` | `flux1-schnell-Q8_0.gguf` (12GB) |
+| `flux-dev` | `black-forest-labs/FLUX.1-dev` | `flux1-dev-Q4_1.gguf` (7GB) or `flux1-dev-Q8_0.gguf` (12GB) |
+
+> **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090.
 
 Model registry is defined in `mold-inference/src/model_registry.rs`.
 
@@ -297,3 +350,18 @@ cargo test -p mold-core         # Test specific crate
 7. **mmap for safetensors**: Model weights are memory-mapped rather than read into memory, allowing the OS to manage paging efficiently.
 
 8. **Env var + config file model paths**: Supports both deployment-friendly env vars and local config file paths. Env vars take precedence over config.
+
+9. **GGUF over BF16 safetensors for 24GB VRAM**: The full BF16 FLUX dev model (23GB) fills all VRAM, leaving nothing for activations. GGUF Q8_0 (12GB) or Q4_1 (7GB) leave plenty of room. Engine auto-detects `.gguf` extension.
+
+10. **T5/CLIP on CPU**: Text encoders load on CPU to keep ~9.2GB off the GPU. Embeddings are moved to GPU after encoding. This is required for the FLUX transformer to fit in VRAM alongside activations.
+
+11. **Nix devshell for CUDA**: `flake.nix` provides a devshell with CUDA 12.8 packages (`cuda_nvcc`, `cuda_cudart`, `libcublas`, `cuda_nvrtc`, `libcurand`) and `CUDA_COMPUTE_CAP=89` for the RTX 4090. Build with `nix develop --command cargo build --release -p mold-server --features cuda`.
+
+## Confirmed Working Configuration (hal9000, 2026-03-12)
+
+```
+Model:      flux-schnell Q8_0 GGUF
+VRAM used:  ~12GB (transformer) + ~300MB (VAE) = ~12.3GB / 24GB
+Generation: 512×512, 4 steps, ~36s first run (model load included)
+GPU:        RTX 4090 (CUDA 12.8, driver 580.119.02)
+```
