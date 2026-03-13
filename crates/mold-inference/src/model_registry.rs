@@ -21,8 +21,3 @@ pub fn known_models() -> Vec<ModelInfo> {
         },
     ]
 }
-
-/// Look up a model by name.
-pub fn find_model(name: &str) -> Option<ModelInfo> {
-    known_models().into_iter().find(|m| m.name == name)
-}

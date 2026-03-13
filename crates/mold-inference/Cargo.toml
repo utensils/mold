@@ -14,9 +14,9 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 [dependencies]
 mold-core = { path = "../mold-core" }
 anyhow = "1"
-candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
-candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
-candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
+candle-core = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
+candle-nn = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
+candle-transformers = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
 image = "0.25"
 safetensors = "0.4"
 serde = { version = "1", features = ["derive"] }

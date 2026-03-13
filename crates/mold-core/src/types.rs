@@ -75,16 +75,11 @@ pub struct ServerStatus {
     pub uptime_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GpuInfo {
     pub name: String,
     pub vram_total_mb: u64,
     pub vram_used_mb: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadModelRequest {
-    pub model: String,
 }
 
 #[cfg(test)]

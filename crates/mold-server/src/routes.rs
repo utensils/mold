@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mold_core::{GenerateRequest, ModelInfo, OutputFormat, ServerStatus};
+use mold_core::{GenerateRequest, GpuInfo, ModelInfo, OutputFormat, ServerStatus};
 use mold_inference::{model_registry, InferenceEngine};
 
 use crate::state::AppState;
@@ -153,8 +153,40 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         models_loaded,
-        gpu_info: None,
+        gpu_info: query_gpu_info(),
         uptime_secs: state.start_time.elapsed().as_secs(),
+    })
+}
+
+/// Query GPU info via nvidia-smi. Returns None if not available or on non-NVIDIA hardware.
+fn query_gpu_info() -> Option<GpuInfo> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8(output.stdout).ok()?;
+    let line = text.lines().next()?;
+    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let name = parts[0].to_string();
+    let vram_total_mb = parts[1].parse::<u64>().ok()?;
+    let vram_used_mb = parts[2].parse::<u64>().ok()?;
+
+    Some(GpuInfo {
+        name,
+        vram_total_mb,
+        vram_used_mb,
     })
 }
 

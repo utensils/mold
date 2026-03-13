@@ -1,64 +1,99 @@
-# mold
+# mold 🧪
 
-> Like ollama, but for diffusion models.
+Local FLUX image generation server. Runs on your GPU (CUDA), serves a REST API, and ships a CLI.
 
-mold is a CLI/TUI tool for AI image generation using FLUX models, powered by [candle](https://github.com/huggingface/candle).
+## What it does
 
-## Quick Start
+- Loads FLUX.1 models (schnell / dev) from local GGUF or safetensors files
+- Serves `POST /api/generate` → raw PNG/JPEG bytes
+- CLI: `mold generate "a glowing robot"`
+
+## Requirements
+
+- NVIDIA GPU with 24GB VRAM (RTX 4090 recommended)
+- CUDA toolkit
+- FLUX model files (see below)
+
+## Quick start
 
 ```bash
+# Build (CUDA)
+cargo build --release --features cuda
+
+# Set model paths
+export MOLD_TRANSFORMER_PATH=/path/to/flux1-schnell-Q8_0.gguf
+export MOLD_VAE_PATH=/path/to/ae.safetensors
+export MOLD_T5_PATH=/path/to/t5xxl_fp16.safetensors
+export MOLD_CLIP_PATH=/path/to/clip_l.safetensors
+
+# Start server
+./target/release/mold serve
+
 # Generate an image
-mold generate "a cat sitting on a cloud"
-
-# Use a specific model
-mold generate -m flux-dev "cyberpunk cityscape" --steps 25
-
-# Start the inference server (on GPU host)
-mold serve
-
-# Generate remotely
-MOLD_HOST=http://gpu-host:7680 mold generate "a sunset over mountains"
-
-# Interactive TUI
-mold run
+./target/release/mold generate "a cat riding a motorcycle through neon-lit streets"
 ```
 
-## Commands
+## Model files
 
-| Command | Description |
-|---------|-------------|
-| `mold generate <PROMPT>` | Generate images from text |
-| `mold serve` | Start inference server |
-| `mold pull <MODEL>` | Download model from HuggingFace |
-| `mold list` | List available models |
-| `mold ps` | Show server status |
-| `mold run [MODEL]` | Interactive TUI session |
+Download from HuggingFace:
 
-## Available Models
+| File | Source |
+|------|--------|
+| `flux1-schnell-Q8_0.gguf` | [city96/FLUX.1-schnell-gguf](https://huggingface.co/city96/FLUX.1-schnell-gguf) |
+| `ae.safetensors` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) |
+| `t5xxl_fp16.safetensors` | [comfyanonymous/flux_text_encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) |
+| `clip_l.safetensors` | [comfyanonymous/flux_text_encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) |
 
-| Model | Steps | Description |
-|-------|-------|-------------|
-| `flux-schnell` | 4 | Fast generation (default) |
-| `flux-dev` | 25 | Higher quality |
+## API
 
-## Configuration
+```
+GET  /health           → 200 OK
+GET  /api/status       → ServerStatus JSON
+GET  /api/models       → ModelInfo[] JSON
+POST /api/generate     → image/png bytes
+```
 
-Config file: `~/.mold/config.toml`
+### Generate request
+
+```json
+{
+  "prompt": "a glowing robot",
+  "model": "flux-schnell",
+  "width": 768,
+  "height": 768,
+  "steps": 4,
+  "seed": null,
+  "batch_size": 1,
+  "output_format": "png"
+}
+```
+
+Constraints: width/height must be multiples of 16, max 1024, min 1. Steps 1–100.
+
+## Config
+
+`~/.mold/config.toml` (optional):
 
 ```toml
 default_model = "flux-schnell"
-models_dir = "~/.mold/models"
 server_port = 7680
+default_width = 768
+default_height = 768
+
+[models.flux-schnell]
+transformer = "/models/flux1-schnell-Q8_0.gguf"
+vae = "/models/ae.safetensors"
+t5_encoder = "/models/t5xxl_fp16.safetensors"
+clip_encoder = "/models/clip_l.safetensors"
 ```
 
-Environment variables: `MOLD_HOST`, `MOLD_MODELS_DIR`, `MOLD_PORT`, `MOLD_LOG`
+## Architecture
 
-## Building
-
-```bash
-cargo build --release
+```
+mold-cli       CLI frontend (mold generate / serve / ps)
+mold-server    axum REST server + request validation
+mold-inference FLUX engine (candle: T5/CLIP on CPU, transformer+VAE on GPU)
+mold-core      Shared types, config, HTTP client
 ```
 
-## License
-
-MIT
+T5-XXL (9.2GB) runs on CPU to fit FLUX transformer + VAE on a single 24GB GPU.

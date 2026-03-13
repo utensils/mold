@@ -1,9 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 
-use crate::types::{
-    GenerateRequest, GenerateResponse, ImageData, LoadModelRequest, ModelInfo, ServerStatus,
-};
+use crate::types::{GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus};
 
 pub struct MoldClient {
     base_url: String,
@@ -89,26 +87,5 @@ impl MoldClient {
             .json::<ServerStatus>()
             .await?;
         Ok(resp)
-    }
-
-    pub async fn load_model(&self, model: &str) -> Result<()> {
-        self.client
-            .post(format!("{}/api/models/load", self.base_url))
-            .json(&LoadModelRequest {
-                model: model.to_string(),
-            })
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-
-    pub async fn unload_model(&self, model: &str) -> Result<()> {
-        self.client
-            .delete(format!("{}/api/models/{}", self.base_url, model))
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
     }
 }

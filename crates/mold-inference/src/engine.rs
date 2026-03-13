@@ -35,14 +35,12 @@ impl FluxTransformer {
         guidance: f64,
     ) -> Result<Tensor> {
         match self {
-            Self::BF16(m) => {
-                flux::sampling::denoise(m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance)
-                    .map_err(anyhow::Error::from)
-            }
-            Self::Quantized(m) => {
-                flux::sampling::denoise(m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance)
-                    .map_err(anyhow::Error::from)
-            }
+            Self::BF16(m) => Ok(flux::sampling::denoise(
+                m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance,
+            )?),
+            Self::Quantized(m) => Ok(flux::sampling::denoise(
+                m, img, img_ids, txt, txt_ids, vec_, timesteps, guidance,
+            )?),
         }
     }
 }
@@ -56,9 +54,7 @@ struct LoadedFlux {
     clip_model: clip::text_model::ClipTextTransformer,
     clip_tokenizer: Tokenizer,
     vae: flux::autoencoder::AutoEncoder,
-    /// CPU device for text encoders (T5 + CLIP)
-    cpu: Device,
-    /// GPU device for FLUX transformer + VAE
+    /// GPU device for FLUX transformer + VAE (T5/CLIP always run on CPU)
     device: Device,
     dtype: DType,
     is_schnell: bool,
@@ -265,7 +261,6 @@ impl FluxEngine {
             clip_model,
             clip_tokenizer,
             vae,
-            cpu,
             device,
             dtype: gpu_dtype,
             is_schnell,
@@ -309,7 +304,7 @@ impl InferenceEngine for FluxEngine {
                 .get_ids()
                 .to_vec();
             tokens.resize(256, 0);
-            let input_ids = Tensor::new(&tokens[..], &loaded.cpu)?.unsqueeze(0)?;
+            let input_ids = Tensor::new(&tokens[..], &Device::Cpu)?.unsqueeze(0)?;
             let emb = loaded.t5_model.forward(&input_ids)?;
             // Move to GPU and cast to GPU dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
@@ -326,7 +321,7 @@ impl InferenceEngine for FluxEngine {
                 .to_vec();
             // CLIP hard limit: 77 tokens (including BOS/EOS)
             tokens.truncate(77);
-            let input_ids = Tensor::new(&tokens[..], &loaded.cpu)?.unsqueeze(0)?;
+            let input_ids = Tensor::new(&tokens[..], &Device::Cpu)?.unsqueeze(0)?;
             let emb = loaded.clip_model.forward(&input_ids)?;
             // Move to GPU and cast to GPU dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
