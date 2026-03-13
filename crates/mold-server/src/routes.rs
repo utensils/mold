@@ -178,10 +178,16 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
 
     // Add any models from config that aren't in the static registry.
     for (name, mcfg) in &state.config.models {
+        let size_gb = mcfg
+            .transformer
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len() as f32 / 1_073_741_824.0)
+            .unwrap_or(0.0);
         known.entry(name.clone()).or_insert_with(|| ModelInfo {
             name: name.clone(),
             family: mcfg.family.clone().unwrap_or_else(|| "flux".to_string()),
-            size_gb: 0.0,
+            size_gb,
             is_loaded: false,
             last_used: None,
             hf_repo: String::new(),
