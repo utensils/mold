@@ -37,6 +37,8 @@
           pkgs.cudaPackages.cuda_cudart
           pkgs.cudaPackages.libcublas
           pkgs.cudaPackages.cuda_nvtx
+          pkgs.cudaPackages.cuda_nvrtc
+          pkgs.cudaPackages.libcurand
         ];
 
         darwinInputs = pkgs.lib.optionals isDarwin [
@@ -56,6 +58,8 @@
             (pkgs.lib.makeLibraryPath [
               pkgs.cudaPackages.cuda_cudart
               pkgs.cudaPackages.libcublas
+              pkgs.cudaPackages.cuda_nvrtc
+              pkgs.cudaPackages.libcurand
             ]) + ":/run/opengl-driver/lib"
           );
 
