@@ -122,8 +122,23 @@ impl Config {
         let config_path = Self::config_path();
         if config_path.exists() {
             match std::fs::read_to_string(&config_path) {
-                Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
-                Err(_) => Config::default(),
+                Ok(contents) => match toml::from_str(&contents) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to parse config at {}: {e} — using defaults",
+                            config_path.display()
+                        );
+                        Config::default()
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to read config at {}: {e} — using defaults",
+                        config_path.display()
+                    );
+                    Config::default()
+                }
             }
         } else {
             Config::default()

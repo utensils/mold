@@ -21,18 +21,5 @@ pub async fn run(port: u16, bind: &str, models_dir: Option<String>) -> Result<()
         models_path.display(),
     );
 
-    // This will block until the server shuts down
-    // mold-server is a library crate, so we call it directly
-    // For now, just use a simple axum setup inline since mold-server
-    // exposes run_server()
-    println!(
-        "{} Server requires mold-server (use with full build)",
-        "!".yellow()
-    );
-    println!(
-        "{} For development, run: cargo run -p mold-server",
-        "●".green()
-    );
-
-    Ok(())
+    mold_server::run_server(bind, port, models_path).await
 }

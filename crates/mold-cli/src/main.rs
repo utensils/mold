@@ -29,12 +29,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Image width
-        #[arg(long, default_value = "1024")]
+        /// Image width (max 768 — 1024+ causes VAE OOM on RTX 4090 with current GGUF models)
+        #[arg(long, default_value = "768")]
         width: u32,
 
-        /// Image height
-        #[arg(long, default_value = "1024")]
+        /// Image height (max 768 — 1024+ causes VAE OOM on RTX 4090 with current GGUF models)
+        #[arg(long, default_value = "768")]
         height: u32,
 
         /// Number of inference steps

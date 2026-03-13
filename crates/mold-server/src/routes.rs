@@ -23,25 +23,69 @@ async fn generate(
     State(state): State<AppState>,
     Json(req): Json<GenerateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut engine = state.engine.lock().await;
-
-    // Lazy-load the model on first request
-    if !engine.is_loaded() {
-        tracing::info!("first request — loading model...");
-        engine.load().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("model load error: {e}"),
-            )
-        })?;
+    // Validate request before touching the engine
+    if let Err(e) = validate_generate_request(&req) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
     }
 
-    let mut response = engine.generate(&req).map_err(|e| {
+    let output_format = req.output_format;
+
+    // Load on first request (holds lock only during load, not inference)
+    {
+        let mut engine = state.engine.lock().await;
+        if !engine.is_loaded() {
+            tracing::info!("first request — loading model...");
+            engine.load().map_err(|e| {
+                tracing::error!("model load failed: {e:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("model load error: {e}"),
+                )
+            })?;
+        }
+    }
+
+    // Run inference in a blocking task to avoid starving the async executor.
+    // Using Arc<Mutex> so the lock is held only during the blocking work, and
+    // panics are caught and converted to proper error responses.
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut guard = engine.blocking_lock();
+            guard.generate(&req)
+        }))
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("inference task join error: {e:?}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("generation error: {e}"),
+            "inference task failed".to_string(),
         )
     })?;
+
+    let mut response = match result {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            tracing::error!("generation error: {e:#}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("generation error: {e}"),
+            ));
+        }
+        Err(panic_payload) => {
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!("inference panicked: {msg}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("inference panicked: {msg}"),
+            ));
+        }
+    };
 
     // Return raw image bytes with correct Content-Type
     let img = response.images.remove(0);
@@ -51,6 +95,34 @@ async fn generate(
     };
     let headers = [(header::CONTENT_TYPE, content_type)];
     Ok((headers, img.data))
+}
+
+fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
+    if req.prompt.trim().is_empty() {
+        return Err("prompt must not be empty".to_string());
+    }
+    if req.width == 0 || req.height == 0 {
+        return Err("width and height must be > 0".to_string());
+    }
+    if req.width % 16 != 0 || req.height % 16 != 0 {
+        return Err(format!(
+            "width ({}) and height ({}) must be multiples of 16 (FLUX patchification requirement)",
+            req.width, req.height
+        ));
+    }
+    if req.width > 1024 || req.height > 1024 {
+        return Err(format!(
+            "width ({}) and height ({}) must be <= 1024",
+            req.width, req.height
+        ));
+    }
+    if req.steps == 0 {
+        return Err("steps must be >= 1".to_string());
+    }
+    if req.steps > 100 {
+        return Err(format!("steps ({}) must be <= 100", req.steps));
+    }
+    Ok(())
 }
 
 async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfo>> {

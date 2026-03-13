@@ -13,6 +13,8 @@ pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
     fn model_name(&self) -> &str;
     fn is_loaded(&self) -> bool;
+    /// Load model weights. Called automatically on first generate if not yet loaded.
+    fn load(&mut self) -> Result<()>;
 }
 
 /// BF16 or quantized (GGUF) FLUX transformer.
@@ -96,7 +98,15 @@ impl FluxEngine {
             return Ok(());
         }
 
-        let is_schnell = self.model_name.contains("schnell");
+        // Detect model family from name or transformer filename
+        let is_schnell = self.model_name.contains("schnell")
+            || self
+                .paths
+                .transformer
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.contains("schnell"))
+                .unwrap_or(false);
         tracing::info!(model = %self.model_name, "loading FLUX model components...");
 
         let cpu = Device::Cpu;
@@ -110,6 +120,20 @@ impl FluxEngine {
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
         tracing::info!("T5/CLIP will load on CPU (F32) to save VRAM");
 
+        // Validate all paths exist before attempting unsafe mmap
+        for (label, path) in [
+            ("transformer", &self.paths.transformer),
+            ("vae", &self.paths.vae),
+            ("t5_encoder", &self.paths.t5_encoder),
+            ("clip_encoder", &self.paths.clip_encoder),
+            ("t5_tokenizer", &self.t5_tokenizer_path),
+            ("clip_tokenizer", &self.clip_tokenizer_path),
+        ] {
+            if !path.exists() {
+                bail!("{label} file not found: {}", path.display());
+            }
+        }
+
         // Load T5 encoder on CPU (9.2GB in F32, too large for GPU alongside FLUX)
         tracing::info!(path = %self.paths.t5_encoder.display(), "loading T5 encoder on CPU...");
         let t5_vb = unsafe {
@@ -119,29 +143,32 @@ impl FluxEngine {
                 &cpu,
             )?
         };
-        let t5_config_text = r#"{
-            "vocab_size": 32128,
-            "d_model": 4096,
-            "d_kv": 64,
-            "d_ff": 10240,
-            "num_heads": 64,
-            "num_layers": 24,
-            "num_decoder_layers": 24,
-            "relative_attention_num_buckets": 32,
-            "relative_attention_max_distance": 128,
-            "dropout_rate": 0.1,
-            "layer_norm_epsilon": 1e-6,
-            "initializer_factor": 1.0,
-            "feed_forward_proj": "gated-gelu",
-            "tie_word_embeddings": false,
-            "is_decoder": false,
-            "is_encoder_decoder": true,
-            "use_cache": true,
-            "pad_token_id": 0,
-            "eos_token_id": 1,
-            "decoder_start_token_id": 0
-        }"#;
-        let t5_config: t5::Config = serde_json::from_str(t5_config_text)?;
+        // T5-XXL config (hardcoded — this model variant is fixed for FLUX)
+        let t5_config = t5::Config {
+            vocab_size: 32128,
+            d_model: 4096,
+            d_kv: 64,
+            d_ff: 10240,
+            num_heads: 64,
+            num_layers: 24,
+            relative_attention_num_buckets: 32,
+            relative_attention_max_distance: 128,
+            dropout_rate: 0.1,
+            layer_norm_epsilon: 1e-6,
+            initializer_factor: 1.0,
+            feed_forward_proj: t5::ActivationWithOptionalGating {
+                gated: true,
+                activation: candle_nn::Activation::NewGelu,
+            },
+            tie_word_embeddings: false,
+            use_cache: true,
+            pad_token_id: 0,
+            eos_token_id: 1,
+            decoder_start_token_id: Some(0),
+            is_decoder: false,
+            is_encoder_decoder: true,
+            num_decoder_layers: Some(24),
+        };
         let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config)?;
         tracing::info!("T5 encoder loaded on CPU");
 
@@ -291,12 +318,14 @@ impl InferenceEngine for FluxEngine {
 
         // 2. Encode prompt with CLIP (on CPU, then move to GPU)
         let clip_emb = {
-            let tokens = loaded
+            let mut tokens = loaded
                 .clip_tokenizer
                 .encode(req.prompt.as_str(), true)
                 .map_err(|e| anyhow::anyhow!("CLIP tokenization failed: {e}"))?
                 .get_ids()
                 .to_vec();
+            // CLIP hard limit: 77 tokens (including BOS/EOS)
+            tokens.truncate(77);
             let input_ids = Tensor::new(&tokens[..], &loaded.cpu)?.unsqueeze(0)?;
             let emb = loaded.clip_model.forward(&input_ids)?;
             // Move to GPU and cast to GPU dtype for FLUX transformer
@@ -321,7 +350,7 @@ impl InferenceEngine for FluxEngine {
                 img.to_dtype(DType::F32)?,
             )
         } else {
-            (t5_emb.clone(), clip_emb.clone(), img.clone())
+            (t5_emb, clip_emb, img)
         };
 
         // 4. Build sampling state
@@ -402,6 +431,10 @@ impl InferenceEngine for FluxEngine {
 
     fn is_loaded(&self) -> bool {
         self.loaded.is_some()
+    }
+
+    fn load(&mut self) -> Result<()> {
+        FluxEngine::load(self)
     }
 }
 

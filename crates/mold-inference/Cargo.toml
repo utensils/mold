@@ -17,7 +17,6 @@ anyhow = "1"
 candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
 candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
 candle-transformers = { git = "https://github.com/huggingface/candle", branch = "main" }
-hf-hub = { version = "0.4", features = ["tokio"] }
 image = "0.25"
 safetensors = "0.4"
 serde = { version = "1", features = ["derive"] }

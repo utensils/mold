@@ -86,3 +86,69 @@ pub struct GpuInfo {
 pub struct LoadModelRequest {
     pub model: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_format_from_str_png() {
+        assert_eq!("png".parse::<OutputFormat>().unwrap(), OutputFormat::Png);
+        assert_eq!("PNG".parse::<OutputFormat>().unwrap(), OutputFormat::Png);
+    }
+
+    #[test]
+    fn output_format_from_str_jpeg() {
+        assert_eq!("jpeg".parse::<OutputFormat>().unwrap(), OutputFormat::Jpeg);
+        assert_eq!("jpg".parse::<OutputFormat>().unwrap(), OutputFormat::Jpeg);
+        assert_eq!("JPEG".parse::<OutputFormat>().unwrap(), OutputFormat::Jpeg);
+    }
+
+    #[test]
+    fn output_format_from_str_invalid() {
+        assert!("webp".parse::<OutputFormat>().is_err());
+        assert!("".parse::<OutputFormat>().is_err());
+        assert!("bmp".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn output_format_display() {
+        assert_eq!(OutputFormat::Png.to_string(), "png");
+        assert_eq!(OutputFormat::Jpeg.to_string(), "jpeg");
+    }
+
+    #[test]
+    fn output_format_serde_roundtrip() {
+        let fmt = OutputFormat::Png;
+        let json = serde_json::to_string(&fmt).unwrap();
+        assert_eq!(json, r#""png""#);
+        let back: OutputFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, fmt);
+    }
+
+    #[test]
+    fn generate_request_serde_roundtrip() {
+        let req = GenerateRequest {
+            prompt: "a cat on Mars".to_string(),
+            model: "flux-schnell".to_string(),
+            width: 768,
+            height: 768,
+            steps: 4,
+            seed: Some(42),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.prompt, req.prompt);
+        assert_eq!(back.width, req.width);
+        assert_eq!(back.seed, req.seed);
+    }
+
+    #[test]
+    fn generate_request_optional_seed() {
+        let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.seed.is_none());
+    }
+}

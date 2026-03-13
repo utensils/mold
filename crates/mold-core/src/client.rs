@@ -1,7 +1,9 @@
 use anyhow::Result;
 use reqwest::Client;
 
-use crate::types::{GenerateRequest, GenerateResponse, LoadModelRequest, ModelInfo, ServerStatus};
+use crate::types::{
+    GenerateRequest, GenerateResponse, ImageData, LoadModelRequest, ModelInfo, ServerStatus,
+};
 
 pub struct MoldClient {
     base_url: String,
@@ -22,17 +24,47 @@ impl MoldClient {
         Self::new(&base_url)
     }
 
-    pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
-        let resp = self
+    /// Generate an image. Returns raw image bytes (PNG or JPEG).
+    /// The server returns raw bytes, not JSON — callers are responsible for
+    /// writing the bytes to disk or further processing.
+    pub async fn generate_raw(&self, req: &GenerateRequest) -> Result<Vec<u8>> {
+        let bytes = self
             .client
             .post(format!("{}/api/generate", self.base_url))
-            .json(&req)
+            .json(req)
             .send()
             .await?
             .error_for_status()?
-            .json::<GenerateResponse>()
-            .await?;
-        Ok(resp)
+            .bytes()
+            .await?
+            .to_vec();
+        Ok(bytes)
+    }
+
+    /// Generate an image and return a minimal response wrapping the raw bytes.
+    pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
+        let seed = req.seed.unwrap_or(0);
+        let width = req.width;
+        let height = req.height;
+        let model = req.model.clone();
+        let format = req.output_format;
+
+        let start = std::time::Instant::now();
+        let data = self.generate_raw(&req).await?;
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+
+        Ok(GenerateResponse {
+            images: vec![ImageData {
+                data,
+                format,
+                width,
+                height,
+                index: 0,
+            }],
+            generation_time_ms,
+            model,
+            seed_used: seed,
+        })
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {

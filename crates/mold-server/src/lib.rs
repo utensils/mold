@@ -1,6 +1,9 @@
 pub mod routes;
 pub mod state;
 
+#[cfg(test)]
+mod routes_test;
+
 use anyhow::{bail, Result};
 use mold_core::{Config, ModelPaths};
 use mold_inference::FluxEngine;

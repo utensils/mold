@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 mold-core = { path = "../mold-core" }
+mold-server = { path = "../mold-server" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 colored = "3"
