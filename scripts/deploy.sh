@@ -10,15 +10,10 @@ echo "🔨 Syncing source to hal9000..."
 rsync -av --exclude target --exclude .git --exclude "*.png" \
   ./ "$REMOTE_USER@$HAL9000:$REMOTE_DIR/"
 
-echo "🦀 Building on hal9000 (CUDA)..."
+echo "🦀 Building on hal9000 (CUDA via nix develop)..."
 ssh "$REMOTE_USER@$HAL9000" "
   cd $REMOTE_DIR
-  # Try to use cargo directly, fallback to nix develop
-  if command -v cargo &>/dev/null; then
-    cargo build --release -p mold-server --features cuda 2>&1
-  else
-    nix develop --command cargo build --release -p mold-server --features cuda 2>&1
-  fi
+  nix develop --command cargo build --release -p mold-server --features cuda 2>&1
 "
 
 echo "🛑 Stopping existing mold-server (if running)..."

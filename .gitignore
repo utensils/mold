@@ -10,3 +10,7 @@ Cargo.lock
 *.jpeg
 *.jpg
 !docs/**/*.png
+
+# Nix / direnv
+.direnv/
+result
