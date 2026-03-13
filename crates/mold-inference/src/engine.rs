@@ -15,6 +15,7 @@ pub trait InferenceEngine: Send + Sync {
 }
 
 /// Loaded FLUX model components, ready for inference.
+/// T5 and CLIP run on CPU to save VRAM; FLUX transformer and VAE run on GPU.
 struct LoadedFlux {
     flux_model: flux::model::Flux,
     t5_model: t5::T5EncoderModel,
@@ -22,6 +23,9 @@ struct LoadedFlux {
     clip_model: clip::text_model::ClipTextTransformer,
     clip_tokenizer: Tokenizer,
     vae: flux::autoencoder::AutoEncoder,
+    /// CPU device for text encoders (T5 + CLIP)
+    cpu: Device,
+    /// GPU device for FLUX transformer + VAE
     device: Device,
     dtype: DType,
     is_schnell: bool,
@@ -62,22 +66,24 @@ impl FluxEngine {
         let is_schnell = self.model_name.contains("schnell");
         tracing::info!(model = %self.model_name, "loading FLUX model components...");
 
+        let cpu = Device::Cpu;
         let device = Device::cuda_if_available(0)?;
-        let dtype = if device.is_cuda() {
+        let gpu_dtype = if device.is_cuda() {
             DType::BF16
         } else {
             DType::F32
         };
 
-        tracing::info!("device: {:?}, dtype: {:?}", device, dtype);
+        tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
+        tracing::info!("T5/CLIP will load on CPU (F32) to save VRAM");
 
-        // Load T5 encoder
-        tracing::info!(path = %self.paths.t5_encoder.display(), "loading T5 encoder...");
+        // Load T5 encoder on CPU (9.2GB in F32, too large for GPU alongside FLUX)
+        tracing::info!(path = %self.paths.t5_encoder.display(), "loading T5 encoder on CPU...");
         let t5_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 std::slice::from_ref(&self.paths.t5_encoder),
-                dtype,
-                &device,
+                DType::F32,
+                &cpu,
             )?
         };
         let t5_config_text = r#"{
@@ -101,19 +107,19 @@ impl FluxEngine {
         }"#;
         let t5_config: t5::Config = serde_json::from_str(t5_config_text)?;
         let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config)?;
-        tracing::info!("T5 encoder loaded");
+        tracing::info!("T5 encoder loaded on CPU");
 
         // Load T5 tokenizer
         let t5_tokenizer = Tokenizer::from_file(&self.t5_tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
 
-        // Load CLIP encoder
-        tracing::info!(path = %self.paths.clip_encoder.display(), "loading CLIP encoder...");
+        // Load CLIP encoder on CPU (small, but keeps all text encoding on CPU)
+        tracing::info!(path = %self.paths.clip_encoder.display(), "loading CLIP encoder on CPU...");
         let clip_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 std::slice::from_ref(&self.paths.clip_encoder),
-                dtype,
-                &device,
+                DType::F32,
+                &cpu,
             )?
         };
         let clip_config = clip::text_model::ClipTextConfig {
@@ -129,14 +135,14 @@ impl FluxEngine {
         };
         let clip_model =
             clip::text_model::ClipTextTransformer::new(clip_vb.pp("text_model"), &clip_config)?;
-        tracing::info!("CLIP encoder loaded");
+        tracing::info!("CLIP encoder loaded on CPU");
 
         // Load CLIP tokenizer
         let clip_tokenizer = Tokenizer::from_file(&self.clip_tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
 
-        // Load FLUX transformer
-        tracing::info!(path = %self.paths.transformer.display(), "loading FLUX transformer...");
+        // Load FLUX transformer on GPU (23GB BF16 — fits in 24GB VRAM)
+        tracing::info!(path = %self.paths.transformer.display(), "loading FLUX transformer on GPU...");
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
         } else {
@@ -145,19 +151,19 @@ impl FluxEngine {
         let flux_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 std::slice::from_ref(&self.paths.transformer),
-                dtype,
+                gpu_dtype,
                 &device,
             )?
         };
         let flux_model = flux::model::Flux::new(&flux_cfg, flux_vb)?;
-        tracing::info!("FLUX transformer loaded");
+        tracing::info!("FLUX transformer loaded on GPU");
 
-        // Load VAE
-        tracing::info!(path = %self.paths.vae.display(), "loading VAE...");
+        // Load VAE on GPU (small, ~300MB)
+        tracing::info!(path = %self.paths.vae.display(), "loading VAE on GPU...");
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 std::slice::from_ref(&self.paths.vae),
-                dtype,
+                gpu_dtype,
                 &device,
             )?
         };
@@ -167,7 +173,7 @@ impl FluxEngine {
             flux::autoencoder::Config::dev()
         };
         let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
-        tracing::info!("VAE loaded");
+        tracing::info!("VAE loaded on GPU");
 
         self.loaded = Some(LoadedFlux {
             flux_model,
@@ -176,8 +182,9 @@ impl FluxEngine {
             clip_model,
             clip_tokenizer,
             vae,
+            cpu,
             device,
-            dtype,
+            dtype: gpu_dtype,
             is_schnell,
         });
 
@@ -209,7 +216,7 @@ impl InferenceEngine for FluxEngine {
             "starting generation"
         );
 
-        // 1. Encode prompt with T5
+        // 1. Encode prompt with T5 (on CPU, then move to GPU)
         let t5_emb = {
             let mut tokens = loaded
                 .t5_tokenizer
@@ -218,12 +225,14 @@ impl InferenceEngine for FluxEngine {
                 .get_ids()
                 .to_vec();
             tokens.resize(256, 0);
-            let input_ids = Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
-            loaded.t5_model.forward(&input_ids)?
+            let input_ids = Tensor::new(&tokens[..], &loaded.cpu)?.unsqueeze(0)?;
+            let emb = loaded.t5_model.forward(&input_ids)?;
+            // Move to GPU and cast to GPU dtype for FLUX transformer
+            emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
-        tracing::info!("T5 encoding complete");
+        tracing::info!("T5 encoding complete (moved to GPU)");
 
-        // 2. Encode prompt with CLIP
+        // 2. Encode prompt with CLIP (on CPU, then move to GPU)
         let clip_emb = {
             let tokens = loaded
                 .clip_tokenizer
@@ -231,10 +240,12 @@ impl InferenceEngine for FluxEngine {
                 .map_err(|e| anyhow::anyhow!("CLIP tokenization failed: {e}"))?
                 .get_ids()
                 .to_vec();
-            let input_ids = Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
-            loaded.clip_model.forward(&input_ids)?
+            let input_ids = Tensor::new(&tokens[..], &loaded.cpu)?.unsqueeze(0)?;
+            let emb = loaded.clip_model.forward(&input_ids)?;
+            // Move to GPU and cast to GPU dtype for FLUX transformer
+            emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
-        tracing::info!("CLIP encoding complete");
+        tracing::info!("CLIP encoding complete (moved to GPU)");
 
         // 3. Generate initial noise
         let img =

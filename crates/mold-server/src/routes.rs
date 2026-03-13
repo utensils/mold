@@ -1,11 +1,11 @@
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use mold_core::{GenerateRequest, GenerateResponse, ModelInfo, ServerStatus};
+use mold_core::{GenerateRequest, ModelInfo, OutputFormat, ServerStatus};
 use mold_inference::{model_registry, InferenceEngine};
 
 use crate::state::AppState;
@@ -22,7 +22,7 @@ pub fn create_router(state: AppState) -> Router {
 async fn generate(
     State(state): State<AppState>,
     Json(req): Json<GenerateRequest>,
-) -> Result<Json<GenerateResponse>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let mut engine = state.engine.lock().await;
 
     // Lazy-load the model on first request
@@ -36,14 +36,21 @@ async fn generate(
         })?;
     }
 
-    let response = engine.generate(&req).map_err(|e| {
+    let mut response = engine.generate(&req).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("generation error: {e}"),
         )
     })?;
 
-    Ok(Json(response))
+    // Return raw image bytes with correct Content-Type
+    let img = response.images.remove(0);
+    let content_type = match img.format {
+        OutputFormat::Png => "image/png",
+        OutputFormat::Jpeg => "image/jpeg",
+    };
+    let headers = [(header::CONTENT_TYPE, content_type)];
+    Ok((headers, img.data))
 }
 
 async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfo>> {
