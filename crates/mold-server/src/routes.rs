@@ -129,10 +129,16 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
             req.width, req.height
         ));
     }
-    if req.width > 1024 || req.height > 1024 {
+    // Cap by total pixel count (~1.1M) rather than per-dimension to allow portrait/landscape.
+    // 896x1152 = 1.03M, 1024x1024 = 1.05M, 1280x768 = 0.98M — all fine.
+    // 1280x1280 = 1.64M — too large, OOMs on VAE decode.
+    let pixels = req.width as u64 * req.height as u64;
+    if pixels > 1_100_000 {
         return Err(format!(
-            "width ({}) and height ({}) must be <= 1024",
-            req.width, req.height
+            "{}x{} = {} megapixels exceeds the ~1.1MP limit (VAE VRAM constraint)",
+            req.width,
+            req.height,
+            pixels as f64 / 1_000_000.0
         ));
     }
     if req.steps == 0 {
