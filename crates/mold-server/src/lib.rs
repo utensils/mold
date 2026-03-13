@@ -49,9 +49,6 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
 fn resolve_tokenizer_path(env_var: &str) -> Result<PathBuf> {
     match std::env::var(env_var) {
         Ok(path) => Ok(PathBuf::from(path)),
-        Err(_) => bail!(
-            "{} not set. Point it at the tokenizer.json file.",
-            env_var
-        ),
+        Err(_) => bail!("{} not set. Point it at the tokenizer.json file.", env_var),
     }
 }

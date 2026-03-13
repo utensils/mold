@@ -155,7 +155,11 @@ impl FluxEngine {
         // Load VAE
         tracing::info!(path = %self.paths.vae.display(), "loading VAE...");
         let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&self.paths.vae), dtype, &device)?
+            VarBuilder::from_mmaped_safetensors(
+                std::slice::from_ref(&self.paths.vae),
+                dtype,
+                &device,
+            )?
         };
         let vae_cfg = if is_schnell {
             flux::autoencoder::Config::schnell()
@@ -214,8 +218,7 @@ impl InferenceEngine for FluxEngine {
                 .get_ids()
                 .to_vec();
             tokens.resize(256, 0);
-            let input_ids =
-                Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
+            let input_ids = Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
             loaded.t5_model.forward(&input_ids)?
         };
         tracing::info!("T5 encoding complete");
@@ -228,15 +231,14 @@ impl InferenceEngine for FluxEngine {
                 .map_err(|e| anyhow::anyhow!("CLIP tokenization failed: {e}"))?
                 .get_ids()
                 .to_vec();
-            let input_ids =
-                Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
+            let input_ids = Tensor::new(&tokens[..], &loaded.device)?.unsqueeze(0)?;
             loaded.clip_model.forward(&input_ids)?
         };
         tracing::info!("CLIP encoding complete");
 
         // 3. Generate initial noise
-        let img = flux::sampling::get_noise(1, height, width, &loaded.device)?
-            .to_dtype(loaded.dtype)?;
+        let img =
+            flux::sampling::get_noise(1, height, width, &loaded.device)?.to_dtype(loaded.dtype)?;
 
         // 4. Build sampling state
         let state = flux::sampling::State::new(&t5_emb, &clip_emb, &img)?;
@@ -245,10 +247,7 @@ impl InferenceEngine for FluxEngine {
         let timesteps = if loaded.is_schnell {
             flux::sampling::get_schedule(req.steps as usize, None)
         } else {
-            flux::sampling::get_schedule(
-                req.steps as usize,
-                Some((state.img.dim(1)?, 0.5, 1.15)),
-            )
+            flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
         tracing::info!(steps = timesteps.len(), "running denoising loop...");
@@ -273,8 +272,7 @@ impl InferenceEngine for FluxEngine {
         let img = loaded.vae.decode(&img)?;
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
-        let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?
-            .to_dtype(DType::U8)?;
+        let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
         tracing::info!("VAE decode complete, encoding output image...");

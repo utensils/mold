@@ -29,10 +29,7 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.transformer.as_deref()),
             "MOLD_TRANSFORMER_PATH",
         )?;
-        let vae = Self::resolve_path(
-            model_cfg.and_then(|m| m.vae.as_deref()),
-            "MOLD_VAE_PATH",
-        )?;
+        let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")?;
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
             "MOLD_T5_PATH",
