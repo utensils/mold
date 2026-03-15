@@ -86,8 +86,8 @@ fn shared_flux_files() -> Vec<ModelFile> {
             gated: false,
         },
         ModelFile {
-            hf_repo: "google-t5/t5-v1_1-xxl".to_string(),
-            hf_filename: "tokenizer.json".to_string(),
+            hf_repo: "lmz/mt5-tokenizers".to_string(),
+            hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
             component: ModelComponent::T5Tokenizer,
             size_bytes: 2_400_000, // ~2.4MB
             gated: false,

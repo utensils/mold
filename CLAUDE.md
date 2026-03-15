@@ -415,7 +415,7 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 | `ae.safetensors` | `black-forest-labs/FLUX.1-schnell` |
 | `t5xxl_fp16.safetensors` | `comfyanonymous/flux_text_encoders` |
 | `clip_l.safetensors` | `comfyanonymous/flux_text_encoders` |
-| `tokenizer.json` (T5) | `google-t5/t5-v1_1-xxl` |
+| `t5-v1_1-xxl.tokenizer.json` (T5) | `lmz/mt5-tokenizers` |
 | `tokenizer.json` (CLIP) | `openai/clip-vit-large-patch14` |
 
 Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate's `model_registry.rs` delegates to the manifest.
