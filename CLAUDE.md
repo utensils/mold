@@ -92,8 +92,9 @@ mold/
 Shared library used by all other crates. Contains:
 
 - **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, etc.)
-- **`client.rs`** — `MoldClient` HTTP client for communicating with mold-server
+- **`client.rs`** — `MoldClient` HTTP client for communicating with mold-server; includes `is_connection_error()` for fallback detection
 - **`config.rs`** — `Config` struct, `ModelConfig`, `ModelPaths`; loads from `~/.mold/config.toml`
+- **`validation.rs`** — `validate_generate_request()` — shared request validation (used by both server and CLI local inference)
 - **`error.rs`** — `MoldError` enum with thiserror
 
 Key types:
@@ -168,11 +169,13 @@ Routes:
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 
+**API validation**: width/height must be multiples of 16, max 1024, min 1. Steps 1–100.
+
 State is managed via `AppState` which holds a `tokio::sync::Mutex<FluxEngine>`. Model is loaded lazily on first `/api/generate` request.
 
 ### mold-cli
 
-Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through `mold-server` to `mold-inference` for GPU-accelerated `mold serve`.
+Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through both `mold-server` and `mold-inference` for GPU-accelerated `mold serve` and local `mold generate` fallback.
 
 ## CLI Command Reference
 
@@ -187,6 +190,7 @@ mold generate [OPTIONS] <PROMPT>
         --batch <N>             Number of images [default: 1]
         --host <URL>            Override MOLD_HOST env var
         --format <FORMAT>       png or jpeg [default: png]
+        --local                 Skip server, run inference locally (requires GPU features)
 
 mold serve [OPTIONS]
         --port <N>              Server port [default: 7680]
@@ -237,9 +241,15 @@ clip_encoder = "/path/to/clip_l.safetensors"
 
 Loaded via `Config::load_or_default()` — falls back to defaults if the file doesn't exist. Model paths can also be set via env vars (see above).
 
-## Remote Rendering
+## Local & Remote Inference
 
-mold supports a client-server architecture for remote GPU rendering:
+`mold generate` works in three modes:
+
+1. **Remote (default)**: Connects to a running `mold serve` instance via HTTP. Set `MOLD_HOST` to point at a remote GPU server.
+2. **Local fallback**: If no server is running (connection refused), automatically falls back to local GPU inference when built with `--features cuda` or `--features metal`. If built without GPU features, fails with a clear error message.
+3. **Local forced (`--local`)**: Skip the server attempt entirely with `mold generate --local "prompt"`. Goes straight to local inference.
+
+For remote rendering:
 
 1. On the GPU host: `mold serve --port 7680`
 2. On any client: `MOLD_HOST=http://gpu-host:7680 mold generate "a sunset"`
@@ -343,6 +353,14 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 
 > **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090.
 
+**HuggingFace download sources for shared components:**
+| File | Source |
+|------|--------|
+| `flux1-schnell-Q8_0.gguf` | `city96/FLUX.1-schnell-gguf` |
+| `ae.safetensors` | `black-forest-labs/FLUX.1-schnell` |
+| `t5xxl_fp16.safetensors` | `comfyanonymous/flux_text_encoders` |
+| `clip_l.safetensors` | `comfyanonymous/flux_text_encoders` |
+
 Model registry is defined in `mold-inference/src/model_registry.rs`.
 
 ## TUI (mold run)
@@ -384,14 +402,22 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 11. **Single binary**: `mold` is the only binary built by the Nix flake. It includes `serve` (via `mold-server` library), so GPU feature flags (`cuda`/`metal`) are forwarded through `mold-cli` → `mold-server` → `mold-inference`. No separate `mold-server` package is needed.
 
-12. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS.
+12. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS. The devshell sets `CPATH` (cuda_cudart + cuda_cccl includes for kernel compilation), `LIBRARY_PATH` (link-time CUDA libs including stubs), and `LD_LIBRARY_PATH` (runtime — real driver from `/run/opengl-driver/lib` first, no stubs).
 
 13. **Shell completions**: `mold completions <shell>` generates completions for bash, zsh, fish, elvish, and PowerShell via `clap_complete`. Load with `source <(mold completions zsh)` or equivalent.
 
-## Confirmed Working Configuration (hal9000, 2026-03-12)
+14. **Local inference fallback**: `mold generate` tries the remote server first, then falls back to local GPU inference if the server isn't running. This gives the "ollama experience" — `mold generate "a cat"` just works without starting a server. The fallback is behind `cfg(feature = "cuda"/"metal")` so non-GPU builds get a clear error instead. Inference runs in `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+
+15. **Shared validation**: `validate_generate_request()` lives in `mold-core` and is used by both the HTTP server (for API requests) and the CLI (for local inference), ensuring consistent validation rules.
+
+## Confirmed Working Configuration (hal9000, 2026-03-15)
 
 ```
-Model:      flux-schnell Q8_0 GGUF
+Model:      flux-dev Q4 GGUF (local inference fallback, no server)
+Generation: 768×768, 20 steps, ~211s (debug build, model load included)
+GPU:        RTX 4090 (CUDA 12.8, driver 580.119.02)
+
+Model:      flux-schnell Q8_0 GGUF (via mold serve)
 VRAM used:  ~12GB (transformer) + ~300MB (VAE) = ~12.3GB / 24GB
 Generation: 512×512, 4 steps, ~36s first run (model load included)
 GPU:        RTX 4090 (CUDA 12.8, driver 580.119.02)

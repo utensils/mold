@@ -60,6 +60,10 @@ enum Commands {
         /// Output format
         #[arg(long, default_value = "png")]
         format: String,
+
+        /// Skip server and run inference locally (requires GPU features)
+        #[arg(long)]
+        local: bool,
     },
 
     /// Start the inference server
@@ -124,9 +128,11 @@ async fn main() -> anyhow::Result<()> {
             batch,
             host,
             format,
+            local,
         } => {
             commands::generate::run(
-                &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format,
+                &prompt, &model, output, width, height, steps, guidance, seed, batch, host,
+                &format, local,
             )
             .await?;
         }

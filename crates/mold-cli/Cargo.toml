@@ -12,11 +12,12 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["mold-server/cuda"]
-metal = ["mold-server/metal"]
+cuda = ["mold-server/cuda", "mold-inference/cuda"]
+metal = ["mold-server/metal", "mold-inference/metal"]
 
 [dependencies]
 mold-core = { path = "../mold-core" }
+mold-inference = { path = "../mold-inference" }
 mold-server = { path = "../mold-server" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

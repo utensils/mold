@@ -70,6 +70,9 @@
             };
             nativeBuildInputs = [
               pkgs.pkg-config
+            ]
+            ++ lib.optionals isLinux [
+              pkgs.cudaPackages.cuda_nvcc
             ];
             buildInputs = [
               pkgs.openssl
@@ -78,13 +81,17 @@
               pkgs.libiconv
             ]
             ++ lib.optionals isLinux [
-              pkgs.cudaPackages.cuda_nvcc
               pkgs.cudaPackages.cuda_cudart
-              pkgs.cudaPackages.libcublas
-              pkgs.cudaPackages.cuda_nvtx
-              pkgs.cudaPackages.cuda_nvrtc
-              pkgs.cudaPackages.libcurand
+              pkgs.cudaPackages.libcublas.lib
+              pkgs.cudaPackages.cuda_nvtx.lib
+              pkgs.cudaPackages.cuda_nvrtc.lib
+              pkgs.cudaPackages.libcurand.lib
             ];
+          }
+          // lib.optionalAttrs isLinux {
+            CUDA_PATH = "${pkgs.cudaPackages.cuda_nvcc}";
+            CUDA_COMPUTE_CAP = "89";
+            NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -143,10 +150,10 @@
             ++ lib.optionals isLinux [
               pkgs.cudaPackages.cuda_nvcc
               pkgs.cudaPackages.cuda_cudart
-              pkgs.cudaPackages.libcublas
-              pkgs.cudaPackages.cuda_nvtx
-              pkgs.cudaPackages.cuda_nvrtc
-              pkgs.cudaPackages.libcurand
+              pkgs.cudaPackages.libcublas.lib
+              pkgs.cudaPackages.cuda_nvtx.lib
+              pkgs.cudaPackages.cuda_nvrtc.lib
+              pkgs.cudaPackages.libcurand.lib
             ];
 
             env = [
@@ -167,22 +174,38 @@
             ++ lib.optionals isLinux [
               {
                 name = "CUDA_PATH";
-                value = "${pkgs.cudaPackages.cuda_cudart}";
+                value = "${pkgs.cudaPackages.cuda_nvcc}";
               }
               {
                 name = "CUDA_COMPUTE_CAP";
                 value = "89";
               }
               {
-                name = "LD_LIBRARY_PATH";
+                name = "CPATH";
+                value = "${pkgs.cudaPackages.cuda_cudart}/include:${pkgs.cudaPackages.cuda_cccl}/include";
+              }
+              {
+                name = "LIBRARY_PATH";
                 value =
                   lib.makeLibraryPath [
                     pkgs.cudaPackages.cuda_cudart
-                    pkgs.cudaPackages.libcublas
-                    pkgs.cudaPackages.cuda_nvrtc
-                    pkgs.cudaPackages.libcurand
+                    pkgs.cudaPackages.libcublas.lib
+                    pkgs.cudaPackages.cuda_nvrtc.lib
+                    pkgs.cudaPackages.libcurand.lib
                   ]
+                  + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs"
                   + ":/run/opengl-driver/lib";
+              }
+              {
+                name = "LD_LIBRARY_PATH";
+                value =
+                  "/run/opengl-driver/lib:"
+                  + lib.makeLibraryPath [
+                    pkgs.cudaPackages.cuda_cudart
+                    pkgs.cudaPackages.libcublas.lib
+                    pkgs.cudaPackages.cuda_nvrtc.lib
+                    pkgs.cudaPackages.libcurand.lib
+                  ];
               }
             ];
 
@@ -191,73 +214,73 @@
                 category = "build";
                 name = "build";
                 help = "cargo build (debug, all crates)";
-                command = "cargo build $@";
+                command = "cargo build \"$@\"";
               }
               {
                 category = "build";
                 name = "build-release";
                 help = "cargo build --release";
-                command = "cargo build --release $@";
+                command = "cargo build --release \"$@\"";
               }
               {
                 category = "build";
                 name = "build-server";
                 help = "cargo build -p mold-cli --features ${gpuFeature} (single binary with GPU)";
-                command = "cargo build -p mold-cli --features ${gpuFeature} $@";
+                command = "cargo build -p mold-cli --features ${gpuFeature} \"$@\"";
               }
               {
                 category = "check";
                 name = "check";
                 help = "cargo check";
-                command = "cargo check $@";
+                command = "cargo check \"$@\"";
               }
               {
                 category = "check";
                 name = "clippy";
                 help = "cargo clippy";
-                command = "cargo clippy $@";
+                command = "cargo clippy \"$@\"";
               }
               {
                 category = "check";
                 name = "run-tests";
                 help = "cargo test";
-                command = "cargo test $@";
+                command = "cargo test \"$@\"";
               }
               {
                 category = "check";
                 name = "fmt";
                 help = "cargo fmt";
-                command = "cargo fmt $@";
+                command = "cargo fmt \"$@\"";
               }
               {
                 category = "check";
                 name = "fmt-check";
                 help = "cargo fmt --check";
-                command = "cargo fmt --check $@";
+                command = "cargo fmt --check \"$@\"";
               }
               {
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "cargo run -p mold-cli -- $@";
+                command = "cargo run -p mold-cli --features ${gpuFeature} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
                 help = "start the mold server";
-                command = "cargo run -p mold-cli -- serve $@";
+                command = "cargo run -p mold-cli --features ${gpuFeature} -- serve \"$@\"";
               }
               {
                 category = "run";
                 name = "generate";
                 help = "generate an image from a prompt";
-                command = "cargo run -p mold-cli -- generate $@";
+                command = "cargo run -p mold-cli --features ${gpuFeature} -- generate \"$@\"";
               }
               {
                 category = "run";
                 name = "tui";
                 help = "interactive TUI session";
-                command = "cargo run -p mold-cli -- run $@";
+                command = "cargo run -p mold-cli --features ${gpuFeature} -- run \"$@\"";
               }
               {
                 category = "deploy";

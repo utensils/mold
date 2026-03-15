@@ -109,6 +109,15 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Check whether an error is a connection error (e.g. "connection refused").
+    /// Useful for deciding whether to fall back to local inference.
+    pub fn is_connection_error(err: &anyhow::Error) -> bool {
+        if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
+            return reqwest_err.is_connect();
+        }
+        false
+    }
+
     pub async fn server_status(&self) -> Result<ServerStatus> {
         let resp = self
             .client
