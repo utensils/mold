@@ -7,7 +7,8 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
 use crate::device::{
-    fmt_gb, free_vram_bytes, should_use_gpu, CLIP_VRAM_THRESHOLD, T5_VRAM_THRESHOLD,
+    fmt_gb, free_vram_bytes, should_use_gpu, t5_vram_threshold, CLIP_VRAM_THRESHOLD,
+    T5_VRAM_THRESHOLD,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine};
@@ -32,6 +33,8 @@ struct LoadedFlux {
     is_schnell: bool,
     /// True if using quantized GGUF model (state tensors must be F32)
     is_quantized: bool,
+    /// The actual T5 encoder path used (may be a quantized GGUF, not the original FP16 path).
+    t5_encoder_path: std::path::PathBuf,
 }
 
 /// FLUX inference engine backed by candle.
@@ -43,18 +46,28 @@ pub struct FluxEngine {
     is_schnell_override: Option<bool>,
     /// Optional progress callback for UI reporting.
     on_progress: Option<ProgressCallback>,
+    /// T5 variant preference: None/"auto" = auto-select, "fp16" = force FP16, "q8"/"q5"/etc = specific quantized.
+    t5_variant: Option<String>,
 }
 
 impl FluxEngine {
     /// Create a new FluxEngine. Does not load models until `load()` is called.
     /// `is_schnell_override` lets callers explicitly set the scheduler family.
-    pub fn new(model_name: String, paths: ModelPaths, is_schnell_override: Option<bool>) -> Self {
+    /// `t5_variant` controls T5 encoder selection: None/"auto" = VRAM-based auto-select,
+    /// "fp16" = force FP16, "q8"/"q5"/etc = specific quantized variant.
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        is_schnell_override: Option<bool>,
+        t5_variant: Option<String>,
+    ) -> Self {
         Self {
             loaded: None,
             model_name,
             paths,
             is_schnell_override,
             on_progress: None,
+            t5_variant,
         }
     }
 
@@ -86,6 +99,141 @@ impl FluxEngine {
         self.emit(ProgressEvent::Info {
             message: message.to_string(),
         });
+    }
+
+    /// Resolve which T5 encoder to use and where to place it.
+    /// Returns (encoder_path, on_gpu, device_label).
+    fn resolve_t5_variant(
+        &self,
+        preference: Option<&str>,
+        gpu_device: &Device,
+        _cpu_device: &Device,
+        free_vram: u64,
+    ) -> Result<(std::path::PathBuf, bool, String)> {
+        use mold_core::download::{cached_file_path, download_single_file_sync};
+        use mold_core::manifest::{find_t5_variant, known_t5_variants, T5_FP16_SIZE};
+
+        let is_cuda = gpu_device.is_cuda();
+
+        match preference {
+            // Explicit quantized variant requested
+            Some(tag) if tag != "fp16" && tag != "auto" => {
+                let variant = find_t5_variant(tag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown T5 variant '{}'. Valid: fp16, auto, q8, q6, q5, q4, q3",
+                        tag,
+                    )
+                })?;
+                let path = self.resolve_t5_gguf_path(variant)?;
+                let threshold = t5_vram_threshold(variant.size_bytes);
+                let on_gpu = should_use_gpu(is_cuda, free_vram, threshold);
+                let label = if on_gpu {
+                    "GPU, quantized"
+                } else {
+                    "CPU, quantized"
+                };
+                self.info(&format!(
+                    "Using T5 {} ({}) on {} (explicit)",
+                    variant.tag,
+                    fmt_gb(variant.size_bytes),
+                    if on_gpu { "GPU" } else { "CPU" },
+                ));
+                Ok((path, on_gpu, label.to_string()))
+            }
+
+            // Explicit FP16 requested
+            Some("fp16") => {
+                let on_gpu = should_use_gpu(is_cuda, free_vram, T5_VRAM_THRESHOLD);
+                let label = if on_gpu { "GPU" } else { "CPU" };
+                self.info(&format!("Using FP16 T5 on {} (explicit)", label));
+                Ok((self.paths.t5_encoder.clone(), on_gpu, label.to_string()))
+            }
+
+            // Auto mode (default): try FP16 on GPU, then quantized on GPU, then FP16 on CPU
+            _ => {
+                // Can FP16 T5 fit on GPU?
+                if should_use_gpu(is_cuda, free_vram, T5_VRAM_THRESHOLD) {
+                    self.info(&format!(
+                        "Loading FP16 T5 on GPU ({} free > {} threshold)",
+                        fmt_gb(free_vram),
+                        fmt_gb(T5_VRAM_THRESHOLD),
+                    ));
+                    return Ok((self.paths.t5_encoder.clone(), true, "GPU".to_string()));
+                }
+
+                // FP16 won't fit on GPU — try quantized variants (largest first)
+                if is_cuda {
+                    for variant in known_t5_variants() {
+                        let threshold = t5_vram_threshold(variant.size_bytes);
+                        if free_vram > threshold {
+                            // Check cache first, download if needed
+                            let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
+                            {
+                                Some(p) => p,
+                                None => {
+                                    self.info(&format!(
+                                        "Downloading T5 {} ({})...",
+                                        variant.tag,
+                                        fmt_gb(variant.size_bytes),
+                                    ));
+                                    tracing::info!(
+                                        variant = variant.tag,
+                                        repo = variant.hf_repo,
+                                        file = variant.hf_filename,
+                                        "downloading quantized T5 encoder"
+                                    );
+                                    download_single_file_sync(variant.hf_repo, variant.hf_filename)
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "failed to download T5 {}: {e}",
+                                                variant.tag
+                                            )
+                                        })?
+                                }
+                            };
+                            self.info(&format!(
+                                "FP16 T5 ({}) exceeds remaining VRAM ({}). Using quantized T5 {} ({}) on GPU instead.",
+                                fmt_gb(T5_FP16_SIZE),
+                                fmt_gb(free_vram),
+                                variant.tag,
+                                fmt_gb(variant.size_bytes),
+                            ));
+                            return Ok((path, true, format!("GPU, quantized {}", variant.tag)));
+                        }
+                    }
+                }
+
+                // No quantized variant fits on GPU either — fall back to FP16 on CPU
+                if is_cuda {
+                    self.info(&format!(
+                        "Loading FP16 T5 on CPU ({} free, no variant fits on GPU)",
+                        fmt_gb(free_vram),
+                    ));
+                } else {
+                    self.info("No GPU detected, loading T5 on CPU");
+                }
+                Ok((self.paths.t5_encoder.clone(), false, "CPU".to_string()))
+            }
+        }
+    }
+
+    /// Resolve the path for a quantized T5 GGUF file: check cache, download if needed.
+    fn resolve_t5_gguf_path(
+        &self,
+        variant: &mold_core::manifest::T5Variant,
+    ) -> Result<std::path::PathBuf> {
+        use mold_core::download::{cached_file_path, download_single_file_sync};
+
+        if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
+            return Ok(path);
+        }
+        self.info(&format!(
+            "Downloading T5 {} ({})...",
+            variant.tag,
+            fmt_gb(variant.size_bytes),
+        ));
+        download_single_file_sync(variant.hf_repo, variant.hf_filename)
+            .map_err(|e| anyhow::anyhow!("failed to download T5 {}: {e}", variant.tag))
     }
 
     /// Load all model components into GPU memory.
@@ -224,41 +372,30 @@ impl FluxEngine {
             );
         }
 
-        let t5_on_gpu = should_use_gpu(device.is_cuda(), free, T5_VRAM_THRESHOLD);
+        // --- T5 encoder: auto-select variant based on VRAM or explicit preference ---
+        let t5_preference = self.t5_variant.as_deref();
+        let (t5_encoder_path, t5_on_gpu, t5_device_label) =
+            self.resolve_t5_variant(t5_preference, &device, &cpu, free)?;
         let t5_device = if t5_on_gpu { &device } else { &cpu };
         let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
-        let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
 
         // Load T5 encoder
         let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
         self.stage_start(&t5_stage_label);
         let t5_stage = Instant::now();
-        if t5_on_gpu {
-            self.info(&format!(
-                "Loading T5 encoder on GPU ({} free > {} threshold)",
-                fmt_gb(free),
-                fmt_gb(T5_VRAM_THRESHOLD)
-            ));
-        } else if device.is_cuda() {
-            self.info(&format!(
-                "Loading T5 encoder on CPU ({} free < {} threshold)",
-                fmt_gb(free),
-                fmt_gb(T5_VRAM_THRESHOLD)
-            ));
-        }
         tracing::info!(
-            path = %self.paths.t5_encoder.display(),
-            device = t5_device_label,
+            path = %t5_encoder_path.display(),
+            device = %t5_device_label,
             "loading T5 encoder..."
         );
         let t5 = encoders::t5::T5Encoder::load(
-            &self.paths.t5_encoder,
+            &t5_encoder_path,
             &self.paths.t5_tokenizer,
             t5_device,
             t5_dtype,
         )?;
         self.stage_done(&t5_stage_label, t5_stage.elapsed());
-        tracing::info!(device = t5_device_label, "T5 encoder loaded");
+        tracing::info!(device = %t5_device_label, "T5 encoder loaded");
 
         // Re-check VRAM after T5 (it may have consumed GPU memory)
         let free_after_t5 = free_vram_bytes().unwrap_or(0);
@@ -294,6 +431,7 @@ impl FluxEngine {
             dtype: gpu_dtype,
             is_schnell,
             is_quantized,
+            t5_encoder_path,
         });
 
         tracing::info!(model = %self.model_name, "all model components loaded successfully");
@@ -323,7 +461,11 @@ impl InferenceEngine for FluxEngine {
         };
 
         // Grab path references before borrowing loaded mutably
-        let t5_encoder_path = self.paths.t5_encoder.clone();
+        let t5_encoder_path = self
+            .loaded
+            .as_ref()
+            .map(|l| l.t5_encoder_path.clone())
+            .unwrap_or_else(|| self.paths.t5_encoder.clone());
         let clip_encoder_path = self.paths.clip_encoder.clone();
 
         let loaded = self

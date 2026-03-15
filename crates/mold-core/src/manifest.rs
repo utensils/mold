@@ -376,6 +376,62 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
     names
 }
 
+/// FP16 T5-XXL model size in bytes (~9.2GB).
+pub const T5_FP16_SIZE: u64 = 9_200_000_000;
+
+// ── Quantized T5 variant registry ────────────────────────────────────────────
+
+/// A quantized T5 encoder variant available from HuggingFace.
+#[derive(Debug, Clone)]
+pub struct T5Variant {
+    pub tag: &'static str,
+    pub hf_repo: &'static str,
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+}
+
+/// Known T5 quantized variants, sorted largest → smallest.
+pub fn known_t5_variants() -> &'static [T5Variant] {
+    static VARIANTS: &[T5Variant] = &[
+        T5Variant {
+            tag: "q8",
+            hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
+            hf_filename: "t5-v1_1-xxl-encoder-Q8_0.gguf",
+            size_bytes: 5_060_000_000, // ~5.06GB
+        },
+        T5Variant {
+            tag: "q6",
+            hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
+            hf_filename: "t5-v1_1-xxl-encoder-Q6_K.gguf",
+            size_bytes: 3_910_000_000, // ~3.91GB
+        },
+        T5Variant {
+            tag: "q5",
+            hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
+            hf_filename: "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+            size_bytes: 3_390_000_000, // ~3.39GB
+        },
+        T5Variant {
+            tag: "q4",
+            hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
+            hf_filename: "t5-v1_1-xxl-encoder-Q4_K_M.gguf",
+            size_bytes: 2_900_000_000, // ~2.9GB
+        },
+        T5Variant {
+            tag: "q3",
+            hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
+            hf_filename: "t5-v1_1-xxl-encoder-Q3_K_S.gguf",
+            size_bytes: 2_100_000_000, // ~2.1GB
+        },
+    ];
+    VARIANTS
+}
+
+/// Find a T5 variant by tag (e.g. "q8", "q5").
+pub fn find_t5_variant(tag: &str) -> Option<&'static T5Variant> {
+    known_t5_variants().iter().find(|v| v.tag == tag)
+}
+
 /// Size of shared FLUX components (VAE, T5, CLIP, tokenizers) in GB.
 pub const SHARED_COMPONENTS_GB: f32 = 9.8;
 
@@ -474,6 +530,53 @@ mod tests {
     fn shared_files_are_not_gated() {
         for file in shared_flux_files() {
             assert!(!file.gated, "{} should not be gated", file.hf_filename);
+        }
+    }
+
+    // --- T5 variant registry tests ---
+
+    #[test]
+    fn t5_variants_sorted_largest_first() {
+        let variants = known_t5_variants();
+        for w in variants.windows(2) {
+            assert!(
+                w[0].size_bytes >= w[1].size_bytes,
+                "{} ({}) should be >= {} ({})",
+                w[0].tag,
+                w[0].size_bytes,
+                w[1].tag,
+                w[1].size_bytes,
+            );
+        }
+    }
+
+    #[test]
+    fn find_t5_variant_by_tag() {
+        assert_eq!(find_t5_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_t5_variant("q5").unwrap().tag, "q5");
+        assert_eq!(find_t5_variant("q3").unwrap().tag, "q3");
+        assert!(find_t5_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn t5_variants_all_gguf() {
+        for v in known_t5_variants() {
+            assert!(
+                v.hf_filename.ends_with(".gguf"),
+                "{} should be a GGUF file",
+                v.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn t5_fp16_larger_than_all_quantized() {
+        for v in known_t5_variants() {
+            assert!(
+                T5_FP16_SIZE > v.size_bytes,
+                "FP16 should be larger than {}",
+                v.tag
+            );
         }
     }
 }

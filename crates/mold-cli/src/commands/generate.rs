@@ -18,6 +18,7 @@ pub async fn run(
     host: Option<String>,
     format: &str,
     local: bool,
+    t5_variant: Option<String>,
 ) -> Result<()> {
     let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
@@ -57,7 +58,7 @@ pub async fn run(
     let response = if local {
         // --local: skip server, go straight to local inference
         println!("{} Using local GPU inference", "●".cyan());
-        generate_local(&req, &config).await?
+        generate_local(&req, &config, t5_variant).await?
     } else {
         // Try remote server first
         let client = match &host {
@@ -82,7 +83,7 @@ pub async fn run(
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
                 println!("{} Using local GPU inference", "●".cyan());
-                generate_local(&req, &config).await?
+                generate_local(&req, &config, t5_variant).await?
             }
             Err(e) => return Err(e),
         }
@@ -125,7 +126,11 @@ pub async fn run(
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<GenerateResponse> {
+async fn generate_local(
+    req: &GenerateRequest,
+    config: &Config,
+    t5_variant_override: Option<String>,
+) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::{FluxEngine, InferenceEngine, ProgressEvent};
@@ -170,7 +175,10 @@ async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<Genera
     }
 
     let is_schnell = effective_config.model_config(&model_name).is_schnell;
-    let mut engine = FluxEngine::new(model_name, paths, is_schnell);
+    let t5_variant = t5_variant_override
+        .or_else(|| std::env::var("MOLD_T5_VARIANT").ok())
+        .or_else(|| effective_config.t5_variant.clone());
+    let mut engine = FluxEngine::new(model_name, paths, is_schnell, t5_variant);
 
     // Set up progress channel for UI updates from the blocking inference thread
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
@@ -229,7 +237,11 @@ async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<Genera
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
-async fn generate_local(_req: &GenerateRequest, _config: &Config) -> Result<GenerateResponse> {
+async fn generate_local(
+    _req: &GenerateRequest,
+    _config: &Config,
+    _t5_variant: Option<String>,
+) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\
          Either start a server with `mold serve` or rebuild with --features cuda"

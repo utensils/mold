@@ -23,6 +23,16 @@ pub enum DownloadError {
     #[error("Failed to build HuggingFace API client: {0}")]
     ApiSetup(#[from] ApiError),
 
+    #[error("Failed to build sync HuggingFace API client: {0}")]
+    SyncApiSetup(String),
+
+    #[error("Sync download failed for {filename} from {repo}: {message}")]
+    SyncDownloadFailed {
+        repo: String,
+        filename: String,
+        message: String,
+    },
+
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
 }
@@ -112,6 +122,38 @@ async fn download_file(
             }
         }
     }
+}
+
+// ── Synchronous single-file download (for use from spawn_blocking) ───────────
+
+/// Download a single file from HuggingFace, returning its cached path.
+/// Uses the sync hf-hub API — safe to call from `spawn_blocking`.
+/// Returns immediately if already cached.
+pub fn download_single_file_sync(
+    hf_repo: &str,
+    hf_filename: &str,
+) -> Result<PathBuf, DownloadError> {
+    use hf_hub::api::sync::ApiBuilder;
+
+    let api = ApiBuilder::from_env()
+        .build()
+        .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
+    let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    repo.get(hf_filename)
+        .map_err(|e| DownloadError::SyncDownloadFailed {
+            repo: hf_repo.to_string(),
+            filename: hf_filename.to_string(),
+            message: e.to_string(),
+        })
+}
+
+/// Check if a file is already cached locally (no download).
+pub fn cached_file_path(hf_repo: &str, hf_filename: &str) -> Option<PathBuf> {
+    use hf_hub::Cache;
+
+    let cache = Cache::from_env();
+    let repo = cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    repo.get(hf_filename)
 }
 
 #[cfg(test)]

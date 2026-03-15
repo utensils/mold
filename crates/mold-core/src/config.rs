@@ -139,6 +139,12 @@ pub struct Config {
     #[serde(default = "default_steps")]
     pub default_steps: u32,
 
+    /// Preferred T5 encoder variant: "fp16" (default), "q8", "q6", "q5", "q4", "q3", or "auto".
+    /// "auto" selects the best variant that fits in GPU VRAM.
+    /// An explicit quantized tag always uses that variant regardless of VRAM.
+    #[serde(default)]
+    pub t5_variant: Option<String>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -178,6 +184,7 @@ impl Default for Config {
             default_width: default_dimension(),
             default_height: default_dimension(),
             default_steps: default_steps(),
+            t5_variant: None,
             models: HashMap::new(),
         }
     }

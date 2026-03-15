@@ -52,7 +52,15 @@ async fn generate(
                         ),
                     )
                 })?;
-            *engine = Box::new(FluxEngine::new(req.model.clone(), paths, is_schnell));
+            let t5_variant = std::env::var("MOLD_T5_VARIANT")
+                .ok()
+                .or_else(|| state.config.t5_variant.clone());
+            *engine = Box::new(FluxEngine::new(
+                req.model.clone(),
+                paths,
+                is_schnell,
+                t5_variant,
+            ));
         }
 
         // Load on first request (or after hot-swap)
@@ -205,7 +213,15 @@ async fn load_model(
     })?;
 
     let mut engine = state.engine.lock().await;
-    *engine = Box::new(FluxEngine::new(body.model.clone(), paths, is_schnell));
+    let t5_variant = std::env::var("MOLD_T5_VARIANT")
+        .ok()
+        .or_else(|| state.config.t5_variant.clone());
+    *engine = Box::new(FluxEngine::new(
+        body.model.clone(),
+        paths,
+        is_schnell,
+        t5_variant,
+    ));
     engine.load().map_err(|e| {
         tracing::error!("model load failed: {e:#}");
         (

@@ -161,6 +161,8 @@ pub trait InferenceEngine: Send + Sync {
 
 **Device split** — FLUX transformer and VAE always load on **GPU**. T5 and CLIP encoders are placed on **GPU or CPU** dynamically based on remaining VRAM after the transformer is loaded (see `device.rs` thresholds). When placed on GPU, they are dropped after encoding to free VRAM for the denoising pass, then reloaded on the next generation. This allows optimal placement: e.g. Q4 models leave enough VRAM for T5 on GPU, while Q8/BF16 models fall back to CPU.
 
+**Quantized T5 auto-fallback** — When FP16 T5 (9.2GB) doesn't fit in VRAM but a smaller quantized T5 GGUF does, the engine automatically selects the largest quantized variant that fits on GPU and downloads it if needed. This means Q8 transformer + Q8 T5 (5.06GB) = ~17GB total, well within 24GB, giving GPU-speed encoding instead of CPU fallback. Control via `MOLD_T5_VARIANT` env var, `t5_variant` config, or `--t5-variant` CLI flag.
+
 **GGUF quantized models** — the engine auto-detects `.gguf` extension on `MOLD_TRANSFORMER_PATH` and uses `candle_transformers::quantized_var_builder` + `flux::quantized_model::Flux`. GGUF quantized models (Q4_1 = 7GB, Q8_0 = 12GB) leave plenty of VRAM for activations. When quantized, state tensors use F32; when BF16, they use BF16.
 
 **FluxTransformer enum** (in `flux/transformer.rs`) wraps either `flux::model::Flux` (BF16) or `flux::quantized_model::Flux` (GGUF quantized). Both implement `flux::WithForward` so the same `denoise()` call works for both.
@@ -207,6 +209,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --host <URL>            Override MOLD_HOST env var
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
+        --t5-variant <TAG>      T5 encoder variant: auto, fp16, q8, q6, q5, q4, q3
 
     Examples:
         mold run flux-dev:q4 "a turtle in the desert"    # specific model + prompt
@@ -239,6 +242,7 @@ mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elv
 | `MOLD_CLIP_PATH` | — | Path to CLIP-L encoder safetensors |
 | `MOLD_T5_TOKENIZER_PATH` | — | Path to T5 tokenizer.json |
 | `MOLD_CLIP_TOKENIZER_PATH` | — | Path to CLIP tokenizer.json |
+| `MOLD_T5_VARIANT` | — | T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3 |
 
 ## Config File
 
@@ -253,6 +257,7 @@ server_port = 7680
 output_dir = "."
 default_width = 1024
 default_height = 1024
+# t5_variant = "auto"  # auto, fp16, q8, q6, q5, q4, q3
 
 [models."flux-schnell:q8"]
 transformer = "/path/to/flux1-schnell-Q8_0.gguf"
@@ -474,7 +479,9 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
 
-19. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
+19. **Quantized T5 encoder with auto-fallback**: When the FP16 T5-XXL (9.2GB) doesn't fit in remaining VRAM alongside the FLUX transformer, the engine automatically selects the largest quantized T5 GGUF that fits on GPU. Available variants from `city96/t5-v1_1-xxl-encoder-gguf`: Q8 (5.06GB), Q6 (3.91GB), Q5 (3.39GB), Q4 (2.9GB), Q3 (2.1GB). Uses `candle_transformers::models::quantized_t5::T5EncoderModel` with the same tokenizer. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_T5_VARIANT` env var, `t5_variant` config field, or `--t5-variant` CLI flag. Priority: CLI flag > env var > config > auto.
+
+20. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-15)
 

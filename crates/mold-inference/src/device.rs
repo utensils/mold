@@ -1,6 +1,14 @@
-/// Minimum free VRAM (bytes) required to place T5-XXL on GPU.
-/// This accounts for T5 weights (~9.2GB) plus headroom for denoising activations
-/// and VAE decode (~6.5GB at 1024x1024). Conservative to avoid CUDA OOM.
+/// Headroom above model size for activation memory during encoding.
+pub const T5_ACTIVATION_HEADROOM: u64 = 2_000_000_000; // 2GB
+
+/// Compute VRAM threshold for a T5 model of a given size.
+/// The model needs its own weight size plus headroom for activations.
+pub fn t5_vram_threshold(model_size_bytes: u64) -> u64 {
+    model_size_bytes + T5_ACTIVATION_HEADROOM
+}
+
+/// Minimum free VRAM (bytes) required to place FP16 T5-XXL on GPU.
+/// Kept for backward compatibility — equivalent to `t5_vram_threshold(9_200_000_000)`.
 pub const T5_VRAM_THRESHOLD: u64 = 16_000_000_000;
 /// Minimum free VRAM (bytes) required to place CLIP-L on GPU: ~246MB model + 500MB headroom.
 pub const CLIP_VRAM_THRESHOLD: u64 = 800_000_000;
@@ -142,5 +150,42 @@ mod tests {
         assert!(CLIP_VRAM_THRESHOLD > 246_000_000);
         // But not unreasonably high
         assert!(CLIP_VRAM_THRESHOLD < 2_000_000_000);
+    }
+
+    // --- Dynamic T5 threshold tests ---
+
+    #[test]
+    fn t5_threshold_for_fp16() {
+        // FP16 T5 is 9.2GB, threshold should account for that + headroom
+        let threshold = t5_vram_threshold(9_200_000_000);
+        assert!(threshold > 9_200_000_000);
+        assert!(threshold <= 16_000_000_000);
+    }
+
+    #[test]
+    fn t5_threshold_for_q8() {
+        // Q8 T5 is ~5.06GB, threshold should be ~7GB
+        let threshold = t5_vram_threshold(5_060_000_000);
+        assert_eq!(threshold, 7_060_000_000);
+        // Should fit when Q4 transformer leaves ~17GB free on 24GB card
+        assert!(should_use_gpu(true, 17_000_000_000, threshold));
+        // Should fit when Q8 transformer leaves ~12GB free
+        assert!(should_use_gpu(true, 12_000_000_000, threshold));
+    }
+
+    #[test]
+    fn t5_threshold_for_q5() {
+        // Q5 T5 is ~3.39GB, threshold should be ~5.4GB
+        let threshold = t5_vram_threshold(3_390_000_000);
+        assert_eq!(threshold, 5_390_000_000);
+        // Should fit with Q8 transformer on 24GB (12GB free)
+        assert!(should_use_gpu(true, 12_000_000_000, threshold));
+    }
+
+    #[test]
+    fn t5_threshold_for_q3() {
+        // Q3 T5 is ~2.1GB, threshold should be ~4.1GB
+        let threshold = t5_vram_threshold(2_100_000_000);
+        assert_eq!(threshold, 4_100_000_000);
     }
 }

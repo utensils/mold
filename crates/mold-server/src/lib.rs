@@ -38,7 +38,10 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
     info!(t5_tok = %paths.t5_tokenizer.display());
     info!(clip_tok = %paths.clip_tokenizer.display());
 
-    let engine = FluxEngine::new(model_name, paths, is_schnell_override);
+    let t5_variant = std::env::var("MOLD_T5_VARIANT")
+        .ok()
+        .or_else(|| config.t5_variant.clone());
+    let engine = FluxEngine::new(model_name, paths, is_schnell_override, t5_variant);
     let state = state::AppState::new(engine, config);
     let app = routes::create_router(state).layer(CorsLayer::permissive());
 

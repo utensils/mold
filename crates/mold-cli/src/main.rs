@@ -68,6 +68,10 @@ enum Commands {
         /// Skip server and run inference locally (requires GPU features)
         #[arg(long)]
         local: bool,
+
+        /// T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3
+        #[arg(long)]
+        t5_variant: Option<String>,
     },
 
     /// Start the inference server
@@ -128,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
             host,
             format,
             local,
+            t5_variant,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -142,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
                 host,
                 format,
                 local,
+                t5_variant,
             )
             .await?;
         }
