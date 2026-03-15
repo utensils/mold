@@ -70,6 +70,7 @@ cargo run -p mold-cli -- run "a cat"                 # Generate image
 - **Remote-capable**: Point `MOLD_HOST` at a GPU server and generate from anywhere
 - **Model management**: Pull, list, load/unload models (like `ollama pull`)
 - **Simple CLI**: `mold run flux-dev:q4 "a cat"` — just works
+- **Pipe-friendly**: `mold run "a cat" | viu -` — composable with Unix tools
 - **Future**: OCI registry for model distribution (like ollama's docker registry format)
 
 ## Crate Structure
@@ -216,7 +217,11 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         mold run "a sunset over mountains"                # default model + prompt
         mold run --model flux-krea:q8 "a sunset"            # explicit model flag
         mold run "a cat" | viu -                           # pipe to image viewer
+        mold run "a cat" | img2sixel                       # pipe to sixel terminal
+        mold run "a cat" | feh -                           # pipe to feh
+        mold run "a cat" > image.png                       # redirect to file
         mold run "a cat" --output - > image.png            # explicit stdout
+        mold run "a cat" 2>/dev/null | viu -               # silent pipe (no status)
 
 mold serve [OPTIONS]
         --port <N>              Server port [default: 7680]
@@ -319,6 +324,40 @@ For remote rendering:
 2. On any client: `MOLD_HOST=http://gpu-host:7680 mold run "a sunset"`
 
 The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receives the generated image bytes in the response. All CLI commands (`generate`, `list`, `ps`) communicate through the same HTTP API.
+
+## Piping & Composability
+
+`mold run` is pipe-friendly — when stdout is not a terminal, raw image bytes go to stdout and all status/progress goes to stderr. This follows Unix conventions (`curl`, `ffmpeg`, `convert`).
+
+```bash
+# View generated images directly in the terminal
+mold run "a cat in space" | viu -
+mold run "neon cityscape" | img2sixel
+mold run "a sunset" | feh -
+
+# Chain with ImageMagick
+mold run "a portrait" | convert - -resize 50% thumbnail.jpg
+mold run "a landscape" --format jpeg | convert - -quality 90 final.jpg
+
+# Redirect to file (no intermediate save)
+mold run "abstract art" > painting.png
+
+# Silent mode — suppress status output
+mold run "a cat" 2>/dev/null | viu -
+
+# Explicit stdout with --output -  (works even in interactive terminals)
+mold run "a cat" --output - > image.png
+
+# Combine with remote inference
+MOLD_HOST=http://gpu-server:7680 mold run "a cat" | viu -
+```
+
+**How it works:**
+- `stdout` → raw image bytes (PNG or JPEG, controlled by `--format`)
+- `stderr` → status messages, progress bars, spinner (visible in terminal)
+- SIGPIPE is reset to default so piping to `head`, short-lived readers, etc. exits cleanly
+- `--output -` forces stdout output even when not piped
+- Colors in stderr status are preserved (stderr is still a TTY when piping)
 
 ## Deployment
 
