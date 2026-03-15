@@ -1,8 +1,70 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # mold — Architecture & Development Guide
 
 > Like ollama, but for diffusion models.
 
 mold is a CLI/TUI tool for AI image generation using FLUX models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+
+## Build & Development Commands
+
+### Nix (preferred)
+
+```bash
+# Pure Nix builds via crane
+nix build                                            # Build mold CLI (default)
+nix build .#mold                                     # Build mold CLI (explicit)
+nix build .#mold-server                              # Build server (cuda on Linux, metal on macOS)
+
+# Run directly
+nix run                                              # Run mold CLI
+nix run .#mold-server                                # Run server
+
+# Dev shell (numtide devshell with menu commands)
+nix develop                                          # Enter devshell (auto via direnv)
+
+# Formatting
+nix fmt                                              # Format Nix + Rust (nixfmt + rustfmt)
+nix flake check                                      # Validate formatting + flake
+```
+
+### Devshell commands (available inside `nix develop`)
+
+| Category | Command | Description |
+|----------|---------|-------------|
+| build | `build` | `cargo build` (debug, all crates) |
+| build | `build-release` | `cargo build --release` |
+| build | `build-server` | `cargo build -p mold-server --features {cuda\|metal}` |
+| check | `check` | `cargo check` |
+| check | `clippy` | `cargo clippy` |
+| check | `run-tests` | `cargo test` |
+| check | `fmt` | `cargo fmt` |
+| check | `fmt-check` | `cargo fmt --check` |
+| run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
+| run | `serve` | Start the mold server |
+| run | `generate` | Generate an image from a prompt |
+| run | `tui` | Interactive TUI session |
+| deploy | `deploy` | Deploy to hal9000 |
+
+### Cargo (direct)
+
+```bash
+cargo build                                          # Debug build (all crates)
+cargo build --release                                # Release build
+cargo build -p mold-cli                              # Just the CLI
+cargo build -p mold-server --features cuda           # Server with CUDA
+cargo check                                          # Type check
+cargo clippy                                         # Lint
+cargo fmt --check                                    # Format check
+cargo test                                           # All tests
+cargo test -p mold-core                              # Single crate
+cargo run -p mold-cli -- generate "a cat"            # Generate image
+cargo run -p mold-cli -- serve                       # Start server
+cargo run -p mold-cli -- run                         # Interactive TUI
+./scripts/deploy.sh                                  # Deploy to hal9000
+```
 
 ## Project Vision
 
@@ -212,13 +274,19 @@ CLIP tokenizer: /home/jamesbrink/AI/models/tokenizers/clip-vit-large-patch14.tok
 
 ### Building with CUDA (Nix devshell)
 
-The `flake.nix` provides a devshell with all CUDA 12.8 dependencies:
+The `flake.nix` (flake-parts + numtide devshell + crane) provides a devshell with all CUDA 12.8 dependencies and pure Nix builds:
 
 ```bash
-# On hal9000:
+# On hal9000 — pure Nix build (preferred):
 cd /home/jamesbrink/mold
 git pull
+nix build .#mold-server
+
+# Or via devshell:
 nix develop --command cargo build --release -p mold-server --features cuda
+# Or inside the shell:
+nix develop
+build-server  # devshell command, auto-selects --features cuda on Linux
 ```
 
 ### Systemd user service
@@ -293,46 +361,6 @@ Planned support for distributing models via OCI-compatible registries (similar t
 - Private model registries
 - Versioned model artifacts with layers for components (text encoder, VAE, transformer)
 
-## Development
-
-### Prerequisites
-
-- Rust stable (1.75+)
-- For GPU inference: CUDA toolkit (candle CUDA backend)
-
-### Building
-
-```bash
-cargo build                     # Debug build (all crates)
-cargo build --release           # Release build
-cargo build -p mold-cli         # Just the CLI binary
-cargo build -p mold-server --features cuda  # Server with CUDA
-```
-
-### Running
-
-```bash
-cargo run -p mold-cli -- generate "a cat"
-cargo run -p mold-cli -- serve
-cargo run -p mold-cli -- list
-cargo run -p mold-cli -- run
-```
-
-### Checking
-
-```bash
-cargo check                     # Type check
-cargo clippy                    # Lint
-cargo fmt --check               # Format check
-```
-
-### Testing
-
-```bash
-cargo test                      # Run all tests
-cargo test -p mold-core         # Test specific crate
-```
-
 ## Key Design Decisions
 
 1. **Workspace structure**: Separating core types, inference, server, and CLI into distinct crates allows independent compilation and clean dependency boundaries. The CLI doesn't need candle, and the server doesn't need clap/ratatui.
@@ -355,7 +383,7 @@ cargo test -p mold-core         # Test specific crate
 
 10. **T5/CLIP on CPU**: Text encoders load on CPU to keep ~9.2GB off the GPU. Embeddings are moved to GPU after encoding. This is required for the FLUX transformer to fit in VRAM alongside activations.
 
-11. **Nix devshell for CUDA**: `flake.nix` provides a devshell with CUDA 12.8 packages (`cuda_nvcc`, `cuda_cudart`, `libcublas`, `cuda_nvrtc`, `libcurand`) and `CUDA_COMPUTE_CAP=89` for the RTX 4090. Build with `nix develop --command cargo build --release -p mold-server --features cuda`.
+11. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`, `nix build .#mold-server`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-12)
 
