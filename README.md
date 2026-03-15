@@ -111,7 +111,7 @@ mold completions fish | source
 ## Architecture
 
 ```
-mold-cli       Single binary: CLI + TUI + serve (mold run / serve / pull / completions)
+mold-cli       Single binary: CLI + serve (mold run / serve / pull / completions)
 mold-server    axum REST server (library, used by mold-cli via `mold serve`)
 mold-inference FLUX engine (candle: T5/CLIP on CPU, transformer+VAE on GPU)
 mold-core      Shared types, config, HTTP client

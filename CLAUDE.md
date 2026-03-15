@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > Like ollama, but for diffusion models.
 
-mold is a CLI/TUI tool for AI image generation using FLUX models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
 ## Build & Development Commands
 
@@ -43,7 +43,7 @@ nix flake check                                      # Validate formatting + fla
 | run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
 | run | `serve` | Start the mold server |
 | run | `generate` | Generate an image from a prompt |
-| run | `tui` | Interactive TUI session |
+| run | `generate` | Generate an image from a prompt |
 | deploy | `deploy` | Deploy to hal9000 |
 
 ### Cargo (direct)
@@ -60,7 +60,7 @@ cargo test                                           # All tests
 cargo test -p mold-core                              # Single crate
 cargo run -p mold-cli -- generate "a cat"            # Generate image
 cargo run -p mold-cli -- serve                       # Start server
-cargo run -p mold-cli -- run                         # Interactive TUI
+cargo run -p mold-cli -- run "a cat"                 # Generate image
 ./scripts/deploy.sh                                  # Deploy to hal9000
 ```
 
@@ -69,7 +69,7 @@ cargo run -p mold-cli -- run                         # Interactive TUI
 - **Local-first**: Run FLUX models directly on your GPU
 - **Remote-capable**: Point `MOLD_HOST` at a GPU server and generate from anywhere
 - **Model management**: Pull, list, load/unload models (like `ollama pull`)
-- **Interactive TUI**: Real-time image generation session with `mold run`
+- **Simple CLI**: `mold run flux-dev:q4 "a cat"` — just works
 - **Future**: OCI registry for model distribution (like ollama's docker registry format)
 
 ## Crate Structure
@@ -84,7 +84,7 @@ mold/
 │   ├── mold-core/                # Shared types, API protocol, HTTP client, config
 │   ├── mold-inference/           # Candle-based FLUX inference engine
 │   ├── mold-server/              # Axum HTTP inference server (lib + binary)
-│   └── mold-cli/                 # Main binary — CLI (clap) + TUI (ratatui)
+│   └── mold-cli/                 # Main binary — CLI (clap)
 ```
 
 ### mold-core
@@ -177,14 +177,14 @@ State is managed via `AppState` which holds a `tokio::sync::Mutex<FluxEngine>`. 
 
 ### mold-cli
 
-Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through both `mold-server` and `mold-inference` for GPU-accelerated `mold serve` and local `mold run` inference.
+Main binary crate. Provides CLI commands and shell completions. Feature flags `cuda` and `metal` forward through both `mold-server` and `mold-inference` for GPU-accelerated `mold serve` and local `mold run` inference.
 
 ## CLI Command Reference
 
 ```
 mold run [MODEL] [PROMPT...] [OPTIONS]
     If PROMPT provided → one-shot generation
-    If PROMPT omitted  → interactive TUI
+    PROMPT is required
     First positional arg is MODEL if it matches a known model name
 
     -m, --model <MODEL>         Explicit model override (bypasses arg heuristics)
@@ -201,8 +201,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
     Examples:
         mold run flux-dev:q4 "a turtle in the desert"    # specific model + prompt
         mold run "a sunset over mountains"                # default model + prompt
-        mold run flux-krea:q8                             # TUI with specific model
-        mold run                                          # TUI with default model
+        mold run --model flux-krea:q8 "a sunset"            # explicit model flag
 
 mold serve [OPTIONS]
         --port <N>              Server port [default: 7680]
@@ -420,14 +419,6 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 
 Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate's `model_registry.rs` delegates to the manifest.
 
-## TUI (mold run)
-
-Interactive terminal UI built with ratatui:
-- Header showing current model
-- Status/output area
-- Prompt input at bottom
-- Keybindings: Enter=generate, Esc/q=quit, type to enter prompt
-
 ## Future: OCI Registry for Models
 
 Planned support for distributing models via OCI-compatible registries (similar to how ollama uses Docker registry format). This would allow:
@@ -437,7 +428,7 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 ## Key Design Decisions
 
-1. **Workspace structure**: Separating core types, inference, server, and CLI into distinct crates allows independent compilation and clean dependency boundaries. The CLI doesn't need candle, and the server doesn't need clap/ratatui.
+1. **Workspace structure**: Separating core types, inference, server, and CLI into distinct crates allows independent compilation and clean dependency boundaries. The CLI doesn't need candle, and the server doesn't need clap.
 
 2. **candle over tch/ort**: candle is pure Rust, provides first-class FLUX support, and doesn't require libtorch system dependencies. It supports CUDA, Metal, and CPU backends.
 
@@ -473,7 +464,7 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
 
-19. **Unified `run` command with positional model arg**: `mold run` replaces both the old `generate` and `run` (TUI) commands. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model; `mold run flux-dev:q4` = TUI with model; `mold run` = TUI with default. This mirrors `ollama run <model> [prompt]`.
+19. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-15)
 

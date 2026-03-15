@@ -274,12 +274,6 @@
                 category = "run";
                 name = "generate";
                 help = "generate an image from a prompt";
-                command = "cargo run -p mold-cli --features ${gpuFeature} -- generate \"$@\"";
-              }
-              {
-                category = "run";
-                name = "tui";
-                help = "interactive TUI session";
                 command = "cargo run -p mold-cli --features ${gpuFeature} -- run \"$@\"";
               }
               {

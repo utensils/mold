@@ -1,5 +1,4 @@
 mod commands;
-mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
@@ -17,11 +16,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run image generation or interactive TUI
+    /// Generate images from a text prompt
     ///
-    /// If PROMPT is provided, generates images (one-shot).
-    /// If PROMPT is omitted, opens the interactive TUI.
     /// First positional arg is treated as MODEL if it matches a known model name.
+    /// Remaining args are the prompt.
     Run {
         /// Model name (e.g. flux-dev:q4, flux-schnell)
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]

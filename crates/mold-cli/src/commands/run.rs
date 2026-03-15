@@ -19,7 +19,7 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 /// Rules:
 /// - If model_or_prompt matches a known model → (model, prompt_rest joined).
 /// - Else → (config default_model, all args joined as prompt).
-/// - Empty prompt → None (triggers TUI mode).
+/// - Empty prompt → None (error: prompt required).
 fn resolve_run_args(
     model_or_prompt: Option<&str>,
     prompt_rest: &[String],
@@ -41,7 +41,7 @@ fn resolve_run_args(
         return (model, Some(parts.join(" ")));
     }
 
-    // No args at all → TUI with default model
+    // No args at all
     (resolve_model_name(&config.default_model), None)
 }
 
@@ -63,15 +63,18 @@ pub async fn run(
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
 
-    if let Some(prompt) = prompt {
-        generate::run(
-            &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format,
-            local,
+    let prompt = prompt.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no prompt provided\n\n\
+             Usage: mold run [MODEL] <PROMPT>\n\
+             Example: mold run flux-dev:q4 \"a turtle in the desert\""
         )
-        .await
-    } else {
-        crate::tui::run(&model).await
-    }
+    })?;
+
+    generate::run(
+        &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format, local,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -97,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn first_arg_is_model_no_prompt() {
+    fn model_only_no_prompt() {
         let config = test_config();
         let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &config);
         assert_eq!(model, "flux-dev:q4");
@@ -129,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn no_args_triggers_tui() {
+    fn no_args_returns_none_prompt() {
         let config = test_config();
         let (model, prompt) = resolve_run_args(None, &[], &config);
         assert_eq!(model, "flux-schnell:q8");

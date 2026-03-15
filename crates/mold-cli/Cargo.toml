@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI and TUI for mold — AI image generation"
+description = "CLI for mold — AI image generation"
 
 [[bin]]
 name = "mold"
@@ -23,9 +23,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 colored = "3"
-crossterm = "0.28"
 dirs = "6"
 indicatif = "0.17"
-ratatui = "0.29"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
