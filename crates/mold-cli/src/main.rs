@@ -103,11 +103,10 @@ enum Commands {
     /// Show version information
     Version,
 
-    /// Generate shell completions
+    /// Generate shell completions (sources dynamic model-name completion)
     Completions {
-        /// Shell to generate completions for
-        #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
+        shell: String,
     },
 }
 
@@ -168,7 +167,28 @@ async fn main() -> anyhow::Result<()> {
             println!("mold {}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "mold", &mut std::io::stdout());
+            let shells = clap_complete::env::Shells::builtins();
+            let completer = match shells.completer(&shell) {
+                Some(c) => c,
+                None => {
+                    let names: Vec<_> = shells.names().collect();
+                    anyhow::bail!(
+                        "unknown shell '{}', expected one of: {}",
+                        shell,
+                        names.join(", ")
+                    );
+                }
+            };
+            let bin = std::env::args()
+                .next()
+                .unwrap_or_else(|| "mold".to_string());
+            completer.write_registration(
+                "COMPLETE",
+                "mold",
+                "mold",
+                &bin,
+                &mut std::io::stdout(),
+            )?;
         }
     }
 
