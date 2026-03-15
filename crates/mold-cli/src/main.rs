@@ -167,30 +167,87 @@ async fn main() -> anyhow::Result<()> {
             println!("mold {}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Completions { shell } => {
-            let shells = clap_complete::env::Shells::builtins();
-            let completer = match shells.completer(&shell) {
-                Some(c) => c,
-                None => {
-                    let names: Vec<_> = shells.names().collect();
-                    anyhow::bail!(
-                        "unknown shell '{}', expected one of: {}",
-                        shell,
-                        names.join(", ")
-                    );
-                }
-            };
-            let bin = std::env::args()
-                .next()
-                .unwrap_or_else(|| "mold".to_string());
-            completer.write_registration(
-                "COMPLETE",
-                "mold",
-                "mold",
-                &bin,
-                &mut std::io::stdout(),
-            )?;
+            generate_completions(&shell)?;
         }
     }
 
+    Ok(())
+}
+
+/// Generate shell completion script.
+///
+/// For zsh: custom script that separates flags from positional candidates so
+/// `mold run <TAB>` shows only model names, while `mold run --<TAB>` shows flags.
+/// For other shells: delegates to clap_complete's dynamic registration.
+fn generate_completions(shell: &str) -> anyhow::Result<()> {
+    if shell == "zsh" {
+        let bin = std::env::args()
+            .next()
+            .unwrap_or_else(|| "mold".to_string());
+        print!(
+            r##"#compdef mold
+function _clap_dynamic_completer_mold() {{
+    local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
+    local _CLAP_IFS=$'\n'
+
+    local completions=("${{(@f)$( \
+        _CLAP_IFS="$_CLAP_IFS" \
+        _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
+        COMPLETE="zsh" \
+        {bin} -- "${{words[@]}}" 2>/dev/null \
+    )}}")
+
+    if [[ -n $completions ]]; then
+        local -a flags=()
+        local -a values=()
+        local completion
+        for completion in $completions; do
+            local value="${{completion%%:*}}"
+            if [[ "$value" == -* ]]; then
+                flags+=("$completion")
+            elif [[ "$value" == */ ]]; then
+                local dir_no_slash="${{value%/}}"
+                if [[ "$completion" == *:* ]]; then
+                    local desc="${{completion#*:}}"
+                    values+=("$dir_no_slash:$desc")
+                else
+                    values+=("$dir_no_slash")
+                fi
+            else
+                values+=("$completion")
+            fi
+        done
+
+        if [[ "${{words[$CURRENT]}}" == -* ]]; then
+            [[ -n $flags ]] && _describe 'options' flags
+        else
+            [[ -n $values ]] && _describe 'values' values
+        fi
+    fi
+}}
+
+compdef _clap_dynamic_completer_mold mold
+"##,
+            bin = bin,
+        );
+        return Ok(());
+    }
+
+    let shells = clap_complete::env::Shells::builtins();
+    let completer = match shells.completer(shell) {
+        Some(c) => c,
+        None => {
+            let names: Vec<_> = shells.names().collect();
+            anyhow::bail!(
+                "unknown shell '{}', expected one of: {}",
+                shell,
+                names.join(", ")
+            );
+        }
+    };
+    let bin = std::env::args()
+        .next()
+        .unwrap_or_else(|| "mold".to_string());
+    completer.write_registration("COMPLETE", "mold", "mold", &bin, &mut std::io::stdout())?;
     Ok(())
 }
