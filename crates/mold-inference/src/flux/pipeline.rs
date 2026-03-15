@@ -373,9 +373,14 @@ impl FluxEngine {
         }
 
         // --- T5 encoder: auto-select variant based on VRAM or explicit preference ---
+        // Emit a stage so the spinner shows something relevant during variant resolution
+        // (which may involve downloading a quantized T5 GGUF).
+        self.stage_start("Selecting T5 encoder");
+        let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (t5_encoder_path, t5_on_gpu, t5_device_label) =
             self.resolve_t5_variant(t5_preference, &device, &cpu, free)?;
+        self.stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
         let t5_device = if t5_on_gpu { &device } else { &cpu };
         let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 

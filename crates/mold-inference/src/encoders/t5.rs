@@ -1,11 +1,11 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::quantized_t5;
 use candle_transformers::models::t5;
-use candle_transformers::quantized_var_builder;
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
+
+use super::t5_gguf::GgufT5Encoder;
 
 /// T5-XXL config (hardcoded — this model variant is fixed for FLUX).
 pub fn config() -> t5::Config {
@@ -36,45 +36,17 @@ pub fn config() -> t5::Config {
     }
 }
 
-/// T5-XXL config for the quantized model (same architecture, different Config type).
-/// Uses serde deserialization since `quantized_t5::Config` has private fields.
-fn quantized_config() -> quantized_t5::Config {
-    serde_json::from_value(serde_json::json!({
-        "vocab_size": 32128,
-        "d_model": 4096,
-        "d_kv": 64,
-        "d_ff": 10240,
-        "num_layers": 24,
-        "num_decoder_layers": 24,
-        "num_heads": 64,
-        "relative_attention_num_buckets": 32,
-        "relative_attention_max_distance": 128,
-        "dropout_rate": 0.1,
-        "layer_norm_epsilon": 1e-6,
-        "initializer_factor": 1.0,
-        "feed_forward_proj": "gated-gelu",
-        "tie_word_embeddings": false,
-        "use_cache": false,
-        "pad_token_id": 0,
-        "eos_token_id": 1,
-        "is_decoder": false,
-        "is_encoder_decoder": true,
-        "decoder_start_token_id": 0
-    }))
-    .expect("hardcoded T5-XXL quantized config should always deserialize")
-}
-
 /// FP16 (safetensors) or quantized (GGUF) T5 encoder.
 pub(crate) enum T5Model {
     FP16(t5::T5EncoderModel),
-    Quantized(quantized_t5::T5EncoderModel),
+    Quantized(GgufT5Encoder),
 }
 
 impl T5Model {
     pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
         match self {
             Self::FP16(m) => Ok(m.forward(input_ids)?),
-            Self::Quantized(m) => Ok(m.forward(input_ids)?),
+            Self::Quantized(m) => m.forward(input_ids),
         }
     }
 }
@@ -109,8 +81,7 @@ impl T5Encoder {
             .unwrap_or(false);
 
         let model = if is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(encoder_path, device)?;
-            T5Model::Quantized(quantized_t5::T5EncoderModel::load(vb, &quantized_config())?)
+            T5Model::Quantized(GgufT5Encoder::load(encoder_path, device)?)
         } else {
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
@@ -170,10 +141,9 @@ impl T5Encoder {
     /// Reload model weights (e.g. for the next generation after being dropped).
     pub fn reload(&mut self, encoder_path: &PathBuf, dtype: DType) -> Result<()> {
         if self.is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(encoder_path, &self.device)?;
-            self.model = Some(T5Model::Quantized(quantized_t5::T5EncoderModel::load(
-                vb,
-                &quantized_config(),
+            self.model = Some(T5Model::Quantized(GgufT5Encoder::load(
+                encoder_path,
+                &self.device,
             )?));
         } else {
             let vb = unsafe {
