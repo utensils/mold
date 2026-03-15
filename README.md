@@ -10,15 +10,15 @@ Local FLUX image generation server. Runs on your GPU (CUDA), serves a REST API, 
 
 ## Requirements
 
-- NVIDIA GPU with 24GB VRAM (RTX 4090 recommended)
-- CUDA toolkit
+- NVIDIA GPU with CUDA **or** Apple Silicon with Metal
 - FLUX model files (see below)
 
 ## Quick start
 
 ```bash
-# Build (CUDA)
-cargo build --release --features cuda
+# Build (CUDA on Linux, Metal on macOS)
+cargo build --release -p mold-cli --features cuda    # Linux
+cargo build --release -p mold-cli --features metal   # macOS
 
 # Set model paths
 export MOLD_TRANSFORMER_PATH=/path/to/flux1-schnell-Q8_0.gguf
@@ -87,11 +87,24 @@ t5_encoder = "/models/t5xxl_fp16.safetensors"
 clip_encoder = "/models/clip_l.safetensors"
 ```
 
+## Shell completions
+
+```bash
+# bash
+source <(mold completions bash)
+
+# zsh
+source <(mold completions zsh)
+
+# fish
+mold completions fish | source
+```
+
 ## Architecture
 
 ```
-mold-cli       CLI frontend (mold generate / serve / ps)
-mold-server    axum REST server + request validation
+mold-cli       Single binary: CLI + TUI + serve (mold generate / serve / run / completions)
+mold-server    axum REST server (library, used by mold-cli via `mold serve`)
 mold-inference FLUX engine (candle: T5/CLIP on CPU, transformer+VAE on GPU)
 mold-core      Shared types, config, HTTP client
 ```

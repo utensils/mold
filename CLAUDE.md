@@ -13,14 +13,12 @@ mold is a CLI/TUI tool for AI image generation using FLUX models via the [candle
 ### Nix (preferred)
 
 ```bash
-# Pure Nix builds via crane
-nix build                                            # Build mold CLI (default)
-nix build .#mold                                     # Build mold CLI (explicit)
-nix build .#mold-server                              # Build server (cuda on Linux, metal on macOS)
+# Pure Nix builds via crane (single binary with GPU features)
+nix build                                            # Build mold (default)
+nix build .#mold                                     # Build mold (explicit, includes serve with GPU)
 
 # Run directly
 nix run                                              # Run mold CLI
-nix run .#mold-server                                # Run server
 
 # Dev shell (numtide devshell with menu commands)
 nix develop                                          # Enter devshell (auto via direnv)
@@ -36,7 +34,7 @@ nix flake check                                      # Validate formatting + fla
 |----------|---------|-------------|
 | build | `build` | `cargo build` (debug, all crates) |
 | build | `build-release` | `cargo build --release` |
-| build | `build-server` | `cargo build -p mold-server --features {cuda\|metal}` |
+| build | `build-server` | `cargo build -p mold-cli --features {cuda\|metal}` (single binary with GPU) |
 | check | `check` | `cargo check` |
 | check | `clippy` | `cargo clippy` |
 | check | `run-tests` | `cargo test` |
@@ -54,7 +52,7 @@ nix flake check                                      # Validate formatting + fla
 cargo build                                          # Debug build (all crates)
 cargo build --release                                # Release build
 cargo build -p mold-cli                              # Just the CLI
-cargo build -p mold-server --features cuda           # Server with CUDA
+cargo build -p mold-cli --features cuda               # CLI with CUDA (includes serve)
 cargo check                                          # Type check
 cargo clippy                                         # Lint
 cargo fmt --check                                    # Format check
@@ -160,7 +158,7 @@ Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
 
 ### mold-server
 
-Axum-based HTTP server that wraps the inference engine. Runs on the GPU host. Has both a library crate and a standalone binary (`mold-server`).
+Axum-based HTTP server that wraps the inference engine. Runs on the GPU host. Used as a library by `mold-cli` (via `mold serve`); the standalone `mold-server` binary exists in the crate but is not built by the Nix flake.
 
 Routes:
 | Method | Path | Description |
@@ -174,7 +172,7 @@ State is managed via `AppState` which holds a `tokio::sync::Mutex<FluxEngine>`. 
 
 ### mold-cli
 
-Main binary crate. Provides both CLI commands and an interactive TUI.
+Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through `mold-server` to `mold-inference` for GPU-accelerated `mold serve`.
 
 ## CLI Command Reference
 
@@ -200,6 +198,7 @@ mold list                       List locally available models
 mold ps                         Show server status + loaded models
 mold run [MODEL]                Interactive TUI session [default: flux-schnell]
 mold version                    Show version information
+mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elvish, powershell)
 ```
 
 ## Environment Variables
@@ -242,7 +241,7 @@ Loaded via `Config::load_or_default()` — falls back to defaults if the file do
 
 mold supports a client-server architecture for remote GPU rendering:
 
-1. On the GPU host: `mold-server serve --port 7680`
+1. On the GPU host: `mold serve --port 7680`
 2. On any client: `MOLD_HOST=http://gpu-host:7680 mold generate "a sunset"`
 
 The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receives the generated image bytes in the response. All CLI commands (`generate`, `list`, `ps`) communicate through the same HTTP API.
@@ -280,13 +279,13 @@ The `flake.nix` (flake-parts + numtide devshell + crane) provides a devshell wit
 # On hal9000 — pure Nix build (preferred):
 cd /home/jamesbrink/mold
 git pull
-nix build .#mold-server
+nix build .#mold
 
 # Or via devshell:
-nix develop --command cargo build --release -p mold-server --features cuda
+nix develop --command cargo build --release -p mold-cli --features cuda
 # Or inside the shell:
 nix develop
-build-server  # devshell command, auto-selects --features cuda on Linux
+build-server  # devshell command, builds mold-cli with --features cuda on Linux
 ```
 
 ### Systemd user service
@@ -383,7 +382,11 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 10. **T5/CLIP on CPU**: Text encoders load on CPU to keep ~9.2GB off the GPU. Embeddings are moved to GPU after encoding. This is required for the FLUX transformer to fit in VRAM alongside activations.
 
-11. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`, `nix build .#mold-server`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS.
+11. **Single binary**: `mold` is the only binary built by the Nix flake. It includes `serve` (via `mold-server` library), so GPU feature flags (`cuda`/`metal`) are forwarded through `mold-cli` → `mold-server` → `mold-inference`. No separate `mold-server` package is needed.
+
+12. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS.
+
+13. **Shell completions**: `mold completions <shell>` generates completions for bash, zsh, fish, elvish, and PowerShell via `clap_complete`. Load with `source <(mold completions zsh)` or equivalent.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-12)
 
