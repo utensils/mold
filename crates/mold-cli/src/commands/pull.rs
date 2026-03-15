@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use colored::Colorize;
 
 pub async fn run(model: &str) -> Result<()> {

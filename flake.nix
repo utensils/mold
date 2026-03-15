@@ -71,26 +71,31 @@
             nativeBuildInputs = [
               pkgs.pkg-config
             ];
-            buildInputs =
-              [
-                pkgs.openssl
-              ]
-              ++ lib.optionals isDarwin [
-                pkgs.libiconv
-              ]
-              ++ lib.optionals isLinux [
-                pkgs.cudaPackages.cuda_nvcc
-                pkgs.cudaPackages.cuda_cudart
-                pkgs.cudaPackages.libcublas
-                pkgs.cudaPackages.cuda_nvtx
-                pkgs.cudaPackages.cuda_nvrtc
-                pkgs.cudaPackages.libcurand
-              ];
+            buildInputs = [
+              pkgs.openssl
+            ]
+            ++ lib.optionals isDarwin [
+              pkgs.libiconv
+            ]
+            ++ lib.optionals isLinux [
+              pkgs.cudaPackages.cuda_nvcc
+              pkgs.cudaPackages.cuda_cudart
+              pkgs.cudaPackages.libcublas
+              pkgs.cudaPackages.cuda_nvtx
+              pkgs.cudaPackages.cuda_nvrtc
+              pkgs.cudaPackages.libcurand
+            ];
           };
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-          gpuFeature = if isLinux then "cuda" else if isDarwin then "metal" else "";
+          gpuFeature =
+            if isLinux then
+              "cuda"
+            else if isDarwin then
+              "metal"
+            else
+              "";
 
           meta = with lib; {
             description = "Like ollama, but for diffusion models";
@@ -103,15 +108,7 @@
             commonArgs
             // {
               inherit cargoArtifacts meta;
-              cargoExtraArgs = "-p mold-cli";
-            }
-          );
-
-          mold-server = craneLib.buildPackage (
-            commonArgs
-            // {
-              inherit cargoArtifacts meta;
-              cargoExtraArgs = "-p mold-server --features ${gpuFeature}";
+              cargoExtraArgs = "-p mold-cli" + lib.optionalString (gpuFeature != "") " --features ${gpuFeature}";
             }
           );
         in
@@ -119,19 +116,13 @@
           _module.args.pkgs = pkgs;
 
           packages = {
-            inherit mold mold-server;
+            inherit mold;
             default = mold;
           };
 
-          apps = {
-            default = {
-              type = "app";
-              program = "${mold}/bin/mold";
-            };
-            mold-server = {
-              type = "app";
-              program = "${mold-server}/bin/mold-server";
-            };
+          apps.default = {
+            type = "app";
+            program = "${mold}/bin/mold";
           };
 
           devshells.default = {
@@ -140,31 +131,31 @@
               $(type menu &>/dev/null && menu)
             '';
 
-            packages =
-              [
-                rustToolchain
-                pkgs.pkg-config
-                pkgs.openssl
-                pkgs.git
-              ]
-              ++ lib.optionals isDarwin [
-                pkgs.libiconv
-              ]
-              ++ lib.optionals isLinux [
-                pkgs.cudaPackages.cuda_nvcc
-                pkgs.cudaPackages.cuda_cudart
-                pkgs.cudaPackages.libcublas
-                pkgs.cudaPackages.cuda_nvtx
-                pkgs.cudaPackages.cuda_nvrtc
-                pkgs.cudaPackages.libcurand
-              ];
+            packages = [
+              rustToolchain
+              pkgs.pkg-config
+              pkgs.openssl
+              pkgs.git
+            ]
+            ++ lib.optionals isDarwin [
+              pkgs.libiconv
+            ]
+            ++ lib.optionals isLinux [
+              pkgs.cudaPackages.cuda_nvcc
+              pkgs.cudaPackages.cuda_cudart
+              pkgs.cudaPackages.libcublas
+              pkgs.cudaPackages.cuda_nvtx
+              pkgs.cudaPackages.cuda_nvrtc
+              pkgs.cudaPackages.libcurand
+            ];
 
             env = [
               {
                 name = "RUST_BACKTRACE";
                 value = "1";
               }
-            ] ++ lib.optionals isDarwin [
+            ]
+            ++ lib.optionals isDarwin [
               {
                 name = "LIBRARY_PATH";
                 value = lib.makeLibraryPath [
@@ -172,7 +163,8 @@
                   pkgs.openssl
                 ];
               }
-            ] ++ lib.optionals isLinux [
+            ]
+            ++ lib.optionals isLinux [
               {
                 name = "CUDA_PATH";
                 value = "${pkgs.cudaPackages.cuda_cudart}";
@@ -183,12 +175,14 @@
               }
               {
                 name = "LD_LIBRARY_PATH";
-                value = lib.makeLibraryPath [
-                  pkgs.cudaPackages.cuda_cudart
-                  pkgs.cudaPackages.libcublas
-                  pkgs.cudaPackages.cuda_nvrtc
-                  pkgs.cudaPackages.libcurand
-                ] + ":/run/opengl-driver/lib";
+                value =
+                  lib.makeLibraryPath [
+                    pkgs.cudaPackages.cuda_cudart
+                    pkgs.cudaPackages.libcublas
+                    pkgs.cudaPackages.cuda_nvrtc
+                    pkgs.cudaPackages.libcurand
+                  ]
+                  + ":/run/opengl-driver/lib";
               }
             ];
 
@@ -208,8 +202,8 @@
               {
                 category = "build";
                 name = "build-server";
-                help = "cargo build -p mold-server --features ${gpuFeature}";
-                command = "cargo build -p mold-server --features ${gpuFeature} $@";
+                help = "cargo build -p mold-cli --features ${gpuFeature} (single binary with GPU)";
+                command = "cargo build -p mold-cli --features ${gpuFeature} $@";
               }
               {
                 category = "check";

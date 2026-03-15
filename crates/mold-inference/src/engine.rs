@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{clip, flux, t5};
@@ -102,8 +102,17 @@ impl FluxEngine {
         tracing::info!(model = %self.model_name, "loading FLUX model components...");
 
         let cpu = Device::Cpu;
-        let device = Device::cuda_if_available(0)?;
-        let gpu_dtype = if device.is_cuda() {
+        let device = if candle_core::utils::cuda_is_available() {
+            tracing::info!("CUDA detected, using GPU");
+            Device::new_cuda(0)?
+        } else if candle_core::utils::metal_is_available() {
+            tracing::info!("Metal detected, using MPS");
+            Device::new_metal(0)?
+        } else {
+            tracing::warn!("No GPU detected, falling back to CPU");
+            Device::Cpu
+        };
+        let gpu_dtype = if device.is_cuda() || device.is_metal() {
             DType::BF16
         } else {
             DType::F32

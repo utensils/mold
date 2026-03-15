@@ -1,7 +1,7 @@
 mod commands;
 mod tui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -98,6 +98,13 @@ enum Commands {
 
     /// Show version information
     Version,
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[tokio::main]
@@ -144,6 +151,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Version => {
             println!("mold {}", env!("CARGO_PKG_VERSION"));
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "mold", &mut std::io::stdout());
         }
     }
 

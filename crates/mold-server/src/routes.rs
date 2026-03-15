@@ -1,15 +1,15 @@
 use axum::{
+    Json, Router,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use mold_core::{GpuInfo, ModelInfo, OutputFormat, ServerStatus};
-use mold_inference::{model_registry, FluxEngine};
+use mold_inference::{FluxEngine, model_registry};
 use serde::{Deserialize, Serialize};
 
-use crate::state::{resolve_paths_for, AppState};
+use crate::state::{AppState, resolve_paths_for};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()

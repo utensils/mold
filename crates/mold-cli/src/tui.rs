@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyEventKind},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     prelude::*,
