@@ -9,6 +9,76 @@ use tokenizers::Tokenizer;
 
 use crate::progress::{ProgressCallback, ProgressEvent};
 
+/// Minimum free VRAM (bytes) required to place T5-XXL on GPU.
+/// This accounts for T5 weights (~9.2GB) plus headroom for denoising activations
+/// and VAE decode (~6.5GB at 1024x1024). Conservative to avoid CUDA OOM.
+const T5_VRAM_THRESHOLD: u64 = 16_000_000_000;
+/// Minimum free VRAM (bytes) required to place CLIP-L on GPU: ~246MB model + 500MB headroom.
+const CLIP_VRAM_THRESHOLD: u64 = 800_000_000;
+
+/// Query free VRAM in bytes from the current CUDA context.
+#[cfg(feature = "cuda")]
+fn free_vram_bytes() -> Option<u64> {
+    candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
+        .ok()
+        .map(|(free, _total)| free as u64)
+}
+
+/// No VRAM info available without CUDA.
+#[cfg(not(feature = "cuda"))]
+fn free_vram_bytes() -> Option<u64> {
+    None
+}
+
+/// Format bytes as a human-readable size (e.g. "11.7 GB").
+fn fmt_gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+}
+
+/// T5-XXL config (hardcoded — this model variant is fixed for FLUX).
+fn t5_config() -> t5::Config {
+    t5::Config {
+        vocab_size: 32128,
+        d_model: 4096,
+        d_kv: 64,
+        d_ff: 10240,
+        num_heads: 64,
+        num_layers: 24,
+        relative_attention_num_buckets: 32,
+        relative_attention_max_distance: 128,
+        dropout_rate: 0.1,
+        layer_norm_epsilon: 1e-6,
+        initializer_factor: 1.0,
+        feed_forward_proj: t5::ActivationWithOptionalGating {
+            gated: true,
+            activation: candle_nn::Activation::NewGelu,
+        },
+        tie_word_embeddings: false,
+        use_cache: true,
+        pad_token_id: 0,
+        eos_token_id: 1,
+        decoder_start_token_id: Some(0),
+        is_decoder: false,
+        is_encoder_decoder: true,
+        num_decoder_layers: Some(24),
+    }
+}
+
+/// CLIP-L text config (hardcoded — this model variant is fixed for FLUX).
+fn clip_config() -> clip::text_model::ClipTextConfig {
+    clip::text_model::ClipTextConfig {
+        vocab_size: 49408,
+        projection_dim: 768,
+        activation: clip::text_model::Activation::QuickGelu,
+        intermediate_size: 3072,
+        embed_dim: 768,
+        max_position_embeddings: 77,
+        pad_with: None,
+        num_hidden_layers: 12,
+        num_attention_heads: 12,
+    }
+}
+
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
@@ -47,20 +117,33 @@ impl FluxTransformer {
 }
 
 /// Loaded FLUX model components, ready for inference.
-/// T5 and CLIP run on CPU to save VRAM; FLUX transformer and VAE run on GPU.
+/// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
+/// depending on available VRAM (checked at load time after the transformer is loaded).
+/// When T5/CLIP are loaded on GPU, they are dropped after encoding to free VRAM
+/// for the denoising pass (their weights are only needed for prompt encoding).
 struct LoadedFlux {
     flux_model: FluxTransformer,
-    t5_model: t5::T5EncoderModel,
+    /// T5 encoder — `Option` so it can be dropped after encoding to free GPU VRAM.
+    t5_model: Option<t5::T5EncoderModel>,
     t5_tokenizer: Tokenizer,
-    clip_model: clip::text_model::ClipTextTransformer,
+    /// CLIP encoder — `Option` so it can be dropped after encoding to free GPU VRAM.
+    clip_model: Option<clip::text_model::ClipTextTransformer>,
     clip_tokenizer: Tokenizer,
     vae: flux::autoencoder::AutoEncoder,
-    /// GPU device for FLUX transformer + VAE (T5/CLIP always run on CPU)
+    /// GPU device for FLUX transformer + VAE
     device: Device,
+    /// Device where T5 encoder weights live (GPU if VRAM allowed, else CPU)
+    t5_device: Device,
+    /// Device where CLIP encoder weights live (GPU if VRAM allowed, else CPU)
+    clip_device: Device,
     dtype: DType,
     is_schnell: bool,
     /// True if using quantized GGUF model (state tensors must be F32)
     is_quantized: bool,
+    /// True if T5 was loaded on GPU (needs to be dropped after encoding)
+    t5_on_gpu: bool,
+    /// True if CLIP was loaded on GPU (needs to be dropped after encoding)
+    clip_on_gpu: bool,
 }
 
 /// FLUX inference engine backed by candle.
@@ -157,7 +240,6 @@ impl FluxEngine {
         };
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
-        tracing::info!("T5/CLIP will load on CPU (F32) to save VRAM");
 
         // Validate all paths exist before attempting unsafe mmap
         for (label, path) in [
@@ -173,81 +255,8 @@ impl FluxEngine {
             }
         }
 
-        // Load T5 encoder on CPU (9.2GB in F32, too large for GPU alongside FLUX)
-        self.stage_start("Loading T5 encoder (CPU)");
-        let t5_stage = Instant::now();
-        tracing::info!(path = %self.paths.t5_encoder.display(), "loading T5 encoder on CPU...");
-        let t5_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.t5_encoder),
-                DType::F32,
-                &cpu,
-            )?
-        };
-        // T5-XXL config (hardcoded — this model variant is fixed for FLUX)
-        let t5_config = t5::Config {
-            vocab_size: 32128,
-            d_model: 4096,
-            d_kv: 64,
-            d_ff: 10240,
-            num_heads: 64,
-            num_layers: 24,
-            relative_attention_num_buckets: 32,
-            relative_attention_max_distance: 128,
-            dropout_rate: 0.1,
-            layer_norm_epsilon: 1e-6,
-            initializer_factor: 1.0,
-            feed_forward_proj: t5::ActivationWithOptionalGating {
-                gated: true,
-                activation: candle_nn::Activation::NewGelu,
-            },
-            tie_word_embeddings: false,
-            use_cache: true,
-            pad_token_id: 0,
-            eos_token_id: 1,
-            decoder_start_token_id: Some(0),
-            is_decoder: false,
-            is_encoder_decoder: true,
-            num_decoder_layers: Some(24),
-        };
-        let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config)?;
-        self.stage_done("Loading T5 encoder (CPU)", t5_stage.elapsed());
-        tracing::info!("T5 encoder loaded on CPU");
-
-        // Load T5 tokenizer
-        let t5_tokenizer = Tokenizer::from_file(&self.paths.t5_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
-
-        // Load CLIP encoder on CPU (small, but keeps all text encoding on CPU)
-        self.stage_start("Loading CLIP encoder (CPU)");
-        let clip_stage = Instant::now();
-        tracing::info!(path = %self.paths.clip_encoder.display(), "loading CLIP encoder on CPU...");
-        let clip_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.clip_encoder),
-                DType::F32,
-                &cpu,
-            )?
-        };
-        let clip_config = clip::text_model::ClipTextConfig {
-            vocab_size: 49408,
-            projection_dim: 768,
-            activation: clip::text_model::Activation::QuickGelu,
-            intermediate_size: 3072,
-            embed_dim: 768,
-            max_position_embeddings: 77,
-            pad_with: None,
-            num_hidden_layers: 12,
-            num_attention_heads: 12,
-        };
-        let clip_model =
-            clip::text_model::ClipTextTransformer::new(clip_vb.pp("text_model"), &clip_config)?;
-        self.stage_done("Loading CLIP encoder (CPU)", clip_stage.elapsed());
-        tracing::info!("CLIP encoder loaded on CPU");
-
-        // Load CLIP tokenizer
-        let clip_tokenizer = Tokenizer::from_file(&self.paths.clip_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
+        // --- Load FLUX transformer + VAE on GPU first (variable size) ---
+        // This must happen before T5/CLIP so we can measure remaining VRAM.
 
         // Load FLUX transformer on GPU — GGUF quantized or BF16 safetensors
         let is_quantized = self
@@ -314,17 +323,105 @@ impl FluxEngine {
         self.stage_done("Loading VAE (GPU)", vae_stage.elapsed());
         tracing::info!("VAE loaded on GPU");
 
+        // --- Decide where to place T5 and CLIP based on remaining VRAM ---
+        let free = free_vram_bytes().unwrap_or(0);
+        if free > 0 {
+            self.info(&format!("Free VRAM after transformer+VAE: {}", fmt_gb(free)));
+            tracing::info!(free_vram = free, "free VRAM after loading transformer + VAE");
+        }
+
+        let t5_on_gpu = should_use_gpu(device.is_cuda(), free, T5_VRAM_THRESHOLD);
+        let t5_device = if t5_on_gpu { &device } else { &cpu };
+        let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
+        let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
+
+        // Load T5 encoder
+        let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
+        self.stage_start(&t5_stage_label);
+        let t5_stage = Instant::now();
+        if t5_on_gpu {
+            self.info(&format!(
+                "Loading T5 encoder on GPU ({} free > {} threshold)",
+                fmt_gb(free),
+                fmt_gb(T5_VRAM_THRESHOLD)
+            ));
+        } else if device.is_cuda() {
+            self.info(&format!(
+                "Loading T5 encoder on CPU ({} free < {} threshold)",
+                fmt_gb(free),
+                fmt_gb(T5_VRAM_THRESHOLD)
+            ));
+        }
+        tracing::info!(
+            path = %self.paths.t5_encoder.display(),
+            device = t5_device_label,
+            "loading T5 encoder..."
+        );
+        let t5_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                std::slice::from_ref(&self.paths.t5_encoder),
+                t5_dtype,
+                t5_device,
+            )?
+        };
+        let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config())?;
+        self.stage_done(&t5_stage_label, t5_stage.elapsed());
+        tracing::info!(device = t5_device_label, "T5 encoder loaded");
+
+        // Load T5 tokenizer
+        let t5_tokenizer = Tokenizer::from_file(&self.paths.t5_tokenizer)
+            .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
+
+        // Re-check VRAM after T5 (it may have consumed GPU memory)
+        let free_after_t5 = free_vram_bytes().unwrap_or(0);
+        let clip_on_gpu = should_use_gpu(device.is_cuda(), free_after_t5, CLIP_VRAM_THRESHOLD);
+        let clip_device = if clip_on_gpu { &device } else { &cpu };
+        let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
+        let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
+
+        // Load CLIP encoder
+        let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
+        self.stage_start(&clip_stage_label);
+        let clip_stage = Instant::now();
+        tracing::info!(
+            path = %self.paths.clip_encoder.display(),
+            device = clip_device_label,
+            "loading CLIP encoder..."
+        );
+        let clip_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                std::slice::from_ref(&self.paths.clip_encoder),
+                clip_dtype,
+                clip_device,
+            )?
+        };
+        let clip_model =
+            clip::text_model::ClipTextTransformer::new(clip_vb.pp("text_model"), &clip_config())?;
+        self.stage_done(&clip_stage_label, clip_stage.elapsed());
+        tracing::info!(device = clip_device_label, "CLIP encoder loaded");
+
+        // Load CLIP tokenizer
+        let clip_tokenizer = Tokenizer::from_file(&self.paths.clip_tokenizer)
+            .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
+
+        let t5_dev = if t5_on_gpu { device.clone() } else { Device::Cpu };
+        let clip_dev = if clip_on_gpu { device.clone() } else { Device::Cpu };
+
         self.loaded = Some(LoadedFlux {
             flux_model,
-            t5_model,
+            t5_model: Some(t5_model),
             t5_tokenizer,
-            clip_model,
+            clip_model: Some(clip_model),
             clip_tokenizer,
             vae,
             device,
+            t5_device: t5_dev,
+            clip_device: clip_dev,
             dtype: gpu_dtype,
             is_schnell,
             is_quantized,
+            t5_on_gpu,
+            clip_on_gpu,
         });
 
         tracing::info!(model = %self.model_name, "all model components loaded successfully");
@@ -353,6 +450,10 @@ impl InferenceEngine for FluxEngine {
             });
         };
 
+        // Grab path references before borrowing loaded mutably
+        let t5_encoder_path = self.paths.t5_encoder.clone();
+        let clip_encoder_path = self.paths.clip_encoder.clone();
+
         let loaded = self
             .loaded
             .as_mut()
@@ -374,10 +475,43 @@ impl InferenceEngine for FluxEngine {
             "starting generation"
         );
 
-        // 1. Encode prompt with T5 (on CPU, then move to GPU)
+        // If T5/CLIP were dropped after a previous generation (GPU offload), reload them.
+        if loaded.t5_model.is_none() {
+            stage_start("Reloading T5 encoder (GPU)");
+            let reload_start = Instant::now();
+            let t5_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&t5_encoder_path),
+                    loaded.dtype,
+                    &loaded.t5_device,
+                )?
+            };
+            loaded.t5_model = Some(t5::T5EncoderModel::load(t5_vb, &t5_config())?);
+            stage_done("Reloading T5 encoder (GPU)", reload_start.elapsed());
+        }
+        if loaded.clip_model.is_none() {
+            stage_start("Reloading CLIP encoder (GPU)");
+            let reload_start = Instant::now();
+            let clip_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&clip_encoder_path),
+                    loaded.dtype,
+                    &loaded.clip_device,
+                )?
+            };
+            loaded.clip_model = Some(clip::text_model::ClipTextTransformer::new(
+                clip_vb.pp("text_model"),
+                &clip_config(),
+            )?);
+            stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
+        }
+
+        // 1. Encode prompt with T5 (may be on GPU or CPU depending on VRAM)
         stage_start("Encoding prompt (T5)");
         let encode_t5 = Instant::now();
         let t5_emb = {
+            let t5 = loaded.t5_model.as_mut()
+                .ok_or_else(|| anyhow::anyhow!("T5 model unavailable"))?;
             let mut tokens = loaded
                 .t5_tokenizer
                 .encode(req.prompt.as_str(), true)
@@ -385,18 +519,21 @@ impl InferenceEngine for FluxEngine {
                 .get_ids()
                 .to_vec();
             tokens.resize(256, 0);
-            let input_ids = Tensor::new(&tokens[..], &Device::Cpu)?.unsqueeze(0)?;
-            let emb = loaded.t5_model.forward(&input_ids)?;
-            // Move to GPU and cast to GPU dtype for FLUX transformer
+            let input_ids =
+                Tensor::new(&tokens[..], &loaded.t5_device)?.unsqueeze(0)?;
+            let emb = t5.forward(&input_ids)?;
+            // Ensure on GPU with correct dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
         stage_done("Encoding prompt (T5)", encode_t5.elapsed());
-        tracing::info!("T5 encoding complete (moved to GPU)");
+        tracing::info!("T5 encoding complete");
 
-        // 2. Encode prompt with CLIP (on CPU, then move to GPU)
+        // 2. Encode prompt with CLIP (may be on GPU or CPU depending on VRAM)
         stage_start("Encoding prompt (CLIP)");
         let encode_clip = Instant::now();
         let clip_emb = {
+            let clip = loaded.clip_model.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("CLIP model unavailable"))?;
             let mut tokens = loaded
                 .clip_tokenizer
                 .encode(req.prompt.as_str(), true)
@@ -405,13 +542,26 @@ impl InferenceEngine for FluxEngine {
                 .to_vec();
             // CLIP hard limit: 77 tokens (including BOS/EOS)
             tokens.truncate(77);
-            let input_ids = Tensor::new(&tokens[..], &Device::Cpu)?.unsqueeze(0)?;
-            let emb = loaded.clip_model.forward(&input_ids)?;
-            // Move to GPU and cast to GPU dtype for FLUX transformer
+            let input_ids =
+                Tensor::new(&tokens[..], &loaded.clip_device)?.unsqueeze(0)?;
+            let emb = clip.forward(&input_ids)?;
+            // Ensure on GPU with correct dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
         stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
-        tracing::info!("CLIP encoding complete (moved to GPU)");
+        tracing::info!("CLIP encoding complete");
+
+        // Drop T5/CLIP from GPU to free VRAM for the denoising pass.
+        // Their weights are only needed for prompt encoding (already done above).
+        // On CPU this is a no-op (CPU RAM is plentiful); they'll be reloaded next call.
+        if loaded.t5_on_gpu {
+            loaded.t5_model = None;
+            tracing::info!("T5 encoder dropped from GPU to free VRAM for denoising");
+        }
+        if loaded.clip_on_gpu {
+            loaded.clip_model = None;
+            tracing::info!("CLIP encoder dropped from GPU to free VRAM for denoising");
+        }
 
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
@@ -467,6 +617,13 @@ impl InferenceEngine for FluxEngine {
         let img = flux::sampling::unpack(&img, height, width)?;
         stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
+
+        // Free denoising intermediates (state, embeddings) before VAE decode.
+        // These GPU tensors can be several GB and the VAE needs that VRAM.
+        drop(state);
+        drop(t5_emb_state);
+        drop(clip_emb_state);
+        drop(img_state);
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
         stage_start("VAE decode");
@@ -531,4 +688,128 @@ fn rand_seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+/// Determine whether a component should be placed on GPU given free VRAM.
+/// Extracted for testability — mirrors the logic in `load()`.
+fn should_use_gpu(is_cuda: bool, free_vram: u64, threshold: u64) -> bool {
+    is_cuda && free_vram > threshold
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- fmt_gb tests ---
+
+    #[test]
+    fn fmt_gb_zero() {
+        assert_eq!(fmt_gb(0), "0.0 GB");
+    }
+
+    #[test]
+    fn fmt_gb_one_gb() {
+        assert_eq!(fmt_gb(1_000_000_000), "1.0 GB");
+    }
+
+    #[test]
+    fn fmt_gb_fractional() {
+        assert_eq!(fmt_gb(14_600_000_000), "14.6 GB");
+    }
+
+    #[test]
+    fn fmt_gb_small() {
+        assert_eq!(fmt_gb(800_000_000), "0.8 GB");
+    }
+
+    // --- free_vram_bytes (non-CUDA stub) ---
+
+    #[test]
+    fn free_vram_returns_none_without_cuda() {
+        // Without the cuda feature, this should always return None
+        #[cfg(not(feature = "cuda"))]
+        assert_eq!(free_vram_bytes(), None);
+    }
+
+    // --- VRAM threshold decision tests ---
+
+    #[test]
+    fn t5_on_gpu_when_plenty_of_vram() {
+        // Q4 transformer (7GB) + VAE (0.3GB) on 24GB card → ~16.7GB free
+        assert!(should_use_gpu(true, 16_700_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_cpu_when_q6_on_24gb() {
+        // Q6 transformer (9.9GB) + VAE (0.3GB) on 24GB card → ~14.6GB free
+        // Not enough headroom for T5 + denoising activations + VAE decode
+        assert!(!should_use_gpu(true, 14_600_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_cpu_when_q8_on_24gb() {
+        // Q8 transformer (12GB) + VAE (0.3GB) on 24GB card → ~11.7GB free
+        assert!(!should_use_gpu(true, 11_700_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_cpu_when_bf16_fills_vram() {
+        // BF16 dev (23GB) + VAE (0.3GB) on 24GB card → ~0.7GB free
+        assert!(!should_use_gpu(true, 700_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_cpu_when_exactly_at_threshold() {
+        // Exactly at threshold should NOT place on GPU (we need strictly more)
+        assert!(!should_use_gpu(true, T5_VRAM_THRESHOLD, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_cpu_when_no_cuda() {
+        // Even with plenty of "free memory", non-CUDA devices always use CPU
+        assert!(!should_use_gpu(false, 100_000_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn t5_on_gpu_on_48gb_card() {
+        // Q8 transformer (12GB) + VAE (0.3GB) on 48GB card → ~35.7GB free
+        assert!(should_use_gpu(true, 35_700_000_000, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn clip_on_gpu_when_vram_available() {
+        // After Q4 transformer + T5 on GPU: ~7.5GB free → CLIP easily fits
+        assert!(should_use_gpu(true, 7_500_000_000, CLIP_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn clip_on_gpu_with_minimal_vram() {
+        // Just above 800MB threshold
+        assert!(should_use_gpu(true, 900_000_000, CLIP_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn clip_on_cpu_when_vram_tight() {
+        // Only 500MB free — below CLIP threshold
+        assert!(!should_use_gpu(true, 500_000_000, CLIP_VRAM_THRESHOLD));
+    }
+
+    // --- Threshold constant sanity checks ---
+
+    #[test]
+    fn t5_threshold_accounts_for_headroom() {
+        // T5 is ~9.2GB, threshold should be higher to account for
+        // denoising activation memory and VAE decode headroom
+        assert!(T5_VRAM_THRESHOLD > 9_200_000_000);
+        // But not unreasonably high (should still work on 48GB cards)
+        assert!(T5_VRAM_THRESHOLD < 25_000_000_000);
+    }
+
+    #[test]
+    fn clip_threshold_accounts_for_headroom() {
+        // CLIP is ~246MB, threshold should be higher
+        assert!(CLIP_VRAM_THRESHOLD > 246_000_000);
+        // But not unreasonably high
+        assert!(CLIP_VRAM_THRESHOLD < 2_000_000_000);
+    }
 }

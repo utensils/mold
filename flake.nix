@@ -276,12 +276,6 @@
                 help = "generate an image from a prompt";
                 command = "cargo run -p mold-cli --features ${gpuFeature} -- run \"$@\"";
               }
-              {
-                category = "deploy";
-                name = "deploy";
-                help = "deploy to hal9000";
-                command = "./scripts/deploy.sh";
-              }
             ];
           };
 

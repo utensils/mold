@@ -105,11 +105,7 @@ pub async fn run(
                     .unwrap_or_default()
                     .as_secs();
                 let ext = output_format.to_string();
-                if batch == 1 {
-                    format!("mold-{model}-{timestamp}.{ext}")
-                } else {
-                    format!("mold-{model}-{timestamp}-{}.{ext}", img.index)
-                }
+                default_filename(model, timestamp, &ext, batch, img.index)
             }
         };
 
@@ -238,4 +234,44 @@ async fn generate_local(_req: &GenerateRequest, _config: &Config) -> Result<Gene
         "No mold server running and this binary was built without GPU support.\n\
          Either start a server with `mold serve` or rebuild with --features cuda"
     )
+}
+
+/// Build a default output filename, sanitizing colons from model names.
+fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u32) -> String {
+    let safe_model = model.replace(':', "-");
+    if batch == 1 {
+        format!("mold-{safe_model}-{timestamp}.{ext}")
+    } else {
+        format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_sanitizes_colon() {
+        let name = default_filename("flux-dev:q6", 1773609166, "png", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q6-1773609166.png");
+        assert!(!name.contains(':'));
+    }
+
+    #[test]
+    fn filename_no_colon_passthrough() {
+        let name = default_filename("flux-schnell", 100, "png", 1, 0);
+        assert_eq!(name, "mold-flux-schnell-100.png");
+    }
+
+    #[test]
+    fn filename_batch_includes_index() {
+        let name = default_filename("flux-dev:q4", 100, "jpeg", 3, 2);
+        assert_eq!(name, "mold-flux-dev-q4-100-2.jpeg");
+    }
+
+    #[test]
+    fn filename_single_batch_no_index() {
+        let name = default_filename("flux-dev:q4", 100, "png", 1, 0);
+        assert!(!name.contains("-0."));
+    }
 }
