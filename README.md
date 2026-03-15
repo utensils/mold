@@ -5,9 +5,9 @@ Like ollama, but for diffusion models. Local FLUX image generation — runs on y
 ## What it does
 
 - Loads FLUX.1 models (schnell / dev) from local GGUF or safetensors files
-- **Just works**: `mold generate "a cat"` — no server needed (auto-detects GPU, runs locally)
+- **Just works**: `mold run "a cat"` — no server needed (auto-pulls model, runs locally)
 - **Remote capable**: Point at a GPU server with `MOLD_HOST` or run `mold serve` for a REST API
-- CLI: `mold generate "a glowing robot"`
+- CLI: `mold run "a glowing robot"`
 
 ## Requirements
 
@@ -27,15 +27,18 @@ export MOLD_VAE_PATH=/path/to/ae.safetensors
 export MOLD_T5_PATH=/path/to/t5xxl_fp16.safetensors
 export MOLD_CLIP_PATH=/path/to/clip_l.safetensors
 
-# Generate an image (no server needed — runs inference locally)
-./target/release/mold generate "a cat riding a motorcycle through neon-lit streets"
+# Generate an image (no server needed — auto-pulls model, runs locally)
+./target/release/mold run "a cat riding a motorcycle through neon-lit streets"
+
+# Use a specific model
+./target/release/mold run flux-dev:q4 "a turtle in the desert"
 
 # Or start a server for remote rendering
 ./target/release/mold serve
-MOLD_HOST=http://gpu-host:7680 mold generate "a sunset"
+MOLD_HOST=http://gpu-host:7680 mold run "a sunset"
 
 # Force local inference (skip server check)
-./target/release/mold generate --local "a glowing robot"
+./target/release/mold run --local "a glowing robot"
 ```
 
 ## Model files
@@ -108,7 +111,7 @@ mold completions fish | source
 ## Architecture
 
 ```
-mold-cli       Single binary: CLI + TUI + serve (mold generate / serve / run / completions)
+mold-cli       Single binary: CLI + TUI + serve (mold run / serve / pull / completions)
 mold-server    axum REST server (library, used by mold-cli via `mold serve`)
 mold-inference FLUX engine (candle: T5/CLIP on CPU, transformer+VAE on GPU)
 mold-core      Shared types, config, HTTP client

@@ -177,22 +177,32 @@ State is managed via `AppState` which holds a `tokio::sync::Mutex<FluxEngine>`. 
 
 ### mold-cli
 
-Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through both `mold-server` and `mold-inference` for GPU-accelerated `mold serve` and local `mold generate` fallback.
+Main binary crate. Provides CLI commands, an interactive TUI, and shell completions. Feature flags `cuda` and `metal` forward through both `mold-server` and `mold-inference` for GPU-accelerated `mold serve` and local `mold run` inference.
 
 ## CLI Command Reference
 
 ```
-mold generate [OPTIONS] <PROMPT>
-    -m, --model <MODEL>         Model to use [default: flux-schnell]
-    -o, --output <PATH>         Output file path [default: ./mold-output-{timestamp}.png]
-        --width <N>             Image width [default: 1024]
-        --height <N>            Image height [default: 1024]
-        --steps <N>             Inference steps [default: 4 (schnell), 25 (dev)]
+mold run [MODEL] [PROMPT...] [OPTIONS]
+    If PROMPT provided → one-shot generation
+    If PROMPT omitted  → interactive TUI
+    First positional arg is MODEL if it matches a known model name
+
+    -m, --model <MODEL>         Explicit model override (bypasses arg heuristics)
+    -o, --output <PATH>         Output file path [default: ./mold-{model}-{timestamp}.png]
+        --width <N>             Image width [default: model config value]
+        --height <N>            Image height [default: model config value]
+        --steps <N>             Inference steps [default: model config value]
         --seed <N>              Random seed [random if not set]
         --batch <N>             Number of images [default: 1]
         --host <URL>            Override MOLD_HOST env var
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
+
+    Examples:
+        mold run flux-dev:q4 "a turtle in the desert"    # specific model + prompt
+        mold run "a sunset over mountains"                # default model + prompt
+        mold run flux-krea:q8                             # TUI with specific model
+        mold run                                          # TUI with default model
 
 mold serve [OPTIONS]
         --port <N>              Server port [default: 7680]
@@ -202,7 +212,6 @@ mold serve [OPTIONS]
 mold pull <MODEL>               Download model from HuggingFace (e.g. flux-schnell, flux-dev:q4)
 mold list                       List configured and available models
 mold ps                         Show server status + loaded models
-mold run [MODEL]                Interactive TUI session [default: flux-schnell]
 mold version                    Show version information
 mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elvish, powershell)
 ```
@@ -266,26 +275,32 @@ mold pull flux-dev-q4           # Legacy format, same as flux-dev:q4
 
 | Name | Transformer Source | Total Size |
 |------|-------------------|-----------|
-| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` / `flux1-schnell-Q8_0.gguf` | ~22GB |
-| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q8_0.gguf` | ~22GB |
-| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q4_1.gguf` | ~17GB |
+| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` / `flux1-schnell-Q8_0.gguf` | 12.0GB |
+| `flux-schnell:q6` | `city96/FLUX.1-schnell-gguf` / `flux1-schnell-Q6_K.gguf` | 9.8GB |
+| `flux-schnell:q4` | `city96/FLUX.1-schnell-gguf` / `flux1-schnell-Q4_1.gguf` | 7.5GB |
+| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q8_0.gguf` | 12.0GB |
+| `flux-dev:q6` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q6_K.gguf` | 9.9GB |
+| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q4_1.gguf` | 7.0GB |
+| `flux-krea:q8` | `QuantStack/FLUX.1-Krea-dev-GGUF` / `flux1-krea-dev-Q8_0.gguf` | 12.7GB |
+| `flux-krea:q6` | `QuantStack/FLUX.1-Krea-dev-GGUF` / `flux1-krea-dev-Q6_K.gguf` | 9.9GB |
+| `flux-krea:q4` | `QuantStack/FLUX.1-Krea-dev-GGUF` / `flux1-krea-dev-Q4_1.gguf` | 7.5GB |
 
-Shared components (VAE, T5, CLIP, tokenizers) are downloaded once and reused across all models via hf-hub's cache (`~/.cache/huggingface/hub/`).
+Sizes are transformer only. First pull also downloads ~9.8GB of shared components (T5, CLIP, VAE, tokenizers), cached and reused across all models via hf-hub (`~/.cache/huggingface/hub/`).
 
 Model manifests are defined in `mold-core/src/manifest.rs`.
 
 ## Local & Remote Inference
 
-`mold generate` works in three modes:
+`mold run` works in three modes:
 
 1. **Remote (default)**: Connects to a running `mold serve` instance via HTTP. Set `MOLD_HOST` to point at a remote GPU server.
-2. **Local fallback**: If no server is running (connection refused), automatically falls back to local GPU inference when built with `--features cuda` or `--features metal`. If built without GPU features, fails with a clear error message.
-3. **Local forced (`--local`)**: Skip the server attempt entirely with `mold generate --local "prompt"`. Goes straight to local inference.
+2. **Local fallback**: If no server is running (connection refused), automatically falls back to local GPU inference when built with `--features cuda` or `--features metal`. If the model isn't downloaded yet, it is auto-pulled before inference. If built without GPU features, fails with a clear error message.
+3. **Local forced (`--local`)**: Skip the server attempt entirely with `mold run --local "prompt"`. Goes straight to local inference (with auto-pull if needed).
 
 For remote rendering:
 
 1. On the GPU host: `mold serve --port 7680`
-2. On any client: `MOLD_HOST=http://gpu-host:7680 mold generate "a sunset"`
+2. On any client: `MOLD_HOST=http://gpu-host:7680 mold run "a sunset"`
 
 The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receives the generated image bytes in the response. All CLI commands (`generate`, `list`, `ps`) communicate through the same HTTP API.
 
@@ -381,9 +396,15 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 
 | Name | Transformer | Recommended File | Size |
 |------|-------------|------------------|------|
-| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` | `flux1-schnell-Q8_0.gguf` | 12GB |
-| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q8_0.gguf` | 12GB |
-| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q4_1.gguf` | 7GB |
+| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` | `flux1-schnell-Q8_0.gguf` | 12.0GB |
+| `flux-schnell:q6` | `city96/FLUX.1-schnell-gguf` | `flux1-schnell-Q6_K.gguf` | 9.8GB |
+| `flux-schnell:q4` | `city96/FLUX.1-schnell-gguf` | `flux1-schnell-Q4_1.gguf` | 7.5GB |
+| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q8_0.gguf` | 12.0GB |
+| `flux-dev:q6` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q6_K.gguf` | 9.9GB |
+| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q4_1.gguf` | 7.0GB |
+| `flux-krea:q8` | `QuantStack/FLUX.1-Krea-dev-GGUF` | `flux1-krea-dev-Q8_0.gguf` | 12.7GB |
+| `flux-krea:q6` | `QuantStack/FLUX.1-Krea-dev-GGUF` | `flux1-krea-dev-Q6_K.gguf` | 9.9GB |
+| `flux-krea:q4` | `QuantStack/FLUX.1-Krea-dev-GGUF` | `flux1-krea-dev-Q4_1.gguf` | 7.5GB |
 
 > **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090.
 
@@ -440,9 +461,9 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 12. **Nix flake (flake-parts + crane)**: `flake.nix` uses flake-parts for structure, crane for pure Nix Rust builds (`nix build .#mold`), numtide devshell with categorized menu commands, and treefmt-nix for `nix fmt`. CUDA 12.8 packages and `CUDA_COMPUTE_CAP=89` are configured for Linux (RTX 4090). Metal is used on macOS. The devshell sets `CPATH` (cuda_cudart + cuda_cccl includes for kernel compilation), `LIBRARY_PATH` (link-time CUDA libs including stubs), and `LD_LIBRARY_PATH` (runtime — real driver from `/run/opengl-driver/lib` first, no stubs).
 
-13. **Shell completions**: `mold completions <shell>` generates completions for bash, zsh, fish, elvish, and PowerShell via `clap_complete`. Load with `source <(mold completions zsh)` or equivalent.
+13. **Shell completions**: Two completion mechanisms are supported. Static: `mold completions <shell>` generates completion scripts via `clap_complete`. Dynamic: `CompleteEnv` enables the binary itself to respond to shell completion requests, with `ArgValueCandidates` providing model name completions for `mold run` and `mold pull` positional args. Set up dynamic completions with `source <(COMPLETE=bash mold)` (bash) or `source <(COMPLETE=zsh mold)` (zsh).
 
-14. **Local inference fallback**: `mold generate` tries the remote server first, then falls back to local GPU inference if the server isn't running. This gives the "ollama experience" — `mold generate "a cat"` just works without starting a server. The fallback is behind `cfg(feature = "cuda"/"metal")` so non-GPU builds get a clear error instead. Inference runs in `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+14. **Local inference fallback with auto-pull**: `mold run "a cat"` tries the remote server first, then falls back to local GPU inference if the server isn't running. If the model isn't downloaded yet, it is auto-pulled before inference — `mold run flux-dev:q4 "a turtle"` just works on first use. The fallback is behind `cfg(feature = "cuda"/"metal")` so non-GPU builds get a clear error instead. Inference runs in `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
 15. **Shared validation**: `validate_generate_request()` lives in `mold-core` and is used by both the HTTP server (for API requests) and the CLI (for local inference), ensuring consistent validation rules.
 
@@ -451,6 +472,8 @@ Planned support for distributing models via OCI-compatible registries (similar t
 17. **XDG directory support**: New installs use `~/.config/mold/config.toml` (config) and `~/.local/share/mold/` (data). Existing `~/.mold/` directories keep working — checked via `Config::legacy_dir_exists()`. No migration needed.
 
 18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
+
+19. **Unified `run` command with positional model arg**: `mold run` replaces both the old `generate` and `run` (TUI) commands. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model; `mold run flux-dev:q4` = TUI with model; `mold run` = TUI with default. This mirrors `ollama run <model> [prompt]`.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-15)
 

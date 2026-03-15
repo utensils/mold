@@ -89,6 +89,13 @@ pub async fn run() -> Result<()> {
                     );
                 }
                 println!();
+                println!(
+                    "{}",
+                    format!(
+                        "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
+                        mold_core::manifest::SHARED_COMPONENTS_GB
+                    ).dimmed(),
+                );
                 println!("Use {} to download.", "mold pull <model>".bold(),);
             }
         }

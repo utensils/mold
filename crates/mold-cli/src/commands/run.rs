@@ -1,0 +1,153 @@
+use anyhow::Result;
+use clap_complete::engine::CompletionCandidate;
+use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
+use mold_core::Config;
+
+use super::generate;
+
+/// Provide model name completions for shell tab-completion.
+pub fn complete_model_name() -> Vec<CompletionCandidate> {
+    let config = Config::load_or_default();
+    all_model_names(&config)
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
+/// Resolve positional args into (model, prompt).
+///
+/// Rules:
+/// - If model_or_prompt matches a known model → (model, prompt_rest joined).
+/// - Else → (config default_model, all args joined as prompt).
+/// - Empty prompt → None (triggers TUI mode).
+fn resolve_run_args(
+    model_or_prompt: Option<&str>,
+    prompt_rest: &[String],
+    config: &Config,
+) -> (String, Option<String>) {
+    if let Some(first) = model_or_prompt {
+        if is_known_model(first, config) {
+            let prompt = if prompt_rest.is_empty() {
+                None
+            } else {
+                Some(prompt_rest.join(" "))
+            };
+            return (resolve_model_name(first), prompt);
+        }
+        // First arg is part of the prompt, not a model
+        let mut parts = vec![first.to_string()];
+        parts.extend(prompt_rest.iter().cloned());
+        let model = resolve_model_name(&config.default_model);
+        return (model, Some(parts.join(" ")));
+    }
+
+    // No args at all → TUI with default model
+    (resolve_model_name(&config.default_model), None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    model_or_prompt: Option<String>,
+    prompt_rest: Vec<String>,
+    output: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    steps: Option<u32>,
+    guidance: Option<f64>,
+    seed: Option<u64>,
+    batch: u32,
+    host: Option<String>,
+    format: String,
+    local: bool,
+) -> Result<()> {
+    let config = Config::load_or_default();
+    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
+
+    if let Some(prompt) = prompt {
+        generate::run(
+            &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format,
+            local,
+        )
+        .await
+    } else {
+        crate::tui::run(&model).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        let mut config = Config::default();
+        config.default_model = "flux-schnell".to_string();
+        config
+    }
+
+    #[test]
+    fn first_arg_is_model() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(
+            Some("flux-dev:q4"),
+            &["a".to_string(), "cat".to_string()],
+            &config,
+        );
+        assert_eq!(model, "flux-dev:q4");
+        assert_eq!(prompt.unwrap(), "a cat");
+    }
+
+    #[test]
+    fn first_arg_is_model_no_prompt() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &config);
+        assert_eq!(model, "flux-dev:q4");
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    fn first_arg_is_prompt() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(
+            Some("a"),
+            &[
+                "sunset".to_string(),
+                "over".to_string(),
+                "mountains".to_string(),
+            ],
+            &config,
+        );
+        assert_eq!(model, "flux-schnell:q8");
+        assert_eq!(prompt.unwrap(), "a sunset over mountains");
+    }
+
+    #[test]
+    fn single_prompt_word() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config);
+        assert_eq!(model, "flux-schnell:q8");
+        assert_eq!(prompt.unwrap(), "sunset");
+    }
+
+    #[test]
+    fn no_args_triggers_tui() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(None, &[], &config);
+        assert_eq!(model, "flux-schnell:q8");
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    fn bare_model_name_resolves() {
+        let config = test_config();
+        let (model, prompt) =
+            resolve_run_args(Some("flux-dev"), &["a turtle".to_string()], &config);
+        assert_eq!(model, "flux-dev:q8");
+        assert_eq!(prompt.unwrap(), "a turtle");
+    }
+
+    #[test]
+    fn completions_return_models() {
+        let candidates = complete_model_name();
+        assert!(!candidates.is_empty());
+    }
+}

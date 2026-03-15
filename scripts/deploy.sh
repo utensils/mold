@@ -46,4 +46,4 @@ ssh "$REMOTE_USER@$HAL9000" "
 
 echo ""
 echo "✅ Deployed! Test with:"
-echo "   MOLD_HOST=http://hal9000.home.urandom.io:$MOLD_PORT mold generate \"a rusty robot on a beach\""
+echo "   MOLD_HOST=http://hal9000.home.urandom.io:$MOLD_PORT mold run \"a rusty robot on a beach\""

@@ -4,7 +4,8 @@ use mold_core::config::Config;
 use mold_core::download::{pull_model, DownloadError};
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
-pub async fn run(model: &str) -> Result<()> {
+/// Download a model and write its config. Returns the updated Config.
+pub async fn pull_and_configure(model: &str) -> Result<Config> {
     let canonical = resolve_model_name(model);
 
     let manifest = match find_manifest(&canonical) {
@@ -22,16 +23,25 @@ pub async fn run(model: &str) -> Result<()> {
                 );
             }
             eprintln!();
+            eprintln!(
+                "{}",
+                format!(
+                    "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
+                    mold_core::manifest::SHARED_COMPONENTS_GB
+                ).dimmed(),
+            );
             eprintln!("Usage: mold pull <model>");
             bail!("unknown model: {model}");
         }
     };
 
+    let total_gb = manifest.size_gb + mold_core::manifest::SHARED_COMPONENTS_GB;
     println!(
-        "{} Pulling {} ({:.1}GB)",
+        "{} Pulling {} ({:.1}GB transformer, {:.1}GB total with shared components)",
         "●".cyan(),
         manifest.name.bold(),
         manifest.size_gb,
+        total_gb,
     );
     println!("  {}", manifest.description.dimmed());
     println!();
@@ -81,8 +91,13 @@ pub async fn run(model: &str) -> Result<()> {
     config.save()?;
 
     println!();
-    println!("{} {} is ready!", "✓".green().bold(), manifest.name.bold(),);
-    println!("  mold generate \"your prompt\"");
+    println!("{} {} is ready!", "✓".green().bold(), manifest.name.bold());
 
+    Ok(config)
+}
+
+pub async fn run(model: &str) -> Result<()> {
+    pull_and_configure(model).await?;
+    println!("  mold run \"your prompt\"");
     Ok(())
 }

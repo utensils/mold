@@ -130,23 +130,50 @@ pub async fn run(
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<GenerateResponse> {
+    use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::{FluxEngine, InferenceEngine, ProgressEvent};
 
     validate_generate_request(req).map_err(|e| anyhow::anyhow!(e))?;
 
     let model_name = req.model.clone();
-    let paths = ModelPaths::resolve(&model_name, config).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
-             or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
-             / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
-            model_name,
-            model_name,
-        )
-    })?;
+    let (paths, auto_config);
+    let effective_config: &Config;
+    match ModelPaths::resolve(&model_name, config) {
+        Some(p) => {
+            paths = p;
+            effective_config = config;
+        }
+        None => {
+            // Auto-pull: if a manifest exists, download the model automatically
+            if find_manifest(&model_name).is_some() {
+                println!(
+                    "{} Model '{}' not found locally, pulling...",
+                    "●".cyan(),
+                    model_name.bold(),
+                );
+                let updated_config = super::pull::pull_and_configure(&model_name).await?;
+                paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model '{}' was pulled but paths could not be resolved",
+                        model_name,
+                    )
+                })?;
+                auto_config = updated_config;
+                effective_config = &auto_config;
+            } else {
+                anyhow::bail!(
+                    "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
+                     or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
+                     / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
+                    model_name,
+                    model_name,
+                );
+            }
+        }
+    }
 
-    let is_schnell = config.model_config(&model_name).is_schnell;
+    let is_schnell = effective_config.model_config(&model_name).is_schnell;
     let mut engine = FluxEngine::new(model_name, paths, is_schnell);
 
     // Set up progress channel for UI updates from the blocking inference thread

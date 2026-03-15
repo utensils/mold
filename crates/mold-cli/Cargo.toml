@@ -20,8 +20,8 @@ mold-core = { path = "../mold-core" }
 mold-inference = { path = "../mold-inference" }
 mold-server = { path = "../mold-server" }
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap = { version = "4", features = ["derive", "unstable-ext"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 colored = "3"
 crossterm = "0.28"
 dirs = "6"

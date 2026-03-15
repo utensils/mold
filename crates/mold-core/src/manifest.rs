@@ -109,7 +109,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
             name: "flux-schnell:q8".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Schnell Q8 — fast 4-step, general purpose".to_string(),
-            size_gb: 22.0,
+            size_gb: 12.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -133,7 +133,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
             name: "flux-dev:q8".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Dev Q8 — full quality, 20+ steps".to_string(),
-            size_gb: 22.0,
+            size_gb: 12.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -157,7 +157,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
             name: "flux-dev:q4".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Dev Q4 — smaller/faster, good quality".to_string(),
-            size_gb: 17.0,
+            size_gb: 7.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -172,6 +172,152 @@ pub fn known_manifests() -> Vec<ModelManifest> {
             defaults: ManifestDefaults {
                 steps: 25,
                 guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+            },
+        },
+        ModelManifest {
+            name: "flux-dev:q6".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Dev Q6 — best quality/size trade-off".to_string(),
+            size_gb: 9.9,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/FLUX.1-dev-gguf".to_string(),
+                    hf_filename: "flux1-dev-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_860_000_000, // ~9.86GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+            },
+        },
+        ModelManifest {
+            name: "flux-schnell:q4".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Schnell Q4 — fast 4-step, smaller footprint".to_string(),
+            size_gb: 7.5,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/FLUX.1-schnell-gguf".to_string(),
+                    hf_filename: "flux1-schnell-Q4_1.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_510_000_000, // ~7.51GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: true,
+            },
+        },
+        ModelManifest {
+            name: "flux-schnell:q6".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Schnell Q6 — fast 4-step, best quality/size trade-off".to_string(),
+            size_gb: 9.8,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/FLUX.1-schnell-gguf".to_string(),
+                    hf_filename: "flux1-schnell-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_830_000_000, // ~9.83GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: true,
+            },
+        },
+        ModelManifest {
+            name: "flux-krea:q8".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Krea Dev Q8 — aesthetic photography fine-tune".to_string(),
+            size_gb: 12.7,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
+                    hf_filename: "flux1-krea-dev-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 12_700_000_000, // ~12.7GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 4.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+            },
+        },
+        ModelManifest {
+            name: "flux-krea:q4".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Krea Dev Q4 — aesthetic photography, smaller footprint"
+                .to_string(),
+            size_gb: 7.5,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
+                    hf_filename: "flux1-krea-dev-Q4_1.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_530_000_000, // ~7.53GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 4.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+            },
+        },
+        ModelManifest {
+            name: "flux-krea:q6".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Krea Dev Q6 — aesthetic photography, best quality/size trade-off"
+                .to_string(),
+            size_gb: 9.9,
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
+                    hf_filename: "flux1-krea-dev-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_860_000_000, // ~9.86GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 4.5,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -208,6 +354,30 @@ pub fn find_manifest(name: &str) -> Option<ModelManifest> {
     let canonical = resolve_model_name(name);
     known_manifests().into_iter().find(|m| m.name == canonical)
 }
+
+/// Check if a name resolves to a known model (manifest or config).
+pub fn is_known_model(name: &str, config: &crate::Config) -> bool {
+    let canonical = resolve_model_name(name);
+    config.models.contains_key(name)
+        || config.models.contains_key(&canonical)
+        || find_manifest(&canonical).is_some()
+}
+
+/// All known model names (manifests + config), deduplicated and sorted.
+pub fn all_model_names(config: &crate::Config) -> Vec<String> {
+    let mut names: Vec<String> = known_manifests().iter().map(|m| m.name.clone()).collect();
+    for key in config.models.keys() {
+        if !names.contains(key) {
+            names.push(key.clone());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Size of shared FLUX components (VAE, T5, CLIP, tokenizers) in GB.
+pub const SHARED_COMPONENTS_GB: f32 = 9.8;
 
 /// Total size of all files in the manifest in bytes.
 pub fn total_download_size(manifest: &ModelManifest) -> u64 {
@@ -260,7 +430,31 @@ mod tests {
         assert!(find_manifest("flux-schnell").is_some());
         assert!(find_manifest("flux-dev:q4").is_some());
         assert!(find_manifest("flux-dev-q4").is_some());
+        assert!(find_manifest("flux-krea").is_some());
+        assert!(find_manifest("flux-schnell:q6").is_some());
+        assert!(find_manifest("flux-dev:q6").is_some());
+        assert!(find_manifest("flux-krea:q4").is_some());
+        assert!(find_manifest("flux-krea:q6").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn flux_krea_resolves_to_q8() {
+        let manifest = find_manifest("flux-krea").unwrap();
+        assert_eq!(manifest.name, "flux-krea:q8");
+        assert!(!manifest.defaults.is_schnell);
+        assert_eq!(manifest.defaults.steps, 25);
+    }
+
+    #[test]
+    fn flux_krea_legacy_format() {
+        assert_eq!(resolve_model_name("flux-krea-q4"), "flux-krea:q4");
+        assert_eq!(resolve_model_name("flux-krea-q6"), "flux-krea:q6");
+    }
+
+    #[test]
+    fn known_manifests_count() {
+        assert_eq!(known_manifests().len(), 9);
     }
 
     #[test]

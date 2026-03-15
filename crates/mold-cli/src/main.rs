@@ -2,6 +2,7 @@ mod commands;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 
 #[derive(Parser)]
 #[command(
@@ -16,20 +17,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate images from a text prompt
-    Generate {
-        /// The text prompt to generate from
-        prompt: String,
+    /// Run image generation or interactive TUI
+    ///
+    /// If PROMPT is provided, generates images (one-shot).
+    /// If PROMPT is omitted, opens the interactive TUI.
+    /// First positional arg is treated as MODEL if it matches a known model name.
+    Run {
+        /// Model name (e.g. flux-dev:q4, flux-schnell)
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model_or_prompt: Option<String>,
 
-        /// Model to use
-        #[arg(short, long, default_value = "flux-schnell")]
-        model: String,
+        /// Prompt text (remaining words after model)
+        #[arg(trailing_var_arg = true)]
+        prompt_rest: Vec<String>,
 
         /// Output file path
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Image width — defaults to model config value (768 for schnell, 896 for portrait models)
+        /// Image width — defaults to model config value
         #[arg(long)]
         width: Option<u32>,
 
@@ -41,7 +47,7 @@ enum Commands {
         #[arg(long)]
         steps: Option<u32>,
 
-        /// Guidance scale — defaults to model config value (0.0 for schnell, 3.5 for dev)
+        /// Guidance scale — defaults to model config value
         #[arg(long)]
         guidance: Option<f64>,
 
@@ -84,6 +90,7 @@ enum Commands {
     /// Download model weights from HuggingFace
     Pull {
         /// Model name to download
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: String,
     },
 
@@ -92,13 +99,6 @@ enum Commands {
 
     /// Show server status and loaded models
     Ps,
-
-    /// Open interactive TUI session
-    Run {
-        /// Model to use
-        #[arg(default_value = "flux-schnell")]
-        model: String,
-    },
 
     /// Show version information
     Version,
@@ -113,12 +113,14 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Generate {
-            prompt,
-            model,
+        Commands::Run {
+            model_or_prompt,
+            prompt_rest,
             output,
             width,
             height,
@@ -130,9 +132,19 @@ async fn main() -> anyhow::Result<()> {
             format,
             local,
         } => {
-            commands::generate::run(
-                &prompt, &model, output, width, height, steps, guidance, seed, batch, host,
-                &format, local,
+            commands::run::run(
+                model_or_prompt,
+                prompt_rest,
+                output,
+                width,
+                height,
+                steps,
+                guidance,
+                seed,
+                batch,
+                host,
+                format,
+                local,
             )
             .await?;
         }
@@ -151,9 +163,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Ps => {
             commands::ps::run().await?;
-        }
-        Commands::Run { model } => {
-            tui::run(&model).await?;
         }
         Commands::Version => {
             println!("mold {}", env!("CARGO_PKG_VERSION"));
