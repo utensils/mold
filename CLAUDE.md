@@ -120,12 +120,21 @@ FLUX diffusion model inference using candle. Structure:
 
 ```
 src/
-├── lib.rs
-├── engine.rs           # InferenceEngine trait + FluxEngine implementation
-├── error.rs            # InferenceError enum
-├── model_registry.rs   # Delegates to mold_core::manifest for known models
+├── lib.rs                    # Re-exports (same public API)
+├── engine.rs                 # InferenceEngine trait + rand_seed()
+├── device.rs                 # VRAM queries, should_use_gpu(), fmt_gb(), thresholds
+├── image.rs                  # Tensor → PNG/JPEG encoding
+├── error.rs                  # InferenceError enum
+├── progress.rs               # ProgressEvent enum + ProgressCallback type
+├── model_registry.rs         # Delegates to mold_core::manifest for known models
+├── encoders/
+│   ├── mod.rs                # pub mod t5; pub mod clip;
+│   ├── t5.rs                 # T5Encoder struct: config, load, encode, drop, reload
+│   └── clip.rs               # ClipEncoder struct: config, load, encode, drop, reload
 └── flux/
-    └── mod.rs           # Module docs (pipeline uses candle_transformers directly)
+    ├── mod.rs                # Module declarations + re-exports
+    ├── transformer.rs        # FluxTransformer enum (BF16/Quantized) + denoise()
+    └── pipeline.rs           # FluxEngine + LoadedFlux + InferenceEngine impl
 ```
 
 The `InferenceEngine` trait:
@@ -134,10 +143,11 @@ pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
     fn model_name(&self) -> &str;
     fn is_loaded(&self) -> bool;
+    fn load(&mut self) -> Result<()>;
 }
 ```
 
-**`FluxEngine`** implements real FLUX.1 inference using candle-transformers:
+**`FluxEngine`** (in `flux/pipeline.rs`) implements real FLUX.1 inference using candle-transformers:
 
 1. **T5 encoding** — `candle_transformers::models::t5::T5EncoderModel` encodes prompt to 4096-dim embeddings (padded to 256 tokens)
 2. **CLIP encoding** — `candle_transformers::models::clip::text_model::ClipTextTransformer` encodes prompt to 768-dim embeddings
@@ -149,11 +159,11 @@ pub trait InferenceEngine: Send + Sync {
 8. **VAE decoding** — `flux::autoencoder::AutoEncoder::decode()` converts latents to pixels
 9. **Image encoding** — Tensor → RGB → PNG/JPEG bytes via the `image` crate
 
-**Device split** — T5 and CLIP encoders load on **CPU** (9.2GB combined), while the FLUX transformer and VAE load on **GPU**. This is required because FLUX dev BF16 (23GB) + T5 (9.2GB) exceeds 24GB VRAM.
+**Device split** — FLUX transformer and VAE always load on **GPU**. T5 and CLIP encoders are placed on **GPU or CPU** dynamically based on remaining VRAM after the transformer is loaded (see `device.rs` thresholds). When placed on GPU, they are dropped after encoding to free VRAM for the denoising pass, then reloaded on the next generation. This allows optimal placement: e.g. Q4 models leave enough VRAM for T5 on GPU, while Q8/BF16 models fall back to CPU.
 
 **GGUF quantized models** — the engine auto-detects `.gguf` extension on `MOLD_TRANSFORMER_PATH` and uses `candle_transformers::quantized_var_builder` + `flux::quantized_model::Flux`. GGUF quantized models (Q4_1 = 7GB, Q8_0 = 12GB) leave plenty of VRAM for activations. When quantized, state tensors use F32; when BF16, they use BF16.
 
-**FluxTransformer enum** wraps either `flux::model::Flux` (BF16) or `flux::quantized_model::Flux` (GGUF quantized). Both implement `flux::WithForward` so the same `denoise()` call works for both.
+**FluxTransformer enum** (in `flux/transformer.rs`) wraps either `flux::model::Flux` (BF16) or `flux::quantized_model::Flux` (GGUF quantized). Both implement `flux::WithForward` so the same `denoise()` call works for both.
 
 Model loading is **lazy** (on first generation request) and uses **mmap** for safetensors files.
 
@@ -446,7 +456,7 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 9. **GGUF over BF16 safetensors for 24GB VRAM**: The full BF16 FLUX dev model (23GB) fills all VRAM, leaving nothing for activations. GGUF Q8_0 (12GB) or Q4_1 (7GB) leave plenty of room. Engine auto-detects `.gguf` extension.
 
-10. **T5/CLIP on CPU**: Text encoders load on CPU to keep ~9.2GB off the GPU. Embeddings are moved to GPU after encoding. This is required for the FLUX transformer to fit in VRAM alongside activations.
+10. **Smart T5/CLIP device placement**: Text encoders are placed on GPU or CPU dynamically based on free VRAM after the transformer loads (thresholds in `device.rs`). When on GPU, encoder weights are dropped after prompt encoding to free VRAM for denoising, then reloaded on the next generation. Embeddings are always moved to GPU regardless of encoder placement.
 
 11. **Single binary**: `mold` is the only binary built by the Nix flake. It includes `serve` (via `mold-server` library), so GPU feature flags (`cuda`/`metal`) are forwarded through `mold-cli` → `mold-server` → `mold-inference`. No separate `mold-server` package is needed.
 

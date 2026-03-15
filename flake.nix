@@ -143,6 +143,7 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.git
+              pkgs.viu
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
