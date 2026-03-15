@@ -44,7 +44,7 @@ nix flake check                                      # Validate formatting + fla
 | run | `serve` | Start the mold server |
 | run | `generate` | Generate an image from a prompt |
 | run | `generate` | Generate an image from a prompt |
-| deploy | `deploy` | Deploy to hal9000 |
+| deploy | `deploy` | Deploy to GPU host |
 
 ### Cargo (direct)
 
@@ -61,7 +61,7 @@ cargo test -p mold-core                              # Single crate
 cargo run -p mold-cli -- generate "a cat"            # Generate image
 cargo run -p mold-cli -- serve                       # Start server
 cargo run -p mold-cli -- run "a cat"                 # Generate image
-./scripts/deploy.sh                                  # Deploy to hal9000
+./scripts/deploy.sh                                  # Deploy to GPU host
 ```
 
 ## Project Vision
@@ -78,7 +78,7 @@ cargo run -p mold-cli -- run "a cat"                 # Generate image
 mold/
 ├── Cargo.toml                    # Workspace root
 ├── scripts/
-│   ├── deploy.sh                 # Build + deploy to hal9000
+│   ├── deploy.sh                 # Build + deploy to GPU host
 │   └── fetch-tokenizers.sh       # Download tokenizer files
 ├── crates/
 │   ├── mold-core/                # Shared types, API protocol, HTTP client, config
@@ -318,39 +318,14 @@ For remote rendering:
 
 The client sends a `GenerateRequest` via HTTP POST to `/api/generate` and receives the generated image bytes in the response. All CLI commands (`generate`, `list`, `ps`) communicate through the same HTTP API.
 
-## Deployment to hal9000
-
-### Hardware
-- NixOS, RTX 4090 (24GB VRAM)
-- SSH: `jamesbrink@hal9000.home.urandom.io`
-- If direct TCP fails: `ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206`
-
-### Model files on hal9000 (already on disk)
-```
-# GGUF quantized (recommended — fits in 24GB with room for activations)
-flux1-schnell-Q8_0.gguf   /home/jamesbrink/AI/models/unet/flux1-schnell-Q8_0.gguf   (12GB) ← ACTIVE
-flux1-dev-Q8_0.gguf       /home/jamesbrink/AI/models/unet/flux1-dev-Q8_0.gguf       (12GB)
-flux1-dev-Q4_1.gguf       /home/jamesbrink/AI/models/unet/flux1-dev-Q4_1.gguf       (7GB)
-
-# BF16 safetensors (23GB — causes CUDA OOM during denoising, avoid)
-flux1-dev.safetensors      /home/jamesbrink/AI/models/unet/flux1-dev.safetensors     (23GB)
-
-# Shared components (used regardless of transformer choice)
-VAE:          /home/jamesbrink/AI/models/vae/ae.safetensors
-T5 encoder:   /home/jamesbrink/AI/models/text_encoders/t5xxl_fp16.safetensors
-CLIP-L:       /home/jamesbrink/AI/models/clip/clip_l.safetensors
-T5 tokenizer: /home/jamesbrink/AI/models/tokenizers/t5-v1_1-xxl.tokenizer.json
-CLIP tokenizer: /home/jamesbrink/AI/models/tokenizers/clip-vit-large-patch14.tokenizer.json
-```
+## Deployment
 
 ### Building with CUDA (Nix devshell)
 
 The `flake.nix` (flake-parts + numtide devshell + crane) provides a devshell with all CUDA 12.8 dependencies and pure Nix builds:
 
 ```bash
-# On hal9000 — pure Nix build (preferred):
-cd /home/jamesbrink/mold
-git pull
+# Pure Nix build (preferred):
 nix build .#mold
 
 # Or via devshell:
@@ -362,7 +337,7 @@ build-server  # devshell command, builds mold-cli with --features cuda on Linux
 
 ### Systemd user service
 
-The server runs as a systemd user service on hal9000:
+The server can run as a systemd user service:
 
 ```bash
 # Check status
@@ -376,34 +351,22 @@ systemctl --user restart mold-server
 ~/.config/systemd/user/mold-server.service
 ```
 
-The service is configured with all required env vars including `LD_LIBRARY_PATH=/run/opengl-driver/lib` for CUDA driver access.
+The service should be configured with `LD_LIBRARY_PATH=/run/opengl-driver/lib` for CUDA driver access on NixOS.
 
 ### First-time tokenizer setup
 
 ```bash
-ssh jamesbrink@hal9000.home.urandom.io
-bash /home/jamesbrink/mold/scripts/fetch-tokenizers.sh
-```
-
-### Deploy from local
-
-```bash
-# From the mold project root:
-./scripts/deploy.sh
+./scripts/fetch-tokenizers.sh
 ```
 
 ### Test
 
 ```bash
 # Direct HTTP test
-curl -X POST http://hal9000.home.urandom.io:7680/api/generate \
+curl -X POST http://localhost:7680/api/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt":"a cat on Mars","model":"flux-schnell","width":512,"height":512,"steps":4,"batch_size":1,"output_format":"png"}' \
   -o output.png
-
-# Or via ProxyJump if local TCP is broken:
-ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
-  'curl -X POST http://localhost:7680/api/generate ...'
 ```
 
 ## Known Models
@@ -479,11 +442,11 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
 
-19. **Quantized T5 encoder with auto-fallback**: When the FP16 T5-XXL (9.2GB) doesn't fit in remaining VRAM alongside the FLUX transformer, the engine automatically selects the largest quantized T5 GGUF that fits on GPU. Available variants from `city96/t5-v1_1-xxl-encoder-gguf`: Q8 (5.06GB), Q6 (3.91GB), Q5 (3.39GB), Q4 (2.9GB), Q3 (2.1GB). Uses `candle_transformers::models::quantized_t5::T5EncoderModel` with the same tokenizer. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_T5_VARIANT` env var, `t5_variant` config field, or `--t5-variant` CLI flag. Priority: CLI flag > env var > config > auto.
+19. **Quantized T5 encoder with auto-fallback**: When the FP16 T5-XXL (9.2GB) doesn't fit in remaining VRAM alongside the FLUX transformer, the engine automatically selects the largest quantized T5 GGUF that fits on GPU. Available variants from `city96/t5-v1_1-xxl-encoder-gguf`: Q8 (5.06GB), Q6 (3.91GB), Q5 (3.39GB), Q4 (2.9GB), Q3 (2.1GB). Uses a custom `GgufT5Encoder` (in `encoders/t5_gguf.rs`) that loads GGUF standard tensor names directly, since candle's `quantized_t5` expects PyTorch-style names. Same tokenizer for all variants. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_T5_VARIANT` env var, `t5_variant` config field, or `--t5-variant` CLI flag. Priority: CLI flag > env var > config > auto.
 
 20. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
 
-## Confirmed Working Configuration (hal9000, 2026-03-15)
+## Confirmed Working Configuration
 
 ```
 Model:      flux-dev Q4 GGUF (local inference fallback, no server)

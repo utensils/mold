@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Download tokenizer files required by mold.
-# Run this on the inference host (hal9000) once.
+# Run this on the inference host once.
 set -euo pipefail
 
-TOKENIZER_DIR="${1:-/home/jamesbrink/AI/models/tokenizers}"
+TOKENIZER_DIR="${1:-${MOLD_MODELS_DIR:-$HOME/.mold/models}/tokenizers}"
 mkdir -p "$TOKENIZER_DIR"
 
 echo "Downloading T5 tokenizer..."
