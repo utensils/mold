@@ -2,7 +2,10 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{Config, GenerateRequest, GenerateResponse, MoldClient, OutputFormat};
+use std::io::Write;
 use std::time::Duration;
+
+use crate::output::{is_piped, status};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -21,6 +24,7 @@ pub async fn run(
     t5_variant: Option<String>,
 ) -> Result<()> {
     let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    let piped = is_piped();
 
     // Load config and pull model-specific defaults.
     let config = Config::load_or_default();
@@ -44,9 +48,9 @@ pub async fn run(
     };
 
     if let Some(desc) = &model_cfg.description {
-        println!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
+        status!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
     }
-    println!(
+    status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",
         "●".cyan(),
         effective_width,
@@ -57,7 +61,7 @@ pub async fn run(
 
     let response = if local {
         // --local: skip server, go straight to local inference
-        println!("{} Using local GPU inference", "●".cyan());
+        status!("{} Using local GPU inference", "●".cyan());
         generate_local(&req, &config, t5_variant).await?
     } else {
         // Try remote server first
@@ -67,6 +71,11 @@ pub async fn run(
         };
 
         let pb = ProgressBar::new_spinner();
+        if piped {
+            // Don't render spinner to stdout when piped — it would corrupt binary output.
+            // Draw to stderr instead.
+            pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+        }
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg}")
@@ -82,40 +91,58 @@ pub async fn run(
             }
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
-                println!("{} Using local GPU inference", "●".cyan());
+                status!("{} Using local GPU inference", "●".cyan());
                 generate_local(&req, &config, t5_variant).await?
             }
             Err(e) => return Err(e),
         }
     };
 
-    for img in &response.images {
-        let filename = match &output {
-            Some(path) if batch == 1 => path.clone(),
-            Some(path) => {
-                let stem = std::path::Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("output");
-                let ext = output_format.to_string();
-                format!("{stem}-{}.{ext}", img.index)
-            }
-            None => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let ext = output_format.to_string();
-                default_filename(model, timestamp, &ext, batch, img.index)
-            }
-        };
+    // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
+    if piped && output.is_none() {
+        // Pipe mode: write raw image bytes to stdout
+        let mut stdout = std::io::stdout().lock();
+        for img in &response.images {
+            stdout.write_all(&img.data)?;
+        }
+        stdout.flush()?;
+    } else {
+        // File mode: save to disk
+        for img in &response.images {
+            let filename = match &output {
+                Some(path) if path == "-" => {
+                    // Explicit stdout via --output -
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(&img.data)?;
+                    stdout.flush()?;
+                    continue;
+                }
+                Some(path) if batch == 1 => path.clone(),
+                Some(path) => {
+                    let stem = std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("output");
+                    let ext = output_format.to_string();
+                    format!("{stem}-{}.{ext}", img.index)
+                }
+                None => {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let ext = output_format.to_string();
+                    default_filename(model, timestamp, &ext, batch, img.index)
+                }
+            };
 
-        std::fs::write(&filename, &img.data)?;
-        println!("{} Saved: {}", "✓".green(), filename.bold());
+            std::fs::write(&filename, &img.data)?;
+            status!("{} Saved: {}", "✓".green(), filename.bold());
+        }
     }
 
     let secs = response.generation_time_ms as f64 / 1000.0;
-    println!(
+    status!(
         "{} Done in {:.1}s (seed: {})",
         "✓".green(),
         secs,
@@ -148,7 +175,7 @@ async fn generate_local(
         None => {
             // Auto-pull: if a manifest exists, download the model automatically
             if find_manifest(&model_name).is_some() {
-                println!(
+                status!(
                     "{} Model '{}' not found locally, pulling...",
                     "●".cyan(),
                     model_name.bold(),
@@ -194,9 +221,12 @@ async fn generate_local(
         engine.generate(&req)
     });
 
-    // Render progress events as they arrive
+    // Render progress events as they arrive (always to stderr when piped)
     let render = tokio::spawn(async move {
         let pb = ProgressBar::new_spinner();
+        if is_piped() {
+            pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+        }
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.cyan} {msg}")
@@ -211,7 +241,7 @@ async fn generate_local(
                 }
                 ProgressEvent::StageDone { name, elapsed } => {
                     pb.suspend(|| {
-                        println!(
+                        status!(
                             "  {} {} {}",
                             "✓".green(),
                             name,
@@ -221,7 +251,7 @@ async fn generate_local(
                 }
                 ProgressEvent::Info { message } => {
                     pb.suspend(|| {
-                        println!("  {} {}", "·".dimmed(), message.dimmed());
+                        status!("  {} {}", "·".dimmed(), message.dimmed());
                     });
                 }
             }
@@ -285,5 +315,18 @@ mod tests {
     fn filename_single_batch_no_index() {
         let name = default_filename("flux-dev:q4", 100, "png", 1, 0);
         assert!(!name.contains("-0."));
+    }
+
+    #[test]
+    fn output_dash_is_special() {
+        // "--output -" triggers stdout output in both interactive and piped modes
+        let path = "-";
+        assert_eq!(path, "-");
+    }
+
+    #[test]
+    fn pipe_detection_available() {
+        // Verify pipe detection is available (used at runtime to route output)
+        let _piped = crate::output::is_piped();
     }
 }

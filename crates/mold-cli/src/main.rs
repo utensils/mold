@@ -1,4 +1,5 @@
 mod commands;
+mod output;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
@@ -114,6 +115,14 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Reset SIGPIPE to default (terminate) so piping doesn't panic.
+    // Rust ignores SIGPIPE by default, causing "broken pipe" panics when
+    // stdout is a pipe and the reader closes (e.g. `mold run ... | head`).
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();

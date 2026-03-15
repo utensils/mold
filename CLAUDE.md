@@ -215,6 +215,8 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         mold run flux-dev:q4 "a turtle in the desert"    # specific model + prompt
         mold run "a sunset over mountains"                # default model + prompt
         mold run --model flux-krea:q8 "a sunset"            # explicit model flag
+        mold run "a cat" | viu -                           # pipe to image viewer
+        mold run "a cat" --output - > image.png            # explicit stdout
 
 mold serve [OPTIONS]
         --port <N>              Server port [default: 7680]
@@ -444,7 +446,9 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 19. **Quantized T5 encoder with auto-fallback**: When the FP16 T5-XXL (9.2GB) doesn't fit in remaining VRAM alongside the FLUX transformer, the engine automatically selects the largest quantized T5 GGUF that fits on GPU. Available variants from `city96/t5-v1_1-xxl-encoder-gguf`: Q8 (5.06GB), Q6 (3.91GB), Q5 (3.39GB), Q4 (2.9GB), Q3 (2.1GB). Uses a custom `GgufT5Encoder` (in `encoders/t5_gguf.rs`) that loads GGUF standard tensor names directly, since candle's `quantized_t5` expects PyTorch-style names. Same tokenizer for all variants. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_T5_VARIANT` env var, `t5_variant` config field, or `--t5-variant` CLI flag. Priority: CLI flag > env var > config > auto.
 
-20. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
+20. **Pipe-friendly output**: When stdout is a pipe (detected via `IsTerminal`), `mold run` writes raw image bytes to stdout and routes all status/progress to stderr. This enables `mold run "a cat" | viu -` and `mold run "a cat" > image.png`. Explicit `--output -` also forces stdout output. SIGPIPE is reset to default at startup to avoid broken-pipe panics when the reader closes early. The `status!` macro routes messages to stdout (interactive) or stderr (piped).
+
+21. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
 
 ## Confirmed Working Configuration
 
