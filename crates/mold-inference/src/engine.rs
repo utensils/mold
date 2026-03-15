@@ -7,6 +7,8 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Output
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
+use crate::progress::{ProgressCallback, ProgressEvent};
+
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
@@ -68,6 +70,8 @@ pub struct FluxEngine {
     paths: ModelPaths,
     /// Optional explicit override for is_schnell; if None, auto-detect from transformer filename.
     is_schnell_override: Option<bool>,
+    /// Optional progress callback for UI reporting.
+    on_progress: Option<ProgressCallback>,
 }
 
 impl FluxEngine {
@@ -79,7 +83,38 @@ impl FluxEngine {
             model_name,
             paths,
             is_schnell_override,
+            on_progress: None,
         }
+    }
+
+    /// Set a progress callback for receiving loading/inference status updates.
+    pub fn set_on_progress<F: Fn(ProgressEvent) + Send + Sync + 'static>(&mut self, callback: F) {
+        self.on_progress = Some(Box::new(callback));
+    }
+
+    fn emit(&self, event: ProgressEvent) {
+        if let Some(cb) = &self.on_progress {
+            cb(event);
+        }
+    }
+
+    fn stage_start(&self, name: &str) {
+        self.emit(ProgressEvent::StageStart {
+            name: name.to_string(),
+        });
+    }
+
+    fn stage_done(&self, name: &str, elapsed: std::time::Duration) {
+        self.emit(ProgressEvent::StageDone {
+            name: name.to_string(),
+            elapsed,
+        });
+    }
+
+    fn info(&self, message: &str) {
+        self.emit(ProgressEvent::Info {
+            message: message.to_string(),
+        });
     }
 
     /// Load all model components into GPU memory.
@@ -103,12 +138,15 @@ impl FluxEngine {
 
         let cpu = Device::Cpu;
         let device = if candle_core::utils::cuda_is_available() {
+            self.info("CUDA detected, using GPU");
             tracing::info!("CUDA detected, using GPU");
             Device::new_cuda(0)?
         } else if candle_core::utils::metal_is_available() {
+            self.info("Metal detected, using GPU");
             tracing::info!("Metal detected, using MPS");
             Device::new_metal(0)?
         } else {
+            self.info("No GPU detected, using CPU");
             tracing::warn!("No GPU detected, falling back to CPU");
             Device::Cpu
         };
@@ -136,6 +174,8 @@ impl FluxEngine {
         }
 
         // Load T5 encoder on CPU (9.2GB in F32, too large for GPU alongside FLUX)
+        self.stage_start("Loading T5 encoder (CPU)");
+        let t5_stage = Instant::now();
         tracing::info!(path = %self.paths.t5_encoder.display(), "loading T5 encoder on CPU...");
         let t5_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -171,6 +211,7 @@ impl FluxEngine {
             num_decoder_layers: Some(24),
         };
         let t5_model = t5::T5EncoderModel::load(t5_vb, &t5_config)?;
+        self.stage_done("Loading T5 encoder (CPU)", t5_stage.elapsed());
         tracing::info!("T5 encoder loaded on CPU");
 
         // Load T5 tokenizer
@@ -178,6 +219,8 @@ impl FluxEngine {
             .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
 
         // Load CLIP encoder on CPU (small, but keeps all text encoding on CPU)
+        self.stage_start("Loading CLIP encoder (CPU)");
+        let clip_stage = Instant::now();
         tracing::info!(path = %self.paths.clip_encoder.display(), "loading CLIP encoder on CPU...");
         let clip_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -199,6 +242,7 @@ impl FluxEngine {
         };
         let clip_model =
             clip::text_model::ClipTextTransformer::new(clip_vb.pp("text_model"), &clip_config)?;
+        self.stage_done("Loading CLIP encoder (CPU)", clip_stage.elapsed());
         tracing::info!("CLIP encoder loaded on CPU");
 
         // Load CLIP tokenizer
@@ -220,6 +264,13 @@ impl FluxEngine {
             flux::model::Config::dev()
         };
 
+        let xformer_label = if is_quantized {
+            "Loading FLUX transformer (GPU, quantized)"
+        } else {
+            "Loading FLUX transformer (GPU, BF16)"
+        };
+        self.stage_start(xformer_label);
+        let xformer_stage = Instant::now();
         tracing::info!(
             path = %self.paths.transformer.display(),
             quantized = is_quantized,
@@ -240,9 +291,12 @@ impl FluxEngine {
             };
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
+        self.stage_done(xformer_label, xformer_stage.elapsed());
         tracing::info!("FLUX transformer loaded on GPU");
 
         // Load VAE on GPU (small, ~300MB)
+        self.stage_start("Loading VAE (GPU)");
+        let vae_stage = Instant::now();
         tracing::info!(path = %self.paths.vae.display(), "loading VAE on GPU...");
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -257,6 +311,7 @@ impl FluxEngine {
             flux::autoencoder::Config::dev()
         };
         let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
+        self.stage_done("Loading VAE (GPU)", vae_stage.elapsed());
         tracing::info!("VAE loaded on GPU");
 
         self.loaded = Some(LoadedFlux {
@@ -279,6 +334,25 @@ impl FluxEngine {
 
 impl InferenceEngine for FluxEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // Extract progress callback ref so we can use it while loaded is mutably borrowed.
+        let on_progress = &self.on_progress;
+        let emit = |event: ProgressEvent| {
+            if let Some(cb) = on_progress {
+                cb(event);
+            }
+        };
+        let stage_start = |name: &str| {
+            emit(ProgressEvent::StageStart {
+                name: name.to_string(),
+            });
+        };
+        let stage_done = |name: &str, elapsed: std::time::Duration| {
+            emit(ProgressEvent::StageDone {
+                name: name.to_string(),
+                elapsed,
+            });
+        };
+
         let loaded = self
             .loaded
             .as_mut()
@@ -301,6 +375,8 @@ impl InferenceEngine for FluxEngine {
         );
 
         // 1. Encode prompt with T5 (on CPU, then move to GPU)
+        stage_start("Encoding prompt (T5)");
+        let encode_t5 = Instant::now();
         let t5_emb = {
             let mut tokens = loaded
                 .t5_tokenizer
@@ -314,9 +390,12 @@ impl InferenceEngine for FluxEngine {
             // Move to GPU and cast to GPU dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
+        stage_done("Encoding prompt (T5)", encode_t5.elapsed());
         tracing::info!("T5 encoding complete (moved to GPU)");
 
         // 2. Encode prompt with CLIP (on CPU, then move to GPU)
+        stage_start("Encoding prompt (CLIP)");
+        let encode_clip = Instant::now();
         let clip_emb = {
             let mut tokens = loaded
                 .clip_tokenizer
@@ -331,6 +410,7 @@ impl InferenceEngine for FluxEngine {
             // Move to GPU and cast to GPU dtype for FLUX transformer
             emb.to_device(&loaded.device)?.to_dtype(loaded.dtype)?
         };
+        stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
         tracing::info!("CLIP encoding complete (moved to GPU)");
 
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
@@ -363,6 +443,9 @@ impl InferenceEngine for FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        stage_start(&denoise_label);
+        let denoise_start = Instant::now();
         tracing::info!(
             steps = timesteps.len(),
             quantized = loaded.is_quantized,
@@ -382,15 +465,19 @@ impl InferenceEngine for FluxEngine {
 
         // 7. Unpack latent to spatial
         let img = flux::sampling::unpack(&img, height, width)?;
+        stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
+        stage_start("VAE decode");
+        let vae_decode_start = Instant::now();
         let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
+        stage_done("VAE decode", vae_decode_start.elapsed());
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 10. Convert candle tensor to image bytes

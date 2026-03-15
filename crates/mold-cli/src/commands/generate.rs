@@ -46,7 +46,7 @@ pub async fn run(
         println!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
     }
     println!(
-        "{} Generating {}x{} ({} steps, guidance {:.1})...",
+        "{} Generating {}x{} ({} steps, guidance {:.1})",
         "●".cyan(),
         effective_width,
         effective_height,
@@ -54,41 +54,39 @@ pub async fn run(
         effective_guidance,
     );
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    pb.enable_steady_tick(Duration::from_millis(100));
-
     let response = if local {
         // --local: skip server, go straight to local inference
-        pb.set_message("Loading model for local inference...");
+        println!("{} Using local GPU inference", "●".cyan());
         generate_local(&req, &config).await?
     } else {
-        // Try remote server first, fall back to local on connection error
+        // Try remote server first
         let client = match &host {
             Some(h) => MoldClient::new(h),
             None => MoldClient::from_env(),
         };
 
-        pb.set_message("Running inference...");
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap(),
+        );
+        pb.set_message("Connecting to server...");
+        pb.enable_steady_tick(Duration::from_millis(100));
+
         match client.generate(req.clone()).await {
-            Ok(response) => response,
+            Ok(response) => {
+                pb.finish_and_clear();
+                response
+            }
             Err(e) if MoldClient::is_connection_error(&e) => {
-                pb.set_message("No server found, falling back to local inference...");
-                eprintln!(
-                    "{} No mold server running, falling back to local inference",
-                    "●".yellow(),
-                );
+                pb.finish_and_clear();
+                println!("{} Using local GPU inference", "●".cyan());
                 generate_local(&req, &config).await?
             }
             Err(e) => return Err(e),
         }
     };
-
-    pb.finish_and_clear();
 
     for img in &response.images {
         let filename = match &output {
@@ -119,10 +117,11 @@ pub async fn run(
         println!("{} Saved: {}", "✓".green(), filename.bold());
     }
 
+    let secs = response.generation_time_ms as f64 / 1000.0;
     println!(
-        "{} Done in {}ms (seed: {})",
+        "{} Done in {:.1}s (seed: {})",
         "✓".green(),
-        response.generation_time_ms,
+        secs,
         response.seed_used,
     );
 
@@ -132,7 +131,7 @@ pub async fn run(
 #[cfg(any(feature = "cuda", feature = "metal"))]
 async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<GenerateResponse> {
     use mold_core::{ModelPaths, validate_generate_request};
-    use mold_inference::{FluxEngine, InferenceEngine};
+    use mold_inference::{FluxEngine, InferenceEngine, ProgressEvent};
 
     validate_generate_request(req).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -150,12 +149,60 @@ async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<Genera
     let is_schnell = config.model_config(&model_name).is_schnell;
     let mut engine = FluxEngine::new(model_name, paths, is_schnell);
 
+    // Set up progress channel for UI updates from the blocking inference thread
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+    engine.set_on_progress(move |event| {
+        let _ = tx.send(event);
+    });
+
     let req = req.clone();
-    tokio::task::spawn_blocking(move || {
+
+    // Spawn inference in a blocking thread
+    let handle = tokio::task::spawn_blocking(move || {
         engine.load()?;
         engine.generate(&req)
-    })
-    .await?
+    });
+
+    // Render progress events as they arrive
+    let render = tokio::spawn(async move {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        pb.enable_steady_tick(Duration::from_millis(100));
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                ProgressEvent::StageStart { name } => {
+                    pb.set_message(format!("{}...", name));
+                }
+                ProgressEvent::StageDone { name, elapsed } => {
+                    pb.suspend(|| {
+                        println!(
+                            "  {} {} {}",
+                            "✓".green(),
+                            name,
+                            format!("[{:.1}s]", elapsed.as_secs_f64()).dimmed(),
+                        );
+                    });
+                }
+                ProgressEvent::Info { message } => {
+                    pb.suspend(|| {
+                        println!("  {} {}", "·".dimmed(), message.dimmed());
+                    });
+                }
+            }
+        }
+
+        pb.finish_and_clear();
+    });
+
+    let result = handle.await?;
+    // Wait for all progress events to be rendered
+    let _ = render.await;
+    result
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
