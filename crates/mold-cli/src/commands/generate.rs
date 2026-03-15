@@ -130,7 +130,7 @@ pub async fn run(
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 async fn generate_local(req: &GenerateRequest, config: &Config) -> Result<GenerateResponse> {
-    use mold_core::{ModelPaths, validate_generate_request};
+    use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::{FluxEngine, InferenceEngine, ProgressEvent};
 
     validate_generate_request(req).map_err(|e| anyhow::anyhow!(e))?;

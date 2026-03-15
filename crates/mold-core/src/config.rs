@@ -1,9 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::manifest::resolve_model_name;
+
 /// Per-model file path + default settings configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ModelConfig {
     // --- paths ---
     pub transformer: Option<String>,
@@ -114,7 +116,7 @@ impl ModelPaths {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_model")]
     pub default_model: String,
@@ -209,17 +211,48 @@ impl Config {
         }
     }
 
-    pub fn config_path() -> PathBuf {
+    /// Returns true if `~/.mold/` exists (legacy layout).
+    fn legacy_dir_exists() -> bool {
         dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".mold")
+            .map(|h| h.join(".mold").is_dir())
+            .unwrap_or(false)
+    }
+
+    pub fn config_path() -> PathBuf {
+        // Legacy: ~/.mold/config.toml if ~/.mold/ exists
+        if Self::legacy_dir_exists() {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".mold")
+                .join("config.toml");
+        }
+        // XDG: ~/.config/mold/config.toml
+        dirs::config_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("mold")
             .join("config.toml")
     }
 
     pub fn data_dir() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".mold")
+        // Legacy: ~/.mold/ if it exists
+        if Self::legacy_dir_exists() {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".mold");
+        }
+        // XDG: ~/.local/share/mold/
+        dirs::data_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".local")
+                    .join("share")
+            })
+            .join("mold")
     }
 
     pub fn resolved_models_dir(&self) -> PathBuf {
@@ -237,7 +270,39 @@ impl Config {
     }
 
     /// Return the ModelConfig for a given model name, or an empty default.
+    /// Tries the exact name first, then the canonical `name:tag` form.
     pub fn model_config(&self, name: &str) -> ModelConfig {
-        self.models.get(name).cloned().unwrap_or_default()
+        if let Some(cfg) = self.models.get(name) {
+            return cfg.clone();
+        }
+        // Try canonical name resolution (e.g. "flux-dev-q4" -> "flux-dev:q4")
+        let canonical = resolve_model_name(name);
+        if canonical != name {
+            if let Some(cfg) = self.models.get(&canonical) {
+                return cfg.clone();
+            }
+        }
+        ModelConfig::default()
+    }
+
+    /// Insert or update a model configuration entry.
+    pub fn upsert_model(&mut self, name: String, config: ModelConfig) {
+        self.models.insert(name, config);
+    }
+
+    /// Write the config to disk at `config_path()`.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let contents = toml::to_string_pretty(self)?;
+        std::fs::write(&path, contents)?;
+        Ok(())
+    }
+
+    /// Whether a config file exists on disk.
+    pub fn exists_on_disk() -> bool {
+        Self::config_path().exists()
     }
 }

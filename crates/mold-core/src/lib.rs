@@ -1,6 +1,8 @@
 pub mod client;
 pub mod config;
+pub mod download;
 pub mod error;
+pub mod manifest;
 pub mod types;
 pub mod validation;
 

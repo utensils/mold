@@ -1,25 +1,88 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use colored::Colorize;
+use mold_core::config::Config;
+use mold_core::download::{pull_model, DownloadError};
+use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
 pub async fn run(model: &str) -> Result<()> {
-    eprintln!("{} `mold pull` is not yet implemented.", "✗".red().bold());
-    eprintln!();
-    eprintln!(
-        "To use {} manually, place the GGUF/safetensors files in your models directory",
-        model.bold()
+    let canonical = resolve_model_name(model);
+
+    let manifest = match find_manifest(&canonical) {
+        Some(m) => m,
+        None => {
+            eprintln!("{} Unknown model: {}", "✗".red().bold(), model.bold());
+            eprintln!();
+            eprintln!("Available models:");
+            for m in known_manifests() {
+                eprintln!(
+                    "  {:<20} {:>5.1}GB  {}",
+                    m.name.bold(),
+                    m.size_gb,
+                    m.description.dimmed(),
+                );
+            }
+            eprintln!();
+            eprintln!("Usage: mold pull <model>");
+            bail!("unknown model: {model}");
+        }
+    };
+
+    println!(
+        "{} Pulling {} ({:.1}GB)",
+        "●".cyan(),
+        manifest.name.bold(),
+        manifest.size_gb,
     );
-    eprintln!("and configure paths in ~/.mold/config.toml or via environment variables:");
-    eprintln!();
-    eprintln!("  MOLD_TRANSFORMER_PATH=/path/to/transformer.gguf");
-    eprintln!("  MOLD_VAE_PATH=/path/to/ae.safetensors");
-    eprintln!("  MOLD_T5_PATH=/path/to/t5xxl_fp16.safetensors");
-    eprintln!("  MOLD_CLIP_PATH=/path/to/clip_l.safetensors");
-    eprintln!();
-    eprintln!("Model files for {} are available at:", model.bold());
-    match model {
-        "flux-schnell" => eprintln!("  https://huggingface.co/black-forest-labs/FLUX.1-schnell"),
-        "flux-dev" => eprintln!("  https://huggingface.co/black-forest-labs/FLUX.1-dev"),
-        _ => eprintln!("  https://huggingface.co/black-forest-labs"),
+    println!("  {}", manifest.description.dimmed());
+    println!();
+
+    let paths = match pull_model(&manifest).await {
+        Ok(paths) => paths,
+        Err(DownloadError::GatedModel { .. }) => {
+            eprintln!();
+            eprintln!(
+                "{} This model requires access approval on HuggingFace.",
+                "✗".red().bold()
+            );
+            eprintln!();
+
+            // Find the gated repo for a helpful message
+            let gated_repo = manifest
+                .files
+                .iter()
+                .find(|f| f.gated)
+                .map(|f| f.hf_repo.as_str())
+                .unwrap_or("the model repository");
+
+            eprintln!("  1. Visit: https://huggingface.co/{gated_repo}");
+            eprintln!("  2. Accept the license agreement");
+            eprintln!("  3. Create a token at: https://huggingface.co/settings/tokens");
+            eprintln!("  4. Set: export HF_TOKEN=hf_...");
+            eprintln!("  5. Retry: mold pull {}", manifest.name);
+            bail!("gated model requires HuggingFace access approval");
+        }
+        Err(e) => {
+            eprintln!();
+            eprintln!("{} Download failed: {e}", "✗".red().bold());
+            bail!(e);
+        }
+    };
+
+    // Save to config
+    let mut config = Config::load_or_default();
+    let model_config = manifest.to_model_config(&paths);
+
+    // Auto-set default_model if no config existed before
+    if !Config::exists_on_disk() {
+        config.default_model = manifest.name.clone();
     }
-    bail!("pull not implemented");
+
+    config.upsert_model(manifest.name.clone(), model_config);
+    config.save()?;
+
+    println!();
+    println!("{} {} is ready!", "✓".green().bold(), manifest.name.bold(),);
+    println!("  mold generate \"your prompt\"");
+
+    Ok(())
 }

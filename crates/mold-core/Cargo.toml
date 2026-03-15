@@ -8,6 +8,9 @@ description = "Shared types, API protocol, and HTTP client for mold"
 
 [dependencies]
 anyhow = "1"
+dirs = "6"
+hf-hub = { version = "0.5", default-features = false, features = ["tokio", "rustls-tls"] }
+indicatif = "0.17"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -15,4 +18,3 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
-dirs = "6"

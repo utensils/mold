@@ -93,7 +93,9 @@ Shared library used by all other crates. Contains:
 
 - **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, etc.)
 - **`client.rs`** — `MoldClient` HTTP client for communicating with mold-server; includes `is_connection_error()` for fallback detection
-- **`config.rs`** — `Config` struct, `ModelConfig`, `ModelPaths`; loads from `~/.mold/config.toml`
+- **`config.rs`** — `Config` struct, `ModelConfig`, `ModelPaths`; loads from `~/.mold/config.toml` (legacy) or `~/.config/mold/config.toml` (XDG); supports `save()` and `upsert_model()` for post-pull config writes
+- **`manifest.rs`** — `ModelManifest`, `ModelFile`, `ModelComponent` types; `known_manifests()` registry of downloadable models with HF sources and generation defaults; `resolve_model_name()` for `name:tag` resolution
+- **`download.rs`** — `pull_model()` download engine wrapping `hf-hub` crate with `indicatif` progress bars; handles gated model errors
 - **`validation.rs`** — `validate_generate_request()` — shared request validation (used by both server and CLI local inference)
 - **`error.rs`** — `MoldError` enum with thiserror
 
@@ -121,7 +123,7 @@ src/
 ├── lib.rs
 ├── engine.rs           # InferenceEngine trait + FluxEngine implementation
 ├── error.rs            # InferenceError enum
-├── model_registry.rs   # Known models → HF repo mapping
+├── model_registry.rs   # Delegates to mold_core::manifest for known models
 └── flux/
     └── mod.rs           # Module docs (pipeline uses candle_transformers directly)
 ```
@@ -197,8 +199,8 @@ mold serve [OPTIONS]
         --bind <ADDR>           Bind address [default: 0.0.0.0]
         --models-dir <PATH>     Override MOLD_MODELS_DIR
 
-mold pull <MODEL>               Download model weights from HuggingFace
-mold list                       List locally available models
+mold pull <MODEL>               Download model from HuggingFace (e.g. flux-schnell, flux-dev:q4)
+mold list                       List configured and available models
 mold ps                         Show server status + loaded models
 mold run [MODEL]                Interactive TUI session [default: flux-schnell]
 mold version                    Show version information
@@ -222,24 +224,55 @@ mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elv
 
 ## Config File
 
-Location: `~/.mold/config.toml`
+Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists)
+
+`mold pull` automatically writes model configs after downloading. Manual example:
 
 ```toml
-default_model = "flux-dev"
+default_model = "flux-schnell:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
 output_dir = "."
 default_width = 1024
 default_height = 1024
 
-[models.flux-dev]
-transformer = "/path/to/flux1-dev.safetensors"
+[models."flux-schnell:q8"]
+transformer = "/path/to/flux1-schnell-Q8_0.gguf"
 vae = "/path/to/ae.safetensors"
 t5_encoder = "/path/to/t5xxl_fp16.safetensors"
 clip_encoder = "/path/to/clip_l.safetensors"
+t5_tokenizer = "/path/to/t5.tokenizer.json"
+clip_tokenizer = "/path/to/clip.tokenizer.json"
+default_steps = 4
+default_guidance = 0.0
+is_schnell = true
 ```
 
 Loaded via `Config::load_or_default()` — falls back to defaults if the file doesn't exist. Model paths can also be set via env vars (see above).
+
+## Model Pull System
+
+`mold pull <model>` downloads all required files from HuggingFace and writes the config automatically:
+
+```bash
+mold pull flux-schnell          # Downloads flux-schnell:q8 (default tag)
+mold pull flux-dev:q4           # Downloads specific quantization
+mold pull flux-dev-q4           # Legacy format, same as flux-dev:q4
+```
+
+**Name resolution**: Names use ollama-style `model:tag` format. Bare names default to `:q8`. Legacy dash format (`flux-dev-q4`) resolves to colon format (`flux-dev:q4`).
+
+**Available models**:
+
+| Name | Transformer Source | Total Size |
+|------|-------------------|-----------|
+| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` / `flux1-schnell-Q8_0.gguf` | ~22GB |
+| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q8_0.gguf` | ~22GB |
+| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` / `flux1-dev-Q4_1.gguf` | ~17GB |
+
+Shared components (VAE, T5, CLIP, tokenizers) are downloaded once and reused across all models via hf-hub's cache (`~/.cache/huggingface/hub/`).
+
+Model manifests are defined in `mold-core/src/manifest.rs`.
 
 ## Local & Remote Inference
 
@@ -346,10 +379,11 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 
 ## Known Models
 
-| Name | HuggingFace Repo | Recommended File |
-|------|-----------------|------|
-| `flux-schnell` | `black-forest-labs/FLUX.1-schnell` | `flux1-schnell-Q8_0.gguf` (12GB) |
-| `flux-dev` | `black-forest-labs/FLUX.1-dev` | `flux1-dev-Q4_1.gguf` (7GB) or `flux1-dev-Q8_0.gguf` (12GB) |
+| Name | Transformer | Recommended File | Size |
+|------|-------------|------------------|------|
+| `flux-schnell:q8` | `city96/FLUX.1-schnell-gguf` | `flux1-schnell-Q8_0.gguf` | 12GB |
+| `flux-dev:q8` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q8_0.gguf` | 12GB |
+| `flux-dev:q4` | `city96/FLUX.1-dev-gguf` | `flux1-dev-Q4_1.gguf` | 7GB |
 
 > **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090.
 
@@ -360,8 +394,10 @@ ssh -J bender.tail1f4f9.ts.net jamesbrink@10.70.100.206 \
 | `ae.safetensors` | `black-forest-labs/FLUX.1-schnell` |
 | `t5xxl_fp16.safetensors` | `comfyanonymous/flux_text_encoders` |
 | `clip_l.safetensors` | `comfyanonymous/flux_text_encoders` |
+| `tokenizer.json` (T5) | `google-t5/t5-v1_1-xxl` |
+| `tokenizer.json` (CLIP) | `openai/clip-vit-large-patch14` |
 
-Model registry is defined in `mold-inference/src/model_registry.rs`.
+Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate's `model_registry.rs` delegates to the manifest.
 
 ## TUI (mold run)
 
@@ -394,7 +430,7 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 7. **mmap for safetensors**: Model weights are memory-mapped rather than read into memory, allowing the OS to manage paging efficiently.
 
-8. **Env var + config file model paths**: Supports both deployment-friendly env vars and local config file paths. Env vars take precedence over config.
+8. **Env var + config file model paths**: Supports both deployment-friendly env vars and local config file paths. Env vars take precedence over config. `mold pull` auto-writes config entries pointing to hf-hub cache paths.
 
 9. **GGUF over BF16 safetensors for 24GB VRAM**: The full BF16 FLUX dev model (23GB) fills all VRAM, leaving nothing for activations. GGUF Q8_0 (12GB) or Q4_1 (7GB) leave plenty of room. Engine auto-detects `.gguf` extension.
 
@@ -409,6 +445,12 @@ Planned support for distributing models via OCI-compatible registries (similar t
 14. **Local inference fallback**: `mold generate` tries the remote server first, then falls back to local GPU inference if the server isn't running. This gives the "ollama experience" — `mold generate "a cat"` just works without starting a server. The fallback is behind `cfg(feature = "cuda"/"metal")` so non-GPU builds get a clear error instead. Inference runs in `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
 15. **Shared validation**: `validate_generate_request()` lives in `mold-core` and is used by both the HTTP server (for API requests) and the CLI (for local inference), ensuring consistent validation rules.
+
+16. **Model pull via hf-hub**: `mold pull` uses the `hf-hub` crate (rustls TLS, no OpenSSL dependency) with `download_with_progress()` for per-file progress bars. Shared FLUX components (VAE, T5, CLIP, tokenizers) are defined once in the manifest and deduplicated by hf-hub's cache. The `Progress` trait adapter bridges hf-hub's async progress callbacks to `indicatif::ProgressBar`.
+
+17. **XDG directory support**: New installs use `~/.config/mold/config.toml` (config) and `~/.local/share/mold/` (data). Existing `~/.mold/` directories keep working — checked via `Config::legacy_dir_exists()`. No migration needed.
+
+18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
 
 ## Confirmed Working Configuration (hal9000, 2026-03-15)
 
