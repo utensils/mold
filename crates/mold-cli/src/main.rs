@@ -90,6 +90,11 @@ enum Commands {
         /// Qwen3 text encoder variant (Z-Image): auto (default), bf16, q8, q6, iq4, q3
         #[arg(long)]
         qwen3_variant: Option<String>,
+
+        /// Keep all model components loaded simultaneously (faster but uses more memory).
+        /// By default, components are loaded and unloaded sequentially to reduce peak memory.
+        #[arg(long)]
+        eager: bool,
     },
 
     /// Start the inference server
@@ -197,6 +202,7 @@ async fn run() -> anyhow::Result<()> {
             local,
             t5_variant,
             qwen3_variant,
+            eager,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -213,6 +219,7 @@ async fn run() -> anyhow::Result<()> {
                 local,
                 t5_variant,
                 qwen3_variant,
+                eager,
             )
             .await?;
         }

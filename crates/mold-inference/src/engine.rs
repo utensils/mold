@@ -4,6 +4,16 @@ use mold_core::GenerateResponse;
 
 use crate::progress::ProgressCallback;
 
+/// Controls how model components are loaded during inference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoadStrategy {
+    /// Load all components at once, keep hot (server mode).
+    #[default]
+    Eager,
+    /// Load-use-drop per component, minimizing peak memory (CLI one-shot mode).
+    Sequential,
+}
+
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;

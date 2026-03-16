@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use mold_core::{Config, ModelPaths};
 
-use crate::engine::InferenceEngine;
+use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::sdxl::SDXLEngine;
 use crate::zimage::ZImageEngine;
@@ -23,12 +23,16 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
 
 /// Create an inference engine for the given model, auto-detecting the family.
 ///
-/// Returns the appropriate engine (FluxEngine or SDXLEngine) based on the model's
-/// family from config or manifest.
+/// Returns the appropriate engine (FluxEngine, SDXLEngine, or ZImageEngine) based on
+/// the model's family from config or manifest.
+///
+/// `load_strategy` controls whether components are loaded eagerly (server) or
+/// sequentially (CLI one-shot) to reduce peak memory.
 pub fn create_engine(
     model_name: String,
     paths: ModelPaths,
     config: &Config,
+    load_strategy: LoadStrategy,
 ) -> Result<Box<dyn InferenceEngine>> {
     let family = resolve_family(&model_name, config);
     let model_cfg = config.model_config(&model_name);
@@ -40,7 +44,11 @@ pub fn create_engine(
                 .ok()
                 .or_else(|| config.t5_variant.clone());
             Ok(Box::new(FluxEngine::new(
-                model_name, paths, is_schnell, t5_variant,
+                model_name,
+                paths,
+                is_schnell,
+                t5_variant,
+                load_strategy,
             )))
         }
         "sdxl" => {
@@ -51,6 +59,7 @@ pub fn create_engine(
                 paths,
                 scheduler_name,
                 is_turbo,
+                load_strategy,
             )))
         }
         "z-image" => {
@@ -61,6 +70,7 @@ pub fn create_engine(
                 model_name,
                 paths,
                 qwen3_variant,
+                load_strategy,
             )))
         }
         other => bail!(

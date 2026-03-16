@@ -23,6 +23,7 @@ pub async fn run(
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    eager: bool,
 ) -> Result<()> {
     let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     let piped = is_piped();
@@ -63,7 +64,7 @@ pub async fn run(
     let response = if local {
         // --local: skip server, go straight to local inference
         status!("{} Using local GPU inference", "●".cyan());
-        generate_local(&req, &config, t5_variant, qwen3_variant).await?
+        generate_local(&req, &config, t5_variant, qwen3_variant, eager).await?
     } else {
         // Try remote server first
         let client = match &host {
@@ -93,7 +94,7 @@ pub async fn run(
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
                 status!("{} Using local GPU inference", "●".cyan());
-                generate_local(&req, &config, t5_variant, qwen3_variant).await?
+                generate_local(&req, &config, t5_variant, qwen3_variant, eager).await?
             }
             Err(e) => return Err(e),
         }
@@ -159,10 +160,11 @@ async fn generate_local(
     config: &Config,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
+    eager: bool,
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
-    use mold_inference::ProgressEvent;
+    use mold_inference::{LoadStrategy, ProgressEvent};
 
     let model_name = req.model.clone();
     let (paths, auto_config);
@@ -228,7 +230,19 @@ async fn generate_local(
     if let Some(ref variant) = qwen3_variant_override {
         std::env::set_var("MOLD_QWEN3_VARIANT", variant);
     }
-    let mut engine = mold_inference::create_engine(model_name, paths, effective_config)?;
+    // Determine load strategy: --eager flag or MOLD_EAGER=1 env var → Eager, else Sequential
+    let is_eager = eager || std::env::var("MOLD_EAGER").map_or(false, |v| v == "1");
+    let load_strategy = if is_eager {
+        LoadStrategy::Eager
+    } else {
+        LoadStrategy::Sequential
+    };
+    // Propagate eager flag so preflight_memory_check can see it
+    if is_eager {
+        std::env::set_var("MOLD_EAGER", "1");
+    }
+    let mut engine =
+        mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
 
     // Set up progress channel for UI updates from the blocking inference thread
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
@@ -255,14 +269,24 @@ async fn generate_local(
                 .template("{spinner:.cyan} {msg}")
                 .unwrap(),
         );
-        pb.enable_steady_tick(Duration::from_millis(100));
+        // No steady tick — redraws only on events to avoid flickering with
+        // hf-hub's download bars (which write to stderr independently).
+        pb.tick();
 
+        let mut denoise_bar: Option<ProgressBar> = None;
         while let Some(event) = rx.recv().await {
             match event {
                 ProgressEvent::StageStart { name } => {
+                    if let Some(db) = denoise_bar.take() {
+                        db.finish_and_clear();
+                    }
                     pb.set_message(format!("{}...", name));
+                    pb.tick();
                 }
                 ProgressEvent::StageDone { name, elapsed } => {
+                    if let Some(db) = denoise_bar.take() {
+                        db.finish_and_clear();
+                    }
                     pb.suspend(|| {
                         status!(
                             "  {} {} {}",
@@ -277,7 +301,43 @@ async fn generate_local(
                         status!("  {} {}", "·".dimmed(), message.dimmed());
                     });
                 }
+                ProgressEvent::DenoiseStep {
+                    step,
+                    total,
+                    elapsed,
+                } => {
+                    let db = denoise_bar.get_or_insert_with(|| {
+                        // Hide the spinner while denoise bar is active
+                        pb.disable_steady_tick();
+                        pb.set_message("");
+
+                        let bar = ProgressBar::new(total as u64);
+                        if is_piped() {
+                            bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                        }
+                        bar.set_style(
+                            ProgressStyle::default_bar()
+                                .template(
+                                    "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
+                                )
+                                .unwrap()
+                                .progress_chars("━╸─"),
+                        );
+                        bar.enable_steady_tick(Duration::from_millis(100));
+                        bar
+                    });
+                    let it_s = if elapsed.as_secs_f64() > 0.0 {
+                        1.0 / elapsed.as_secs_f64()
+                    } else {
+                        0.0
+                    };
+                    db.set_message(format!("{:.2} it/s", it_s));
+                    db.set_position(step as u64);
+                }
             }
+        }
+        if let Some(db) = denoise_bar.take() {
+            db.finish_and_clear();
         }
 
         pb.finish_and_clear();
@@ -295,6 +355,7 @@ async fn generate_local(
     _config: &Config,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
+    _eager: bool,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

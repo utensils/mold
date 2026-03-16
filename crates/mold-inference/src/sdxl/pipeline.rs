@@ -4,7 +4,8 @@ use candle_transformers::models::stable_diffusion;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
-use crate::engine::{rand_seed, InferenceEngine};
+use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
+use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent};
 
@@ -29,6 +30,8 @@ pub struct SDXLEngine {
     scheduler_name: String,
     is_turbo: bool,
     on_progress: Option<ProgressCallback>,
+    /// How to load model components (Eager = all at once, Sequential = load-use-drop).
+    load_strategy: LoadStrategy,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -42,6 +45,7 @@ impl SDXLEngine {
         paths: ModelPaths,
         scheduler_name: String,
         is_turbo: bool,
+        load_strategy: LoadStrategy,
     ) -> Self {
         Self {
             loaded: None,
@@ -50,6 +54,7 @@ impl SDXLEngine {
             scheduler_name,
             is_turbo,
             on_progress: None,
+            load_strategy,
         }
     }
 
@@ -78,73 +83,108 @@ impl SDXLEngine {
         });
     }
 
-    /// Load all SDXL model components.
-    pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
-            return Ok(());
-        }
-
-        // Validate SDXL-specific paths
+    /// Validate and return required SDXL paths.
+    fn validate_paths(
+        &self,
+    ) -> Result<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> {
         let clip_encoder = self
             .paths
             .clip_encoder
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SDXL models"))?;
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SDXL models"))?
+            .clone();
         let clip_tokenizer = self
             .paths
             .clip_tokenizer
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SDXL models"))?;
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SDXL models"))?
+            .clone();
         let clip_encoder_2 = self
             .paths
             .clip_encoder_2
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G encoder path required for SDXL models"))?;
+            .ok_or_else(|| anyhow::anyhow!("CLIP-G encoder path required for SDXL models"))?
+            .clone();
         let clip_tokenizer_2 = self
             .paths
             .clip_tokenizer_2
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G tokenizer path required for SDXL models"))?;
+            .ok_or_else(|| anyhow::anyhow!("CLIP-G tokenizer path required for SDXL models"))?
+            .clone();
 
-        // Validate all paths exist
         for (label, path) in [
             ("transformer (UNet)", &self.paths.transformer),
             ("vae", &self.paths.vae),
-            ("clip_encoder (CLIP-L)", clip_encoder),
-            ("clip_tokenizer (CLIP-L)", clip_tokenizer),
-            ("clip_encoder_2 (CLIP-G)", clip_encoder_2),
-            ("clip_tokenizer_2 (CLIP-G)", clip_tokenizer_2),
+            ("clip_encoder (CLIP-L)", &clip_encoder),
+            ("clip_tokenizer (CLIP-L)", &clip_tokenizer),
+            ("clip_encoder_2 (CLIP-G)", &clip_encoder_2),
+            ("clip_tokenizer_2 (CLIP-G)", &clip_tokenizer_2),
         ] {
             if !path.exists() {
                 bail!("{label} file not found: {}", path.display());
             }
         }
 
-        tracing::info!(model = %self.model_name, "loading SDXL model components...");
+        Ok((
+            clip_encoder,
+            clip_tokenizer,
+            clip_encoder_2,
+            clip_tokenizer_2,
+        ))
+    }
 
-        let device = if candle_core::utils::cuda_is_available() {
+    /// Create a GPU device.
+    fn create_device(&self) -> Result<Device> {
+        if candle_core::utils::cuda_is_available() {
             self.info("CUDA detected, using GPU");
-            Device::new_cuda(0)?
+            Ok(Device::new_cuda(0)?)
         } else if candle_core::utils::metal_is_available() {
             self.info("Metal detected, using GPU");
-            Device::new_metal(0)?
+            Ok(Device::new_metal(0)?)
         } else {
             self.info("No GPU detected, using CPU");
-            Device::Cpu
-        };
+            Ok(Device::Cpu)
+        }
+    }
 
+    /// Create the SDXL config.
+    fn sd_config(&self) -> stable_diffusion::StableDiffusionConfig {
+        if self.is_turbo {
+            stable_diffusion::StableDiffusionConfig::sdxl_turbo(None, None, None)
+        } else {
+            stable_diffusion::StableDiffusionConfig::sdxl(None, None, None)
+        }
+    }
+
+    /// Load all SDXL model components (Eager mode).
+    pub fn load(&mut self) -> Result<()> {
+        if self.loaded.is_some() {
+            return Ok(());
+        }
+
+        // Sequential mode defers loading to generate_sequential()
+        if self.load_strategy == LoadStrategy::Sequential {
+            return Ok(());
+        }
+
+        let (clip_encoder, clip_tokenizer, clip_encoder_2, clip_tokenizer_2) =
+            self.validate_paths()?;
+
+        tracing::info!(model = %self.model_name, "loading SDXL model components...");
+
+        let device = self.create_device()?;
         let dtype = if device.is_cuda() || device.is_metal() {
             DType::F16
         } else {
             DType::F32
         };
 
-        // Create SDXL config (sets up UNet, VAE, and CLIP configs)
-        let sd_config = if self.is_turbo {
-            stable_diffusion::StableDiffusionConfig::sdxl_turbo(None, None, None)
-        } else {
-            stable_diffusion::StableDiffusionConfig::sdxl(None, None, None)
-        };
+        let sd_config = self.sd_config();
 
         // Load UNet
         self.stage_start("Loading UNet (GPU)");
@@ -169,7 +209,7 @@ impl SDXLEngine {
         let clip_l_start = Instant::now();
         let clip_l = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
-            clip_encoder,
+            &clip_encoder,
             &device,
             DType::F32,
         )?;
@@ -184,16 +224,16 @@ impl SDXLEngine {
             .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
         let clip_g = stable_diffusion::build_clip_transformer(
             clip2_config,
-            clip_encoder_2,
+            &clip_encoder_2,
             &device,
             DType::F32,
         )?;
         self.stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
 
         // Load tokenizers
-        let tokenizer_l = tokenizers::Tokenizer::from_file(clip_tokenizer)
+        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-        let tokenizer_g = tokenizers::Tokenizer::from_file(clip_tokenizer_2)
+        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
 
         self.loaded = Some(LoadedSDXL {
@@ -231,10 +271,296 @@ impl SDXLEngine {
         let ids = ids.into_iter().map(|i| i as i64).collect::<Vec<_>>();
         Ok(Tensor::new(ids, device)?.unsqueeze(0)?)
     }
+
+    /// Run the denoising loop (shared between eager and sequential).
+    fn denoise_loop(
+        &self,
+        unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
+        text_embeddings: &Tensor,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        latents: &mut Tensor,
+        guidance: f64,
+        steps: u32,
+    ) -> Result<()> {
+        let use_cfg = guidance > 1.0;
+        let mut scheduler = sd_config.build_scheduler(steps as usize)?;
+        let timesteps = scheduler.timesteps().to_vec();
+
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        self.stage_start(&denoise_label);
+        let denoise_start = Instant::now();
+
+        for (step_idx, &t) in timesteps.iter().enumerate() {
+            let step_start = std::time::Instant::now();
+            let latent_input = if use_cfg {
+                Tensor::cat(&[&*latents, &*latents], 0)?
+            } else {
+                latents.clone()
+            };
+
+            let latent_input = scheduler.scale_model_input(latent_input, t)?;
+            let noise_pred = unet.forward(&latent_input, t as f64, text_embeddings)?;
+
+            let noise_pred = if use_cfg {
+                let chunks = noise_pred.chunk(2, 0)?;
+                let noise_pred_uncond = &chunks[0];
+                let noise_pred_cond = &chunks[1];
+                (noise_pred_uncond + ((noise_pred_cond - noise_pred_uncond)? * guidance)?)?
+            } else {
+                noise_pred
+            };
+
+            *latents = scheduler.step(&noise_pred, t, &*latents)?;
+            self.emit(ProgressEvent::DenoiseStep {
+                step: step_idx + 1,
+                total: timesteps.len(),
+                elapsed: step_start.elapsed(),
+            });
+        }
+
+        self.stage_done(&denoise_label, denoise_start.elapsed());
+        Ok(())
+    }
+
+    /// Encode prompt with both CLIP encoders.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_prompt(
+        &self,
+        clip_l: &stable_diffusion::clip::ClipTextTransformer,
+        clip_g: &stable_diffusion::clip::ClipTextTransformer,
+        tokenizer_l: &tokenizers::Tokenizer,
+        tokenizer_g: &tokenizers::Tokenizer,
+        prompt: &str,
+        max_len: usize,
+        device: &Device,
+        dtype: DType,
+        guidance: f64,
+    ) -> Result<Tensor> {
+        let use_cfg = guidance > 1.0;
+
+        self.stage_start("Encoding prompt (CLIP-L)");
+        let encode_l_start = Instant::now();
+        let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
+        let text_emb_l = clip_l.forward(&tokens_l)?;
+        self.stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+
+        self.stage_start("Encoding prompt (CLIP-G)");
+        let encode_g_start = Instant::now();
+        let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
+        let text_emb_g = clip_g.forward(&tokens_g)?;
+        self.stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+
+        let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
+
+        let text_embeddings = if use_cfg {
+            let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
+            let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
+            let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
+            let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
+            let uncond_embeddings = Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
+            Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
+        } else {
+            text_embeddings
+        };
+
+        Ok(text_embeddings.to_dtype(dtype)?)
+    }
+
+    /// Generate an image using sequential loading strategy.
+    ///
+    /// Loads components one at a time and drops them when done:
+    /// 1. Load CLIP-L → encode → drop CLIP-L
+    /// 2. Load CLIP-G → encode → drop CLIP-G
+    /// 3. Load UNet → denoise → drop UNet
+    /// 4. Load VAE → decode → drop VAE
+    fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let (clip_encoder, clip_tokenizer, clip_encoder_2, clip_tokenizer_2) =
+            self.validate_paths()?;
+
+        // Check memory budget
+        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
+            self.info(&warning);
+        }
+
+        let device = self.create_device()?;
+        let dtype = if device.is_cuda() || device.is_metal() {
+            DType::F16
+        } else {
+            DType::F32
+        };
+
+        let sd_config = self.sd_config();
+        let max_len = sd_config.clip.max_position_embeddings;
+
+        let start = Instant::now();
+        let seed = req.seed.unwrap_or_else(rand_seed);
+        device.set_seed(seed)?;
+
+        let width = req.width as usize;
+        let height = req.height as usize;
+        let guidance = req.guidance;
+
+        tracing::info!(
+            prompt = %req.prompt,
+            seed, width, height,
+            steps = req.steps,
+            guidance,
+            "starting sequential SDXL generation"
+        );
+
+        self.info("Using sequential loading (load-use-drop) to minimize peak memory");
+
+        // --- Phase 1: Load both CLIP encoders, encode, then drop ---
+        // SDXL CLIP encoders are small (~1.7GB total) so we load both for encoding,
+        // then drop them together before loading the UNet.
+        if let Some(status) = memory_status_string() {
+            self.info(&status);
+        }
+
+        // Load tokenizers (kept in memory — tiny)
+        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
+            .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
+        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
+            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+
+        // Load CLIP-L
+        self.stage_start("Loading CLIP-L encoder");
+        let clip_l_start = Instant::now();
+        let clip_l = stable_diffusion::build_clip_transformer(
+            &sd_config.clip,
+            &clip_encoder,
+            &device,
+            DType::F32,
+        )?;
+        self.stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+
+        // Load CLIP-G
+        self.stage_start("Loading CLIP-G encoder");
+        let clip_g_start = Instant::now();
+        let clip2_config = sd_config
+            .clip2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
+        let clip_g = stable_diffusion::build_clip_transformer(
+            clip2_config,
+            &clip_encoder_2,
+            &device,
+            DType::F32,
+        )?;
+        self.stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+
+        // Encode prompt
+        let text_embeddings = self.encode_prompt(
+            &clip_l,
+            &clip_g,
+            &tokenizer_l,
+            &tokenizer_g,
+            &req.prompt,
+            max_len,
+            &device,
+            dtype,
+            guidance,
+        )?;
+
+        // Drop CLIP encoders to free memory
+        drop(clip_l);
+        drop(clip_g);
+        self.info("Freed CLIP-L and CLIP-G encoders");
+        tracing::info!("CLIP encoders dropped (sequential mode)");
+
+        // --- Phase 2: Load UNet and denoise ---
+        let unet_size = std::fs::metadata(&self.paths.transformer)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        preflight_memory_check("UNet", unet_size)?;
+        if let Some(status) = memory_status_string() {
+            self.info(&status);
+        }
+
+        self.stage_start("Loading UNet (GPU)");
+        let unet_start = Instant::now();
+        let unet = sd_config.build_unet(&self.paths.transformer, &device, 4, false, dtype)?;
+        self.stage_done("Loading UNet (GPU)", unet_start.elapsed());
+
+        let latent_h = height / 8;
+        let latent_w = width / 8;
+        let scheduler = sd_config.build_scheduler(req.steps as usize)?;
+        let init_noise_sigma = scheduler.init_noise_sigma();
+        let mut latents =
+            (Tensor::randn(0f32, 1f32, &[1, 4, latent_h, latent_w], &device)? * init_noise_sigma)?;
+        latents = latents.to_dtype(dtype)?;
+
+        self.denoise_loop(
+            &unet,
+            &text_embeddings,
+            &sd_config,
+            &mut latents,
+            guidance,
+            req.steps,
+        )?;
+
+        // Drop UNet to free memory for VAE decode
+        drop(unet);
+        drop(text_embeddings);
+        self.info("Freed UNet");
+        tracing::info!("UNet dropped (sequential mode)");
+
+        // --- Phase 3: Load VAE and decode ---
+        self.stage_start("Loading VAE (GPU)");
+        let vae_start = Instant::now();
+        let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+        self.stage_done("Loading VAE (GPU)", vae_start.elapsed());
+
+        self.stage_start("VAE decode");
+        let vae_decode_start = Instant::now();
+
+        let vae_scale = if self.is_turbo {
+            VAE_SCALE_TURBO
+        } else {
+            VAE_SCALE_STANDARD
+        };
+        let latents = (latents / vae_scale)?;
+        let img = vae.decode(&latents.to_dtype(dtype)?)?;
+
+        let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
+        let img = (img * 255.)?.to_dtype(DType::U8)?;
+        let img = img.squeeze(0)?;
+
+        self.stage_done("VAE decode", vae_decode_start.elapsed());
+
+        // VAE dropped here
+        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        tracing::info!(
+            generation_time_ms,
+            seed,
+            "sequential SDXL generation complete"
+        );
+
+        Ok(GenerateResponse {
+            images: vec![ImageData {
+                data: image_bytes,
+                format: req.output_format,
+                width: req.width,
+                height: req.height,
+                index: 0,
+            }],
+            generation_time_ms,
+            model: req.model.clone(),
+            seed_used: seed,
+        })
+    }
 }
 
 impl InferenceEngine for SDXLEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // Sequential mode: load-use-drop each component
+        if self.load_strategy == LoadStrategy::Sequential {
+            return self.generate_sequential(req);
+        }
+
+        // Eager mode: use pre-loaded components
         let loaded = self
             .loaded
             .as_ref()
@@ -247,7 +573,6 @@ impl InferenceEngine for SDXLEngine {
         let width = req.width as usize;
         let height = req.height as usize;
         let guidance = req.guidance;
-        let use_cfg = guidance > 1.0;
 
         tracing::info!(
             prompt = %req.prompt,
@@ -260,44 +585,22 @@ impl InferenceEngine for SDXLEngine {
 
         // 1. Encode prompt with both CLIP encoders
         let max_len = loaded.sd_config.clip.max_position_embeddings;
-
-        self.stage_start("Encoding prompt (CLIP-L)");
-        let encode_l_start = Instant::now();
-        let tokens_l = Self::tokenize(&loaded.tokenizer_l, &req.prompt, max_len, &loaded.device)?;
-        let text_emb_l = loaded.clip_l.forward(&tokens_l)?;
-        self.stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
-
-        self.stage_start("Encoding prompt (CLIP-G)");
-        let encode_g_start = Instant::now();
-        let tokens_g = Self::tokenize(&loaded.tokenizer_g, &req.prompt, max_len, &loaded.device)?;
-        let text_emb_g = loaded.clip_g.forward(&tokens_g)?;
-        self.stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
-
-        // Concatenate CLIP-L (768) + CLIP-G (1280) → 2048-dim
-        let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
-
-        // 2. If using classifier-free guidance, also encode empty prompt
-        let text_embeddings = if use_cfg {
-            let uncond_tokens_l = Self::tokenize(&loaded.tokenizer_l, "", max_len, &loaded.device)?;
-            let uncond_emb_l = loaded.clip_l.forward(&uncond_tokens_l)?;
-            let uncond_tokens_g = Self::tokenize(&loaded.tokenizer_g, "", max_len, &loaded.device)?;
-            let uncond_emb_g = loaded.clip_g.forward(&uncond_tokens_g)?;
-            let uncond_embeddings = Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
-            // [uncond, cond] → batch=2
-            Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
-        } else {
-            text_embeddings
-        };
-
-        let text_embeddings = text_embeddings.to_dtype(loaded.dtype)?;
+        let text_embeddings = self.encode_prompt(
+            &loaded.clip_l,
+            &loaded.clip_g,
+            &loaded.tokenizer_l,
+            &loaded.tokenizer_g,
+            &req.prompt,
+            max_len,
+            &loaded.device,
+            loaded.dtype,
+            guidance,
+        )?;
 
         // 3. Build scheduler
-        let mut scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
-        let timesteps = scheduler.timesteps().to_vec();
-
-        // 4. Generate initial noise
         let latent_h = height / 8;
         let latent_w = width / 8;
+        let scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
         let init_noise_sigma = scheduler.init_noise_sigma();
         let mut latents =
             (Tensor::randn(0f32, 1f32, &[1, 4, latent_h, latent_w], &loaded.device)?
@@ -305,36 +608,14 @@ impl InferenceEngine for SDXLEngine {
         latents = latents.to_dtype(loaded.dtype)?;
 
         // 5. Denoising loop
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
-        self.stage_start(&denoise_label);
-        let denoise_start = Instant::now();
-
-        for &t in &timesteps {
-            let latent_input = if use_cfg {
-                Tensor::cat(&[&latents, &latents], 0)?
-            } else {
-                latents.clone()
-            };
-
-            let latent_input = scheduler.scale_model_input(latent_input, t)?;
-            let noise_pred = loaded
-                .unet
-                .forward(&latent_input, t as f64, &text_embeddings)?;
-
-            let noise_pred = if use_cfg {
-                let chunks = noise_pred.chunk(2, 0)?;
-                let noise_pred_uncond = &chunks[0];
-                let noise_pred_cond = &chunks[1];
-                // CFG: uncond + guidance * (cond - uncond)
-                (noise_pred_uncond + ((noise_pred_cond - noise_pred_uncond)? * guidance)?)?
-            } else {
-                noise_pred
-            };
-
-            latents = scheduler.step(&noise_pred, t, &latents)?;
-        }
-
-        self.stage_done(&denoise_label, denoise_start.elapsed());
+        self.denoise_loop(
+            &loaded.unet,
+            &text_embeddings,
+            &loaded.sd_config,
+            &mut latents,
+            guidance,
+            req.steps,
+        )?;
 
         // 6. VAE decode
         self.stage_start("VAE decode");
@@ -380,7 +661,8 @@ impl InferenceEngine for SDXLEngine {
     }
 
     fn is_loaded(&self) -> bool {
-        self.loaded.is_some()
+        // Sequential mode is always "ready" — it loads on demand
+        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
     }
 
     fn load(&mut self) -> Result<()> {

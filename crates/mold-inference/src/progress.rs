@@ -9,6 +9,12 @@ pub enum ProgressEvent {
     StageDone { name: String, elapsed: Duration },
     /// Informational message (e.g. "CUDA detected, using GPU")
     Info { message: String },
+    /// A single denoising step completed.
+    DenoiseStep {
+        step: usize,
+        total: usize,
+        elapsed: Duration,
+    },
 }
 
 /// Callback type for receiving progress events.

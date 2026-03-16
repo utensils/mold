@@ -51,13 +51,18 @@ async fn generate(
                     ),
                 )
             })?;
-            *engine = mold_inference::create_engine(req.model.clone(), paths, &state.config)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("failed to create engine for {}: {e}", req.model),
-                    )
-                })?;
+            *engine = mold_inference::create_engine(
+                req.model.clone(),
+                paths,
+                &state.config,
+                mold_inference::LoadStrategy::Eager,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to create engine for {}: {e}", req.model),
+                )
+            })?;
         }
 
         // Load on first request (or after hot-swap)
@@ -210,13 +215,18 @@ async fn load_model(
     })?;
 
     let mut engine = state.engine.lock().await;
-    *engine =
-        mold_inference::create_engine(body.model.clone(), paths, &state.config).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to create engine for {}: {e}", body.model),
-            )
-        })?;
+    *engine = mold_inference::create_engine(
+        body.model.clone(),
+        paths,
+        &state.config,
+        mold_inference::LoadStrategy::Eager,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create engine for {}: {e}", body.model),
+        )
+    })?;
     engine.load().map_err(|e| {
         tracing::error!("model load failed: {e:#}");
         (

@@ -61,6 +61,7 @@ pub async fn run(
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    eager: bool,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
@@ -88,6 +89,7 @@ pub async fn run(
         local,
         t5_variant,
         qwen3_variant,
+        eager,
     )
     .await
 }

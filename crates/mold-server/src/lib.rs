@@ -54,7 +54,12 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
         info!(text_tok = %text_tok.display());
     }
 
-    let engine = mold_inference::create_engine(model_name, paths, &config)?;
+    let engine = mold_inference::create_engine(
+        model_name,
+        paths,
+        &config,
+        mold_inference::LoadStrategy::Eager,
+    )?;
     let state = state::AppState::new(engine, config);
     let app = routes::create_router(state).layer(CorsLayer::permissive());
 

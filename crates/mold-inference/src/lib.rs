@@ -10,7 +10,7 @@ pub mod progress;
 pub mod sdxl;
 pub mod zimage;
 
-pub use engine::InferenceEngine;
+pub use engine::{InferenceEngine, LoadStrategy};
 pub use error::InferenceError;
 pub use factory::create_engine;
 pub use flux::FluxEngine;
