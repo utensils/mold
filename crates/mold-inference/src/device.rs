@@ -13,6 +13,17 @@ pub const T5_VRAM_THRESHOLD: u64 = 16_000_000_000;
 /// Minimum free VRAM (bytes) required to place CLIP-L on GPU: ~246MB model + 500MB headroom.
 pub const CLIP_VRAM_THRESHOLD: u64 = 800_000_000;
 
+/// Compute VRAM threshold for a Qwen3 text encoder of a given size.
+/// Uses the same headroom formula as T5 (model size + 2GB activations).
+pub fn qwen3_vram_threshold(model_size_bytes: u64) -> u64 {
+    model_size_bytes + T5_ACTIVATION_HEADROOM
+}
+
+/// Minimum free VRAM for BF16 Qwen3-4B on GPU with drop-and-reload.
+/// 8.2GB model + 2GB activation headroom = 10.2GB.
+/// With drop-and-reload, the encoder is temporary — loaded for encoding, then dropped.
+pub const QWEN3_FP16_VRAM_THRESHOLD: u64 = 10_200_000_000;
+
 /// Query free VRAM in bytes from the current CUDA context.
 #[cfg(feature = "cuda")]
 pub(crate) fn free_vram_bytes() -> Option<u64> {
@@ -35,7 +46,12 @@ pub(crate) fn fmt_gb(bytes: u64) -> String {
 /// Determine whether a component should be placed on GPU given free VRAM.
 /// On Metal (Apple Silicon), unified memory means all components always fit on GPU.
 /// On CUDA, checks that free discrete VRAM exceeds the threshold.
-pub(crate) fn should_use_gpu(is_cuda: bool, is_metal: bool, free_vram: u64, threshold: u64) -> bool {
+pub(crate) fn should_use_gpu(
+    is_cuda: bool,
+    is_metal: bool,
+    free_vram: u64,
+    threshold: u64,
+) -> bool {
     if is_metal {
         return true;
     }
@@ -81,19 +97,34 @@ mod tests {
     #[test]
     fn t5_on_gpu_when_plenty_of_vram() {
         // Q4 transformer (7GB) + VAE (0.3GB) on 24GB card → ~16.7GB free
-        assert!(should_use_gpu(true, false, 16_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(should_use_gpu(
+            true,
+            false,
+            16_700_000_000,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn t5_on_cpu_when_q6_on_24gb() {
         // Q6 transformer (9.9GB) + VAE (0.3GB) on 24GB card → ~14.6GB free
-        assert!(!should_use_gpu(true, false, 14_600_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(
+            true,
+            false,
+            14_600_000_000,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn t5_on_cpu_when_q8_on_24gb() {
         // Q8 transformer (12GB) + VAE (0.3GB) on 24GB card → ~11.7GB free
-        assert!(!should_use_gpu(true, false, 11_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(
+            true,
+            false,
+            11_700_000_000,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
@@ -105,37 +136,67 @@ mod tests {
     #[test]
     fn t5_on_cpu_when_exactly_at_threshold() {
         // Exactly at threshold should NOT place on GPU (we need strictly more)
-        assert!(!should_use_gpu(true, false, T5_VRAM_THRESHOLD, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(
+            true,
+            false,
+            T5_VRAM_THRESHOLD,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn t5_on_cpu_when_no_gpu() {
         // Even with plenty of "free memory", CPU-only devices always use CPU
-        assert!(!should_use_gpu(false, false, 100_000_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(
+            false,
+            false,
+            100_000_000_000,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn t5_on_gpu_on_48gb_card() {
         // Q8 transformer (12GB) + VAE (0.3GB) on 48GB card → ~35.7GB free
-        assert!(should_use_gpu(true, false, 35_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(should_use_gpu(
+            true,
+            false,
+            35_700_000_000,
+            T5_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn clip_on_gpu_when_vram_available() {
         // After Q4 transformer + T5 on GPU: ~7.5GB free → CLIP easily fits
-        assert!(should_use_gpu(true, false, 7_500_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(should_use_gpu(
+            true,
+            false,
+            7_500_000_000,
+            CLIP_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn clip_on_gpu_with_minimal_vram() {
         // Just above 800MB threshold
-        assert!(should_use_gpu(true, false, 900_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(should_use_gpu(
+            true,
+            false,
+            900_000_000,
+            CLIP_VRAM_THRESHOLD
+        ));
     }
 
     #[test]
     fn clip_on_cpu_when_vram_tight() {
         // Only 500MB free — below CLIP threshold
-        assert!(!should_use_gpu(true, false, 500_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(
+            true,
+            false,
+            500_000_000,
+            CLIP_VRAM_THRESHOLD
+        ));
     }
 
     // --- Metal (Apple Silicon unified memory) — always GPU ---
@@ -205,5 +266,54 @@ mod tests {
         // Q3 T5 is ~2.1GB, threshold should be ~4.1GB
         let threshold = t5_vram_threshold(2_100_000_000);
         assert_eq!(threshold, 4_100_000_000);
+    }
+
+    // --- Qwen3 VRAM threshold tests ---
+
+    #[test]
+    fn qwen3_fp16_threshold_with_drop_and_reload() {
+        // BF16 Qwen3 is 8.2GB, threshold = 10.2GB (includes 2GB headroom)
+        assert_eq!(QWEN3_FP16_VRAM_THRESHOLD, 10_200_000_000);
+        // Q8 transformer (6.6GB) on 24GB → ~17GB free → fits!
+        assert!(should_use_gpu(
+            true,
+            false,
+            17_000_000_000,
+            QWEN3_FP16_VRAM_THRESHOLD
+        ));
+        // Q4 transformer (3.9GB) on 24GB → ~19GB free → fits!
+        assert!(should_use_gpu(
+            true,
+            false,
+            19_000_000_000,
+            QWEN3_FP16_VRAM_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn qwen3_threshold_for_q8() {
+        let threshold = qwen3_vram_threshold(4_280_000_000);
+        assert_eq!(threshold, 6_280_000_000);
+        // Should fit when Q8 transformer leaves ~17GB free on 24GB
+        assert!(should_use_gpu(true, false, 17_000_000_000, threshold));
+    }
+
+    #[test]
+    fn qwen3_threshold_for_q3() {
+        let threshold = qwen3_vram_threshold(2_080_000_000);
+        assert_eq!(threshold, 4_080_000_000);
+        // Should fit even in tight VRAM situations
+        assert!(should_use_gpu(true, false, 5_000_000_000, threshold));
+    }
+
+    #[test]
+    fn qwen3_fp16_does_not_fit_with_bf16_transformer() {
+        // BF16 transformer (24.6GB) on 24GB → ~0GB free → doesn't fit
+        assert!(!should_use_gpu(
+            true,
+            false,
+            400_000_000,
+            QWEN3_FP16_VRAM_THRESHOLD
+        ));
     }
 }

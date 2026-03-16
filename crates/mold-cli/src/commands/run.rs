@@ -60,6 +60,7 @@ pub async fn run(
     format: String,
     local: bool,
     t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
@@ -73,8 +74,20 @@ pub async fn run(
     })?;
 
     generate::run(
-        &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format, local,
+        &prompt,
+        &model,
+        output,
+        width,
+        height,
+        steps,
+        guidance,
+        seed,
+        batch,
+        host,
+        &format,
+        local,
         t5_variant,
+        qwen3_variant,
     )
     .await
 }

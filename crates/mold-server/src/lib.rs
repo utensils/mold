@@ -32,16 +32,26 @@ pub async fn run_server(bind: &str, port: u16, _models_dir: PathBuf) -> Result<(
     if let Some(t5) = &paths.t5_encoder {
         info!(t5 = %t5.display());
     }
-    info!(clip = %paths.clip_encoder.display());
+    if let Some(clip) = &paths.clip_encoder {
+        info!(clip = %clip.display());
+    }
     if let Some(t5_tok) = &paths.t5_tokenizer {
         info!(t5_tok = %t5_tok.display());
     }
-    info!(clip_tok = %paths.clip_tokenizer.display());
+    if let Some(clip_tok) = &paths.clip_tokenizer {
+        info!(clip_tok = %clip_tok.display());
+    }
     if let Some(clip2) = &paths.clip_encoder_2 {
         info!(clip2 = %clip2.display());
     }
     if let Some(clip2_tok) = &paths.clip_tokenizer_2 {
         info!(clip2_tok = %clip2_tok.display());
+    }
+    for (i, te) in paths.text_encoder_files.iter().enumerate() {
+        info!(text_encoder_shard = i, path = %te.display());
+    }
+    if let Some(text_tok) = &paths.text_tokenizer {
+        info!(text_tok = %text_tok.display());
     }
 
     let engine = mold_inference::create_engine(model_name, paths, &config)?;

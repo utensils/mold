@@ -7,12 +7,14 @@ fn format_family_padded(family: &str, width: usize) -> String {
     let label = match family {
         "flux" => "FLUX.1",
         "sdxl" => "SDXL",
+        "z-image" => "Z-Image",
         other => other,
     };
     let padded = format!("{:<width$}", label, width = width);
     match family {
         "flux" => padded.magenta().to_string(),
         "sdxl" => padded.yellow().to_string(),
+        "z-image" => padded.cyan().to_string(),
         _ => padded,
     }
 }

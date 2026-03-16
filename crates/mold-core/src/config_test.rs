@@ -138,7 +138,7 @@ is_schnell = false
             "/tmp/t5.safetensors"
         );
         assert_eq!(
-            paths.clip_encoder.to_str().unwrap(),
+            paths.clip_encoder.as_ref().unwrap().to_str().unwrap(),
             "/tmp/clip.safetensors"
         );
         assert_eq!(
@@ -146,7 +146,7 @@ is_schnell = false
             "/tmp/t5.tokenizer.json"
         );
         assert_eq!(
-            paths.clip_tokenizer.to_str().unwrap(),
+            paths.clip_tokenizer.as_ref().unwrap().to_str().unwrap(),
             "/tmp/clip.tokenizer.json"
         );
     }

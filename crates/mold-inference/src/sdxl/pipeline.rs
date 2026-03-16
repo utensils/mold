@@ -85,6 +85,16 @@ impl SDXLEngine {
         }
 
         // Validate SDXL-specific paths
+        let clip_encoder = self
+            .paths
+            .clip_encoder
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SDXL models"))?;
+        let clip_tokenizer = self
+            .paths
+            .clip_tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SDXL models"))?;
         let clip_encoder_2 = self
             .paths
             .clip_encoder_2
@@ -100,8 +110,8 @@ impl SDXLEngine {
         for (label, path) in [
             ("transformer (UNet)", &self.paths.transformer),
             ("vae", &self.paths.vae),
-            ("clip_encoder (CLIP-L)", &self.paths.clip_encoder),
-            ("clip_tokenizer (CLIP-L)", &self.paths.clip_tokenizer),
+            ("clip_encoder (CLIP-L)", clip_encoder),
+            ("clip_tokenizer (CLIP-L)", clip_tokenizer),
             ("clip_encoder_2 (CLIP-G)", clip_encoder_2),
             ("clip_tokenizer_2 (CLIP-G)", clip_tokenizer_2),
         ] {
@@ -159,7 +169,7 @@ impl SDXLEngine {
         let clip_l_start = Instant::now();
         let clip_l = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
-            &self.paths.clip_encoder,
+            clip_encoder,
             &device,
             DType::F32,
         )?;
@@ -181,7 +191,7 @@ impl SDXLEngine {
         self.stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
 
         // Load tokenizers
-        let tokenizer_l = tokenizers::Tokenizer::from_file(&self.paths.clip_tokenizer)
+        let tokenizer_l = tokenizers::Tokenizer::from_file(clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
         let tokenizer_g = tokenizers::Tokenizer::from_file(clip_tokenizer_2)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;

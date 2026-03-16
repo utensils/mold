@@ -3,12 +3,14 @@ use candle_core::Tensor;
 use candle_transformers::models::flux;
 
 /// BF16 or quantized (GGUF) FLUX transformer.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum FluxTransformer {
     BF16(flux::model::Flux),
     Quantized(flux::quantized_model::Flux),
 }
 
 impl FluxTransformer {
+    #[allow(clippy::too_many_arguments)]
     pub fn denoise(
         &self,
         img: &Tensor,

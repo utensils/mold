@@ -300,14 +300,28 @@ impl FluxEngine {
             .ok_or_else(|| anyhow::anyhow!("T5 tokenizer path required for FLUX models"))?
             .clone();
 
+        // Validate CLIP paths are present (required for FLUX)
+        let clip_encoder_path = self
+            .paths
+            .clip_encoder
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?
+            .clone();
+        let clip_tokenizer_path = self
+            .paths
+            .clip_tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CLIP tokenizer path required for FLUX models"))?
+            .clone();
+
         // Validate all paths exist before attempting unsafe mmap
         for (label, path) in [
             ("transformer", &self.paths.transformer),
             ("vae", &self.paths.vae),
             ("t5_encoder", &t5_encoder_path),
-            ("clip_encoder", &self.paths.clip_encoder),
+            ("clip_encoder", &clip_encoder_path),
             ("t5_tokenizer", &t5_tokenizer_path),
-            ("clip_tokenizer", &self.paths.clip_tokenizer),
+            ("clip_tokenizer", &clip_tokenizer_path),
         ] {
             if !path.exists() {
                 bail!("{label} file not found: {}", path.display());
@@ -427,7 +441,12 @@ impl FluxEngine {
 
         // Re-check VRAM after T5 (it may have consumed GPU memory)
         let free_after_t5 = free_vram_bytes().unwrap_or(0);
-        let clip_on_gpu = should_use_gpu(device.is_cuda(), device.is_metal(), free_after_t5, CLIP_VRAM_THRESHOLD);
+        let clip_on_gpu = should_use_gpu(
+            device.is_cuda(),
+            device.is_metal(),
+            free_after_t5,
+            CLIP_VRAM_THRESHOLD,
+        );
         let clip_device = if clip_on_gpu { &device } else { &cpu };
         let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
         let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
@@ -437,13 +456,13 @@ impl FluxEngine {
         self.stage_start(&clip_stage_label);
         let clip_stage = Instant::now();
         tracing::info!(
-            path = %self.paths.clip_encoder.display(),
+            path = %clip_encoder_path.display(),
             device = clip_device_label,
             "loading CLIP encoder..."
         );
         let clip = encoders::clip::ClipEncoder::load(
-            &self.paths.clip_encoder,
-            &self.paths.clip_tokenizer,
+            &clip_encoder_path,
+            &clip_tokenizer_path,
             clip_device,
             clip_dtype,
         )?;
@@ -495,7 +514,11 @@ impl InferenceEngine for FluxEngine {
             .map(|l| l.t5_encoder_path.clone())
             .or_else(|| self.paths.t5_encoder.clone())
             .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for FLUX models"))?;
-        let clip_encoder_path = self.paths.clip_encoder.clone();
+        let clip_encoder_path = self
+            .paths
+            .clip_encoder
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?;
 
         let loaded = self
             .loaded

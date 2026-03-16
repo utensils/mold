@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::{
     find_manifest, resolve_model_name, ModelComponent, SHARED_COMPONENTS_GB,
-    SHARED_SDXL_COMPONENTS_GB,
+    SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
 };
 use mold_core::Config;
 
@@ -10,6 +10,7 @@ fn format_family(family: &str) -> String {
     match family {
         "flux" => "FLUX.1".magenta().to_string(),
         "sdxl" => "SDXL".yellow().to_string(),
+        "z-image" => "Z-Image".cyan().to_string(),
         other => other.to_uppercase(),
     }
 }
@@ -17,6 +18,7 @@ fn format_family(family: &str) -> String {
 fn component_label(component: &ModelComponent) -> &'static str {
     match component {
         ModelComponent::Transformer => "Transformer",
+        ModelComponent::TransformerShard => "Transformer Shard",
         ModelComponent::Vae => "VAE",
         ModelComponent::T5Encoder => "T5 Encoder",
         ModelComponent::ClipEncoder => "CLIP-L Encoder",
@@ -24,6 +26,8 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::ClipTokenizer => "CLIP-L Tokenizer",
         ModelComponent::ClipEncoder2 => "CLIP-G Encoder",
         ModelComponent::ClipTokenizer2 => "CLIP-G Tokenizer",
+        ModelComponent::TextEncoder => "Text Encoder",
+        ModelComponent::TextTokenizer => "Text Tokenizer",
     }
 }
 
@@ -56,6 +60,7 @@ pub fn run(name: &str) -> Result<()> {
         // Size info
         let shared_gb = match m.family.as_str() {
             "sdxl" => SHARED_SDXL_COMPONENTS_GB,
+            "z-image" => SHARED_ZIMAGE_COMPONENTS_GB,
             _ => SHARED_COMPONENTS_GB,
         };
         println!(
@@ -129,9 +134,9 @@ pub fn run(name: &str) -> Result<()> {
         );
     }
 
-    // Installation status
+    // Installation status + local file paths
     println!();
-    if model_config.is_some() {
+    if let Some(mcfg) = model_config {
         println!(
             "  {:<16} {}",
             "Status:".dimmed(),
@@ -139,6 +144,64 @@ pub fn run(name: &str) -> Result<()> {
         );
         let config_path = Config::config_path();
         println!("  {:<16} {}", "Config:".dimmed(), config_path.display());
+
+        // Show local file paths
+        println!();
+        println!("  {}", "Local Files".bold());
+        let mut has_files = false;
+        if let Some(ref p) = mcfg.transformer {
+            println!("  {:<20} {}", "Transformer:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref shards) = mcfg.transformer_shards {
+            for (i, p) in shards.iter().enumerate() {
+                let label = format!("Xformer Shard {}:", i + 1);
+                println!("  {:<20} {}", label.dimmed(), p);
+            }
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.vae {
+            println!("  {:<20} {}", "VAE:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.t5_encoder {
+            println!("  {:<20} {}", "T5 Encoder:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.clip_encoder {
+            println!("  {:<20} {}", "CLIP-L Encoder:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.t5_tokenizer {
+            println!("  {:<20} {}", "T5 Tokenizer:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.clip_tokenizer {
+            println!("  {:<20} {}", "CLIP-L Tokenizer:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.clip_encoder_2 {
+            println!("  {:<20} {}", "CLIP-G Encoder:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.clip_tokenizer_2 {
+            println!("  {:<20} {}", "CLIP-G Tokenizer:".dimmed(), p);
+            has_files = true;
+        }
+        if let Some(ref files) = mcfg.text_encoder_files {
+            for (i, p) in files.iter().enumerate() {
+                let label = format!("Text Enc Shard {}:", i + 1);
+                println!("  {:<20} {}", label.dimmed(), p);
+            }
+            has_files = true;
+        }
+        if let Some(ref p) = mcfg.text_tokenizer {
+            println!("  {:<20} {}", "Text Tokenizer:".dimmed(), p);
+            has_files = true;
+        }
+        if !has_files {
+            println!("  {}", "(no paths configured)".dimmed());
+        }
     } else {
         println!(
             "  {:<16} {} — run {} to download",
@@ -159,6 +222,7 @@ mod tests {
     fn component_labels_are_all_nonempty() {
         let components = [
             ModelComponent::Transformer,
+            ModelComponent::TransformerShard,
             ModelComponent::Vae,
             ModelComponent::T5Encoder,
             ModelComponent::ClipEncoder,
@@ -166,6 +230,8 @@ mod tests {
             ModelComponent::ClipTokenizer,
             ModelComponent::ClipEncoder2,
             ModelComponent::ClipTokenizer2,
+            ModelComponent::TextEncoder,
+            ModelComponent::TextTokenizer,
         ];
         for c in &components {
             assert!(!component_label(c).is_empty());

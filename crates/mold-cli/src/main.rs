@@ -73,6 +73,10 @@ enum Commands {
         /// T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3
         #[arg(long)]
         t5_variant: Option<String>,
+
+        /// Qwen3 text encoder variant (Z-Image): auto (default), bf16, q8, q6, iq4, q3
+        #[arg(long)]
+        qwen3_variant: Option<String>,
     },
 
     /// Start the inference server
@@ -150,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
             format,
             local,
             t5_variant,
+            qwen3_variant,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -165,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
                 format,
                 local,
                 t5_variant,
+                qwen3_variant,
             )
             .await?;
         }

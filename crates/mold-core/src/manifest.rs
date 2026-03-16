@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
     Transformer,
+    TransformerShard, // One shard of a multi-file transformer (Z-Image BF16)
     Vae,
     T5Encoder,
     ClipEncoder,
@@ -12,6 +13,8 @@ pub enum ModelComponent {
     ClipTokenizer,
     ClipEncoder2,   // CLIP-G / OpenCLIP (SDXL)
     ClipTokenizer2, // CLIP-G tokenizer (SDXL)
+    TextEncoder,    // Generic text encoder shard (Qwen3 for Z-Image)
+    TextTokenizer,  // Generic text encoder tokenizer
 }
 
 #[derive(Debug, Clone)]
@@ -49,23 +52,55 @@ impl ModelManifest {
     pub fn to_model_config(&self, paths: &ModelPaths) -> ModelConfig {
         ModelConfig {
             transformer: Some(paths.transformer.to_string_lossy().to_string()),
+            transformer_shards: if paths.transformer_shards.is_empty() {
+                None
+            } else {
+                Some(
+                    paths
+                        .transformer_shards
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect(),
+                )
+            },
             vae: Some(paths.vae.to_string_lossy().to_string()),
             t5_encoder: paths
                 .t5_encoder
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            clip_encoder: Some(paths.clip_encoder.to_string_lossy().to_string()),
+            clip_encoder: paths
+                .clip_encoder
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             t5_tokenizer: paths
                 .t5_tokenizer
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            clip_tokenizer: Some(paths.clip_tokenizer.to_string_lossy().to_string()),
+            clip_tokenizer: paths
+                .clip_tokenizer
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             clip_encoder_2: paths
                 .clip_encoder_2
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             clip_tokenizer_2: paths
                 .clip_tokenizer_2
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            text_encoder_files: if paths.text_encoder_files.is_empty() {
+                None
+            } else {
+                Some(
+                    paths
+                        .text_encoder_files
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect(),
+                )
+            },
+            text_tokenizer: paths
+                .text_tokenizer
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             default_steps: Some(self.defaults.steps),
@@ -353,6 +388,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
         },
     ];
     manifests.extend(sdxl_manifests());
+    manifests.extend(zimage_manifests());
     manifests
 }
 
@@ -558,6 +594,179 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+/// Shared Z-Image component files (Qwen3 text encoder, VAE, tokenizer) — identical across all Z-Image models.
+fn shared_zimage_files() -> Vec<ModelFile> {
+    vec![
+        // Qwen3 text encoder (3 shards)
+        ModelFile {
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00003.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 3_960_000_000, // ~3.96GB
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00003.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 3_990_000_000, // ~3.99GB
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00003.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 99_600_000, // ~99.6MB
+            gated: false,
+        },
+        // VAE
+        ModelFile {
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 168_000_000, // ~168MB
+            gated: false,
+        },
+        // Qwen3 tokenizer
+        ModelFile {
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 11_400_000, // ~11.4MB
+            gated: false,
+        },
+    ]
+}
+
+/// Size of shared Z-Image components (Qwen3 text encoder + VAE + tokenizer) in GB.
+pub const SHARED_ZIMAGE_COMPONENTS_GB: f32 = 8.2;
+
+/// All known Z-Image model manifests.
+fn zimage_manifests() -> Vec<ModelManifest> {
+    vec![
+        // BF16 full precision
+        ModelManifest {
+            name: "z-image-turbo:bf16".to_string(),
+            family: "z-image".to_string(),
+            description: "Z-Image Turbo BF16 — 9-step, Alibaba flow-matching".to_string(),
+            size_gb: 24.6,
+            files: {
+                let mut files = shared_zimage_files();
+                // Transformer shards (3 files)
+                files.push(ModelFile {
+                    hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00003.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_970_000_000, // ~9.97GB
+                    gated: false,
+                });
+                files.push(ModelFile {
+                    hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00003.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_970_000_000, // ~9.97GB
+                    gated: false,
+                });
+                files.push(ModelFile {
+                    hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00003-of-00003.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 4_670_000_000, // ~4.67GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 9,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("flow_match_euler"),
+            },
+        },
+        // GGUF quantized variants (transformer only; shared components are always BF16)
+        ModelManifest {
+            name: "z-image-turbo:q8".to_string(),
+            family: "z-image".to_string(),
+            description: "Z-Image Turbo Q8 — 9-step, quantized transformer".to_string(),
+            size_gb: 6.58,
+            files: {
+                let mut files = shared_zimage_files();
+                files.push(ModelFile {
+                    hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
+                    hf_filename: "z_image_turbo-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 6_580_000_000, // ~6.58GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 9,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("flow_match_euler"),
+            },
+        },
+        ModelManifest {
+            name: "z-image-turbo:q6".to_string(),
+            family: "z-image".to_string(),
+            description: "Z-Image Turbo Q6 — 9-step, best quality/size trade-off".to_string(),
+            size_gb: 5.26,
+            files: {
+                let mut files = shared_zimage_files();
+                files.push(ModelFile {
+                    hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
+                    hf_filename: "z_image_turbo-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_260_000_000, // ~5.26GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 9,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("flow_match_euler"),
+            },
+        },
+        ModelManifest {
+            name: "z-image-turbo:q4".to_string(),
+            family: "z-image".to_string(),
+            description: "Z-Image Turbo Q4 — 9-step, smallest footprint".to_string(),
+            size_gb: 3.86,
+            files: {
+                let mut files = shared_zimage_files();
+                files.push(ModelFile {
+                    hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
+                    hf_filename: "z_image_turbo-Q4_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 3_860_000_000, // ~3.86GB
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 9,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("flow_match_euler"),
+            },
+        },
+    ]
+}
+
 /// Resolve a user-provided model name to its canonical `name:tag` form.
 ///
 /// - `flux-schnell` → `flux-schnell:q8` (FLUX default tag)
@@ -578,7 +787,7 @@ pub fn resolve_model_name(input: &str) -> String {
             return format!("{base}:{suffix}");
         }
     }
-    // Try :q8 first (FLUX convention), then :fp16 (SDXL convention)
+    // Try :q8 first (FLUX convention), then :fp16 (SDXL convention), then :bf16 (Z-Image convention)
     let q8 = format!("{input}:q8");
     if find_manifest_exact(&q8).is_some() {
         return q8;
@@ -586,6 +795,10 @@ pub fn resolve_model_name(input: &str) -> String {
     let fp16 = format!("{input}:fp16");
     if find_manifest_exact(&fp16).is_some() {
         return fp16;
+    }
+    let bf16 = format!("{input}:bf16");
+    if find_manifest_exact(&bf16).is_some() {
+        return bf16;
     }
     // Fallback to :q8 for backward compatibility
     format!("{input}:q8")
@@ -626,6 +839,9 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
 
 /// FP16 T5-XXL model size in bytes (~9.2GB).
 pub const T5_FP16_SIZE: u64 = 9_200_000_000;
+
+/// BF16 Qwen3-4B text encoder size in bytes (~8.2GB, 3 safetensors shards).
+pub const QWEN3_FP16_SIZE: u64 = 8_200_000_000;
 
 // ── Quantized T5 variant registry ────────────────────────────────────────────
 
@@ -680,6 +896,53 @@ pub fn find_t5_variant(tag: &str) -> Option<&'static T5Variant> {
     known_t5_variants().iter().find(|v| v.tag == tag)
 }
 
+// ── Quantized Qwen3 variant registry ──────────────────────────────────────────
+
+/// A quantized Qwen3 text encoder variant available from HuggingFace.
+#[derive(Debug, Clone)]
+pub struct Qwen3Variant {
+    pub tag: &'static str,
+    pub hf_repo: &'static str,
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+}
+
+/// Known Qwen3 quantized variants, sorted largest → smallest.
+pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
+    static VARIANTS: &[Qwen3Variant] = &[
+        Qwen3Variant {
+            tag: "q8",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-Q8_0.gguf",
+            size_bytes: 4_280_000_000, // ~4.28GB
+        },
+        Qwen3Variant {
+            tag: "q6",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-Q6_K.gguf",
+            size_bytes: 3_310_000_000, // ~3.31GB
+        },
+        Qwen3Variant {
+            tag: "iq4",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-imatrix-IQ4_XS.gguf",
+            size_bytes: 2_270_000_000, // ~2.27GB
+        },
+        Qwen3Variant {
+            tag: "q3",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-imatrix-Q3_K_M.gguf",
+            size_bytes: 2_080_000_000, // ~2.08GB
+        },
+    ];
+    VARIANTS
+}
+
+/// Find a Qwen3 variant by tag (e.g. "q8", "q6", "iq4", "q3").
+pub fn find_qwen3_variant(tag: &str) -> Option<&'static Qwen3Variant> {
+    known_qwen3_variants().iter().find(|v| v.tag == tag)
+}
+
 /// Size of shared FLUX components (VAE, T5, CLIP, tokenizers) in GB.
 pub const SHARED_COMPONENTS_GB: f32 = 9.8;
 
@@ -689,8 +952,8 @@ pub fn total_download_size(manifest: &ModelManifest) -> u64 {
 }
 
 /// Convert a `ModelManifest` to a `ModelPaths` from resolved download paths.
-/// Transformer, VAE, CLIP-L encoder, and CLIP-L tokenizer are always required.
-/// T5 (FLUX) and CLIP-G (SDXL) components are optional — each engine validates what it needs.
+/// Transformer (or TransformerShards) and VAE are always required.
+/// Other components are optional — each engine validates what it needs at load time.
 pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<ModelPaths> {
     let find = |c: ModelComponent| -> Option<PathBuf> {
         downloads
@@ -699,15 +962,32 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
             .map(|(_, p)| p.clone())
     };
 
+    let collect = |c: ModelComponent| -> Vec<PathBuf> {
+        downloads
+            .iter()
+            .filter(|(comp, _)| *comp == c)
+            .map(|(_, p)| p.clone())
+            .collect()
+    };
+
+    let transformer_shards = collect(ModelComponent::TransformerShard);
+
+    // Transformer: use single Transformer file, or first TransformerShard as primary path
+    let transformer =
+        find(ModelComponent::Transformer).or_else(|| transformer_shards.first().cloned())?;
+
     Some(ModelPaths {
-        transformer: find(ModelComponent::Transformer)?,
+        transformer,
+        transformer_shards,
         vae: find(ModelComponent::Vae)?,
-        t5_encoder: find(ModelComponent::T5Encoder), // Optional (FLUX only)
-        clip_encoder: find(ModelComponent::ClipEncoder)?,
-        t5_tokenizer: find(ModelComponent::T5Tokenizer), // Optional (FLUX only)
-        clip_tokenizer: find(ModelComponent::ClipTokenizer)?,
-        clip_encoder_2: find(ModelComponent::ClipEncoder2), // Optional (SDXL only)
-        clip_tokenizer_2: find(ModelComponent::ClipTokenizer2), // Optional (SDXL only)
+        t5_encoder: find(ModelComponent::T5Encoder),
+        clip_encoder: find(ModelComponent::ClipEncoder),
+        t5_tokenizer: find(ModelComponent::T5Tokenizer),
+        clip_tokenizer: find(ModelComponent::ClipTokenizer),
+        clip_encoder_2: find(ModelComponent::ClipEncoder2),
+        clip_tokenizer_2: find(ModelComponent::ClipTokenizer2),
+        text_encoder_files: collect(ModelComponent::TextEncoder),
+        text_tokenizer: find(ModelComponent::TextTokenizer),
     })
 }
 
@@ -766,38 +1046,38 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 6 SDXL = 15
-        assert_eq!(known_manifests().len(), 15);
+        // 9 FLUX + 6 SDXL + 4 Z-Image = 19
+        assert_eq!(known_manifests().len(), 19);
     }
 
     #[test]
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All models need transformer, VAE, and at least one CLIP
-            assert!(
-                components.contains(&ModelComponent::Transformer),
-                "{} missing Transformer",
-                manifest.name
-            );
+            // All models need VAE
             assert!(
                 components.contains(&ModelComponent::Vae),
                 "{} missing Vae",
                 manifest.name
             );
-            assert!(
-                components.contains(&ModelComponent::ClipEncoder),
-                "{} missing ClipEncoder",
-                manifest.name
-            );
-            assert!(
-                components.contains(&ModelComponent::ClipTokenizer),
-                "{} missing ClipTokenizer",
-                manifest.name
-            );
 
             match manifest.family.as_str() {
                 "flux" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (flux) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder),
+                        "{} (flux) missing ClipEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer),
+                        "{} (flux) missing ClipTokenizer",
+                        manifest.name
+                    );
                     assert!(
                         components.contains(&ModelComponent::T5Encoder),
                         "{} (flux) missing T5Encoder",
@@ -811,6 +1091,21 @@ mod tests {
                 }
                 "sdxl" => {
                     assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (sdxl) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder),
+                        "{} (sdxl) missing ClipEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer),
+                        "{} (sdxl) missing ClipTokenizer",
+                        manifest.name
+                    );
+                    assert!(
                         components.contains(&ModelComponent::ClipEncoder2),
                         "{} (sdxl) missing ClipEncoder2",
                         manifest.name
@@ -818,6 +1113,31 @@ mod tests {
                     assert!(
                         components.contains(&ModelComponent::ClipTokenizer2),
                         "{} (sdxl) missing ClipTokenizer2",
+                        manifest.name
+                    );
+                }
+                "z-image" => {
+                    // Z-Image uses Transformer (GGUF) or TransformerShard (BF16)
+                    assert!(
+                        components.contains(&ModelComponent::Transformer)
+                            || components.contains(&ModelComponent::TransformerShard),
+                        "{} (z-image) missing Transformer or TransformerShard",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (z-image) missing TextEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} (z-image) missing TextTokenizer",
+                        manifest.name
+                    );
+                    // Z-Image does NOT use CLIP
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} (z-image) should not have ClipEncoder",
                         manifest.name
                     );
                 }
@@ -922,6 +1242,81 @@ mod tests {
                 "FP16 should be larger than {}",
                 v.tag
             );
+        }
+    }
+
+    // --- Z-Image tests ---
+
+    #[test]
+    fn zimage_turbo_resolves_to_q8() {
+        assert_eq!(resolve_model_name("z-image-turbo"), "z-image-turbo:q8");
+    }
+
+    #[test]
+    fn zimage_turbo_bf16_found() {
+        let manifest = find_manifest("z-image-turbo:bf16").unwrap();
+        assert_eq!(manifest.family, "z-image");
+        assert_eq!(manifest.defaults.steps, 9);
+        assert_eq!(manifest.defaults.guidance, 0.0);
+        assert_eq!(manifest.defaults.scheduler, Some("flow_match_euler"));
+    }
+
+    // --- Qwen3 variant registry tests ---
+
+    #[test]
+    fn qwen3_variants_sorted_largest_first() {
+        let variants = known_qwen3_variants();
+        for w in variants.windows(2) {
+            assert!(
+                w[0].size_bytes >= w[1].size_bytes,
+                "{} ({}) should be >= {} ({})",
+                w[0].tag,
+                w[0].size_bytes,
+                w[1].tag,
+                w[1].size_bytes,
+            );
+        }
+    }
+
+    #[test]
+    fn find_qwen3_variant_by_tag() {
+        assert_eq!(find_qwen3_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_qwen3_variant("q6").unwrap().tag, "q6");
+        assert_eq!(find_qwen3_variant("iq4").unwrap().tag, "iq4");
+        assert_eq!(find_qwen3_variant("q3").unwrap().tag, "q3");
+        assert!(find_qwen3_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn qwen3_variants_all_gguf() {
+        for v in known_qwen3_variants() {
+            assert!(
+                v.hf_filename.ends_with(".gguf"),
+                "{} should be a GGUF file",
+                v.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_fp16_larger_than_all_quantized() {
+        for v in known_qwen3_variants() {
+            assert!(
+                QWEN3_FP16_SIZE > v.size_bytes,
+                "FP16 should be larger than {}",
+                v.tag
+            );
+        }
+    }
+
+    #[test]
+    fn zimage_defaults() {
+        for manifest in known_manifests() {
+            if manifest.family == "z-image" {
+                assert_eq!(manifest.defaults.steps, 9);
+                assert_eq!(manifest.defaults.guidance, 0.0);
+                assert_eq!(manifest.defaults.scheduler, Some("flow_match_euler"));
+            }
         }
     }
 }

@@ -9,6 +9,8 @@ use crate::manifest::resolve_model_name;
 pub struct ModelConfig {
     // --- paths ---
     pub transformer: Option<String>,
+    /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
+    pub transformer_shards: Option<Vec<String>>,
     pub vae: Option<String>,
     pub t5_encoder: Option<String>,
     pub clip_encoder: Option<String>,
@@ -18,6 +20,10 @@ pub struct ModelConfig {
     pub clip_encoder_2: Option<String>,
     /// CLIP-G / OpenCLIP tokenizer path (SDXL only)
     pub clip_tokenizer_2: Option<String>,
+    /// Generic text encoder shard paths (Qwen3 for Z-Image)
+    pub text_encoder_files: Option<Vec<String>>,
+    /// Generic text encoder tokenizer path (Qwen3 for Z-Image)
+    pub text_tokenizer: Option<String>,
 
     // --- generation defaults ---
     /// Default inference steps (e.g. 4 for schnell, 25 for dev)
@@ -62,27 +68,32 @@ impl ModelConfig {
 }
 
 /// Resolved model file paths.
-/// `transformer`, `vae`, `clip_encoder`, `clip_tokenizer` are always required.
-/// `t5_encoder` / `t5_tokenizer` are required for FLUX (validated by engine).
-/// `clip_encoder_2` / `clip_tokenizer_2` are required for SDXL (validated by engine).
+/// `transformer` and `vae` are always required.
+/// Other paths are optional — each engine validates what it needs at load time.
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     pub transformer: PathBuf,
+    /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
+    pub transformer_shards: Vec<PathBuf>,
     pub vae: PathBuf,
     pub t5_encoder: Option<PathBuf>,
-    pub clip_encoder: PathBuf,
+    pub clip_encoder: Option<PathBuf>,
     pub t5_tokenizer: Option<PathBuf>,
-    pub clip_tokenizer: PathBuf,
+    pub clip_tokenizer: Option<PathBuf>,
     /// CLIP-G / OpenCLIP encoder (SDXL only)
     pub clip_encoder_2: Option<PathBuf>,
     /// CLIP-G / OpenCLIP tokenizer (SDXL only)
     pub clip_tokenizer_2: Option<PathBuf>,
+    /// Generic text encoder shard paths (Qwen3 for Z-Image)
+    pub text_encoder_files: Vec<PathBuf>,
+    /// Generic text encoder tokenizer (Qwen3 for Z-Image)
+    pub text_tokenizer: Option<PathBuf>,
 }
 
 impl ModelPaths {
     /// Resolve paths for a model. Checks config, then env vars.
-    /// Returns None if transformer, VAE, or primary CLIP paths can't be resolved.
-    /// T5 and CLIP2 paths are optional (depend on model family).
+    /// Returns None if transformer and VAE paths can't be resolved.
+    /// All other paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
         let model_cfg = config.models.get(model_name);
 
@@ -90,6 +101,10 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.transformer.as_deref()),
             "MOLD_TRANSFORMER_PATH",
         )?;
+        let transformer_shards = model_cfg
+            .and_then(|m| m.transformer_shards.as_ref())
+            .map(|shards| shards.iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
         let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")?;
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
@@ -98,7 +113,7 @@ impl ModelPaths {
         let clip_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_encoder.as_deref()),
             "MOLD_CLIP_PATH",
-        )?;
+        );
         let t5_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_tokenizer.as_deref()),
             "MOLD_T5_TOKENIZER_PATH",
@@ -106,7 +121,7 @@ impl ModelPaths {
         let clip_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_tokenizer.as_deref()),
             "MOLD_CLIP_TOKENIZER_PATH",
-        )?;
+        );
         let clip_encoder_2 = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_encoder_2.as_deref()),
             "MOLD_CLIP2_PATH",
@@ -115,9 +130,18 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.clip_tokenizer_2.as_deref()),
             "MOLD_CLIP2_TOKENIZER_PATH",
         );
+        let text_encoder_files = model_cfg
+            .and_then(|m| m.text_encoder_files.as_ref())
+            .map(|files| files.iter().map(PathBuf::from).collect())
+            .unwrap_or_default();
+        let text_tokenizer = Self::resolve_path(
+            model_cfg.and_then(|m| m.text_tokenizer.as_deref()),
+            "MOLD_TEXT_TOKENIZER_PATH",
+        );
 
         Some(Self {
             transformer,
+            transformer_shards,
             vae,
             t5_encoder,
             clip_encoder,
@@ -125,6 +149,8 @@ impl ModelPaths {
             clip_tokenizer,
             clip_encoder_2,
             clip_tokenizer_2,
+            text_encoder_files,
+            text_tokenizer,
         })
     }
 
@@ -168,6 +194,11 @@ pub struct Config {
     #[serde(default)]
     pub t5_variant: Option<String>,
 
+    /// Preferred Qwen3 text encoder variant: "bf16" (default), "q8", "q6", "iq4", "q3", or "auto".
+    /// "auto" selects the best variant that fits in GPU VRAM (with drop-and-reload).
+    #[serde(default)]
+    pub qwen3_variant: Option<String>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -208,6 +239,7 @@ impl Default for Config {
             default_height: default_dimension(),
             default_steps: default_steps(),
             t5_variant: None,
+            qwen3_variant: None,
             models: HashMap::new(),
         }
     }

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # mold — Architecture & Development Guide
 
-> Local AI image generation CLI — FLUX & SDXL diffusion models on your GPU.
+> Local AI image generation CLI — FLUX, SDXL & Z-Image diffusion models on your GPU.
 
-mold is a CLI tool for AI image generation using FLUX and SDXL models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX, SDXL, and Z-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
 ## Build & Development Commands
 
@@ -119,7 +119,7 @@ ModelPaths          // resolved PathBufs for all model components
 
 ### mold-inference
 
-FLUX and SDXL diffusion model inference using candle. Structure:
+FLUX, SDXL, and Z-Image diffusion model inference using candle. Structure:
 
 ```
 src/
@@ -132,17 +132,24 @@ src/
 ├── progress.rs               # ProgressEvent enum + ProgressCallback type
 ├── model_registry.rs         # Delegates to mold_core::manifest for known models
 ├── encoders/
-│   ├── mod.rs                # pub mod t5; pub mod clip; pub mod t5_gguf;
+│   ├── mod.rs                # pub mod t5; pub mod clip; pub mod t5_gguf; pub mod qwen3; pub mod qwen3_gguf;
 │   ├── t5.rs                 # T5Encoder struct: FP16 safetensors, config, load, encode, drop, reload
 │   ├── t5_gguf.rs            # GgufT5Encoder: loads quantized T5 GGUF with standard tensor names
-│   └── clip.rs               # ClipEncoder struct: config, load, encode, drop, reload
+│   ├── clip.rs               # ClipEncoder struct: config, load, encode, drop, reload
+│   ├── qwen3.rs              # Qwen3Encoder: wraps BF16 ZImageTextEncoder or GgufQwen3Encoder, drop/reload
+│   └── qwen3_gguf.rs         # GgufQwen3Encoder: quantized Qwen3-4B GGUF (GQA, SwiGLU, RoPE, causal mask)
 ├── flux/
 │   ├── mod.rs                # Module declarations + re-exports
 │   ├── transformer.rs        # FluxTransformer enum (BF16/Quantized) + denoise()
 │   └── pipeline.rs           # FluxEngine + LoadedFlux + InferenceEngine impl
-└── sdxl/
+├── sdxl/
+│   ├── mod.rs                # Module declarations + re-exports
+│   └── pipeline.rs           # SDXLEngine + LoadedSDXL + InferenceEngine impl
+└── zimage/
     ├── mod.rs                # Module declarations + re-exports
-    └── pipeline.rs           # SDXLEngine + LoadedSDXL + InferenceEngine impl
+    ├── transformer.rs        # ZImageTransformer enum (BF16/Quantized) dispatch
+    ├── quantized_transformer.rs # QuantizedZImageTransformer2DModel (GGUF)
+    └── pipeline.rs           # ZImageEngine + LoadedZImage + InferenceEngine impl
 ```
 
 The `InferenceEngine` trait:
@@ -187,9 +194,27 @@ Model loading is **lazy** (on first generation request) and uses **mmap** for sa
 5. **VAE decode** — Latents scaled by factor (0.18215 standard, 0.13025 turbo) → `AutoEncoderKL.decode()`
 6. **Image encoding** — Same post-processing as FLUX (tensor → RGB → PNG/JPEG)
 
+**`ZImageEngine`** (in `zimage/pipeline.rs`) implements Z-Image Turbo inference using candle's z_image module:
+
+1. **Qwen3 text encoding** — `Qwen3Encoder` wraps either BF16 `ZImageTextEncoder` or quantized `GgufQwen3Encoder`, encodes prompt (Qwen3 chat template: `<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`). After encoding, weights are **dropped from GPU** to free VRAM for denoising (drop-and-reload pattern, same as FLUX's T5/CLIP). Reloaded on next generation.
+2. **Latent dimensions** — `2 * (image_size / 16)` (different from FLUX's `image_size / 16`)
+3. **Scheduler** — `FlowMatchEulerDiscreteScheduler` with exponential time shift (`mu` based on image sequence length)
+4. **Denoising** — Z-Image transformer forward, **negate prediction** (Z-Image-specific), scheduler step. Frame dimension (5D `[B,C,1,H,W]`) squeezed/unsqueezed around scheduler.
+5. **VAE decode** — `AutoEncoderKL` (diffusers format, 16 latent channels, scale=0.3611, shift=0.1159)
+6. **Post-processing** — `postprocess_image()` from candle z_image module
+
+**ZImageTransformer enum** (in `zimage/transformer.rs`) wraps either candle's `ZImageTransformer2DModel` (BF16) or mold's `QuantizedZImageTransformer2DModel` (GGUF). The quantized version lives in the mold crate (not candle) because candle has no quantized Z-Image model. It mirrors the BF16 architecture but uses `quantized_nn::Linear` / `quantized_nn::RmsNorm` and handles GGUF-specific tensor naming (fused QKV `[dim, 3*dim]` instead of separate Q/K/V, different path prefixes). All computation inside the quantized transformer runs in F32 (dequantized), with output cast back to the caller's dtype.
+
+**GGUF tensor name differences** — The GGUF files from `leejet/Z-Image-Turbo-GGUF` use different naming than the BF16 safetensors: fused `attention.qkv` (vs separate `to_q`/`to_k`/`to_v`), `attention.out` (vs `to_out.0`), `q_norm`/`k_norm` (vs `norm_q`/`norm_k`), `x_embedder` (vs `all_x_embedder.2-1`), `final_layer` (vs `all_final_layer.2-1`).
+
+**Quantized Qwen3 auto-fallback** — When BF16 Qwen3 (8.2GB) doesn't fit in remaining VRAM (e.g. BF16 transformer on 24GB, shared GPU), the engine auto-selects the largest quantized Qwen3 GGUF that fits on GPU. Available variants from `worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF`: Q8 (4.28GB), Q6 (3.31GB), IQ4 (2.27GB), Q3 (2.08GB). Same tokenizer for all variants. Uses a custom `GgufQwen3Encoder` (in `encoders/qwen3_gguf.rs`) that implements the full Qwen3-4B architecture: GQA (32Q/8KV heads), SwiGLU MLP, RoPE, causal mask, per-head Q/K norms. Returns second-to-last layer output (layer 34 of 36), no final norm. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_QWEN3_VARIANT` env var, `qwen3_variant` config field, or `--qwen3-variant` CLI flag. Priority: CLI flag > env var > config > auto.
+
+**Device split (Z-Image)** — Z-Image transformer and VAE always load on **GPU**. Qwen3 text encoder is placed on **GPU or CPU** dynamically based on remaining VRAM after the transformer is loaded. With the drop-and-reload pattern, the VRAM threshold is only 10.2GB (8.2GB model + 2GB headroom) instead of the full 22GB that was needed when the encoder stayed loaded alongside denoising activations. When placed on GPU, the encoder is **dropped after encoding** to free VRAM for denoising, then reloaded on the next generation. This allows BF16 Qwen3 on GPU for all quantized transformers on 24GB cards (~0.1s encoding vs ~14s on CPU).
+
 **Engine factory** — `create_engine(model_name, paths, config)` auto-detects the model family from config/manifest and returns the appropriate engine:
 - `"flux"` → `FluxEngine` (T5 + CLIP-L, flow-matching transformer)
 - `"sdxl"` → `SDXLEngine` (CLIP-L + CLIP-G, UNet with DDIM/Euler Ancestral)
+- `"z-image"` → `ZImageEngine` (Qwen3 text encoder, flow-matching transformer with 3D RoPE)
 
 Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
 
@@ -232,6 +257,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
         --t5-variant <TAG>      T5 encoder variant: auto, fp16, q8, q6, q5, q4, q3
+        --qwen3-variant <TAG>   Qwen3 text encoder variant (Z-Image): auto, bf16, q8, q6, iq4, q3
 
     Examples:
         mold run flux-dev:q4 "a turtle in the desert"    # specific model + prompt
@@ -271,6 +297,7 @@ mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elv
 | `MOLD_T5_TOKENIZER_PATH` | — | Path to T5 tokenizer.json |
 | `MOLD_CLIP_TOKENIZER_PATH` | — | Path to CLIP tokenizer.json |
 | `MOLD_T5_VARIANT` | — | T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3 |
+| `MOLD_QWEN3_VARIANT` | — | Qwen3 text encoder variant (Z-Image): auto (default), bf16, q8, q6, iq4, q3 |
 | `MOLD_CLIP2_PATH` | — | Path to CLIP-G encoder safetensors (SDXL) |
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Path to CLIP-G tokenizer.json (SDXL) |
 
@@ -288,6 +315,7 @@ output_dir = "."
 default_width = 1024
 default_height = 1024
 # t5_variant = "auto"  # auto, fp16, q8, q6, q5, q4, q3
+# qwen3_variant = "auto"  # auto, bf16, q8, q6, iq4, q3
 
 [models."flux-schnell:q8"]
 transformer = "/path/to/flux1-schnell-Q8_0.gguf"
@@ -330,6 +358,17 @@ mold pull flux-dev-q4           # Legacy format, same as flux-dev:q4
 | `flux-krea:q4` | `QuantStack/FLUX.1-Krea-dev-GGUF` / `flux1-krea-dev-Q4_1.gguf` | 7.5GB |
 
 Sizes are transformer only. First pull also downloads ~9.8GB of shared components (T5, CLIP, VAE, tokenizers), cached and reused across all models via hf-hub (`~/.cache/huggingface/hub/`).
+
+**Z-Image Models**
+
+| Name | Transformer Source | Total Size |
+|------|-------------------|-----------|
+| `z-image-turbo:bf16` | `Tongyi-MAI/Z-Image-Turbo` (3 safetensors shards) | 32.9GB |
+| `z-image-turbo:q8` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q8_0.gguf` | 14.8GB |
+| `z-image-turbo:q6` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q6_K.gguf` | 13.5GB |
+| `z-image-turbo:q4` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q4_K.gguf` | 12.1GB |
+
+Z-Image sizes include shared components (~8.2GB Qwen3 text encoder + VAE + tokenizer from `Tongyi-MAI/Z-Image-Turbo`). Z-Image uses Qwen3 text encoder (not CLIP or T5).
 
 Model manifests are defined in `mold-core/src/manifest.rs`.
 
@@ -479,6 +518,22 @@ curl -X POST http://localhost:7680/api/generate \
 | `tokenizer.json` (CLIP-L) | `openai/clip-vit-large-patch14` |
 | `tokenizer.json` (CLIP-G) | `laion/CLIP-ViT-bigG-14-laion2B-39B-b160k` |
 
+**Z-Image Models (Alibaba Z-Image Turbo)**
+
+| Name | Transformer Source | Steps | Size |
+|------|-------------------|-------|------|
+| `z-image-turbo:bf16` | `Tongyi-MAI/Z-Image-Turbo` (3 BF16 shards) | 9 | 24.6GB |
+| `z-image-turbo:q8` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q8_0.gguf` | 9 | 6.58GB |
+| `z-image-turbo:q6` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q6_K.gguf` | 9 | 5.26GB |
+| `z-image-turbo:q4` | `leejet/Z-Image-Turbo-GGUF` / `z_image_turbo-Q4_K.gguf` | 9 | 3.86GB |
+
+**HuggingFace download sources for shared Z-Image components:**
+| File | Source |
+|------|--------|
+| `text_encoder/model-00001..00003-of-00003.safetensors` (Qwen3) | `Tongyi-MAI/Z-Image-Turbo` |
+| `vae/diffusion_pytorch_model.safetensors` | `Tongyi-MAI/Z-Image-Turbo` |
+| `tokenizer/tokenizer.json` (Qwen3) | `Tongyi-MAI/Z-Image-Turbo` |
+
 Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate's `model_registry.rs` delegates to the manifest.
 
 ## Future: OCI Registry for Models
@@ -533,6 +588,10 @@ Planned support for distributing models via OCI-compatible registries (Docker re
 21. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model.
 
 22. **SDXL model family support**: SDXL is supported as a second model family alongside FLUX. The engine factory (`create_engine()`) auto-detects the family from config or manifest. SDXL uses dual-CLIP (CLIP-L 768-dim + CLIP-G 1280-dim, concatenated to 2048-dim) instead of FLUX's T5+CLIP-L. SDXL uses UNet2DConditionModel with DDIM or Euler Ancestral schedulers, classifier-free guidance (dual pass: uncond + cond), and 8x latent downscaling (vs FLUX's 16x). Bare model names resolve to `:fp16` for SDXL (vs `:q8` for FLUX) via smart `resolve_model_name()`. SDXL FP16 UNets (~5GB) fit comfortably on the RTX 4090 alongside shared components (~2.2GB).
+
+23. **Z-Image model family support**: Z-Image (Alibaba) is the third model family. Uses a Qwen3 text encoder (not CLIP or T5), a 24B flow-matching transformer with 3D RoPE, and `FlowMatchEulerDiscreteScheduler`. Both BF16 safetensors (multi-shard) and GGUF quantized loading are supported. The GGUF quantized transformer is implemented in the mold crate (`zimage/quantized_transformer.rs`) since candle has no quantized Z-Image model. Key GGUF differences from BF16: fused QKV (`[dim, 3*dim]` single weight vs separate Q/K/V), different tensor naming (`x_embedder` vs `all_x_embedder.2-1`, `attention.out` vs `attention.to_out.0`, `q_norm`/`k_norm` vs `norm_q`/`norm_k`). All quantized computation runs in F32 internally. Bare model name resolves to `:q8` (same as FLUX). Z-Image Turbo uses 9 steps, guidance 0.0 (no CFG). Prediction is negated before scheduler step (Z-Image-specific quirk). Latent dims use `2 * (image_size / 16)` vs FLUX's `image_size / 16`.
+
+24. **Quantized Qwen3 encoder with auto-fallback**: When the BF16 Qwen3-4B (8.2GB) doesn't fit in remaining VRAM alongside the Z-Image transformer, the engine automatically selects the largest quantized Qwen3 GGUF that fits on GPU. Available variants from `worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF`: Q8 (4.28GB), Q6 (3.31GB), IQ4 (2.27GB), Q3 (2.08GB). Uses a custom `GgufQwen3Encoder` (in `encoders/qwen3_gguf.rs`) that implements the full Qwen3-4B decoder architecture: GQA (32Q/8KV heads, repeat_kv for 4:1 ratio), SwiGLU MLP (SiLU activation), RoPE (theta=1e6), causal attention mask, per-head Q/K RMS norms. Returns second-to-last layer output (layer 34 of 36), no final norm — matching candle's `ZImageTextEncoder`. With the **drop-and-reload pattern** (encoder dropped after encoding, reloaded next generation), the VRAM threshold drops from 22GB to 10.2GB, letting BF16 Qwen3 fit on GPU for all quantized transformers on 24GB cards. Override with `MOLD_QWEN3_VARIANT` env var, `qwen3_variant` config field, or `--qwen3-variant` CLI flag. Priority: CLI flag > env var > config > auto.
 
 ## Confirmed Working Configuration
 
