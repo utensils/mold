@@ -42,17 +42,10 @@ pub async fn run() -> Result<()> {
             }
         }
         Err(_) => {
-            // Server not running — show config-defined models locally.
             let config = Config::load_or_default();
-            println!(
-                "{} Server not reachable — showing local config:",
-                "!".yellow()
-            );
-            println!();
 
             if config.models.is_empty() {
-                println!("{} No models in ~/.mold/config.toml", "●".dimmed());
-                println!("Add [models.<name>] sections to configure models.");
+                println!("{} No models configured.", "●".dimmed());
             } else {
                 println!(
                     "{:<18} {:<7} {:<9} {:<8} {:<7} {}",
@@ -75,6 +68,35 @@ pub async fn run() -> Result<()> {
                         mcfg.description.as_deref().unwrap_or("").dimmed(),
                     );
                 }
+            }
+
+            // Show available-to-pull models
+            let manifests = mold_core::manifest::known_manifests();
+            let available: Vec<_> = manifests
+                .iter()
+                .filter(|m| !config.models.contains_key(&m.name))
+                .collect();
+
+            if !available.is_empty() {
+                println!();
+                println!("Available to pull:");
+                for m in &available {
+                    println!(
+                        "  {:<20} {:>5.1}GB  {}",
+                        m.name.bold(),
+                        m.size_gb,
+                        m.description.dimmed(),
+                    );
+                }
+                println!();
+                println!(
+                    "{}",
+                    format!(
+                        "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
+                        mold_core::manifest::SHARED_COMPONENTS_GB
+                    ).dimmed(),
+                );
+                println!("Use {} to download.", "mold pull <model>".bold(),);
             }
         }
     }

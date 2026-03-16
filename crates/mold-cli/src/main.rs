@@ -1,12 +1,13 @@
 mod commands;
-mod tui;
+mod output;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "AI image generation — like ollama, but for diffusion models"
+    about = "Local AI image generation — FLUX & SDXL diffusion models on your GPU"
 )]
 #[command(version, propagate_version = true)]
 struct Cli {
@@ -17,19 +18,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Generate images from a text prompt
-    Generate {
-        /// The text prompt to generate from
-        prompt: String,
+    ///
+    /// First positional arg is treated as MODEL if it matches a known model name.
+    /// Remaining args are the prompt.
+    Run {
+        /// Model name (e.g. flux-dev:q4, flux-schnell)
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model_or_prompt: Option<String>,
 
-        /// Model to use
-        #[arg(short, long, default_value = "flux-schnell")]
-        model: String,
+        /// Prompt text (remaining words after model)
+        #[arg(trailing_var_arg = true)]
+        prompt_rest: Vec<String>,
 
         /// Output file path
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Image width — defaults to model config value (768 for schnell, 896 for portrait models)
+        /// Image width — defaults to model config value
         #[arg(long)]
         width: Option<u32>,
 
@@ -41,7 +46,7 @@ enum Commands {
         #[arg(long)]
         steps: Option<u32>,
 
-        /// Guidance scale — defaults to model config value (0.0 for schnell, 3.5 for dev)
+        /// Guidance scale — defaults to model config value
         #[arg(long)]
         guidance: Option<f64>,
 
@@ -60,6 +65,14 @@ enum Commands {
         /// Output format
         #[arg(long, default_value = "png")]
         format: String,
+
+        /// Skip server and run inference locally (requires GPU features)
+        #[arg(long)]
+        local: bool,
+
+        /// T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3
+        #[arg(long)]
+        t5_variant: Option<String>,
     },
 
     /// Start the inference server
@@ -80,6 +93,7 @@ enum Commands {
     /// Download model weights from HuggingFace
     Pull {
         /// Model name to download
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: String,
     },
 
@@ -89,25 +103,34 @@ enum Commands {
     /// Show server status and loaded models
     Ps,
 
-    /// Open interactive TUI session
-    Run {
-        /// Model to use
-        #[arg(default_value = "flux-schnell")]
-        model: String,
-    },
-
     /// Show version information
     Version,
+
+    /// Generate shell completions (sources dynamic model-name completion)
+    Completions {
+        /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
+        shell: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Reset SIGPIPE to default (terminate) so piping doesn't panic.
+    // Rust ignores SIGPIPE by default, causing "broken pipe" panics when
+    // stdout is a pipe and the reader closes (e.g. `mold run ... | head`).
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Generate {
-            prompt,
-            model,
+        Commands::Run {
+            model_or_prompt,
+            prompt_rest,
             output,
             width,
             height,
@@ -117,9 +140,23 @@ async fn main() -> anyhow::Result<()> {
             batch,
             host,
             format,
+            local,
+            t5_variant,
         } => {
-            commands::generate::run(
-                &prompt, &model, output, width, height, steps, guidance, seed, batch, host, &format,
+            commands::run::run(
+                model_or_prompt,
+                prompt_rest,
+                output,
+                width,
+                height,
+                steps,
+                guidance,
+                seed,
+                batch,
+                host,
+                format,
+                local,
+                t5_variant,
             )
             .await?;
         }
@@ -139,13 +176,91 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ps => {
             commands::ps::run().await?;
         }
-        Commands::Run { model } => {
-            tui::run(&model).await?;
-        }
         Commands::Version => {
             println!("mold {}", env!("CARGO_PKG_VERSION"));
         }
+        Commands::Completions { shell } => {
+            generate_completions(&shell)?;
+        }
     }
 
+    Ok(())
+}
+
+/// Generate shell completion script.
+///
+/// For zsh: custom script that separates flags from positional candidates so
+/// `mold run <TAB>` shows only model names, while `mold run --<TAB>` shows flags.
+/// For other shells: delegates to clap_complete's dynamic registration.
+fn generate_completions(shell: &str) -> anyhow::Result<()> {
+    if shell == "zsh" {
+        let bin = std::env::args()
+            .next()
+            .unwrap_or_else(|| "mold".to_string());
+        print!(
+            r##"#compdef mold
+function _clap_dynamic_completer_mold() {{
+    local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
+    local _CLAP_IFS=$'\n'
+
+    local completions=("${{(@f)$( \
+        _CLAP_IFS="$_CLAP_IFS" \
+        _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
+        COMPLETE="zsh" \
+        {bin} -- "${{words[@]}}" 2>/dev/null \
+    )}}")
+
+    if [[ -n $completions ]]; then
+        local -a flags=()
+        local -a values=()
+        local completion
+        for completion in $completions; do
+            local value="${{completion%%:*}}"
+            if [[ "$value" == -* ]]; then
+                flags+=("$completion")
+            elif [[ "$value" == */ ]]; then
+                local dir_no_slash="${{value%/}}"
+                if [[ "$completion" == *:* ]]; then
+                    local desc="${{completion#*:}}"
+                    values+=("$dir_no_slash:$desc")
+                else
+                    values+=("$dir_no_slash")
+                fi
+            else
+                values+=("$completion")
+            fi
+        done
+
+        if [[ "${{words[$CURRENT]}}" == -* ]]; then
+            [[ -n $flags ]] && _describe 'options' flags
+        else
+            [[ -n $values ]] && _describe 'values' values
+        fi
+    fi
+}}
+
+compdef _clap_dynamic_completer_mold mold
+"##,
+            bin = bin,
+        );
+        return Ok(());
+    }
+
+    let shells = clap_complete::env::Shells::builtins();
+    let completer = match shells.completer(shell) {
+        Some(c) => c,
+        None => {
+            let names: Vec<_> = shells.names().collect();
+            anyhow::bail!(
+                "unknown shell '{}', expected one of: {}",
+                shell,
+                names.join(", ")
+            );
+        }
+    };
+    let bin = std::env::args()
+        .next()
+        .unwrap_or_else(|| "mold".to_string());
+    completer.write_registration("COMPLETE", "mold", "mold", &bin, &mut std::io::stdout())?;
     Ok(())
 }

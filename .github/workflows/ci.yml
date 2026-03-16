@@ -9,8 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Note: CUDA builds are not run in CI — they happen on hal9000 (NixOS + RTX 4090)
-# via scripts/deploy.sh. CI only checks non-CUDA compilation, lints, and tests.
+# Note: CUDA builds are not run in CI — they require a GPU host with NixOS + CUDA.
+# CI only checks non-CUDA compilation, lints, and tests.
 
 jobs:
   check:

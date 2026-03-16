@@ -1,9 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::manifest::resolve_model_name;
+
 /// Per-model file path + default settings configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ModelConfig {
     // --- paths ---
     pub transformer: Option<String>,
@@ -12,6 +14,10 @@ pub struct ModelConfig {
     pub clip_encoder: Option<String>,
     pub t5_tokenizer: Option<String>,
     pub clip_tokenizer: Option<String>,
+    /// CLIP-G / OpenCLIP encoder path (SDXL only)
+    pub clip_encoder_2: Option<String>,
+    /// CLIP-G / OpenCLIP tokenizer path (SDXL only)
+    pub clip_tokenizer_2: Option<String>,
 
     // --- generation defaults ---
     /// Default inference steps (e.g. 4 for schnell, 25 for dev)
@@ -25,6 +31,8 @@ pub struct ModelConfig {
     /// Whether this model uses the schnell (distilled) timestep schedule.
     /// If None, auto-detected from the transformer filename.
     pub is_schnell: Option<bool>,
+    /// Scheduler type: "ddim", "euler_ancestral" (SDXL only; FLUX uses flow-matching)
+    pub scheduler: Option<String>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -54,20 +62,28 @@ impl ModelConfig {
     }
 }
 
-/// Resolved model file paths (all required).
+/// Resolved model file paths.
+/// `transformer`, `vae`, `clip_encoder`, `clip_tokenizer` are always required.
+/// `t5_encoder` / `t5_tokenizer` are required for FLUX (validated by engine).
+/// `clip_encoder_2` / `clip_tokenizer_2` are required for SDXL (validated by engine).
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     pub transformer: PathBuf,
     pub vae: PathBuf,
-    pub t5_encoder: PathBuf,
+    pub t5_encoder: Option<PathBuf>,
     pub clip_encoder: PathBuf,
-    pub t5_tokenizer: PathBuf,
+    pub t5_tokenizer: Option<PathBuf>,
     pub clip_tokenizer: PathBuf,
+    /// CLIP-G / OpenCLIP encoder (SDXL only)
+    pub clip_encoder_2: Option<PathBuf>,
+    /// CLIP-G / OpenCLIP tokenizer (SDXL only)
+    pub clip_tokenizer_2: Option<PathBuf>,
 }
 
 impl ModelPaths {
     /// Resolve paths for a model. Checks config, then env vars.
-    /// Returns None if any required path is unresolvable.
+    /// Returns None if transformer, VAE, or primary CLIP paths can't be resolved.
+    /// T5 and CLIP2 paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
         let model_cfg = config.models.get(model_name);
 
@@ -79,7 +95,7 @@ impl ModelPaths {
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
             "MOLD_T5_PATH",
-        )?;
+        );
         let clip_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_encoder.as_deref()),
             "MOLD_CLIP_PATH",
@@ -87,11 +103,19 @@ impl ModelPaths {
         let t5_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_tokenizer.as_deref()),
             "MOLD_T5_TOKENIZER_PATH",
-        )?;
+        );
         let clip_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_tokenizer.as_deref()),
             "MOLD_CLIP_TOKENIZER_PATH",
         )?;
+        let clip_encoder_2 = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_encoder_2.as_deref()),
+            "MOLD_CLIP2_PATH",
+        );
+        let clip_tokenizer_2 = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_tokenizer_2.as_deref()),
+            "MOLD_CLIP2_TOKENIZER_PATH",
+        );
 
         Some(Self {
             transformer,
@@ -100,6 +124,8 @@ impl ModelPaths {
             clip_encoder,
             t5_tokenizer,
             clip_tokenizer,
+            clip_encoder_2,
+            clip_tokenizer_2,
         })
     }
 
@@ -114,7 +140,7 @@ impl ModelPaths {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_model")]
     pub default_model: String,
@@ -136,6 +162,12 @@ pub struct Config {
 
     #[serde(default = "default_steps")]
     pub default_steps: u32,
+
+    /// Preferred T5 encoder variant: "fp16" (default), "q8", "q6", "q5", "q4", "q3", or "auto".
+    /// "auto" selects the best variant that fits in GPU VRAM.
+    /// An explicit quantized tag always uses that variant regardless of VRAM.
+    #[serde(default)]
+    pub t5_variant: Option<String>,
 
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
@@ -176,6 +208,7 @@ impl Default for Config {
             default_width: default_dimension(),
             default_height: default_dimension(),
             default_steps: default_steps(),
+            t5_variant: None,
             models: HashMap::new(),
         }
     }
@@ -209,17 +242,48 @@ impl Config {
         }
     }
 
-    pub fn config_path() -> PathBuf {
+    /// Returns true if `~/.mold/` exists (legacy layout).
+    fn legacy_dir_exists() -> bool {
         dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".mold")
+            .map(|h| h.join(".mold").is_dir())
+            .unwrap_or(false)
+    }
+
+    pub fn config_path() -> PathBuf {
+        // Legacy: ~/.mold/config.toml if ~/.mold/ exists
+        if Self::legacy_dir_exists() {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".mold")
+                .join("config.toml");
+        }
+        // XDG: ~/.config/mold/config.toml
+        dirs::config_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("mold")
             .join("config.toml")
     }
 
     pub fn data_dir() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".mold")
+        // Legacy: ~/.mold/ if it exists
+        if Self::legacy_dir_exists() {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".mold");
+        }
+        // XDG: ~/.local/share/mold/
+        dirs::data_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".local")
+                    .join("share")
+            })
+            .join("mold")
     }
 
     pub fn resolved_models_dir(&self) -> PathBuf {
@@ -237,7 +301,39 @@ impl Config {
     }
 
     /// Return the ModelConfig for a given model name, or an empty default.
+    /// Tries the exact name first, then the canonical `name:tag` form.
     pub fn model_config(&self, name: &str) -> ModelConfig {
-        self.models.get(name).cloned().unwrap_or_default()
+        if let Some(cfg) = self.models.get(name) {
+            return cfg.clone();
+        }
+        // Try canonical name resolution (e.g. "flux-dev-q4" -> "flux-dev:q4")
+        let canonical = resolve_model_name(name);
+        if canonical != name {
+            if let Some(cfg) = self.models.get(&canonical) {
+                return cfg.clone();
+            }
+        }
+        ModelConfig::default()
+    }
+
+    /// Insert or update a model configuration entry.
+    pub fn upsert_model(&mut self, name: String, config: ModelConfig) {
+        self.models.insert(name, config);
+    }
+
+    /// Write the config to disk at `config_path()`.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let contents = toml::to_string_pretty(self)?;
+        std::fs::write(&path, contents)?;
+        Ok(())
+    }
+
+    /// Whether a config file exists on disk.
+    pub fn exists_on_disk() -> bool {
+        Self::config_path().exists()
     }
 }

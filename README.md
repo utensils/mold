@@ -1,48 +1,69 @@
 # mold 🧪
 
-Local FLUX image generation server. Runs on your GPU (CUDA), serves a REST API, and ships a CLI.
+Local AI image generation CLI — run FLUX and SDXL diffusion models directly on your GPU, with a built-in inference server for remote rendering.
 
 ## What it does
 
-- Loads FLUX.1 models (schnell / dev) from local GGUF or safetensors files
-- Serves `POST /api/generate` → raw PNG/JPEG bytes
-- CLI: `mold generate "a glowing robot"`
+- **Just works**: `mold run "a cat"` — auto-pulls model, runs locally on your GPU
+- **Two model families**: FLUX.1 (schnell, dev, krea) and SDXL (base, turbo, DreamShaper, Juggernaut, RealVis, Playground)
+- **Model management**: `mold pull`, `mold list`, `mold ps` — download and manage models
+- **Remote capable**: Point at a GPU server with `MOLD_HOST` or run `mold serve` for a REST API
+- **Pipe-friendly**: `mold run "a cat" | viu -` — composable with Unix tools
+- **Quantized models**: GGUF Q4/Q6/Q8 for FLUX, FP16 safetensors for SDXL
 
 ## Requirements
 
-- NVIDIA GPU with 24GB VRAM (RTX 4090 recommended)
-- CUDA toolkit
-- FLUX model files (see below)
+- NVIDIA GPU with CUDA **or** Apple Silicon with Metal
+- Model files auto-downloaded on first use via `mold pull` or `mold run`
 
 ## Quick start
 
 ```bash
-# Build (CUDA)
-cargo build --release --features cuda
+# Build (CUDA on Linux, Metal on macOS)
+cargo build --release -p mold-cli --features cuda    # Linux
+cargo build --release -p mold-cli --features metal   # macOS
 
-# Set model paths
-export MOLD_TRANSFORMER_PATH=/path/to/flux1-schnell-Q8_0.gguf
-export MOLD_VAE_PATH=/path/to/ae.safetensors
-export MOLD_T5_PATH=/path/to/t5xxl_fp16.safetensors
-export MOLD_CLIP_PATH=/path/to/clip_l.safetensors
+# Generate an image (auto-pulls model on first use)
+mold run "a cat riding a motorcycle through neon-lit streets"
 
-# Start server
-./target/release/mold serve
+# Use a specific model
+mold run flux-dev:q4 "a turtle in the desert"
+mold run sdxl-turbo "a sunset over mountains"
+mold run dreamshaper-xl "fantasy castle on a cliff"
 
-# Generate an image
-./target/release/mold generate "a cat riding a motorcycle through neon-lit streets"
+# Pipe to an image viewer
+mold run "neon cityscape" | viu -
+mold run "a portrait" | img2sixel
+
+# Or start a server for remote rendering
+mold serve
+MOLD_HOST=http://gpu-host:7680 mold run "a sunset"
 ```
 
-## Model files
+## Available models
 
-Download from HuggingFace:
+### FLUX (GGUF quantized)
 
-| File | Source |
-|------|--------|
-| `flux1-schnell-Q8_0.gguf` | [city96/FLUX.1-schnell-gguf](https://huggingface.co/city96/FLUX.1-schnell-gguf) |
-| `ae.safetensors` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) |
-| `t5xxl_fp16.safetensors` | [comfyanonymous/flux_text_encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) |
-| `clip_l.safetensors` | [comfyanonymous/flux_text_encoders](https://huggingface.co/comfyanonymous/flux_text_encoders) |
+| Name | Steps | Size | Description |
+|------|-------|------|-------------|
+| `flux-schnell:q8` | 4 | 12GB | Fast 4-step, general purpose |
+| `flux-schnell:q4` | 4 | 7.5GB | Fast 4-step, smaller footprint |
+| `flux-dev:q8` | 25 | 12GB | Full quality, 20+ steps |
+| `flux-dev:q4` | 25 | 7GB | Smaller/faster, good quality |
+| `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography fine-tune |
+
+### SDXL (FP16 safetensors)
+
+| Name | Steps | Size | Description |
+|------|-------|------|-------------|
+| `sdxl-base:fp16` | 25 | 5.1GB | Official Stability AI base |
+| `sdxl-turbo:fp16` | 4 | 5.1GB | Ultra-fast 1-4 step generation |
+| `dreamshaper-xl:fp16` | 8 | 5.1GB | Fantasy, concept art, stylized |
+| `juggernaut-xl:fp16` | 30 | 5.1GB | Photorealism, cinematic |
+| `realvis-xl:fp16` | 25 | 5.1GB | Photorealism, versatile |
+| `playground-v2.5:fp16` | 25 | 5.1GB | Aesthetic quality, artistic |
+
+Bare model names default to `:q8` (FLUX) or `:fp16` (SDXL).
 
 ## API
 
@@ -51,6 +72,7 @@ GET  /health           → 200 OK
 GET  /api/status       → ServerStatus JSON
 GET  /api/models       → ModelInfo[] JSON
 POST /api/generate     → image/png bytes
+POST /api/models/load  → 200 OK (hot-swap model)
 ```
 
 ### Generate request
@@ -62,6 +84,7 @@ POST /api/generate     → image/png bytes
   "width": 768,
   "height": 768,
   "steps": 4,
+  "guidance": 3.5,
   "seed": null,
   "batch_size": 1,
   "output_format": "png"
@@ -72,28 +95,45 @@ Constraints: width/height must be multiples of 16, max 1024, min 1. Steps 1–10
 
 ## Config
 
-`~/.mold/config.toml` (optional):
+`~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy):
 
 ```toml
-default_model = "flux-schnell"
+default_model = "flux-schnell:q8"
 server_port = 7680
-default_width = 768
-default_height = 768
+default_width = 1024
+default_height = 1024
 
-[models.flux-schnell]
-transformer = "/models/flux1-schnell-Q8_0.gguf"
-vae = "/models/ae.safetensors"
-t5_encoder = "/models/t5xxl_fp16.safetensors"
-clip_encoder = "/models/clip_l.safetensors"
+[models."flux-schnell:q8"]
+transformer = "/path/to/flux1-schnell-Q8_0.gguf"
+vae = "/path/to/ae.safetensors"
+t5_encoder = "/path/to/t5xxl_fp16.safetensors"
+clip_encoder = "/path/to/clip_l.safetensors"
+t5_tokenizer = "/path/to/t5.tokenizer.json"
+clip_tokenizer = "/path/to/clip.tokenizer.json"
+```
+
+Config is auto-written by `mold pull` — manual editing is rarely needed.
+
+## Shell completions
+
+```bash
+# bash
+source <(mold completions bash)
+
+# zsh
+source <(mold completions zsh)
+
+# fish
+mold completions fish | source
 ```
 
 ## Architecture
 
 ```
-mold-cli       CLI frontend (mold generate / serve / ps)
-mold-server    axum REST server + request validation
-mold-inference FLUX engine (candle: T5/CLIP on CPU, transformer+VAE on GPU)
-mold-core      Shared types, config, HTTP client
+mold-cli       Single binary: CLI + serve (mold run / serve / pull / list / completions)
+mold-server    Axum REST server (library, used by mold-cli via `mold serve`)
+mold-inference FLUX + SDXL engines (candle ML framework, smart GPU/CPU encoder placement)
+mold-core      Shared types, config, model manifests, HuggingFace download client
 ```
 
-T5-XXL (9.2GB) runs on CPU to fit FLUX transformer + VAE on a single 24GB GPU.
+Built with [candle](https://github.com/huggingface/candle) — pure Rust ML framework with CUDA and Metal backends. No Python, no libtorch.

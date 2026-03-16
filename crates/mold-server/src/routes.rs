@@ -5,11 +5,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mold_core::{GpuInfo, ModelInfo, OutputFormat, ServerStatus};
-use mold_inference::{model_registry, FluxEngine};
+use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
+use mold_inference::model_registry;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{resolve_paths_for, AppState};
+use crate::state::AppState;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -42,17 +42,22 @@ async fn generate(
                 to = %req.model,
                 "hot-swapping model"
             );
-            let (paths, is_schnell) =
-                resolve_paths_for(&req.model, &state.config).ok_or_else(|| {
+            let paths = ModelPaths::resolve(&req.model, &state.config).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no paths configured for model '{}'. Add [models.{}] to config.",
+                        req.model, req.model
+                    ),
+                )
+            })?;
+            *engine = mold_inference::create_engine(req.model.clone(), paths, &state.config)
+                .map_err(|e| {
                     (
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "no paths configured for model '{}'. Add [models.{}] to config.",
-                            req.model, req.model
-                        ),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to create engine for {}: {e}", req.model),
                     )
                 })?;
-            *engine = Box::new(FluxEngine::new(req.model.clone(), paths, is_schnell));
         }
 
         // Load on first request (or after hot-swap)
@@ -117,37 +122,7 @@ async fn generate(
 }
 
 fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
-    if req.prompt.trim().is_empty() {
-        return Err("prompt must not be empty".to_string());
-    }
-    if req.width == 0 || req.height == 0 {
-        return Err("width and height must be > 0".to_string());
-    }
-    if req.width % 16 != 0 || req.height % 16 != 0 {
-        return Err(format!(
-            "width ({}) and height ({}) must be multiples of 16 (FLUX patchification requirement)",
-            req.width, req.height
-        ));
-    }
-    // Cap by total pixel count (~1.1M) rather than per-dimension to allow portrait/landscape.
-    // 896x1152 = 1.03M, 1024x1024 = 1.05M, 1280x768 = 0.98M — all fine.
-    // 1280x1280 = 1.64M — too large, OOMs on VAE decode.
-    let pixels = req.width as u64 * req.height as u64;
-    if pixels > 1_100_000 {
-        return Err(format!(
-            "{}x{} = {} megapixels exceeds the ~1.1MP limit (VAE VRAM constraint)",
-            req.width,
-            req.height,
-            pixels as f64 / 1_000_000.0
-        ));
-    }
-    if req.steps == 0 {
-        return Err("steps must be >= 1".to_string());
-    }
-    if req.steps > 100 {
-        return Err(format!("steps ({}) must be <= 100", req.steps));
-    }
-    Ok(())
+    mold_core::validate_generate_request(req)
 }
 
 // ── /api/models ───────────────────────────────────────────────────────────────
@@ -224,7 +199,7 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let (paths, is_schnell) = resolve_paths_for(&body.model, &state.config).ok_or_else(|| {
+    let paths = ModelPaths::resolve(&body.model, &state.config).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             format!(
@@ -235,7 +210,13 @@ async fn load_model(
     })?;
 
     let mut engine = state.engine.lock().await;
-    *engine = Box::new(FluxEngine::new(body.model.clone(), paths, is_schnell));
+    *engine =
+        mold_inference::create_engine(body.model.clone(), paths, &state.config).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create engine for {}: {e}", body.model),
+            )
+        })?;
     engine.load().map_err(|e| {
         tracing::error!("model load failed: {e:#}");
         (

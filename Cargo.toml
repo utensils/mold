@@ -11,4 +11,10 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+authors = ["James Brink <brink.james@gmail.com>"]
+description = "Local AI image generation CLI — FLUX & SDXL diffusion models on your GPU"
+homepage = "https://github.com/utensils/mold"
 repository = "https://github.com/utensils/mold"
+
+[workspace.metadata.crane]
+name = "mold"
