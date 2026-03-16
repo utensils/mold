@@ -840,6 +840,9 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
 /// FP16 T5-XXL model size in bytes (~9.2GB).
 pub const T5_FP16_SIZE: u64 = 9_200_000_000;
 
+/// BF16 Qwen3-4B text encoder size in bytes (~8.2GB, 3 safetensors shards).
+pub const QWEN3_FP16_SIZE: u64 = 8_200_000_000;
+
 // ── Quantized T5 variant registry ────────────────────────────────────────────
 
 /// A quantized T5 encoder variant available from HuggingFace.
@@ -891,6 +894,53 @@ pub fn known_t5_variants() -> &'static [T5Variant] {
 /// Find a T5 variant by tag (e.g. "q8", "q5").
 pub fn find_t5_variant(tag: &str) -> Option<&'static T5Variant> {
     known_t5_variants().iter().find(|v| v.tag == tag)
+}
+
+// ── Quantized Qwen3 variant registry ──────────────────────────────────────────
+
+/// A quantized Qwen3 text encoder variant available from HuggingFace.
+#[derive(Debug, Clone)]
+pub struct Qwen3Variant {
+    pub tag: &'static str,
+    pub hf_repo: &'static str,
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+}
+
+/// Known Qwen3 quantized variants, sorted largest → smallest.
+pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
+    static VARIANTS: &[Qwen3Variant] = &[
+        Qwen3Variant {
+            tag: "q8",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-Q8_0.gguf",
+            size_bytes: 4_280_000_000, // ~4.28GB
+        },
+        Qwen3Variant {
+            tag: "q6",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-Q6_K.gguf",
+            size_bytes: 3_310_000_000, // ~3.31GB
+        },
+        Qwen3Variant {
+            tag: "iq4",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-imatrix-IQ4_XS.gguf",
+            size_bytes: 2_270_000_000, // ~2.27GB
+        },
+        Qwen3Variant {
+            tag: "q3",
+            hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
+            hf_filename: "Qwen_3_4b-imatrix-Q3_K_M.gguf",
+            size_bytes: 2_080_000_000, // ~2.08GB
+        },
+    ];
+    VARIANTS
+}
+
+/// Find a Qwen3 variant by tag (e.g. "q8", "q6", "iq4", "q3").
+pub fn find_qwen3_variant(tag: &str) -> Option<&'static Qwen3Variant> {
+    known_qwen3_variants().iter().find(|v| v.tag == tag)
 }
 
 /// Size of shared FLUX components (VAE, T5, CLIP, tokenizers) in GB.
@@ -1209,6 +1259,54 @@ mod tests {
         assert_eq!(manifest.defaults.steps, 9);
         assert_eq!(manifest.defaults.guidance, 0.0);
         assert_eq!(manifest.defaults.scheduler, Some("flow_match_euler"));
+    }
+
+    // --- Qwen3 variant registry tests ---
+
+    #[test]
+    fn qwen3_variants_sorted_largest_first() {
+        let variants = known_qwen3_variants();
+        for w in variants.windows(2) {
+            assert!(
+                w[0].size_bytes >= w[1].size_bytes,
+                "{} ({}) should be >= {} ({})",
+                w[0].tag,
+                w[0].size_bytes,
+                w[1].tag,
+                w[1].size_bytes,
+            );
+        }
+    }
+
+    #[test]
+    fn find_qwen3_variant_by_tag() {
+        assert_eq!(find_qwen3_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_qwen3_variant("q6").unwrap().tag, "q6");
+        assert_eq!(find_qwen3_variant("iq4").unwrap().tag, "iq4");
+        assert_eq!(find_qwen3_variant("q3").unwrap().tag, "q3");
+        assert!(find_qwen3_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn qwen3_variants_all_gguf() {
+        for v in known_qwen3_variants() {
+            assert!(
+                v.hf_filename.ends_with(".gguf"),
+                "{} should be a GGUF file",
+                v.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_fp16_larger_than_all_quantized() {
+        for v in known_qwen3_variants() {
+            assert!(
+                QWEN3_FP16_SIZE > v.size_bytes,
+                "FP16 should be larger than {}",
+                v.tag
+            );
+        }
     }
 
     #[test]

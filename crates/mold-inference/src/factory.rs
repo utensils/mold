@@ -53,7 +53,16 @@ pub fn create_engine(
                 is_turbo,
             )))
         }
-        "z-image" => Ok(Box::new(ZImageEngine::new(model_name, paths))),
+        "z-image" => {
+            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
+                .ok()
+                .or_else(|| config.qwen3_variant.clone());
+            Ok(Box::new(ZImageEngine::new(
+                model_name,
+                paths,
+                qwen3_variant,
+            )))
+        }
         other => bail!(
             "unknown model family '{}' for model '{}'. Supported: flux, sdxl, z-image",
             other,

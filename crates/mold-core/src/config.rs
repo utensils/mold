@@ -194,6 +194,11 @@ pub struct Config {
     #[serde(default)]
     pub t5_variant: Option<String>,
 
+    /// Preferred Qwen3 text encoder variant: "bf16" (default), "q8", "q6", "iq4", "q3", or "auto".
+    /// "auto" selects the best variant that fits in GPU VRAM (with drop-and-reload).
+    #[serde(default)]
+    pub qwen3_variant: Option<String>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -234,6 +239,7 @@ impl Default for Config {
             default_height: default_dimension(),
             default_steps: default_steps(),
             t5_variant: None,
+            qwen3_variant: None,
             models: HashMap::new(),
         }
     }

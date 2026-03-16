@@ -22,6 +22,7 @@ pub async fn run(
     format: &str,
     local: bool,
     t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
 ) -> Result<()> {
     let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     let piped = is_piped();
@@ -62,7 +63,7 @@ pub async fn run(
     let response = if local {
         // --local: skip server, go straight to local inference
         status!("{} Using local GPU inference", "●".cyan());
-        generate_local(&req, &config, t5_variant).await?
+        generate_local(&req, &config, t5_variant, qwen3_variant).await?
     } else {
         // Try remote server first
         let client = match &host {
@@ -92,7 +93,7 @@ pub async fn run(
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
                 status!("{} Using local GPU inference", "●".cyan());
-                generate_local(&req, &config, t5_variant).await?
+                generate_local(&req, &config, t5_variant, qwen3_variant).await?
             }
             Err(e) => return Err(e),
         }
@@ -157,6 +158,7 @@ async fn generate_local(
     req: &GenerateRequest,
     config: &Config,
     t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
@@ -219,9 +221,12 @@ async fn generate_local(
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Apply CLI --t5-variant override via env var (factory reads MOLD_T5_VARIANT)
+    // Apply CLI variant overrides via env vars (factory reads MOLD_T5_VARIANT / MOLD_QWEN3_VARIANT)
     if let Some(ref variant) = t5_variant_override {
         std::env::set_var("MOLD_T5_VARIANT", variant);
+    }
+    if let Some(ref variant) = qwen3_variant_override {
+        std::env::set_var("MOLD_QWEN3_VARIANT", variant);
     }
     let mut engine = mold_inference::create_engine(model_name, paths, effective_config)?;
 
@@ -289,6 +294,7 @@ async fn generate_local(
     _req: &GenerateRequest,
     _config: &Config,
     _t5_variant: Option<String>,
+    _qwen3_variant: Option<String>,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

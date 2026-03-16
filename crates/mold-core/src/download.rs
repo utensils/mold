@@ -302,30 +302,36 @@ mod tests {
         assert!(msg.contains("mold pull flux-schnell:q8"));
     }
 
+    /// Mutex to serialize tests that mutate `HF_TOKEN` — `set_var`/`remove_var`
+    /// are process-global and not thread-safe, so parallel tests race.
+    static HF_TOKEN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_hf_token_reads_env_var() {
-        // Save and clear any existing value
+        let _guard = HF_TOKEN_LOCK.lock().unwrap();
         let original = std::env::var("HF_TOKEN").ok();
         std::env::set_var("HF_TOKEN", "hf_test_token_123");
         let token = resolve_hf_token();
-        assert_eq!(token, Some("hf_test_token_123".to_string()));
-        // Restore
-        match original {
+        // Restore before asserting so we don't leak on panic
+        match &original {
             Some(v) => std::env::set_var("HF_TOKEN", v),
             None => std::env::remove_var("HF_TOKEN"),
         }
+        assert_eq!(token, Some("hf_test_token_123".to_string()));
     }
 
     #[test]
     fn resolve_hf_token_ignores_empty_env() {
+        let _guard = HF_TOKEN_LOCK.lock().unwrap();
         let original = std::env::var("HF_TOKEN").ok();
         std::env::set_var("HF_TOKEN", "  ");
         let token = resolve_hf_token();
-        // Should fall through to file-based token (which may or may not exist)
-        assert_ne!(token, Some("  ".to_string()));
-        match original {
+        // Restore before asserting
+        match &original {
             Some(v) => std::env::set_var("HF_TOKEN", v),
             None => std::env::remove_var("HF_TOKEN"),
         }
+        // Should fall through to file-based token (which may or may not exist)
+        assert_ne!(token, Some("  ".to_string()));
     }
 }

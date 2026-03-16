@@ -3,8 +3,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::{
     calculate_shift, get_noise, postprocess_image, AutoEncoderKL, Config,
-    FlowMatchEulerDiscreteScheduler, SchedulerConfig, TextEncoderConfig, VaeConfig,
-    ZImageTextEncoder, ZImageTransformer2DModel,
+    FlowMatchEulerDiscreteScheduler, SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
 };
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -12,7 +11,10 @@ use std::time::Instant;
 
 use super::quantized_transformer::QuantizedZImageTransformer2DModel;
 use super::transformer::ZImageTransformer;
-use crate::device::{fmt_gb, free_vram_bytes, should_use_gpu};
+use crate::device::{
+    fmt_gb, free_vram_bytes, qwen3_vram_threshold, should_use_gpu, QWEN3_FP16_VRAM_THRESHOLD,
+};
+use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -28,26 +30,16 @@ const MAX_SHIFT: f64 = 1.15;
 /// for conv2d im2col expansions through the upsampling blocks.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 6_500_000_000;
 
-/// Minimum free VRAM (bytes) required to place Qwen3 text encoder on GPU.
-/// The encoder is ~8GB BF16. We also need headroom for denoising activations (~8GB)
-/// and VAE decode workspace (~6GB) that share the same VRAM. On a 24GB card with Q8
-/// (~17GB free), this threshold ensures the text encoder stays on CPU. On 48GB+ cards,
-/// it loads on GPU for fast encoding (~0.1s vs ~14s on CPU).
-const QWEN3_VRAM_THRESHOLD: u64 = 22_000_000_000;
-
 /// Loaded Z-Image model components, ready for inference.
 struct LoadedZImage {
     /// Transformer is wrapped in Option so it can be dropped to free VRAM for VAE decode,
     /// then reloaded from disk for the next generation (similar to FLUX's T5/CLIP offload).
     transformer: Option<ZImageTransformer>,
-    text_encoder: ZImageTextEncoder,
+    text_encoder: encoders::qwen3::Qwen3Encoder,
     vae: AutoEncoderKL,
-    tokenizer: tokenizers::Tokenizer,
     transformer_cfg: Config,
     /// GPU device for transformer + denoising
     device: Device,
-    /// Device where the text encoder lives (may be CPU if VRAM is tight)
-    text_encoder_device: Device,
     /// Device where the VAE lives (may be CPU if VRAM is extremely tight)
     vae_device: Device,
     dtype: DType,
@@ -61,23 +53,18 @@ pub struct ZImageEngine {
     model_name: String,
     paths: ModelPaths,
     on_progress: Option<ProgressCallback>,
-}
-
-/// Format a user prompt for Qwen3 chat template.
-fn format_prompt_for_qwen3(prompt: &str) -> String {
-    format!(
-        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-        prompt
-    )
+    /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
+    qwen3_variant: Option<String>,
 }
 
 impl ZImageEngine {
-    pub fn new(model_name: String, paths: ModelPaths) -> Self {
+    pub fn new(model_name: String, paths: ModelPaths, qwen3_variant: Option<String>) -> Self {
         Self {
             loaded: None,
             model_name,
             paths,
             on_progress: None,
+            qwen3_variant,
         }
     }
 
@@ -114,6 +101,154 @@ impl ZImageEngine {
         } else {
             vec![self.paths.transformer.clone()]
         }
+    }
+
+    /// Resolve which Qwen3 encoder to use and where to place it.
+    /// Returns (encoder_paths, is_gguf, on_gpu, device_label).
+    ///
+    /// With drop-and-reload, the text encoder is temporary — loaded for encoding,
+    /// then dropped. This lowers the VRAM threshold from 22GB to ~10GB.
+    fn resolve_qwen3_variant(
+        &self,
+        preference: Option<&str>,
+        gpu_device: &Device,
+        free_vram: u64,
+    ) -> Result<(Vec<std::path::PathBuf>, bool, bool, String)> {
+        use mold_core::download::{cached_file_path, download_single_file_sync};
+        use mold_core::manifest::{find_qwen3_variant, known_qwen3_variants, QWEN3_FP16_SIZE};
+
+        let is_cuda = gpu_device.is_cuda();
+        let is_metal = gpu_device.is_metal();
+        let bf16_paths: Vec<std::path::PathBuf> = self.paths.text_encoder_files.clone();
+
+        match preference {
+            // Explicit quantized variant requested
+            Some(tag) if tag != "bf16" && tag != "auto" => {
+                let variant = find_qwen3_variant(tag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown Qwen3 variant '{}'. Valid: bf16, auto, q8, q6, iq4, q3",
+                        tag,
+                    )
+                })?;
+                let path = self.resolve_qwen3_gguf_path(variant)?;
+                let threshold = qwen3_vram_threshold(variant.size_bytes);
+                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
+                let label = if on_gpu {
+                    "GPU, quantized"
+                } else {
+                    "CPU, quantized"
+                };
+                self.info(&format!(
+                    "Using Qwen3 {} ({}) on {} (explicit)",
+                    variant.tag,
+                    fmt_gb(variant.size_bytes),
+                    if on_gpu { "GPU" } else { "CPU" },
+                ));
+                Ok((vec![path], true, on_gpu, label.to_string()))
+            }
+
+            // Explicit BF16 requested
+            Some("bf16") => {
+                let on_gpu =
+                    should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD);
+                let label = if on_gpu { "GPU" } else { "CPU" };
+                self.info(&format!("Using BF16 Qwen3 on {} (explicit)", label));
+                Ok((bf16_paths, false, on_gpu, label.to_string()))
+            }
+
+            // Auto mode (default): try BF16 on GPU → quantized on GPU → BF16 on CPU
+            _ => {
+                // Can BF16 Qwen3 fit on GPU (with drop-and-reload)?
+                if should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD) {
+                    if is_metal {
+                        self.info("Loading BF16 Qwen3 on GPU (unified memory)");
+                    } else {
+                        self.info(&format!(
+                            "Loading BF16 Qwen3 on GPU ({} free > {} threshold, drop-and-reload)",
+                            fmt_gb(free_vram),
+                            fmt_gb(QWEN3_FP16_VRAM_THRESHOLD),
+                        ));
+                    }
+                    return Ok((bf16_paths, false, true, "GPU".to_string()));
+                }
+
+                // BF16 won't fit — try quantized variants (largest first)
+                if is_cuda {
+                    for variant in known_qwen3_variants() {
+                        let threshold = qwen3_vram_threshold(variant.size_bytes);
+                        if free_vram > threshold {
+                            let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
+                            {
+                                Some(p) => p,
+                                None => {
+                                    self.info(&format!(
+                                        "Downloading Qwen3 {} ({})...",
+                                        variant.tag,
+                                        fmt_gb(variant.size_bytes),
+                                    ));
+                                    tracing::info!(
+                                        variant = variant.tag,
+                                        repo = variant.hf_repo,
+                                        file = variant.hf_filename,
+                                        "downloading quantized Qwen3 encoder"
+                                    );
+                                    download_single_file_sync(variant.hf_repo, variant.hf_filename)
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "failed to download Qwen3 {}: {e}",
+                                                variant.tag
+                                            )
+                                        })?
+                                }
+                            };
+                            self.info(&format!(
+                                "BF16 Qwen3 ({}) exceeds remaining VRAM ({}). Using Qwen3 {} ({}) on GPU instead.",
+                                fmt_gb(QWEN3_FP16_SIZE),
+                                fmt_gb(free_vram),
+                                variant.tag,
+                                fmt_gb(variant.size_bytes),
+                            ));
+                            return Ok((
+                                vec![path],
+                                true,
+                                true,
+                                format!("GPU, quantized {}", variant.tag),
+                            ));
+                        }
+                    }
+                }
+
+                // No variant fits on GPU — fall back to BF16 on CPU
+                if is_cuda {
+                    self.info(&format!(
+                        "Loading BF16 Qwen3 on CPU ({} free, no variant fits on GPU)",
+                        fmt_gb(free_vram),
+                    ));
+                } else {
+                    self.info("No GPU detected, loading Qwen3 on CPU");
+                }
+                Ok((bf16_paths, false, false, "CPU".to_string()))
+            }
+        }
+    }
+
+    /// Resolve the path for a quantized Qwen3 GGUF file: check cache, download if needed.
+    fn resolve_qwen3_gguf_path(
+        &self,
+        variant: &mold_core::manifest::Qwen3Variant,
+    ) -> Result<std::path::PathBuf> {
+        use mold_core::download::{cached_file_path, download_single_file_sync};
+
+        if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
+            return Ok(path);
+        }
+        self.info(&format!(
+            "Downloading Qwen3 {} ({})...",
+            variant.tag,
+            fmt_gb(variant.size_bytes),
+        ));
+        download_single_file_sync(variant.hf_repo, variant.hf_filename)
+            .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
     }
 
     pub fn load(&mut self) -> Result<()> {
@@ -259,63 +394,58 @@ impl ZImageEngine {
         self.stage_done(&vae_label, vae_start.elapsed());
         tracing::info!(device = vae_device_label, "Z-Image VAE loaded");
 
-        // Text encoder placement: dynamic based on free VRAM.
-        // The Qwen3 text encoder is ~8GB BF16. We need enough VRAM to also hold
-        // denoising activations (~8GB) and VAE decode workspace (~6GB), so the threshold
-        // is high (~22GB). On a 24GB card this means CPU; on 48GB+ cards it goes on GPU
-        // for fast encoding (~0.1s vs ~14s on CPU). Metal always uses GPU (unified memory).
-        let te_on_gpu = should_use_gpu(is_cuda, is_metal, free, QWEN3_VRAM_THRESHOLD);
+        // --- Qwen3 text encoder: auto-select variant based on VRAM ---
+        self.stage_start("Selecting Qwen3 encoder");
+        let qwen3_resolve_start = Instant::now();
+        let qwen3_preference = self.qwen3_variant.as_deref();
+        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) =
+            self.resolve_qwen3_variant(qwen3_preference, &device, free)?;
+        self.stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
+
         let te_device = if te_on_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
         let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
-        let te_device_label = if te_on_gpu { "GPU" } else { "CPU" };
 
-        if !te_on_gpu && is_cuda {
-            self.info(&format!(
-                "Qwen3 text encoder on CPU ({} free < {} needed for encoder + activations)",
-                fmt_gb(free),
-                fmt_gb(QWEN3_VRAM_THRESHOLD),
-            ));
-        }
-
-        // Load text encoder (Qwen3)
-        let te_label = format!(
-            "Loading Qwen3 text encoder ({} shards, {})",
-            self.paths.text_encoder_files.len(),
-            te_device_label,
-        );
+        // Load text encoder
+        let te_label = if is_qwen3_gguf {
+            format!("Loading Qwen3 text encoder (GGUF, {})", te_device_label)
+        } else {
+            format!(
+                "Loading Qwen3 text encoder ({} shards, {})",
+                resolved_paths.len(),
+                te_device_label,
+            )
+        };
         self.stage_start(&te_label);
         let te_start = Instant::now();
 
-        let te_cfg = TextEncoderConfig::z_image();
-        let te_path_strs: Vec<&str> = self
-            .paths
-            .text_encoder_files
-            .iter()
-            .map(|p| p.to_str().expect("non-UTF8 path"))
-            .collect();
-        let te_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&te_path_strs, te_dtype, &te_device)? };
-        let text_encoder = ZImageTextEncoder::new(&te_cfg, te_vb)?;
+        let text_encoder = if is_qwen3_gguf {
+            encoders::qwen3::Qwen3Encoder::load_gguf(
+                &resolved_paths[0],
+                text_tokenizer_path,
+                &te_device,
+            )?
+        } else {
+            encoders::qwen3::Qwen3Encoder::load_bf16(
+                &resolved_paths,
+                text_tokenizer_path,
+                &te_device,
+                te_dtype,
+            )?
+        };
 
         self.stage_done(&te_label, te_start.elapsed());
-        tracing::info!(device = te_device_label, "Qwen3 text encoder loaded");
-
-        // Load tokenizer
-        let tokenizer = tokenizers::Tokenizer::from_file(text_tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
+        tracing::info!(device = %te_device_label, quantized = is_qwen3_gguf, "Qwen3 text encoder loaded");
 
         self.loaded = Some(LoadedZImage {
             transformer: Some(transformer),
             text_encoder,
             vae,
-            tokenizer,
             transformer_cfg,
             device,
-            text_encoder_device: te_device,
             vae_device,
             dtype,
             is_quantized: is_gguf,
@@ -416,34 +546,38 @@ impl InferenceEngine for ZImageEngine {
             "starting Z-Image generation"
         );
 
-        // 1. Tokenize prompt with Qwen3 chat template
+        // 1. Reload text encoder if weights were dropped after previous generation
+        if loaded.text_encoder.model.is_none() {
+            let te_label = if loaded.text_encoder.is_quantized {
+                "Reloading Qwen3 encoder (GGUF)"
+            } else {
+                "Reloading Qwen3 encoder (BF16)"
+            };
+            stage_start(te_label);
+            let reload_start = Instant::now();
+            loaded.text_encoder.reload()?;
+            stage_done(te_label, reload_start.elapsed());
+        }
+
+        // 2. Encode prompt with Qwen3
         stage_start("Encoding prompt (Qwen3)");
         let encode_start = Instant::now();
 
-        let formatted_prompt = format_prompt_for_qwen3(&req.prompt);
-        let tokens = loaded
-            .tokenizer
-            .encode(formatted_prompt.as_str(), true)
-            .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?
-            .get_ids()
-            .to_vec();
-
-        // Create input_ids on the text encoder's device (may be CPU)
-        let input_ids = Tensor::from_vec(
-            tokens.clone(),
-            (1, tokens.len()),
-            &loaded.text_encoder_device,
-        )?;
-
-        // 2. Encode text (on text encoder device, then move to GPU)
-        let cap_feats = loaded.text_encoder.forward(&input_ids)?;
-        let cap_feats = cap_feats
-            .to_device(&loaded.device)?
-            .to_dtype(loaded.dtype)?;
-        let cap_mask = Tensor::ones((1, tokens.len()), DType::U8, &loaded.device)?;
+        let (cap_feats, token_count) =
+            loaded
+                .text_encoder
+                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
+        let cap_mask = Tensor::ones((1, token_count), DType::U8, &loaded.device)?;
 
         stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
-        tracing::info!(token_count = tokens.len(), "text encoding complete");
+        tracing::info!(token_count, "text encoding complete");
+
+        // Drop text encoder from GPU to free VRAM for denoising + VAE decode.
+        // It will be reloaded on the next generate() call.
+        if loaded.text_encoder.on_gpu {
+            loaded.text_encoder.drop_weights();
+            tracing::info!("Qwen3 text encoder dropped from GPU to free VRAM for denoising");
+        }
 
         // 3. Calculate latent dimensions: 2 * (image_size / 16)
         let vae_align = 16;
@@ -585,15 +719,6 @@ mod tests {
     use crate::device::should_use_gpu;
 
     #[test]
-    fn prompt_formatting() {
-        let result = format_prompt_for_qwen3("a cat");
-        assert_eq!(
-            result,
-            "<|im_start|>user\na cat<|im_end|>\n<|im_start|>assistant\n"
-        );
-    }
-
-    #[test]
     fn latent_dimensions() {
         // 1024px → 2 * (1024 / 16) = 128
         assert_eq!(2 * (1024 / 16), 128);
@@ -603,53 +728,61 @@ mod tests {
         assert_eq!(2 * (768 / 16), 96);
     }
 
-    // --- VRAM threshold decision tests ---
+    // --- VRAM threshold decision tests (with drop-and-reload) ---
 
     #[test]
-    fn qwen3_on_cpu_on_24gb_with_q8() {
+    fn qwen3_on_gpu_on_24gb_with_q8_drop_reload() {
         // Q8 transformer (6.6GB) on 24GB card → ~17GB free
-        // Text encoder should go to CPU (17GB < 22GB threshold)
-        assert!(!should_use_gpu(
+        // With drop-and-reload, threshold is 10.2GB → fits on GPU!
+        assert!(should_use_gpu(
             true,
             false,
             17_000_000_000,
-            QWEN3_VRAM_THRESHOLD
+            QWEN3_FP16_VRAM_THRESHOLD
         ));
     }
 
     #[test]
-    fn qwen3_on_cpu_on_24gb_with_q4() {
+    fn qwen3_on_gpu_on_24gb_with_q4_drop_reload() {
         // Q4 transformer (3.9GB) on 24GB card → ~19GB free
-        // Still on CPU (19GB < 22GB threshold) — need room for denoising + VAE
-        assert!(!should_use_gpu(
+        // With drop-and-reload, easily fits on GPU
+        assert!(should_use_gpu(
             true,
             false,
             19_000_000_000,
-            QWEN3_VRAM_THRESHOLD
+            QWEN3_FP16_VRAM_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn qwen3_on_cpu_with_bf16_transformer() {
+        // BF16 transformer (24.6GB) on 24GB card → ~0GB free
+        // Even with drop-and-reload, can't fit
+        assert!(!should_use_gpu(
+            true,
+            false,
+            400_000_000,
+            QWEN3_FP16_VRAM_THRESHOLD
         ));
     }
 
     #[test]
     fn qwen3_on_gpu_on_48gb_card() {
-        // Q8 transformer (6.6GB) on 48GB card → ~40GB free
-        // Text encoder should go to GPU for fast encoding
         assert!(should_use_gpu(
             true,
             false,
             40_000_000_000,
-            QWEN3_VRAM_THRESHOLD
+            QWEN3_FP16_VRAM_THRESHOLD
         ));
     }
 
     #[test]
     fn qwen3_on_gpu_on_metal() {
-        // Metal uses unified memory — always GPU regardless of free VRAM
-        assert!(should_use_gpu(false, true, 0, QWEN3_VRAM_THRESHOLD));
+        assert!(should_use_gpu(false, true, 0, QWEN3_FP16_VRAM_THRESHOLD));
     }
 
     #[test]
     fn vae_on_gpu_when_plenty_of_vram() {
-        // Q8 transformer on 24GB, no other processes → ~17GB free
         assert!(should_use_gpu(
             true,
             false,
@@ -660,7 +793,6 @@ mod tests {
 
     #[test]
     fn vae_on_cpu_when_vram_tight() {
-        // Q8 transformer on 24GB + 12GB used by other process → ~5.4GB free
         assert!(!should_use_gpu(
             true,
             false,
@@ -677,21 +809,19 @@ mod tests {
     // --- Threshold sanity checks ---
 
     #[test]
-    fn qwen3_threshold_exceeds_encoder_size() {
-        // Qwen3 text encoder is ~8GB; threshold must be much higher
-        // to account for denoising activations + VAE workspace
-        assert!(QWEN3_VRAM_THRESHOLD > 8_000_000_000);
+    fn qwen3_threshold_allows_gpu_on_24gb_with_quantized_xformer() {
+        // Key improvement: with drop-and-reload, BF16 Qwen3 fits on GPU
+        // when quantized transformer is used on 24GB cards
+        assert!(QWEN3_FP16_VRAM_THRESHOLD < 17_000_000_000);
     }
 
     #[test]
-    fn qwen3_threshold_reasonable_for_large_cards() {
-        // Should not be so high that even 48GB cards can't use GPU
-        assert!(QWEN3_VRAM_THRESHOLD < 40_000_000_000);
+    fn qwen3_threshold_exceeds_encoder_size() {
+        assert!(QWEN3_FP16_VRAM_THRESHOLD > 8_200_000_000);
     }
 
     #[test]
     fn vae_threshold_accounts_for_decode_workspace() {
-        // VAE weights are ~160MB, but im2col workspace needs much more
         assert!(VAE_DECODE_VRAM_THRESHOLD > 160_000_000);
         assert!(VAE_DECODE_VRAM_THRESHOLD < 15_000_000_000);
     }
