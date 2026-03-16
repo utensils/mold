@@ -1,10 +1,11 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::download::{pull_model, DownloadError};
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
 use crate::output::status;
+use crate::AlreadyReported;
 
 /// Download a model and write its config. Returns the updated Config.
 pub async fn pull_and_configure(model: &str) -> Result<Config> {
@@ -33,7 +34,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                 ).dimmed(),
             );
             eprintln!("Usage: mold pull <model>");
-            bail!("unknown model: {model}");
+            return Err(AlreadyReported.into());
         }
     };
 
@@ -71,7 +72,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                     "!".yellow().bold()
                 );
             }
-            bail!("authentication required");
+            return Err(AlreadyReported.into());
         }
         Err(DownloadError::GatedModel { .. }) => {
             eprintln!();
@@ -94,12 +95,12 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
             eprintln!("  3. Create a token at: https://huggingface.co/settings/tokens");
             eprintln!("  4. Set: export HF_TOKEN=hf_...");
             eprintln!("  5. Retry: mold pull {}", manifest.name);
-            bail!("gated model requires HuggingFace access approval");
+            return Err(AlreadyReported.into());
         }
         Err(e) => {
             eprintln!();
             eprintln!("{} Download failed: {e}", "✗".red().bold());
-            bail!(e);
+            return Err(AlreadyReported.into());
         }
     };
 

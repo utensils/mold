@@ -46,6 +46,33 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// Collect all file path strings from this model config into a flat list.
+    /// Used for reference counting when determining which files are shared.
+    pub fn all_file_paths(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        let singles = [
+            &self.transformer,
+            &self.vae,
+            &self.t5_encoder,
+            &self.clip_encoder,
+            &self.t5_tokenizer,
+            &self.clip_tokenizer,
+            &self.clip_encoder_2,
+            &self.clip_tokenizer_2,
+            &self.text_tokenizer,
+        ];
+        for p in singles.into_iter().flatten() {
+            paths.push(p.clone());
+        }
+        if let Some(ref shards) = self.transformer_shards {
+            paths.extend(shards.iter().cloned());
+        }
+        if let Some(ref files) = self.text_encoder_files {
+            paths.extend(files.iter().cloned());
+        }
+        paths
+    }
+
     /// Effective steps: model default → global fallback → hardcoded default.
     pub fn effective_steps(&self, global_cfg: &Config) -> u32 {
         self.default_steps.unwrap_or(global_cfg.default_steps)
@@ -350,6 +377,11 @@ impl Config {
     /// Insert or update a model configuration entry.
     pub fn upsert_model(&mut self, name: String, config: ModelConfig) {
         self.models.insert(name, config);
+    }
+
+    /// Remove a model entry from the config, returning it if it existed.
+    pub fn remove_model(&mut self, name: &str) -> Option<ModelConfig> {
+        self.models.remove(name)
     }
 
     /// Write the config to disk at `config_path()`.

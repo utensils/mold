@@ -4,6 +4,19 @@ mod output;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
+/// Sentinel error: the command already printed diagnostics to stderr.
+/// The main handler should just exit(1) without printing anything extra.
+#[derive(Debug)]
+struct AlreadyReported;
+
+impl std::fmt::Display for AlreadyReported {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl std::error::Error for AlreadyReported {}
+
 #[derive(Parser)]
 #[command(
     name = "mold",
@@ -101,6 +114,19 @@ enum Commands {
         model: String,
     },
 
+    /// Remove downloaded model(s) and their unique files
+    #[command(alias = "remove")]
+    Rm {
+        /// Model name(s) to remove
+        #[arg(required = true, num_args = 1..)]
+        #[arg(add = ArgValueCandidates::new(commands::rm::complete_installed_model_name))]
+        models: Vec<String>,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// List locally available models
     #[command(alias = "ls")]
     List,
@@ -126,7 +152,7 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     // Reset SIGPIPE to default (terminate) so piping doesn't panic.
     // Rust ignores SIGPIPE by default, causing "broken pipe" panics when
     // stdout is a pipe and the reader closes (e.g. `mold run ... | head`).
@@ -135,6 +161,22 @@ async fn main() -> anyhow::Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    if let Err(e) = run().await {
+        // If the command already printed its own diagnostics, just exit.
+        if e.downcast_ref::<AlreadyReported>().is_some() {
+            std::process::exit(1);
+        }
+        // Print the error chain cleanly without backtraces
+        use colored::Colorize;
+        eprintln!("{} {e}", "error:".red().bold());
+        for cause in e.chain().skip(1) {
+            eprintln!("  {} {cause}", "caused by:".dimmed());
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
@@ -183,6 +225,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Pull { model } => {
             commands::pull::run(&model).await?;
+        }
+        Commands::Rm { models, force } => {
+            commands::rm::run(&models, force).await?;
         }
         Commands::List => {
             commands::list::run().await?;

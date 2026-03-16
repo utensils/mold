@@ -42,11 +42,13 @@ pub fn run(name: &str) -> Result<()> {
         .or_else(|| config.models.get(name));
 
     if manifest.is_none() && model_config.is_none() {
-        anyhow::bail!(
-            "unknown model '{}'. Use {} to see available models.",
+        eprintln!(
+            "{} Unknown model '{}'. Use {} to see available models.",
+            "error:".red().bold(),
             canonical,
             "mold list".bold()
         );
+        return Err(crate::AlreadyReported.into());
     }
 
     // Header
@@ -259,8 +261,6 @@ mod tests {
     fn unknown_model_returns_error() {
         let result = run("nonexistent-model-xyz");
         assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown model"));
     }
 
     #[test]
