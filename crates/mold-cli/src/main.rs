@@ -99,8 +99,8 @@ enum Commands {
 
     /// Start the inference server
     Serve {
-        /// Server port
-        #[arg(long, default_value = "7680")]
+        /// Server port (default: 7680, or MOLD_PORT env var)
+        #[arg(long, default_value_t = default_port())]
         port: u16,
 
         /// Bind address
@@ -181,7 +181,22 @@ async fn main() {
     }
 }
 
+fn default_port() -> u16 {
+    std::env::var("MOLD_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7680)
+}
+
 async fn run() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();

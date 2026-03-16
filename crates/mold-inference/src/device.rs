@@ -1,4 +1,24 @@
 use crate::engine::LoadStrategy;
+use crate::progress::ProgressReporter;
+
+/// Create a GPU device, falling back to CPU if no accelerator is available.
+/// Reports device selection via the progress reporter.
+pub fn create_device(progress: &ProgressReporter) -> anyhow::Result<candle_core::Device> {
+    use candle_core::Device;
+    if candle_core::utils::cuda_is_available() {
+        progress.info("CUDA detected, using GPU");
+        tracing::info!("CUDA detected, using GPU");
+        Ok(Device::new_cuda(0)?)
+    } else if candle_core::utils::metal_is_available() {
+        progress.info("Metal detected, using GPU");
+        tracing::info!("Metal detected, using MPS");
+        Ok(Device::new_metal(0)?)
+    } else {
+        progress.info("No GPU detected, using CPU");
+        tracing::warn!("No GPU detected, falling back to CPU");
+        Ok(Device::Cpu)
+    }
+}
 
 /// Headroom above model size for activation memory during encoding.
 pub const T5_ACTIVATION_HEADROOM: u64 = 2_000_000_000; // 2GB

@@ -4,10 +4,8 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use mold_core::{GenerateRequest, GenerateResponse, ImageData, OutputFormat};
+    use mold_core::{GenerateRequest, GenerateResponse, ImageData};
     use mold_inference::InferenceEngine;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     use crate::{routes::create_router, state::AppState};

@@ -203,9 +203,6 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub server_port: u16,
 
-    #[serde(default = "default_output_dir")]
-    pub output_dir: String,
-
     #[serde(default = "default_dimension")]
     pub default_width: u32,
 
@@ -243,10 +240,6 @@ fn default_port() -> u16 {
     7680
 }
 
-fn default_output_dir() -> String {
-    ".".to_string()
-}
-
 fn default_dimension() -> u32 {
     768
 }
@@ -261,7 +254,6 @@ impl Default for Config {
             default_model: default_model(),
             models_dir: default_models_dir(),
             server_port: default_port(),
-            output_dir: default_output_dir(),
             default_width: default_dimension(),
             default_height: default_dimension(),
             default_steps: default_steps(),

@@ -50,7 +50,6 @@ cargo test                                           # All tests
 cargo test -p mold-core                              # Single crate
 cargo run -p mold-cli -- run "a cat"                 # Generate image
 cargo run -p mold-cli -- serve                       # Start server
-./scripts/deploy.sh                                  # Deploy to GPU host
 ```
 
 ### CI (GitHub Actions)
@@ -128,6 +127,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 |--------|------|-------------|
 | `POST` | `/api/generate` | Generate images from prompt |
 | `GET` | `/api/models` | List available models |
+| `POST` | `/api/models/load` | Load/swap the active model |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 
@@ -152,6 +152,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --host <URL>            Override MOLD_HOST
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
+        --eager                 Keep all model components loaded simultaneously (faster, more memory)
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
 
@@ -172,7 +173,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port |
-| `MOLD_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `MOLD_LOG` | `warn` (CLI) / `info` (server) | Log level (trace, debug, info, warn, error) |
+| `MOLD_EAGER` | — | Set `1` to keep all model components loaded simultaneously |
 | `MOLD_TRANSFORMER_PATH` | — | Override transformer path |
 | `MOLD_VAE_PATH` | — | Override VAE path |
 | `MOLD_T5_PATH` | — | Override T5-XXL encoder path |
@@ -194,7 +196,6 @@ Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy �
 default_model = "flux-schnell:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
-output_dir = "."
 default_width = 1024
 default_height = 1024
 # t5_variant = "auto"

@@ -826,14 +826,15 @@ pub fn is_known_model(name: &str, config: &crate::Config) -> bool {
 
 /// All known model names (manifests + config), deduplicated and sorted.
 pub fn all_model_names(config: &crate::Config) -> Vec<String> {
-    let mut names: Vec<String> = known_manifests().iter().map(|m| m.name.clone()).collect();
-    for key in config.models.keys() {
-        if !names.contains(key) {
-            names.push(key.clone());
-        }
+    let mut seen = std::collections::HashSet::new();
+    for m in known_manifests() {
+        seen.insert(m.name.clone());
     }
+    for key in config.models.keys() {
+        seen.insert(key.clone());
+    }
+    let mut names: Vec<String> = seen.into_iter().collect();
     names.sort();
-    names.dedup();
     names
 }
 

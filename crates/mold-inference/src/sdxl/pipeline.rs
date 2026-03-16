@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
-use crate::progress::{ProgressCallback, ProgressEvent};
+use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Loaded SDXL model components, ready for inference.
 struct LoadedSDXL {
@@ -29,7 +29,7 @@ pub struct SDXLEngine {
     paths: ModelPaths,
     scheduler_name: String,
     is_turbo: bool,
-    on_progress: Option<ProgressCallback>,
+    progress: ProgressReporter,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
 }
@@ -53,34 +53,9 @@ impl SDXLEngine {
             paths,
             scheduler_name,
             is_turbo,
-            on_progress: None,
+            progress: ProgressReporter::default(),
             load_strategy,
         }
-    }
-
-    fn emit(&self, event: ProgressEvent) {
-        if let Some(cb) = &self.on_progress {
-            cb(event);
-        }
-    }
-
-    fn stage_start(&self, name: &str) {
-        self.emit(ProgressEvent::StageStart {
-            name: name.to_string(),
-        });
-    }
-
-    fn stage_done(&self, name: &str, elapsed: std::time::Duration) {
-        self.emit(ProgressEvent::StageDone {
-            name: name.to_string(),
-            elapsed,
-        });
-    }
-
-    fn info(&self, message: &str) {
-        self.emit(ProgressEvent::Info {
-            message: message.to_string(),
-        });
     }
 
     /// Validate and return required SDXL paths.
@@ -138,20 +113,6 @@ impl SDXLEngine {
         ))
     }
 
-    /// Create a GPU device.
-    fn create_device(&self) -> Result<Device> {
-        if candle_core::utils::cuda_is_available() {
-            self.info("CUDA detected, using GPU");
-            Ok(Device::new_cuda(0)?)
-        } else if candle_core::utils::metal_is_available() {
-            self.info("Metal detected, using GPU");
-            Ok(Device::new_metal(0)?)
-        } else {
-            self.info("No GPU detected, using CPU");
-            Ok(Device::Cpu)
-        }
-    }
-
     /// Create the SDXL config.
     fn sd_config(&self) -> stable_diffusion::StableDiffusionConfig {
         if self.is_turbo {
@@ -177,7 +138,7 @@ impl SDXLEngine {
 
         tracing::info!(model = %self.model_name, "loading SDXL model components...");
 
-        let device = self.create_device()?;
+        let device = crate::device::create_device(&self.progress)?;
         let dtype = if device.is_cuda() || device.is_metal() {
             DType::F16
         } else {
@@ -187,7 +148,7 @@ impl SDXLEngine {
         let sd_config = self.sd_config();
 
         // Load UNet
-        self.stage_start("Loading UNet (GPU)");
+        self.progress.stage_start("Loading UNet (GPU)");
         let unet_start = Instant::now();
         let unet = sd_config.build_unet(
             &self.paths.transformer,
@@ -196,16 +157,18 @@ impl SDXLEngine {
             false, // use_flash_attn
             dtype,
         )?;
-        self.stage_done("Loading UNet (GPU)", unet_start.elapsed());
+        self.progress
+            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
         // Load VAE
-        self.stage_start("Loading VAE (GPU)");
+        self.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
         let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-        self.stage_done("Loading VAE (GPU)", vae_start.elapsed());
+        self.progress
+            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
         // Load CLIP-L encoder
-        self.stage_start("Loading CLIP-L encoder");
+        self.progress.stage_start("Loading CLIP-L encoder");
         let clip_l_start = Instant::now();
         let clip_l = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
@@ -213,10 +176,11 @@ impl SDXLEngine {
             &device,
             DType::F32,
         )?;
-        self.stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+        self.progress
+            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
 
         // Load CLIP-G encoder
-        self.stage_start("Loading CLIP-G encoder");
+        self.progress.stage_start("Loading CLIP-G encoder");
         let clip_g_start = Instant::now();
         let clip2_config = sd_config
             .clip2
@@ -228,7 +192,8 @@ impl SDXLEngine {
             &device,
             DType::F32,
         )?;
-        self.stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+        self.progress
+            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
 
         // Load tokenizers
         let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
@@ -287,7 +252,7 @@ impl SDXLEngine {
         let timesteps = scheduler.timesteps().to_vec();
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len());
-        self.stage_start(&denoise_label);
+        self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         for (step_idx, &t) in timesteps.iter().enumerate() {
@@ -311,14 +276,15 @@ impl SDXLEngine {
             };
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
-            self.emit(ProgressEvent::DenoiseStep {
+            self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: timesteps.len(),
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.stage_done(&denoise_label, denoise_start.elapsed());
+        self.progress
+            .stage_done(&denoise_label, denoise_start.elapsed());
         Ok(())
     }
 
@@ -338,17 +304,19 @@ impl SDXLEngine {
     ) -> Result<Tensor> {
         let use_cfg = guidance > 1.0;
 
-        self.stage_start("Encoding prompt (CLIP-L)");
+        self.progress.stage_start("Encoding prompt (CLIP-L)");
         let encode_l_start = Instant::now();
         let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
         let text_emb_l = clip_l.forward(&tokens_l)?;
-        self.stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+        self.progress
+            .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
 
-        self.stage_start("Encoding prompt (CLIP-G)");
+        self.progress.stage_start("Encoding prompt (CLIP-G)");
         let encode_g_start = Instant::now();
         let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
         let text_emb_g = clip_g.forward(&tokens_g)?;
-        self.stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+        self.progress
+            .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
 
         let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
 
@@ -379,10 +347,10 @@ impl SDXLEngine {
 
         // Check memory budget
         if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.info(&warning);
+            self.progress.info(&warning);
         }
 
-        let device = self.create_device()?;
+        let device = crate::device::create_device(&self.progress)?;
         let dtype = if device.is_cuda() || device.is_metal() {
             DType::F16
         } else {
@@ -408,13 +376,14 @@ impl SDXLEngine {
             "starting sequential SDXL generation"
         );
 
-        self.info("Using sequential loading (load-use-drop) to minimize peak memory");
+        self.progress
+            .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Load both CLIP encoders, encode, then drop ---
         // SDXL CLIP encoders are small (~1.7GB total) so we load both for encoding,
         // then drop them together before loading the UNet.
         if let Some(status) = memory_status_string() {
-            self.info(&status);
+            self.progress.info(&status);
         }
 
         // Load tokenizers (kept in memory — tiny)
@@ -424,7 +393,7 @@ impl SDXLEngine {
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
 
         // Load CLIP-L
-        self.stage_start("Loading CLIP-L encoder");
+        self.progress.stage_start("Loading CLIP-L encoder");
         let clip_l_start = Instant::now();
         let clip_l = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
@@ -432,10 +401,11 @@ impl SDXLEngine {
             &device,
             DType::F32,
         )?;
-        self.stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+        self.progress
+            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
 
         // Load CLIP-G
-        self.stage_start("Loading CLIP-G encoder");
+        self.progress.stage_start("Loading CLIP-G encoder");
         let clip_g_start = Instant::now();
         let clip2_config = sd_config
             .clip2
@@ -447,7 +417,8 @@ impl SDXLEngine {
             &device,
             DType::F32,
         )?;
-        self.stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+        self.progress
+            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
 
         // Encode prompt
         let text_embeddings = self.encode_prompt(
@@ -465,7 +436,7 @@ impl SDXLEngine {
         // Drop CLIP encoders to free memory
         drop(clip_l);
         drop(clip_g);
-        self.info("Freed CLIP-L and CLIP-G encoders");
+        self.progress.info("Freed CLIP-L and CLIP-G encoders");
         tracing::info!("CLIP encoders dropped (sequential mode)");
 
         // --- Phase 2: Load UNet and denoise ---
@@ -474,13 +445,14 @@ impl SDXLEngine {
             .unwrap_or(0);
         preflight_memory_check("UNet", unet_size)?;
         if let Some(status) = memory_status_string() {
-            self.info(&status);
+            self.progress.info(&status);
         }
 
-        self.stage_start("Loading UNet (GPU)");
+        self.progress.stage_start("Loading UNet (GPU)");
         let unet_start = Instant::now();
         let unet = sd_config.build_unet(&self.paths.transformer, &device, 4, false, dtype)?;
-        self.stage_done("Loading UNet (GPU)", unet_start.elapsed());
+        self.progress
+            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
         let latent_h = height / 8;
         let latent_w = width / 8;
@@ -502,16 +474,17 @@ impl SDXLEngine {
         // Drop UNet to free memory for VAE decode
         drop(unet);
         drop(text_embeddings);
-        self.info("Freed UNet");
+        self.progress.info("Freed UNet");
         tracing::info!("UNet dropped (sequential mode)");
 
         // --- Phase 3: Load VAE and decode ---
-        self.stage_start("Loading VAE (GPU)");
+        self.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
         let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-        self.stage_done("Loading VAE (GPU)", vae_start.elapsed());
+        self.progress
+            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
-        self.stage_start("VAE decode");
+        self.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
         let vae_scale = if self.is_turbo {
@@ -526,7 +499,8 @@ impl SDXLEngine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.stage_done("VAE decode", vae_decode_start.elapsed());
+        self.progress
+            .stage_done("VAE decode", vae_decode_start.elapsed());
 
         // VAE dropped here
         let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
@@ -618,7 +592,7 @@ impl InferenceEngine for SDXLEngine {
         )?;
 
         // 6. VAE decode
-        self.stage_start("VAE decode");
+        self.progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
         let vae_scale = if self.is_turbo {
@@ -634,7 +608,7 @@ impl InferenceEngine for SDXLEngine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?; // [3, H, W]
 
-        self.stage_done("VAE decode", vae_start.elapsed());
+        self.progress.stage_done("VAE decode", vae_start.elapsed());
 
         // 8. Encode to image format
         let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
@@ -670,6 +644,6 @@ impl InferenceEngine for SDXLEngine {
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.on_progress = Some(callback);
+        self.progress.set_callback(callback);
     }
 }
