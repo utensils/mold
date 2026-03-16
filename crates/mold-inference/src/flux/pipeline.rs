@@ -116,6 +116,7 @@ impl FluxEngine {
         use mold_core::manifest::{find_t5_variant, known_t5_variants, T5_FP16_SIZE};
 
         let is_cuda = gpu_device.is_cuda();
+        let is_metal = gpu_device.is_metal();
 
         match preference {
             // Explicit quantized variant requested
@@ -128,7 +129,7 @@ impl FluxEngine {
                 })?;
                 let path = self.resolve_t5_gguf_path(variant)?;
                 let threshold = t5_vram_threshold(variant.size_bytes);
-                let on_gpu = should_use_gpu(is_cuda, free_vram, threshold);
+                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
                 let label = if on_gpu {
                     "GPU, quantized"
                 } else {
@@ -145,7 +146,7 @@ impl FluxEngine {
 
             // Explicit FP16 requested
             Some("fp16") => {
-                let on_gpu = should_use_gpu(is_cuda, free_vram, T5_VRAM_THRESHOLD);
+                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, T5_VRAM_THRESHOLD);
                 let label = if on_gpu { "GPU" } else { "CPU" };
                 self.info(&format!("Using FP16 T5 on {} (explicit)", label));
                 Ok((default_t5_path.to_path_buf(), on_gpu, label.to_string()))
@@ -154,7 +155,7 @@ impl FluxEngine {
             // Auto mode (default): try FP16 on GPU, then quantized on GPU, then FP16 on CPU
             _ => {
                 // Can FP16 T5 fit on GPU?
-                if should_use_gpu(is_cuda, free_vram, T5_VRAM_THRESHOLD) {
+                if should_use_gpu(is_cuda, is_metal, free_vram, T5_VRAM_THRESHOLD) {
                     self.info(&format!(
                         "Loading FP16 T5 on GPU ({} free > {} threshold)",
                         fmt_gb(free_vram),
@@ -164,6 +165,8 @@ impl FluxEngine {
                 }
 
                 // FP16 won't fit on GPU — try quantized variants (largest first)
+                // (Only relevant for CUDA with discrete VRAM; Metal unified memory
+                //  always passes the threshold check above.)
                 if is_cuda {
                     for variant in known_t5_variants() {
                         let threshold = t5_vram_threshold(variant.size_bytes);
@@ -420,7 +423,7 @@ impl FluxEngine {
 
         // Re-check VRAM after T5 (it may have consumed GPU memory)
         let free_after_t5 = free_vram_bytes().unwrap_or(0);
-        let clip_on_gpu = should_use_gpu(device.is_cuda(), free_after_t5, CLIP_VRAM_THRESHOLD);
+        let clip_on_gpu = should_use_gpu(device.is_cuda(), device.is_metal(), free_after_t5, CLIP_VRAM_THRESHOLD);
         let clip_device = if clip_on_gpu { &device } else { &cpu };
         let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
         let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };

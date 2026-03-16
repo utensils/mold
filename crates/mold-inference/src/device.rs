@@ -33,7 +33,12 @@ pub(crate) fn fmt_gb(bytes: u64) -> String {
 }
 
 /// Determine whether a component should be placed on GPU given free VRAM.
-pub(crate) fn should_use_gpu(is_cuda: bool, free_vram: u64, threshold: u64) -> bool {
+/// On Metal (Apple Silicon), unified memory means all components always fit on GPU.
+/// On CUDA, checks that free discrete VRAM exceeds the threshold.
+pub(crate) fn should_use_gpu(is_cuda: bool, is_metal: bool, free_vram: u64, threshold: u64) -> bool {
+    if is_metal {
+        return true;
+    }
     is_cuda && free_vram > threshold
 }
 
@@ -71,66 +76,79 @@ mod tests {
         assert_eq!(free_vram_bytes(), None);
     }
 
-    // --- VRAM threshold decision tests ---
+    // --- VRAM threshold decision tests (CUDA — discrete VRAM) ---
 
     #[test]
     fn t5_on_gpu_when_plenty_of_vram() {
         // Q4 transformer (7GB) + VAE (0.3GB) on 24GB card → ~16.7GB free
-        assert!(should_use_gpu(true, 16_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(should_use_gpu(true, false, 16_700_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn t5_on_cpu_when_q6_on_24gb() {
         // Q6 transformer (9.9GB) + VAE (0.3GB) on 24GB card → ~14.6GB free
-        assert!(!should_use_gpu(true, 14_600_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(true, false, 14_600_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn t5_on_cpu_when_q8_on_24gb() {
         // Q8 transformer (12GB) + VAE (0.3GB) on 24GB card → ~11.7GB free
-        assert!(!should_use_gpu(true, 11_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(true, false, 11_700_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn t5_on_cpu_when_bf16_fills_vram() {
         // BF16 dev (23GB) + VAE (0.3GB) on 24GB card → ~0.7GB free
-        assert!(!should_use_gpu(true, 700_000_000, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(true, false, 700_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn t5_on_cpu_when_exactly_at_threshold() {
         // Exactly at threshold should NOT place on GPU (we need strictly more)
-        assert!(!should_use_gpu(true, T5_VRAM_THRESHOLD, T5_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(true, false, T5_VRAM_THRESHOLD, T5_VRAM_THRESHOLD));
     }
 
     #[test]
-    fn t5_on_cpu_when_no_cuda() {
-        // Even with plenty of "free memory", non-CUDA devices always use CPU
-        assert!(!should_use_gpu(false, 100_000_000_000, T5_VRAM_THRESHOLD));
+    fn t5_on_cpu_when_no_gpu() {
+        // Even with plenty of "free memory", CPU-only devices always use CPU
+        assert!(!should_use_gpu(false, false, 100_000_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn t5_on_gpu_on_48gb_card() {
         // Q8 transformer (12GB) + VAE (0.3GB) on 48GB card → ~35.7GB free
-        assert!(should_use_gpu(true, 35_700_000_000, T5_VRAM_THRESHOLD));
+        assert!(should_use_gpu(true, false, 35_700_000_000, T5_VRAM_THRESHOLD));
     }
 
     #[test]
     fn clip_on_gpu_when_vram_available() {
         // After Q4 transformer + T5 on GPU: ~7.5GB free → CLIP easily fits
-        assert!(should_use_gpu(true, 7_500_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(should_use_gpu(true, false, 7_500_000_000, CLIP_VRAM_THRESHOLD));
     }
 
     #[test]
     fn clip_on_gpu_with_minimal_vram() {
         // Just above 800MB threshold
-        assert!(should_use_gpu(true, 900_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(should_use_gpu(true, false, 900_000_000, CLIP_VRAM_THRESHOLD));
     }
 
     #[test]
     fn clip_on_cpu_when_vram_tight() {
         // Only 500MB free — below CLIP threshold
-        assert!(!should_use_gpu(true, 500_000_000, CLIP_VRAM_THRESHOLD));
+        assert!(!should_use_gpu(true, false, 500_000_000, CLIP_VRAM_THRESHOLD));
+    }
+
+    // --- Metal (Apple Silicon unified memory) — always GPU ---
+
+    #[test]
+    fn metal_always_uses_gpu_for_t5() {
+        // Metal uses unified memory — VRAM thresholds don't apply
+        assert!(should_use_gpu(false, true, 0, T5_VRAM_THRESHOLD));
+    }
+
+    #[test]
+    fn metal_always_uses_gpu_for_clip() {
+        assert!(should_use_gpu(false, true, 0, CLIP_VRAM_THRESHOLD));
     }
 
     // --- Threshold constant sanity checks ---
@@ -168,9 +186,9 @@ mod tests {
         let threshold = t5_vram_threshold(5_060_000_000);
         assert_eq!(threshold, 7_060_000_000);
         // Should fit when Q4 transformer leaves ~17GB free on 24GB card
-        assert!(should_use_gpu(true, 17_000_000_000, threshold));
+        assert!(should_use_gpu(true, false, 17_000_000_000, threshold));
         // Should fit when Q8 transformer leaves ~12GB free
-        assert!(should_use_gpu(true, 12_000_000_000, threshold));
+        assert!(should_use_gpu(true, false, 12_000_000_000, threshold));
     }
 
     #[test]
@@ -179,7 +197,7 @@ mod tests {
         let threshold = t5_vram_threshold(3_390_000_000);
         assert_eq!(threshold, 5_390_000_000);
         // Should fit with Q8 transformer on 24GB (12GB free)
-        assert!(should_use_gpu(true, 12_000_000_000, threshold));
+        assert!(should_use_gpu(true, false, 12_000_000_000, threshold));
     }
 
     #[test]
