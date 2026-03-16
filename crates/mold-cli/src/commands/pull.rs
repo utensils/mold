@@ -4,6 +4,8 @@ use mold_core::config::Config;
 use mold_core::download::{pull_model, DownloadError};
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
+use crate::output::status;
+
 /// Download a model and write its config. Returns the updated Config.
 pub async fn pull_and_configure(model: &str) -> Result<Config> {
     let canonical = resolve_model_name(model);
@@ -41,15 +43,15 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
         mold_core::manifest::SHARED_COMPONENTS_GB
     };
     let total_gb = manifest.size_gb + shared_gb;
-    println!(
+    status!(
         "{} Pulling {} ({:.1}GB transformer, {:.1}GB total with shared components)",
         "●".cyan(),
         manifest.name.bold(),
         manifest.size_gb,
         total_gb,
     );
-    println!("  {}", manifest.description.dimmed());
-    println!();
+    status!("  {}", manifest.description.dimmed());
+    status!("");
 
     let paths = match pull_model(&manifest).await {
         Ok(paths) => paths,
@@ -95,14 +97,14 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     config.upsert_model(manifest.name.clone(), model_config);
     config.save()?;
 
-    println!();
-    println!("{} {} is ready!", "✓".green().bold(), manifest.name.bold());
+    status!("");
+    status!("{} {} is ready!", "✓".green().bold(), manifest.name.bold());
 
     Ok(config)
 }
 
 pub async fn run(model: &str) -> Result<()> {
     pull_and_configure(model).await?;
-    println!("  mold run \"your prompt\"");
+    status!("  mold run \"your prompt\"");
     Ok(())
 }

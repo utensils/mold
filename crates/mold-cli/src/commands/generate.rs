@@ -162,11 +162,10 @@ async fn generate_local(
     use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::ProgressEvent;
 
-    validate_generate_request(req).map_err(|e| anyhow::anyhow!(e))?;
-
     let model_name = req.model.clone();
     let (paths, auto_config);
     let effective_config: &Config;
+    let mut req = req.clone();
     match ModelPaths::resolve(&model_name, config) {
         Some(p) => {
             paths = p;
@@ -189,6 +188,23 @@ async fn generate_local(
                 })?;
                 auto_config = updated_config;
                 effective_config = &auto_config;
+
+                // Re-resolve model defaults now that config has the manifest values.
+                // The request was built before the pull, so dimensions/guidance/steps
+                // may be wrong (global defaults instead of model-specific ones).
+                let model_cfg = effective_config.model_config(&model_name);
+                req.width = model_cfg.effective_width(effective_config);
+                req.height = model_cfg.effective_height(effective_config);
+                req.steps = model_cfg.effective_steps(effective_config);
+                req.guidance = model_cfg.effective_guidance();
+                status!(
+                    "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
+                    "●".cyan(),
+                    req.width,
+                    req.height,
+                    req.steps,
+                    req.guidance,
+                );
             } else {
                 anyhow::bail!(
                     "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
@@ -200,6 +216,8 @@ async fn generate_local(
             }
         }
     }
+
+    validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
     // Apply CLI --t5-variant override via env var (factory reads MOLD_T5_VARIANT)
     if let Some(ref variant) = t5_variant_override {
