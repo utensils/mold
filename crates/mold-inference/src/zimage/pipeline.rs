@@ -115,11 +115,12 @@ impl ZImageEngine {
         free_vram: u64,
     ) -> Result<(Vec<std::path::PathBuf>, bool, bool, String)> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
-        use mold_core::manifest::{find_qwen3_variant, known_qwen3_variants, QWEN3_FP16_SIZE};
+        use mold_core::manifest::{find_qwen3_variant, known_qwen3_variants};
 
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let bf16_paths: Vec<std::path::PathBuf> = self.paths.text_encoder_files.clone();
+        let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
 
         match preference {
             // Explicit quantized variant requested
@@ -149,6 +150,12 @@ impl ZImageEngine {
 
             // Explicit BF16 requested
             Some("bf16") => {
+                if !have_bf16 {
+                    bail!(
+                        "BF16 Qwen3 encoder requested but shard files are missing or not configured. \
+                         Either run `mold pull` for a Z-Image model or use --qwen3-variant q8/q6/iq4/q3."
+                    );
+                }
                 let on_gpu =
                     should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD);
                 let label = if on_gpu { "GPU" } else { "CPU" };
@@ -159,7 +166,9 @@ impl ZImageEngine {
             // Auto mode (default): try BF16 on GPU → quantized on GPU → BF16 on CPU
             _ => {
                 // Can BF16 Qwen3 fit on GPU (with drop-and-reload)?
-                if should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD) {
+                if have_bf16
+                    && should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD)
+                {
                     if is_metal {
                         self.info("Loading BF16 Qwen3 on GPU (unified memory)");
                     } else {
@@ -172,11 +181,11 @@ impl ZImageEngine {
                     return Ok((bf16_paths, false, true, "GPU".to_string()));
                 }
 
-                // BF16 won't fit — try quantized variants (largest first)
-                if is_cuda {
+                // BF16 won't fit (or shards missing) — try quantized variants (largest first)
+                if is_cuda || !have_bf16 {
                     for variant in known_qwen3_variants() {
                         let threshold = qwen3_vram_threshold(variant.size_bytes);
-                        if free_vram > threshold {
+                        if !is_cuda || free_vram > threshold {
                             let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
                             {
                                 Some(p) => p,
@@ -201,33 +210,45 @@ impl ZImageEngine {
                                         })?
                                 }
                             };
+                            let on_gpu = is_cuda || is_metal;
                             self.info(&format!(
-                                "BF16 Qwen3 ({}) exceeds remaining VRAM ({}). Using Qwen3 {} ({}) on GPU instead.",
-                                fmt_gb(QWEN3_FP16_SIZE),
-                                fmt_gb(free_vram),
+                                "Using Qwen3 {} ({}) on {}",
                                 variant.tag,
                                 fmt_gb(variant.size_bytes),
+                                if on_gpu { "GPU" } else { "CPU" },
                             ));
                             return Ok((
                                 vec![path],
                                 true,
-                                true,
-                                format!("GPU, quantized {}", variant.tag),
+                                on_gpu,
+                                format!(
+                                    "{}, quantized {}",
+                                    if on_gpu { "GPU" } else { "CPU" },
+                                    variant.tag
+                                ),
                             ));
                         }
                     }
                 }
 
-                // No variant fits on GPU — fall back to BF16 on CPU
-                if is_cuda {
-                    self.info(&format!(
-                        "Loading BF16 Qwen3 on CPU ({} free, no variant fits on GPU)",
-                        fmt_gb(free_vram),
-                    ));
-                } else {
-                    self.info("No GPU detected, loading Qwen3 on CPU");
+                // Fall back to BF16 on CPU (only if shards are available)
+                if have_bf16 {
+                    if is_cuda {
+                        self.info(&format!(
+                            "Loading BF16 Qwen3 on CPU ({} free, no variant fits on GPU)",
+                            fmt_gb(free_vram),
+                        ));
+                    } else {
+                        self.info("No GPU detected, loading Qwen3 on CPU");
+                    }
+                    return Ok((bf16_paths, false, false, "CPU".to_string()));
                 }
-                Ok((bf16_paths, false, false, "CPU".to_string()))
+
+                bail!(
+                    "no Qwen3 text encoder available: BF16 shards not configured and no \
+                     quantized variant could be resolved. Run `mold pull` for a Z-Image model \
+                     or use --qwen3-variant q8/q6/iq4/q3."
+                );
             }
         }
     }
@@ -266,18 +287,21 @@ impl ZImageEngine {
             .map(|e| e.eq_ignore_ascii_case("gguf"))
             .unwrap_or(false);
 
-        // Validate required paths
-        if self.paths.text_encoder_files.is_empty() {
-            bail!("text encoder paths required for Z-Image models");
-        }
+        // Validate tokenizer path (required regardless of encoder variant)
         let text_tokenizer_path =
             self.paths.text_tokenizer.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("text tokenizer path required for Z-Image models")
             })?;
+        if !text_tokenizer_path.exists() {
+            bail!(
+                "text tokenizer file not found: {}",
+                text_tokenizer_path.display()
+            );
+        }
 
         let xformer_paths = self.transformer_paths();
 
-        // Validate all files exist
+        // Validate transformer and VAE files exist
         for path in &xformer_paths {
             if !path.exists() {
                 bail!("transformer file not found: {}", path.display());
@@ -286,17 +310,10 @@ impl ZImageEngine {
         if !self.paths.vae.exists() {
             bail!("VAE file not found: {}", self.paths.vae.display());
         }
-        for path in &self.paths.text_encoder_files {
-            if !path.exists() {
-                bail!("text encoder file not found: {}", path.display());
-            }
-        }
-        if !text_tokenizer_path.exists() {
-            bail!(
-                "text tokenizer file not found: {}",
-                text_tokenizer_path.display()
-            );
-        }
+
+        // Note: BF16 text encoder files are validated later, after resolve_qwen3_variant()
+        // determines which encoder to use. When --qwen3-variant selects a GGUF encoder,
+        // BF16 shards are not needed and may not be present.
 
         // Select device
         let device = if candle_core::utils::cuda_is_available() {
