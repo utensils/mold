@@ -6,9 +6,12 @@ use candle_transformers::models::z_image::{
     FlowMatchEulerDiscreteScheduler, SchedulerConfig, TextEncoderConfig, VaeConfig,
     ZImageTextEncoder, ZImageTransformer2DModel,
 };
+use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
+use super::quantized_transformer::QuantizedZImageTransformer2DModel;
+use super::transformer::ZImageTransformer;
 use crate::engine::{rand_seed, InferenceEngine};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -21,7 +24,7 @@ const MAX_SHIFT: f64 = 1.15;
 
 /// Loaded Z-Image model components, ready for inference.
 struct LoadedZImage {
-    transformer: ZImageTransformer2DModel,
+    transformer: ZImageTransformer,
     text_encoder: ZImageTextEncoder,
     vae: AutoEncoderKL,
     tokenizer: tokenizers::Tokenizer,
@@ -98,7 +101,6 @@ impl ZImageEngine {
 
         tracing::info!(model = %self.model_name, "loading Z-Image model components...");
 
-        // Check if this is a GGUF quantized model (not yet supported)
         let is_gguf = self
             .paths
             .transformer
@@ -106,13 +108,6 @@ impl ZImageEngine {
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case("gguf"))
             .unwrap_or(false);
-
-        if is_gguf {
-            bail!(
-                "GGUF quantized Z-Image not yet supported — use :bf16 tag instead. \
-                 Run: mold pull z-image-turbo:bf16"
-            );
-        }
 
         // Validate required paths
         if self.paths.text_encoder_files.is_empty() {
@@ -159,26 +154,44 @@ impl ZImageEngine {
         };
 
         let dtype = device.bf16_default_to_f32();
+        let transformer_cfg = Config::z_image_turbo();
 
-        // Load transformer
-        let xformer_label = format!(
-            "Loading Z-Image transformer ({} shards)",
-            xformer_paths.len()
-        );
+        // Load transformer — GGUF quantized or BF16 safetensors
+        let xformer_label = if is_gguf {
+            "Loading Z-Image transformer (GPU, quantized)".to_string()
+        } else {
+            format!(
+                "Loading Z-Image transformer ({} shards)",
+                xformer_paths.len()
+            )
+        };
         self.stage_start(&xformer_label);
         let xformer_start = Instant::now();
 
-        let transformer_cfg = Config::z_image_turbo();
-        let xformer_path_strs: Vec<&str> = xformer_paths
-            .iter()
-            .map(|p| p.to_str().expect("non-UTF8 path"))
-            .collect();
-        let xformer_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&xformer_path_strs, dtype, &device)? };
-        let transformer = ZImageTransformer2DModel::new(&transformer_cfg, xformer_vb)?;
+        let transformer = if is_gguf {
+            tracing::info!(
+                path = %self.paths.transformer.display(),
+                "loading quantized Z-Image transformer from GGUF..."
+            );
+            let vb =
+                quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
+            ZImageTransformer::Quantized(QuantizedZImageTransformer2DModel::new(
+                &transformer_cfg,
+                dtype,
+                vb,
+            )?)
+        } else {
+            let xformer_path_strs: Vec<&str> = xformer_paths
+                .iter()
+                .map(|p| p.to_str().expect("non-UTF8 path"))
+                .collect();
+            let xformer_vb =
+                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_path_strs, dtype, &device)? };
+            ZImageTransformer::BF16(ZImageTransformer2DModel::new(&transformer_cfg, xformer_vb)?)
+        };
 
         self.stage_done(&xformer_label, xformer_start.elapsed());
-        tracing::info!("Z-Image transformer loaded");
+        tracing::info!(quantized = is_gguf, "Z-Image transformer loaded");
 
         // Load VAE
         self.stage_start("Loading VAE");
