@@ -4,6 +4,7 @@ use mold_core::{Config, ModelPaths};
 use crate::engine::InferenceEngine;
 use crate::flux::FluxEngine;
 use crate::sdxl::SDXLEngine;
+use crate::zimage::ZImageEngine;
 
 /// Determine the model family from config or manifest, defaulting to "flux".
 fn resolve_family(model_name: &str, config: &Config) -> String {
@@ -52,8 +53,9 @@ pub fn create_engine(
                 is_turbo,
             )))
         }
+        "z-image" => Ok(Box::new(ZImageEngine::new(model_name, paths))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, sdxl",
+            "unknown model family '{}' for model '{}'. Supported: flux, sdxl, z-image",
             other,
             model_name
         ),
