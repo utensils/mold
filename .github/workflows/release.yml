@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-release
+          cache-on-failure: true
+
+      - name: Build (Metal)
+        run: cargo build --release -p mold-cli --features metal
+
+      - name: Ad-hoc code sign
+        run: codesign -s - target/release/mold
+
+      - name: Package
+        run: tar -czf mold-aarch64-apple-darwin.tar.gz -C target/release mold
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mold-aarch64-apple-darwin
+          path: mold-aarch64-apple-darwin.tar.gz
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.6.3"
+          method: network
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cuda-release
+          cache-on-failure: true
+
+      - name: Build (CUDA)
+        env:
+          CUDA_COMPUTE_CAP: "89"
+          LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+        run: cargo build --release -p mold-cli --features cuda
+
+      - name: Package
+        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda.tar.gz -C target/release mold
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mold-x86_64-unknown-linux-gnu-cuda
+          path: mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+
+  release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Create/update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          prerelease: true
+          make_latest: false
+          files: |
+            artifacts/mold-aarch64-apple-darwin.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            artifacts/SHA256SUMS
+          body: |
+            Rolling pre-release — updated on every push to `main`.
+
+            **Commit:** ${{ github.sha }}
+
+            ## Download
+
+            | Platform | File |
+            |----------|------|
+            | macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+
+            ```bash
+            # macOS
+            tar xzf mold-aarch64-apple-darwin.tar.gz
+            xattr -d com.apple.quarantine mold  # if needed
+            ./mold version
+
+            # Linux (requires NVIDIA driver + CUDA runtime)
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            ./mold version
+            ```

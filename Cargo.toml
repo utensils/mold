@@ -18,3 +18,8 @@ repository = "https://github.com/utensils/mold"
 
 [workspace.metadata.crane]
 name = "mold"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
