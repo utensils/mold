@@ -156,11 +156,15 @@ impl FluxEngine {
             _ => {
                 // Can FP16 T5 fit on GPU?
                 if should_use_gpu(is_cuda, is_metal, free_vram, T5_VRAM_THRESHOLD) {
-                    self.info(&format!(
-                        "Loading FP16 T5 on GPU ({} free > {} threshold)",
-                        fmt_gb(free_vram),
-                        fmt_gb(T5_VRAM_THRESHOLD),
-                    ));
+                    if is_metal {
+                        self.info("Loading FP16 T5 on GPU (unified memory)");
+                    } else {
+                        self.info(&format!(
+                            "Loading FP16 T5 on GPU ({} free > {} threshold)",
+                            fmt_gb(free_vram),
+                            fmt_gb(T5_VRAM_THRESHOLD),
+                        ));
+                    }
                     return Ok((default_t5_path.to_path_buf(), true, "GPU".to_string()));
                 }
 
