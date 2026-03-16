@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # mold — Architecture & Development Guide
 
-> Like ollama, but for diffusion models.
+> Local AI image generation CLI — FLUX & SDXL diffusion models on your GPU.
 
 mold is a CLI tool for AI image generation using FLUX and SDXL models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
@@ -68,10 +68,10 @@ cargo run -p mold-cli -- run "a cat"                 # Generate image
 
 - **Local-first**: Run FLUX models directly on your GPU
 - **Remote-capable**: Point `MOLD_HOST` at a GPU server and generate from anywhere
-- **Model management**: Pull, list, load/unload models (like `ollama pull`)
+- **Model management**: Pull, list, load/unload models (`mold pull`, `mold list`)
 - **Simple CLI**: `mold run flux-dev:q4 "a cat"` — just works
 - **Pipe-friendly**: `mold run "a cat" | viu -` — composable with Unix tools
-- **Future**: OCI registry for model distribution (like ollama's docker registry format)
+- **Future**: OCI registry for model distribution (Docker registry format for model artifacts)
 
 ## Crate Structure
 
@@ -310,7 +310,7 @@ mold pull flux-dev:q4           # Downloads specific quantization
 mold pull flux-dev-q4           # Legacy format, same as flux-dev:q4
 ```
 
-**Name resolution**: Names use ollama-style `model:tag` format. Bare names default to `:q8`. Legacy dash format (`flux-dev-q4`) resolves to colon format (`flux-dev:q4`).
+**Name resolution**: Names use `model:tag` format (e.g. `flux-dev:q4`). Bare names default to `:q8` (FLUX) or `:fp16` (SDXL). Legacy dash format (`flux-dev-q4`) resolves to colon format (`flux-dev:q4`).
 
 **Available models**:
 
@@ -480,7 +480,7 @@ Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate'
 
 ## Future: OCI Registry for Models
 
-Planned support for distributing models via OCI-compatible registries (similar to how ollama uses Docker registry format). This would allow:
+Planned support for distributing models via OCI-compatible registries (Docker registry format for model layers). This would allow:
 - `mold pull registry.example.com/flux-schnell:latest`
 - Private model registries
 - Versioned model artifacts with layers for components (text encoder, VAE, transformer)
@@ -521,13 +521,13 @@ Planned support for distributing models via OCI-compatible registries (similar t
 
 17. **XDG directory support**: New installs use `~/.config/mold/config.toml` (config) and `~/.local/share/mold/` (data). Existing `~/.mold/` directories keep working — checked via `Config::legacy_dir_exists()`. No migration needed.
 
-18. **Ollama-style model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8`) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
+18. **Model:tag naming**: Models use `name:tag` format (e.g., `flux-dev:q4`). `resolve_model_name()` handles bare names (default to `:q8` for FLUX, `:fp16` for SDXL) and legacy dash format (`flux-dev-q4` → `flux-dev:q4`). Config lookup tries both forms for backward compatibility.
 
 19. **Quantized T5 encoder with auto-fallback**: When the FP16 T5-XXL (9.2GB) doesn't fit in remaining VRAM alongside the FLUX transformer, the engine automatically selects the largest quantized T5 GGUF that fits on GPU. Available variants from `city96/t5-v1_1-xxl-encoder-gguf`: Q8 (5.06GB), Q6 (3.91GB), Q5 (3.39GB), Q4 (2.9GB), Q3 (2.1GB). Uses a custom `GgufT5Encoder` (in `encoders/t5_gguf.rs`) that loads GGUF standard tensor names directly, since candle's `quantized_t5` expects PyTorch-style names. Same tokenizer for all variants. Auto-downloaded via hf-hub sync API on first use. Override with `MOLD_T5_VARIANT` env var, `t5_variant` config field, or `--t5-variant` CLI flag. Priority: CLI flag > env var > config > auto.
 
 20. **Pipe-friendly output**: When stdout is a pipe (detected via `IsTerminal`), `mold run` writes raw image bytes to stdout and routes all status/progress to stderr. This enables `mold run "a cat" | viu -` and `mold run "a cat" > image.png`. Explicit `--output -` also forces stdout output. SIGPIPE is reset to default at startup to avoid broken-pipe panics when the reader closes early. The `status!` macro routes messages to stdout (interactive) or stderr (piped).
 
-21. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
+21. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model.
 
 22. **SDXL model family support**: SDXL is supported as a second model family alongside FLUX. The engine factory (`create_engine()`) auto-detects the family from config or manifest. SDXL uses dual-CLIP (CLIP-L 768-dim + CLIP-G 1280-dim, concatenated to 2048-dim) instead of FLUX's T5+CLIP-L. SDXL uses UNet2DConditionModel with DDIM or Euler Ancestral schedulers, classifier-free guidance (dual pass: uncond + cond), and 8x latent downscaling (vs FLUX's 16x). Bare model names resolve to `:fp16` for SDXL (vs `:q8` for FLUX) via smart `resolve_model_name()`. SDXL FP16 UNets (~5GB) fit comfortably on the RTX 4090 alongside shared components (~2.2GB).
 

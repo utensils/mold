@@ -7,7 +7,7 @@ use clap_complete::engine::ArgValueCandidates;
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "AI image generation — like ollama, but for diffusion models"
+    about = "Local AI image generation — FLUX & SDXL diffusion models on your GPU"
 )]
 #[command(version, propagate_version = true)]
 struct Cli {
