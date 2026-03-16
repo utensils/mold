@@ -1,0 +1,28 @@
+[Unit]
+Description=mold inference server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mold serve --port 7680 --bind 0.0.0.0
+Restart=on-failure
+RestartSec=5
+
+# Environment — override via EnvironmentFile or drop-in
+Environment=MOLD_LOG=info
+Environment=MOLD_PORT=7680
+# EnvironmentFile=-/etc/mold/mold.env
+
+# NixOS: CUDA driver access
+# Environment=LD_LIBRARY_PATH=/run/opengl-driver/lib
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.mold %h/.config/mold %h/.cache/huggingface
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

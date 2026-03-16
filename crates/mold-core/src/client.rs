@@ -118,6 +118,22 @@ impl MoldClient {
         false
     }
 
+    pub fn host(&self) -> &str {
+        &self.base_url
+    }
+
+    pub async fn unload_model(&self) -> Result<String> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/models/unload", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(resp)
+    }
+
     pub async fn server_status(&self) -> Result<ServerStatus> {
         let resp = self
             .client

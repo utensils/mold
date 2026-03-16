@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
@@ -16,6 +16,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/generate", post(generate))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))
+        .route("/api/models/unload", delete(unload_model))
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
@@ -237,6 +238,21 @@ async fn load_model(
 
     tracing::info!(model = %body.model, "model loaded via API");
     Ok(StatusCode::OK)
+}
+
+// ── /api/models/unload ────────────────────────────────────────────────────────
+
+async fn unload_model(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let mut engine = state.engine.lock().await;
+    if !engine.is_loaded() {
+        return Ok((StatusCode::OK, "no model loaded".to_string()));
+    }
+    let name = engine.model_name().to_string();
+    engine.unload();
+    tracing::info!(model = %name, "model unloaded via API");
+    Ok((StatusCode::OK, format!("unloaded {name}")))
 }
 
 // ── /api/status ───────────────────────────────────────────────────────────────

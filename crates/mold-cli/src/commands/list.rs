@@ -19,6 +19,16 @@ fn format_family_padded(family: &str, width: usize) -> String {
     }
 }
 
+fn format_disk_size(bytes: u64) -> String {
+    if bytes == 0 {
+        "—".to_string()
+    } else if bytes >= 1_073_741_824 {
+        format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
+    } else {
+        format!("{:.0}MB", bytes as f64 / 1_048_576.0)
+    }
+}
+
 pub async fn run() -> Result<()> {
     let client = MoldClient::from_env();
 
@@ -72,32 +82,49 @@ pub async fn run() -> Result<()> {
                 println!("{} No models configured.", "●".dimmed());
             } else {
                 println!(
-                    "{:<18} {:<10} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "{:<18} {:<10} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                     "NAME".bold(),
                     "FAMILY".bold(),
                     "SIZE".bold(),
+                    "DISK".bold(),
                     "STEPS".bold(),
                     "GUIDANCE".bold(),
                     "WIDTH".bold(),
                     "HEIGHT".bold(),
                     "DESCRIPTION".bold(),
                 );
-                println!("{}", "─".repeat(100).dimmed());
+                println!("{}", "─".repeat(108).dimmed());
+                let mut total_disk: u64 = 0;
                 for (name, mcfg) in &config.models {
                     let family_raw = mcfg.family.as_deref().unwrap_or("");
                     let size = mold_core::manifest::find_manifest(name)
                         .map(|m| format!("{:.1}GB", m.size_gb))
                         .unwrap_or_else(|| "—".to_string());
+                    let disk_bytes: u64 = mcfg
+                        .all_file_paths()
+                        .iter()
+                        .filter_map(|p| std::fs::metadata(p).ok())
+                        .map(|m| m.len())
+                        .sum();
+                    total_disk += disk_bytes;
+                    let disk = format_disk_size(disk_bytes);
                     println!(
-                        "{:<18} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        "{:<18} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                         name,
                         format_family_padded(family_raw, 10),
                         size,
+                        disk,
                         mcfg.effective_steps(&config),
                         format!("{:.1}", mcfg.effective_guidance()),
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
                         mcfg.description.as_deref().unwrap_or("").dimmed(),
+                    );
+                }
+                if config.models.len() > 1 && total_disk > 0 {
+                    println!(
+                        "{:>37}",
+                        format!("Total: {}", format_disk_size(total_disk)).dimmed()
                     );
                 }
             }

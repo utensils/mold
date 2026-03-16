@@ -643,6 +643,10 @@ impl InferenceEngine for SDXLEngine {
         SDXLEngine::load(self)
     }
 
+    fn unload(&mut self) {
+        self.loaded = None;
+    }
+
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
     }

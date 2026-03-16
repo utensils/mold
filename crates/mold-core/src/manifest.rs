@@ -24,6 +24,8 @@ pub struct ModelFile {
     pub component: ModelComponent,
     pub size_bytes: u64,
     pub gated: bool,
+    /// Expected SHA-256 hex digest. None means not yet collected.
+    pub sha256: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
             gated: true,             // BFL repos now require authentication
+            sha256: None,
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
@@ -131,6 +134,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::T5Encoder,
             size_bytes: 9_200_000_000, // ~9.2GB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
@@ -138,6 +142,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder,
             size_bytes: 246_000_000, // ~246MB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "lmz/mt5-tokenizers".to_string(),
@@ -145,6 +150,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::T5Tokenizer,
             size_bytes: 2_400_000, // ~2.4MB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
@@ -152,6 +158,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer,
             size_bytes: 600_000, // ~600KB
             gated: false,
+            sha256: None,
         },
     ]
 }
@@ -172,6 +179,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_000_000_000, // ~12GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -197,6 +205,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_000_000_000, // ~12GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -222,6 +231,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_000_000_000, // ~7GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -247,6 +257,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_860_000_000, // ~9.86GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -272,6 +283,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_510_000_000, // ~7.51GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -297,6 +309,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_830_000_000, // ~9.83GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -322,6 +335,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_700_000_000, // ~12.7GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -348,6 +362,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_530_000_000, // ~7.53GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -374,6 +389,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_860_000_000, // ~9.86GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -401,6 +417,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
@@ -408,6 +425,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder,
             size_bytes: 492_000_000, // ~492MB (CLIP-L)
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
@@ -415,6 +433,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder2,
             size_bytes: 1_390_000_000, // ~1.39GB (CLIP-G / OpenCLIP)
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
@@ -422,6 +441,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer,
             size_bytes: 600_000, // ~600KB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
@@ -429,6 +449,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer2,
             size_bytes: 600_000, // ~600KB
             gated: false,
+            sha256: None,
         },
     ]
 }
@@ -453,6 +474,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -478,6 +500,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -503,6 +526,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -528,6 +552,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -553,6 +578,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -579,6 +605,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -604,6 +631,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 3_960_000_000, // ~3.96GB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -611,6 +639,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 3_990_000_000, // ~3.99GB
             gated: false,
+            sha256: None,
         },
         ModelFile {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -618,6 +647,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 99_600_000, // ~99.6MB
             gated: false,
+            sha256: None,
         },
         // VAE
         ModelFile {
@@ -626,6 +656,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 168_000_000, // ~168MB
             gated: false,
+            sha256: None,
         },
         // Qwen3 tokenizer
         ModelFile {
@@ -634,6 +665,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextTokenizer,
             size_bytes: 11_400_000, // ~11.4MB
             gated: false,
+            sha256: None,
         },
     ]
 }
@@ -660,6 +692,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 9_970_000_000, // ~9.97GB
                     gated: false,
+                    sha256: None,
                 });
                 files.push(ModelFile {
                     hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -668,6 +701,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 9_970_000_000, // ~9.97GB
                     gated: false,
+                    sha256: None,
                 });
                 files.push(ModelFile {
                     hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -676,6 +710,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 4_670_000_000, // ~4.67GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -702,6 +737,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 6_580_000_000, // ~6.58GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -727,6 +763,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_260_000_000, // ~5.26GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },
@@ -752,6 +789,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 3_860_000_000, // ~3.86GB
                     gated: false,
+                    sha256: None,
                 });
                 files
             },

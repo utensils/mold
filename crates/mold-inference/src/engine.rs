@@ -21,6 +21,9 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
     /// Load model weights. Called automatically on first generate if not yet loaded.
     fn load(&mut self) -> Result<()>;
+    /// Unload model weights to free GPU memory. The engine remains valid and
+    /// can be re-loaded by calling `load()` or generating again.
+    fn unload(&mut self) {}
     /// Set a progress callback for receiving loading/inference status updates.
     /// Default implementation is a no-op for engines that don't support progress.
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}

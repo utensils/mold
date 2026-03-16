@@ -128,6 +128,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `POST` | `/api/generate` | Generate images from prompt |
 | `GET` | `/api/models` | List available models |
 | `POST` | `/api/models/load` | Load/swap the active model |
+| `DELETE` | `/api/models/unload` | Unload model to free GPU memory |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 
@@ -158,7 +159,9 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
-mold list                       List configured and available models
+mold list                       List configured and available models (with disk usage)
+mold info <MODEL> [--verify]    Show model details (memory estimates, optional SHA-256 verify)
+mold unload                     Unload the current model from server to free GPU memory
 mold ps                         Show server status + loaded models
 mold version                    Show version
 mold completions <SHELL>        Generate shell completions

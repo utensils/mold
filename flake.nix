@@ -42,6 +42,12 @@
           isLinux = system == "x86_64-linux";
           isDarwin = system == "aarch64-darwin";
 
+          # CUDA compute capability — override for different GPU architectures.
+          # Default "89" targets RTX 4090 (Ada Lovelace).
+          # Common values: "75" (Turing), "80" (Ampere A100), "86" (Ampere 3090),
+          # "89" (Ada 4090), "90" (Hopper H100).
+          cudaComputeCap = "89";
+
           pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
@@ -90,7 +96,7 @@
           }
           // lib.optionalAttrs isLinux {
             CUDA_PATH = "${pkgs.cudaPackages.cuda_nvcc}";
-            CUDA_COMPUTE_CAP = "89";
+            CUDA_COMPUTE_CAP = cudaComputeCap;
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
 

@@ -141,7 +141,14 @@ enum Commands {
         /// Model name (e.g. flux-dev:q4, sdxl-turbo:fp16)
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: String,
+
+        /// Verify file integrity via SHA-256 checksums
+        #[arg(long)]
+        verify: bool,
     },
+
+    /// Unload the current model from the server to free GPU memory
+    Unload,
 
     /// Show server status and loaded models
     Ps,
@@ -254,8 +261,11 @@ async fn run() -> anyhow::Result<()> {
         Commands::List => {
             commands::list::run().await?;
         }
-        Commands::Info { model } => {
-            commands::info::run(&model)?;
+        Commands::Info { model, verify } => {
+            commands::info::run(&model, verify)?;
+        }
+        Commands::Unload => {
+            commands::unload::run().await?;
         }
         Commands::Ps => {
             commands::ps::run().await?;

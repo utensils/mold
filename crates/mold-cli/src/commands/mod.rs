@@ -6,3 +6,4 @@ pub mod pull;
 pub mod rm;
 pub mod run;
 pub mod serve;
+pub mod unload;
