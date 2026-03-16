@@ -55,6 +55,24 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
 
     let paths = match pull_model(&manifest).await {
         Ok(paths) => paths,
+        Err(DownloadError::Unauthorized { repo, .. }) => {
+            eprintln!();
+            eprintln!("{} Authentication required for {repo}", "✗".red().bold());
+            eprintln!();
+            eprintln!("  1. Create a token at: https://huggingface.co/settings/tokens");
+            eprintln!("     (select at least \"Read\" access)");
+            eprintln!("  2. Set: export HF_TOKEN=hf_...");
+            eprintln!("     Or run: huggingface-cli login");
+            eprintln!("  3. Retry: mold pull {}", manifest.name);
+            if std::env::var("HF_TOKEN").is_ok() {
+                eprintln!();
+                eprintln!(
+                    "  {} HF_TOKEN is set but was rejected — it may be invalid or expired.",
+                    "!".yellow().bold()
+                );
+            }
+            bail!("authentication required");
+        }
         Err(DownloadError::GatedModel { .. }) => {
             eprintln!();
             eprintln!(

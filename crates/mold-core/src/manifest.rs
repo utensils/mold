@@ -88,7 +88,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             hf_filename: "ae.safetensors".to_string(),
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
-            gated: false,
+            gated: true,             // BFL repos now require authentication
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
@@ -827,9 +827,17 @@ mod tests {
     }
 
     #[test]
-    fn shared_files_are_not_gated() {
+    fn shared_files_gated_flags() {
         for file in shared_flux_files() {
-            assert!(!file.gated, "{} should not be gated", file.hf_filename);
+            if file.hf_repo.starts_with("black-forest-labs/") {
+                assert!(
+                    file.gated,
+                    "{} should be gated (BFL repo)",
+                    file.hf_filename
+                );
+            } else {
+                assert!(!file.gated, "{} should not be gated", file.hf_filename);
+            }
         }
     }
 

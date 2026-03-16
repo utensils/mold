@@ -92,7 +92,7 @@ impl T5SelfAttention {
                 None => {
                     return Err(anyhow::anyhow!(
                         "no relative attention bias and none provided"
-                    ))
+                    ));
                 }
                 Some(rel_attn_bias) => {
                     let pb = self.compute_bias(seq_len, rel_attn_bias, scores.device())?;

@@ -11,8 +11,15 @@ use crate::ModelPaths;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
-    #[error("Model requires access approval on HuggingFace.\n\n  1. Visit: https://huggingface.co/{repo}\n  2. Accept the license agreement\n  3. Create a token at: https://huggingface.co/settings/tokens\n  4. Set: export HF_TOKEN=hf_...\n  5. Retry: mold pull {model}")]
+    #[error(
+        "Model requires access approval on HuggingFace.\n\n  1. Visit: https://huggingface.co/{repo}\n  2. Accept the license agreement\n  3. Create a token at: https://huggingface.co/settings/tokens\n  4. Set: export HF_TOKEN=hf_...\n  5. Retry: mold pull {model}"
+    )]
     GatedModel { repo: String, model: String },
+
+    #[error(
+        "Authentication required for repository {repo}.\n\n  1. Create a token at: https://huggingface.co/settings/tokens\n     (select at least \"Read\" access)\n  2. Set: export HF_TOKEN=hf_...\n     Or run: huggingface-cli login\n  3. Retry: mold pull {model}\n\n  If HF_TOKEN is already set, it may be invalid or expired."
+    )]
+    Unauthorized { repo: String, model: String },
 
     #[error("Download failed for {filename} from {repo}: {source}")]
     DownloadFailed {
@@ -36,6 +43,18 @@ pub enum DownloadError {
 
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
+}
+
+/// Resolve HuggingFace token: `HF_TOKEN` env var takes precedence over
+/// the token file (`~/.cache/huggingface/token` from `huggingface-cli login`).
+fn resolve_hf_token() -> Option<String> {
+    if let Ok(token) = std::env::var("HF_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    hf_hub::Cache::from_env().token()
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -88,7 +107,11 @@ impl Progress for DownloadProgress {
 
 /// Download all files for a model manifest, returning resolved paths.
 pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, DownloadError> {
-    let api = ApiBuilder::from_env().build()?;
+    let mut builder = ApiBuilder::from_env();
+    if let Some(token) = resolve_hf_token() {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder.build()?;
 
     let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
     let msg_width = filename_column_width();
@@ -118,6 +141,15 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
 }
 
+/// Extract HTTP status code from an async `ApiError`, if available.
+fn extract_http_status(err: &ApiError) -> Option<u16> {
+    if let ApiError::RequestError(reqwest_err) = err {
+        reqwest_err.status().map(|s| s.as_u16())
+    } else {
+        None
+    }
+}
+
 async fn download_file(
     api: &Api,
     file: &ModelFile,
@@ -132,8 +164,15 @@ async fn download_file(
     {
         Ok(path) => Ok(path),
         Err(e) => {
+            let status = extract_http_status(&e);
             let err_str = e.to_string();
-            if err_str.contains("403")
+            if status == Some(401) || err_str.contains("401") || err_str.contains("Unauthorized") {
+                Err(DownloadError::Unauthorized {
+                    repo: file.hf_repo.clone(),
+                    model: model_name.to_string(),
+                })
+            } else if status == Some(403)
+                || err_str.contains("403")
                 || err_str.contains("Forbidden")
                 || err_str.contains("gated")
                 || err_str.contains("Access denied")
@@ -164,16 +203,38 @@ pub fn download_single_file_sync(
 ) -> Result<PathBuf, DownloadError> {
     use hf_hub::api::sync::ApiBuilder;
 
-    let api = ApiBuilder::from_env()
+    let mut builder = ApiBuilder::from_env();
+    if let Some(token) = resolve_hf_token() {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
     let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
-    repo.get(hf_filename)
-        .map_err(|e| DownloadError::SyncDownloadFailed {
-            repo: hf_repo.to_string(),
-            filename: hf_filename.to_string(),
-            message: e.to_string(),
-        })
+    repo.get(hf_filename).map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("401") || err_str.contains("Unauthorized") {
+            DownloadError::Unauthorized {
+                repo: hf_repo.to_string(),
+                model: String::new(),
+            }
+        } else if err_str.contains("403")
+            || err_str.contains("Forbidden")
+            || err_str.contains("gated")
+            || err_str.contains("Access denied")
+        {
+            DownloadError::GatedModel {
+                repo: hf_repo.to_string(),
+                model: String::new(),
+            }
+        } else {
+            DownloadError::SyncDownloadFailed {
+                repo: hf_repo.to_string(),
+                filename: hf_filename.to_string(),
+                message: err_str,
+            }
+        }
+    })
 }
 
 /// Check if a file is already cached locally (no download).
@@ -225,5 +286,46 @@ mod tests {
         assert!(msg.contains("huggingface.co/black-forest-labs/FLUX.1-dev"));
         assert!(msg.contains("HF_TOKEN"));
         assert!(msg.contains("mold pull flux-dev:q8"));
+    }
+
+    #[test]
+    fn download_error_unauthorized_message() {
+        let err = DownloadError::Unauthorized {
+            repo: "black-forest-labs/FLUX.1-schnell".to_string(),
+            model: "flux-schnell:q8".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Authentication required"));
+        assert!(msg.contains("black-forest-labs/FLUX.1-schnell"));
+        assert!(msg.contains("HF_TOKEN"));
+        assert!(msg.contains("huggingface-cli login"));
+        assert!(msg.contains("mold pull flux-schnell:q8"));
+    }
+
+    #[test]
+    fn resolve_hf_token_reads_env_var() {
+        // Save and clear any existing value
+        let original = std::env::var("HF_TOKEN").ok();
+        std::env::set_var("HF_TOKEN", "hf_test_token_123");
+        let token = resolve_hf_token();
+        assert_eq!(token, Some("hf_test_token_123".to_string()));
+        // Restore
+        match original {
+            Some(v) => std::env::set_var("HF_TOKEN", v),
+            None => std::env::remove_var("HF_TOKEN"),
+        }
+    }
+
+    #[test]
+    fn resolve_hf_token_ignores_empty_env() {
+        let original = std::env::var("HF_TOKEN").ok();
+        std::env::set_var("HF_TOKEN", "  ");
+        let token = resolve_hf_token();
+        // Should fall through to file-based token (which may or may not exist)
+        assert_ne!(token, Some("  ".to_string()));
+        match original {
+            Some(v) => std::env::set_var("HF_TOKEN", v),
+            None => std::env::remove_var("HF_TOKEN"),
+        }
     }
 }
