@@ -5,11 +5,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mold_core::{GpuInfo, ModelInfo, OutputFormat, ServerStatus};
-use mold_inference::{model_registry, FluxEngine};
+use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
+use mold_inference::model_registry;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{resolve_paths_for, AppState};
+use crate::state::AppState;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -42,25 +42,22 @@ async fn generate(
                 to = %req.model,
                 "hot-swapping model"
             );
-            let (paths, is_schnell) =
-                resolve_paths_for(&req.model, &state.config).ok_or_else(|| {
+            let paths = ModelPaths::resolve(&req.model, &state.config).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no paths configured for model '{}'. Add [models.{}] to config.",
+                        req.model, req.model
+                    ),
+                )
+            })?;
+            *engine = mold_inference::create_engine(req.model.clone(), paths, &state.config)
+                .map_err(|e| {
                     (
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "no paths configured for model '{}'. Add [models.{}] to config.",
-                            req.model, req.model
-                        ),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to create engine for {}: {e}", req.model),
                     )
                 })?;
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| state.config.t5_variant.clone());
-            *engine = Box::new(FluxEngine::new(
-                req.model.clone(),
-                paths,
-                is_schnell,
-                t5_variant,
-            ));
         }
 
         // Load on first request (or after hot-swap)
@@ -202,7 +199,7 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let (paths, is_schnell) = resolve_paths_for(&body.model, &state.config).ok_or_else(|| {
+    let paths = ModelPaths::resolve(&body.model, &state.config).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             format!(
@@ -213,15 +210,13 @@ async fn load_model(
     })?;
 
     let mut engine = state.engine.lock().await;
-    let t5_variant = std::env::var("MOLD_T5_VARIANT")
-        .ok()
-        .or_else(|| state.config.t5_variant.clone());
-    *engine = Box::new(FluxEngine::new(
-        body.model.clone(),
-        paths,
-        is_schnell,
-        t5_variant,
-    ));
+    *engine =
+        mold_inference::create_engine(body.model.clone(), paths, &state.config).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create engine for {}: {e}", body.model),
+            )
+        })?;
     engine.load().map_err(|e| {
         tracing::error!("model load failed: {e:#}");
         (

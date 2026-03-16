@@ -133,13 +133,16 @@ is_schnell = false
         let paths = ModelPaths::resolve("test-flux", &cfg).unwrap();
         assert_eq!(paths.transformer.to_str().unwrap(), "/tmp/transformer.gguf");
         assert_eq!(paths.vae.to_str().unwrap(), "/tmp/vae.safetensors");
-        assert_eq!(paths.t5_encoder.to_str().unwrap(), "/tmp/t5.safetensors");
+        assert_eq!(
+            paths.t5_encoder.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/t5.safetensors"
+        );
         assert_eq!(
             paths.clip_encoder.to_str().unwrap(),
             "/tmp/clip.safetensors"
         );
         assert_eq!(
-            paths.t5_tokenizer.to_str().unwrap(),
+            paths.t5_tokenizer.as_ref().unwrap().to_str().unwrap(),
             "/tmp/t5.tokenizer.json"
         );
         assert_eq!(
@@ -207,7 +210,7 @@ is_schnell = false
         let paths = ModelPaths::resolve("flux-schnell", &Config::default()).unwrap();
         assert_eq!(paths.transformer.to_str().unwrap(), "/env/transformer.gguf");
         assert_eq!(
-            paths.t5_tokenizer.to_str().unwrap(),
+            paths.t5_tokenizer.as_ref().unwrap().to_str().unwrap(),
             "/env/t5.tokenizer.json"
         );
 

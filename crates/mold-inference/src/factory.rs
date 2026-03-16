@@ -1,0 +1,61 @@
+use anyhow::{bail, Result};
+use mold_core::{Config, ModelPaths};
+
+use crate::engine::InferenceEngine;
+use crate::flux::FluxEngine;
+use crate::sdxl::SDXLEngine;
+
+/// Determine the model family from config or manifest, defaulting to "flux".
+fn resolve_family(model_name: &str, config: &Config) -> String {
+    // Check config first
+    let model_cfg = config.model_config(model_name);
+    if let Some(family) = model_cfg.family {
+        return family;
+    }
+    // Check manifest
+    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
+        return manifest.family;
+    }
+    // Default to flux for backward compatibility
+    "flux".to_string()
+}
+
+/// Create an inference engine for the given model, auto-detecting the family.
+///
+/// Returns the appropriate engine (FluxEngine or SDXLEngine) based on the model's
+/// family from config or manifest.
+pub fn create_engine(
+    model_name: String,
+    paths: ModelPaths,
+    config: &Config,
+) -> Result<Box<dyn InferenceEngine>> {
+    let family = resolve_family(&model_name, config);
+    let model_cfg = config.model_config(&model_name);
+
+    match family.as_str() {
+        "flux" => {
+            let is_schnell = model_cfg.is_schnell;
+            let t5_variant = std::env::var("MOLD_T5_VARIANT")
+                .ok()
+                .or_else(|| config.t5_variant.clone());
+            Ok(Box::new(FluxEngine::new(
+                model_name, paths, is_schnell, t5_variant,
+            )))
+        }
+        "sdxl" => {
+            let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
+            let is_turbo = scheduler_name == "euler_ancestral" || model_name.contains("turbo");
+            Ok(Box::new(SDXLEngine::new(
+                model_name,
+                paths,
+                scheduler_name,
+                is_turbo,
+            )))
+        }
+        other => bail!(
+            "unknown model family '{}' for model '{}'. Supported: flux, sdxl",
+            other,
+            model_name
+        ),
+    }
+}

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > Like ollama, but for diffusion models.
 
-mold is a CLI tool for AI image generation using FLUX models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX and SDXL models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
 ## Build & Development Commands
 
@@ -117,12 +117,13 @@ ModelPaths          // resolved PathBufs for all model components
 
 ### mold-inference
 
-FLUX diffusion model inference using candle. Structure:
+FLUX and SDXL diffusion model inference using candle. Structure:
 
 ```
 src/
 ├── lib.rs                    # Re-exports (same public API)
-├── engine.rs                 # InferenceEngine trait + rand_seed()
+├── engine.rs                 # InferenceEngine trait + rand_seed() + set_on_progress()
+├── factory.rs                # create_engine() — auto-detects family, returns Box<dyn InferenceEngine>
 ├── device.rs                 # VRAM queries, should_use_gpu(), fmt_gb(), thresholds
 ├── image.rs                  # Tensor → PNG/JPEG encoding
 ├── error.rs                  # InferenceError enum
@@ -132,10 +133,13 @@ src/
 │   ├── mod.rs                # pub mod t5; pub mod clip;
 │   ├── t5.rs                 # T5Encoder struct: config, load, encode, drop, reload
 │   └── clip.rs               # ClipEncoder struct: config, load, encode, drop, reload
-└── flux/
+├── flux/
+│   ├── mod.rs                # Module declarations + re-exports
+│   ├── transformer.rs        # FluxTransformer enum (BF16/Quantized) + denoise()
+│   └── pipeline.rs           # FluxEngine + LoadedFlux + InferenceEngine impl
+└── sdxl/
     ├── mod.rs                # Module declarations + re-exports
-    ├── transformer.rs        # FluxTransformer enum (BF16/Quantized) + denoise()
-    └── pipeline.rs           # FluxEngine + LoadedFlux + InferenceEngine impl
+    └── pipeline.rs           # SDXLEngine + LoadedSDXL + InferenceEngine impl
 ```
 
 The `InferenceEngine` trait:
@@ -145,6 +149,7 @@ pub trait InferenceEngine: Send + Sync {
     fn model_name(&self) -> &str;
     fn is_loaded(&self) -> bool;
     fn load(&mut self) -> Result<()>;
+    fn set_on_progress(&mut self, _callback: ProgressCallback) {} // default no-op
 }
 ```
 
@@ -169,6 +174,19 @@ pub trait InferenceEngine: Send + Sync {
 **FluxTransformer enum** (in `flux/transformer.rs`) wraps either `flux::model::Flux` (BF16) or `flux::quantized_model::Flux` (GGUF quantized). Both implement `flux::WithForward` so the same `denoise()` call works for both.
 
 Model loading is **lazy** (on first generation request) and uses **mmap** for safetensors files.
+
+**`SDXLEngine`** (in `sdxl/pipeline.rs`) implements SDXL inference using candle's stable_diffusion module:
+
+1. **Dual-CLIP encoding** — CLIP-L (768-dim) + CLIP-G (1280-dim), concatenated → 2048-dim cross-attention input
+2. **Classifier-free guidance** — When guidance > 1.0, encodes empty prompt and applies CFG: `uncond + guidance * (cond - uncond)`
+3. **Scheduler** — DDIM for standard models (25-30 steps), Euler Ancestral for turbo (1-4 steps)
+4. **UNet denoising** — `UNet2DConditionModel.forward(latents, timestep, encoder_hidden_states)`
+5. **VAE decode** — Latents scaled by factor (0.18215 standard, 0.13025 turbo) → `AutoEncoderKL.decode()`
+6. **Image encoding** — Same post-processing as FLUX (tensor → RGB → PNG/JPEG)
+
+**Engine factory** — `create_engine(model_name, paths, config)` auto-detects the model family from config/manifest and returns the appropriate engine:
+- `"flux"` → `FluxEngine` (T5 + CLIP-L, flow-matching transformer)
+- `"sdxl"` → `SDXLEngine` (CLIP-L + CLIP-G, UNet with DDIM/Euler Ancestral)
 
 Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
 
@@ -250,6 +268,8 @@ mold completions <SHELL>        Generate shell completions (bash, zsh, fish, elv
 | `MOLD_T5_TOKENIZER_PATH` | — | Path to T5 tokenizer.json |
 | `MOLD_CLIP_TOKENIZER_PATH` | — | Path to CLIP tokenizer.json |
 | `MOLD_T5_VARIANT` | — | T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3 |
+| `MOLD_CLIP2_PATH` | — | Path to CLIP-G encoder safetensors (SDXL) |
+| `MOLD_CLIP2_TOKENIZER_PATH` | — | Path to CLIP-G tokenizer.json (SDXL) |
 
 ## Config File
 
@@ -424,9 +444,20 @@ curl -X POST http://localhost:7680/api/generate \
 | `flux-krea:q6` | `QuantStack/FLUX.1-Krea-dev-GGUF` | `flux1-krea-dev-Q6_K.gguf` | 9.9GB |
 | `flux-krea:q4` | `QuantStack/FLUX.1-Krea-dev-GGUF` | `flux1-krea-dev-Q4_1.gguf` | 7.5GB |
 
-> **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090.
+**SDXL Models (FP16 safetensors)**
 
-**HuggingFace download sources for shared components:**
+| Name | UNet Source | Scheduler | Steps | Size |
+|------|-----------|-----------|-------|------|
+| `sdxl-base:fp16` | `stabilityai/stable-diffusion-xl-base-1.0` | DDIM | 25 | 5.14GB |
+| `dreamshaper-xl:fp16` | `Lykon/dreamshaper-xl-v2-turbo` | Euler Ancestral | 8 | 5.14GB |
+| `juggernaut-xl:fp16` | `RunDiffusion/Juggernaut-XL-v9` | DDIM | 30 | 5.14GB |
+| `realvis-xl:fp16` | `SG161222/RealVisXL_V5.0` | DDIM | 25 | 5.14GB |
+| `playground-v2.5:fp16` | `playgroundai/playground-v2.5-1024px-aesthetic` | DDIM | 25 | 5.14GB |
+| `sdxl-turbo:fp16` | `stabilityai/sdxl-turbo` | Euler Ancestral | 4 | 5.14GB |
+
+> **Note:** The full BF16 safetensors FLUX dev (23GB) fills all 24GB VRAM and causes CUDA OOM during the denoising activation pass. Always use GGUF quantized models on the RTX 4090. SDXL FP16 UNets (~5GB) fit comfortably alongside shared components.
+
+**HuggingFace download sources for shared FLUX components:**
 | File | Source |
 |------|--------|
 | `flux1-schnell-Q8_0.gguf` | `city96/FLUX.1-schnell-gguf` |
@@ -435,6 +466,15 @@ curl -X POST http://localhost:7680/api/generate \
 | `clip_l.safetensors` | `comfyanonymous/flux_text_encoders` |
 | `t5-v1_1-xxl.tokenizer.json` (T5) | `lmz/mt5-tokenizers` |
 | `tokenizer.json` (CLIP) | `openai/clip-vit-large-patch14` |
+
+**HuggingFace download sources for shared SDXL components:**
+| File | Source |
+|------|--------|
+| `diffusion_pytorch_model.safetensors` (VAE) | `madebyollin/sdxl-vae-fp16-fix` |
+| `text_encoder/model.safetensors` (CLIP-L) | `stabilityai/stable-diffusion-xl-base-1.0` |
+| `text_encoder_2/model.safetensors` (CLIP-G) | `stabilityai/stable-diffusion-xl-base-1.0` |
+| `tokenizer.json` (CLIP-L) | `openai/clip-vit-large-patch14` |
+| `tokenizer.json` (CLIP-G) | `laion/CLIP-ViT-bigG-14-laion2B-39B-b160k` |
 
 Model manifests are defined in `mold-core/src/manifest.rs`. The inference crate's `model_registry.rs` delegates to the manifest.
 
@@ -488,6 +528,8 @@ Planned support for distributing models via OCI-compatible registries (similar t
 20. **Pipe-friendly output**: When stdout is a pipe (detected via `IsTerminal`), `mold run` writes raw image bytes to stdout and routes all status/progress to stderr. This enables `mold run "a cat" | viu -` and `mold run "a cat" > image.png`. Explicit `--output -` also forces stdout output. SIGPIPE is reset to default at startup to avoid broken-pipe panics when the reader closes early. The `status!` macro routes messages to stdout (interactive) or stderr (piped).
 
 21. **Unified `run` command with positional model arg**: `mold run` is the primary command. The first positional arg is disambiguated at runtime: if it matches a known model (manifests + config), it's treated as the model; otherwise it's part of the prompt. `mold run flux-dev:q4 "prompt"` = specific model; `mold run "prompt"` = default model. This mirrors `ollama run <model> <prompt>`.
+
+22. **SDXL model family support**: SDXL is supported as a second model family alongside FLUX. The engine factory (`create_engine()`) auto-detects the family from config or manifest. SDXL uses dual-CLIP (CLIP-L 768-dim + CLIP-G 1280-dim, concatenated to 2048-dim) instead of FLUX's T5+CLIP-L. SDXL uses UNet2DConditionModel with DDIM or Euler Ancestral schedulers, classifier-free guidance (dual pass: uncond + cond), and 8x latent downscaling (vs FLUX's 16x). Bare model names resolve to `:fp16` for SDXL (vs `:q8` for FLUX) via smart `resolve_model_name()`. SDXL FP16 UNets (~5GB) fit comfortably on the RTX 4090 alongside shared components (~2.2GB).
 
 ## Confirmed Working Configuration
 

@@ -14,6 +14,10 @@ pub struct ModelConfig {
     pub clip_encoder: Option<String>,
     pub t5_tokenizer: Option<String>,
     pub clip_tokenizer: Option<String>,
+    /// CLIP-G / OpenCLIP encoder path (SDXL only)
+    pub clip_encoder_2: Option<String>,
+    /// CLIP-G / OpenCLIP tokenizer path (SDXL only)
+    pub clip_tokenizer_2: Option<String>,
 
     // --- generation defaults ---
     /// Default inference steps (e.g. 4 for schnell, 25 for dev)
@@ -27,6 +31,8 @@ pub struct ModelConfig {
     /// Whether this model uses the schnell (distilled) timestep schedule.
     /// If None, auto-detected from the transformer filename.
     pub is_schnell: Option<bool>,
+    /// Scheduler type: "ddim", "euler_ancestral" (SDXL only; FLUX uses flow-matching)
+    pub scheduler: Option<String>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -56,20 +62,28 @@ impl ModelConfig {
     }
 }
 
-/// Resolved model file paths (all required).
+/// Resolved model file paths.
+/// `transformer`, `vae`, `clip_encoder`, `clip_tokenizer` are always required.
+/// `t5_encoder` / `t5_tokenizer` are required for FLUX (validated by engine).
+/// `clip_encoder_2` / `clip_tokenizer_2` are required for SDXL (validated by engine).
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     pub transformer: PathBuf,
     pub vae: PathBuf,
-    pub t5_encoder: PathBuf,
+    pub t5_encoder: Option<PathBuf>,
     pub clip_encoder: PathBuf,
-    pub t5_tokenizer: PathBuf,
+    pub t5_tokenizer: Option<PathBuf>,
     pub clip_tokenizer: PathBuf,
+    /// CLIP-G / OpenCLIP encoder (SDXL only)
+    pub clip_encoder_2: Option<PathBuf>,
+    /// CLIP-G / OpenCLIP tokenizer (SDXL only)
+    pub clip_tokenizer_2: Option<PathBuf>,
 }
 
 impl ModelPaths {
     /// Resolve paths for a model. Checks config, then env vars.
-    /// Returns None if any required path is unresolvable.
+    /// Returns None if transformer, VAE, or primary CLIP paths can't be resolved.
+    /// T5 and CLIP2 paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
         let model_cfg = config.models.get(model_name);
 
@@ -81,7 +95,7 @@ impl ModelPaths {
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
             "MOLD_T5_PATH",
-        )?;
+        );
         let clip_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_encoder.as_deref()),
             "MOLD_CLIP_PATH",
@@ -89,11 +103,19 @@ impl ModelPaths {
         let t5_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_tokenizer.as_deref()),
             "MOLD_T5_TOKENIZER_PATH",
-        )?;
+        );
         let clip_tokenizer = Self::resolve_path(
             model_cfg.and_then(|m| m.clip_tokenizer.as_deref()),
             "MOLD_CLIP_TOKENIZER_PATH",
         )?;
+        let clip_encoder_2 = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_encoder_2.as_deref()),
+            "MOLD_CLIP2_PATH",
+        );
+        let clip_tokenizer_2 = Self::resolve_path(
+            model_cfg.and_then(|m| m.clip_tokenizer_2.as_deref()),
+            "MOLD_CLIP2_TOKENIZER_PATH",
+        );
 
         Some(Self {
             transformer,
@@ -102,6 +124,8 @@ impl ModelPaths {
             clip_encoder,
             t5_tokenizer,
             clip_tokenizer,
+            clip_encoder_2,
+            clip_tokenizer_2,
         })
     }
 

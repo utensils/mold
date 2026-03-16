@@ -2,6 +2,8 @@ use anyhow::Result;
 use mold_core::GenerateRequest;
 use mold_core::GenerateResponse;
 
+use crate::progress::ProgressCallback;
+
 /// Trait for inference backends.
 pub trait InferenceEngine: Send + Sync {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse>;
@@ -9,6 +11,9 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
     /// Load model weights. Called automatically on first generate if not yet loaded.
     fn load(&mut self) -> Result<()>;
+    /// Set a progress callback for receiving loading/inference status updates.
+    /// Default implementation is a no-op for engines that don't support progress.
+    fn set_on_progress(&mut self, _callback: ProgressCallback) {}
 }
 
 /// Generate a random seed from the current system time.

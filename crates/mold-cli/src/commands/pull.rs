@@ -35,7 +35,12 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
         }
     };
 
-    let total_gb = manifest.size_gb + mold_core::manifest::SHARED_COMPONENTS_GB;
+    let shared_gb = if manifest.family == "sdxl" {
+        mold_core::manifest::SHARED_SDXL_COMPONENTS_GB
+    } else {
+        mold_core::manifest::SHARED_COMPONENTS_GB
+    };
+    let total_gb = manifest.size_gb + shared_gb;
     println!(
         "{} Pulling {} ({:.1}GB transformer, {:.1}GB total with shared components)",
         "●".cyan(),

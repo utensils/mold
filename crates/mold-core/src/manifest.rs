@@ -10,6 +10,8 @@ pub enum ModelComponent {
     ClipEncoder,
     T5Tokenizer,
     ClipTokenizer,
+    ClipEncoder2,   // CLIP-G / OpenCLIP (SDXL)
+    ClipTokenizer2, // CLIP-G tokenizer (SDXL)
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,8 @@ pub struct ManifestDefaults {
     pub width: u32,
     pub height: u32,
     pub is_schnell: bool,
+    /// Scheduler type: None for FLUX (uses flow-matching), "ddim" or "euler_ancestral" for SDXL.
+    pub scheduler: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,15 +50,30 @@ impl ModelManifest {
         ModelConfig {
             transformer: Some(paths.transformer.to_string_lossy().to_string()),
             vae: Some(paths.vae.to_string_lossy().to_string()),
-            t5_encoder: Some(paths.t5_encoder.to_string_lossy().to_string()),
+            t5_encoder: paths
+                .t5_encoder
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             clip_encoder: Some(paths.clip_encoder.to_string_lossy().to_string()),
-            t5_tokenizer: Some(paths.t5_tokenizer.to_string_lossy().to_string()),
+            t5_tokenizer: paths
+                .t5_tokenizer
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             clip_tokenizer: Some(paths.clip_tokenizer.to_string_lossy().to_string()),
+            clip_encoder_2: paths
+                .clip_encoder_2
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            clip_tokenizer_2: paths
+                .clip_tokenizer_2
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             default_steps: Some(self.defaults.steps),
             default_guidance: Some(self.defaults.guidance),
             default_width: Some(self.defaults.width),
             default_height: Some(self.defaults.height),
             is_schnell: Some(self.defaults.is_schnell),
+            scheduler: self.defaults.scheduler.map(|s| s.to_string()),
             description: Some(self.description.clone()),
             family: Some(self.family.clone()),
         }
@@ -102,9 +121,9 @@ fn shared_flux_files() -> Vec<ModelFile> {
     ]
 }
 
-/// All known downloadable model manifests.
+/// All known downloadable model manifests (FLUX + SDXL).
 pub fn known_manifests() -> Vec<ModelManifest> {
-    vec![
+    let mut manifests = vec![
         ModelManifest {
             name: "flux-schnell:q8".to_string(),
             family: "flux".to_string(),
@@ -127,6 +146,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: true,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -151,6 +171,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -175,6 +196,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -199,6 +221,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -223,6 +246,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: true,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -247,6 +271,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: true,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -271,6 +296,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -296,6 +322,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -321,6 +348,211 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
+            },
+        },
+    ];
+    manifests.extend(sdxl_manifests());
+    manifests
+}
+
+/// Shared SDXL component files (VAE, dual-CLIP encoders, tokenizers) — identical across all SDXL models.
+fn shared_sdxl_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "madebyollin/sdxl-vae-fp16-fix".to_string(),
+            hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 335_000_000, // ~335MB
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
+            hf_filename: "text_encoder/model.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder,
+            size_bytes: 492_000_000, // ~492MB (CLIP-L)
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
+            hf_filename: "text_encoder_2/model.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder2,
+            size_bytes: 1_390_000_000, // ~1.39GB (CLIP-G / OpenCLIP)
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "openai/clip-vit-large-patch14".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+        },
+        ModelFile {
+            hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer2,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+        },
+    ]
+}
+
+/// Size of shared SDXL components (VAE, dual-CLIP, tokenizers) in GB.
+pub const SHARED_SDXL_COMPONENTS_GB: f32 = 2.2;
+
+/// All known SDXL model manifests.
+fn sdxl_manifests() -> Vec<ModelManifest> {
+    vec![
+        // --- Standard SDXL (DDIM scheduler, 20-30 steps, guidance 7.5) ---
+        ModelManifest {
+            name: "sdxl-base:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "SDXL Base 1.0 — official Stability AI base model".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        ModelManifest {
+            name: "dreamshaper-xl:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "DreamShaper XL — fantasy, concept art, stylized".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "Lykon/dreamshaper-xl-v2-turbo".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 8,
+                guidance: 2.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("euler_ancestral"),
+            },
+        },
+        ModelManifest {
+            name: "juggernaut-xl:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "Juggernaut XL — photorealism, cinematic lighting".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "RunDiffusion/Juggernaut-XL-v9".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 30,
+                guidance: 7.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        ModelManifest {
+            name: "realvis-xl:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "RealVisXL V5.0 — photorealism, versatile subjects".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "SG161222/RealVisXL_V5.0".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        ModelManifest {
+            name: "playground-v2.5:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "Playground v2.5 — aesthetic quality, artistic".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "playgroundai/playground-v2.5-1024px-aesthetic".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
+        ModelManifest {
+            name: "sdxl-turbo:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "SDXL Turbo — ultra-fast 1-4 step generation".to_string(),
+            size_gb: 5.14,
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "stabilityai/sdxl-turbo".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_140_000_000,
+                    gated: false,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: Some("euler_ancestral"),
             },
         },
     ]
@@ -328,7 +560,8 @@ pub fn known_manifests() -> Vec<ModelManifest> {
 
 /// Resolve a user-provided model name to its canonical `name:tag` form.
 ///
-/// - `flux-schnell` → `flux-schnell:q8`
+/// - `flux-schnell` → `flux-schnell:q8` (FLUX default tag)
+/// - `dreamshaper-xl` → `dreamshaper-xl:fp16` (SDXL default tag)
 /// - `flux-dev:q4` → `flux-dev:q4` (unchanged)
 /// - `flux-dev-q4` → `flux-dev:q4` (legacy format)
 pub fn resolve_model_name(input: &str) -> String {
@@ -345,8 +578,23 @@ pub fn resolve_model_name(input: &str) -> String {
             return format!("{base}:{suffix}");
         }
     }
-    // Default tag
+    // Try :q8 first (FLUX convention), then :fp16 (SDXL convention)
+    let q8 = format!("{input}:q8");
+    if find_manifest_exact(&q8).is_some() {
+        return q8;
+    }
+    let fp16 = format!("{input}:fp16");
+    if find_manifest_exact(&fp16).is_some() {
+        return fp16;
+    }
+    // Fallback to :q8 for backward compatibility
     format!("{input}:q8")
+}
+
+/// Find a manifest by exact name (no resolution). Used internally to avoid
+/// circular dependency in `resolve_model_name`.
+fn find_manifest_exact(name: &str) -> Option<ModelManifest> {
+    known_manifests().into_iter().find(|m| m.name == name)
 }
 
 /// Find a manifest by name, handling tag resolution and legacy names.
@@ -441,6 +689,8 @@ pub fn total_download_size(manifest: &ModelManifest) -> u64 {
 }
 
 /// Convert a `ModelManifest` to a `ModelPaths` from resolved download paths.
+/// Transformer, VAE, CLIP-L encoder, and CLIP-L tokenizer are always required.
+/// T5 (FLUX) and CLIP-G (SDXL) components are optional — each engine validates what it needs.
 pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<ModelPaths> {
     let find = |c: ModelComponent| -> Option<PathBuf> {
         downloads
@@ -452,10 +702,12 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
     Some(ModelPaths {
         transformer: find(ModelComponent::Transformer)?,
         vae: find(ModelComponent::Vae)?,
-        t5_encoder: find(ModelComponent::T5Encoder)?,
+        t5_encoder: find(ModelComponent::T5Encoder), // Optional (FLUX only)
         clip_encoder: find(ModelComponent::ClipEncoder)?,
-        t5_tokenizer: find(ModelComponent::T5Tokenizer)?,
+        t5_tokenizer: find(ModelComponent::T5Tokenizer), // Optional (FLUX only)
         clip_tokenizer: find(ModelComponent::ClipTokenizer)?,
+        clip_encoder_2: find(ModelComponent::ClipEncoder2), // Optional (SDXL only)
+        clip_tokenizer_2: find(ModelComponent::ClipTokenizer2), // Optional (SDXL only)
     })
 }
 
@@ -473,6 +725,10 @@ mod tests {
     fn resolve_name_default_tag() {
         assert_eq!(resolve_model_name("flux-schnell"), "flux-schnell:q8");
         assert_eq!(resolve_model_name("flux-dev"), "flux-dev:q8");
+        // SDXL models default to :fp16
+        assert_eq!(resolve_model_name("sdxl-base"), "sdxl-base:fp16");
+        assert_eq!(resolve_model_name("sdxl-turbo"), "sdxl-turbo:fp16");
+        assert_eq!(resolve_model_name("dreamshaper-xl"), "dreamshaper-xl:fp16");
     }
 
     #[test]
@@ -510,19 +766,63 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        assert_eq!(known_manifests().len(), 9);
+        // 9 FLUX + 6 SDXL = 15
+        assert_eq!(known_manifests().len(), 15);
     }
 
     #[test]
-    fn manifest_has_all_components() {
+    fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            assert!(components.contains(&ModelComponent::Transformer));
-            assert!(components.contains(&ModelComponent::Vae));
-            assert!(components.contains(&ModelComponent::T5Encoder));
-            assert!(components.contains(&ModelComponent::ClipEncoder));
-            assert!(components.contains(&ModelComponent::T5Tokenizer));
-            assert!(components.contains(&ModelComponent::ClipTokenizer));
+            // All models need transformer, VAE, and at least one CLIP
+            assert!(
+                components.contains(&ModelComponent::Transformer),
+                "{} missing Transformer",
+                manifest.name
+            );
+            assert!(
+                components.contains(&ModelComponent::Vae),
+                "{} missing Vae",
+                manifest.name
+            );
+            assert!(
+                components.contains(&ModelComponent::ClipEncoder),
+                "{} missing ClipEncoder",
+                manifest.name
+            );
+            assert!(
+                components.contains(&ModelComponent::ClipTokenizer),
+                "{} missing ClipTokenizer",
+                manifest.name
+            );
+
+            match manifest.family.as_str() {
+                "flux" => {
+                    assert!(
+                        components.contains(&ModelComponent::T5Encoder),
+                        "{} (flux) missing T5Encoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::T5Tokenizer),
+                        "{} (flux) missing T5Tokenizer",
+                        manifest.name
+                    );
+                }
+                "sdxl" => {
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder2),
+                        "{} (sdxl) missing ClipEncoder2",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer2),
+                        "{} (sdxl) missing ClipTokenizer2",
+                        manifest.name
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -567,6 +867,43 @@ mod tests {
                 v.hf_filename
             );
         }
+    }
+
+    #[test]
+    fn sdxl_manifests_have_scheduler() {
+        for manifest in known_manifests() {
+            if manifest.family == "sdxl" {
+                assert!(
+                    manifest.defaults.scheduler.is_some(),
+                    "{} (sdxl) should have a scheduler",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sdxl_turbo_uses_euler_ancestral() {
+        let manifest = find_manifest("sdxl-turbo").unwrap();
+        assert_eq!(manifest.defaults.scheduler, Some("euler_ancestral"));
+        assert_eq!(manifest.defaults.steps, 4);
+        assert_eq!(manifest.defaults.guidance, 0.0);
+    }
+
+    #[test]
+    fn sdxl_base_uses_ddim() {
+        let manifest = find_manifest("sdxl-base").unwrap();
+        assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+        assert_eq!(manifest.defaults.steps, 25);
+    }
+
+    #[test]
+    fn sdxl_resolve_fp16_default() {
+        assert_eq!(resolve_model_name("sdxl-base"), "sdxl-base:fp16");
+        assert_eq!(
+            resolve_model_name("playground-v2.5"),
+            "playground-v2.5:fp16"
+        );
     }
 
     #[test]

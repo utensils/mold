@@ -103,12 +103,14 @@ impl FluxEngine {
 
     /// Resolve which T5 encoder to use and where to place it.
     /// Returns (encoder_path, on_gpu, device_label).
+    /// `default_t5_path` is the FP16 T5 encoder path (already validated to exist).
     fn resolve_t5_variant(
         &self,
         preference: Option<&str>,
         gpu_device: &Device,
         _cpu_device: &Device,
         free_vram: u64,
+        default_t5_path: &std::path::Path,
     ) -> Result<(std::path::PathBuf, bool, String)> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
         use mold_core::manifest::{find_t5_variant, known_t5_variants, T5_FP16_SIZE};
@@ -146,7 +148,7 @@ impl FluxEngine {
                 let on_gpu = should_use_gpu(is_cuda, free_vram, T5_VRAM_THRESHOLD);
                 let label = if on_gpu { "GPU" } else { "CPU" };
                 self.info(&format!("Using FP16 T5 on {} (explicit)", label));
-                Ok((self.paths.t5_encoder.clone(), on_gpu, label.to_string()))
+                Ok((default_t5_path.to_path_buf(), on_gpu, label.to_string()))
             }
 
             // Auto mode (default): try FP16 on GPU, then quantized on GPU, then FP16 on CPU
@@ -158,7 +160,7 @@ impl FluxEngine {
                         fmt_gb(free_vram),
                         fmt_gb(T5_VRAM_THRESHOLD),
                     ));
-                    return Ok((self.paths.t5_encoder.clone(), true, "GPU".to_string()));
+                    return Ok((default_t5_path.to_path_buf(), true, "GPU".to_string()));
                 }
 
                 // FP16 won't fit on GPU — try quantized variants (largest first)
@@ -212,7 +214,7 @@ impl FluxEngine {
                 } else {
                     self.info("No GPU detected, loading T5 on CPU");
                 }
-                Ok((self.paths.t5_encoder.clone(), false, "CPU".to_string()))
+                Ok((default_t5_path.to_path_buf(), false, "CPU".to_string()))
             }
         }
     }
@@ -277,13 +279,27 @@ impl FluxEngine {
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
+        // Validate T5 paths are present (required for FLUX)
+        let t5_encoder_path = self
+            .paths
+            .t5_encoder
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for FLUX models"))?
+            .clone();
+        let t5_tokenizer_path = self
+            .paths
+            .t5_tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("T5 tokenizer path required for FLUX models"))?
+            .clone();
+
         // Validate all paths exist before attempting unsafe mmap
         for (label, path) in [
             ("transformer", &self.paths.transformer),
             ("vae", &self.paths.vae),
-            ("t5_encoder", &self.paths.t5_encoder),
+            ("t5_encoder", &t5_encoder_path),
             ("clip_encoder", &self.paths.clip_encoder),
-            ("t5_tokenizer", &self.paths.t5_tokenizer),
+            ("t5_tokenizer", &t5_tokenizer_path),
             ("clip_tokenizer", &self.paths.clip_tokenizer),
         ] {
             if !path.exists() {
@@ -378,8 +394,8 @@ impl FluxEngine {
         self.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
-        let (t5_encoder_path, t5_on_gpu, t5_device_label) =
-            self.resolve_t5_variant(t5_preference, &device, &cpu, free)?;
+        let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+            self.resolve_t5_variant(t5_preference, &device, &cpu, free, &t5_encoder_path)?;
         self.stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
         let t5_device = if t5_on_gpu { &device } else { &cpu };
         let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
@@ -389,13 +405,13 @@ impl FluxEngine {
         self.stage_start(&t5_stage_label);
         let t5_stage = Instant::now();
         tracing::info!(
-            path = %t5_encoder_path.display(),
+            path = %resolved_t5_path.display(),
             device = %t5_device_label,
             "loading T5 encoder..."
         );
         let t5 = encoders::t5::T5Encoder::load(
-            &t5_encoder_path,
-            &self.paths.t5_tokenizer,
+            &resolved_t5_path,
+            &t5_tokenizer_path,
             t5_device,
             t5_dtype,
         )?;
@@ -436,7 +452,7 @@ impl FluxEngine {
             dtype: gpu_dtype,
             is_schnell,
             is_quantized,
-            t5_encoder_path,
+            t5_encoder_path: resolved_t5_path,
         });
 
         tracing::info!(model = %self.model_name, "all model components loaded successfully");
@@ -470,7 +486,8 @@ impl InferenceEngine for FluxEngine {
             .loaded
             .as_ref()
             .map(|l| l.t5_encoder_path.clone())
-            .unwrap_or_else(|| self.paths.t5_encoder.clone());
+            .or_else(|| self.paths.t5_encoder.clone())
+            .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for FLUX models"))?;
         let clip_encoder_path = self.paths.clip_encoder.clone();
 
         let loaded = self
@@ -642,5 +659,9 @@ impl InferenceEngine for FluxEngine {
 
     fn load(&mut self) -> Result<()> {
         FluxEngine::load(self)
+    }
+
+    fn set_on_progress(&mut self, callback: ProgressCallback) {
+        self.on_progress = Some(callback);
     }
 }

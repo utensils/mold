@@ -160,7 +160,7 @@ async fn generate_local(
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
-    use mold_inference::{FluxEngine, InferenceEngine, ProgressEvent};
+    use mold_inference::ProgressEvent;
 
     validate_generate_request(req).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -201,17 +201,17 @@ async fn generate_local(
         }
     }
 
-    let is_schnell = effective_config.model_config(&model_name).is_schnell;
-    let t5_variant = t5_variant_override
-        .or_else(|| std::env::var("MOLD_T5_VARIANT").ok())
-        .or_else(|| effective_config.t5_variant.clone());
-    let mut engine = FluxEngine::new(model_name, paths, is_schnell, t5_variant);
+    // Apply CLI --t5-variant override via env var (factory reads MOLD_T5_VARIANT)
+    if let Some(ref variant) = t5_variant_override {
+        std::env::set_var("MOLD_T5_VARIANT", variant);
+    }
+    let mut engine = mold_inference::create_engine(model_name, paths, effective_config)?;
 
     // Set up progress channel for UI updates from the blocking inference thread
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
-    engine.set_on_progress(move |event| {
+    engine.set_on_progress(Box::new(move |event| {
         let _ = tx.send(event);
-    });
+    }));
 
     let req = req.clone();
 
