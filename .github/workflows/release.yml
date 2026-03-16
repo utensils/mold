@@ -43,7 +43,7 @@ jobs:
       - uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: "12.6.3"
-          method: network
+          method: local
 
       - uses: dtolnay/rust-toolchain@stable
 
