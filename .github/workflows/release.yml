@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Jimver/cuda-toolkit@v0.2.19
+      - uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: "12.6.3"
           method: network
