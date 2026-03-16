@@ -8,6 +8,7 @@ description = "Shared types, API protocol, and HTTP client for mold"
 
 [dependencies]
 anyhow = "1"
+console = "0.15"
 dirs = "6"
 hf-hub = { version = "0.5", default-features = false, features = ["tokio", "ureq", "rustls-tls"] }
 indicatif = "0.17"

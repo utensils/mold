@@ -42,8 +42,7 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// Effective steps: model default → global fallback → hardcoded default.
     pub fn effective_steps(&self, global_cfg: &Config) -> u32 {
-        self.default_steps
-            .unwrap_or_else(|| global_cfg.default_steps)
+        self.default_steps.unwrap_or(global_cfg.default_steps)
     }
 
     /// Effective guidance.

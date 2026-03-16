@@ -43,8 +43,6 @@ nix flake check                                      # Validate formatting + fla
 | run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
 | run | `serve` | Start the mold server |
 | run | `generate` | Generate an image from a prompt |
-| run | `generate` | Generate an image from a prompt |
-| deploy | `deploy` | Deploy to GPU host |
 
 ### Cargo (direct)
 
@@ -63,6 +61,10 @@ cargo run -p mold-cli -- serve                       # Start server
 cargo run -p mold-cli -- run "a cat"                 # Generate image
 ./scripts/deploy.sh                                  # Deploy to GPU host
 ```
+
+### CI (GitHub Actions)
+
+CI runs on every push and PR (`.github/workflows/ci.yml`): `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test --workspace`. All four must pass.
 
 ## Project Vision
 
@@ -130,8 +132,9 @@ src/
 ├── progress.rs               # ProgressEvent enum + ProgressCallback type
 ├── model_registry.rs         # Delegates to mold_core::manifest for known models
 ├── encoders/
-│   ├── mod.rs                # pub mod t5; pub mod clip;
-│   ├── t5.rs                 # T5Encoder struct: config, load, encode, drop, reload
+│   ├── mod.rs                # pub mod t5; pub mod clip; pub mod t5_gguf;
+│   ├── t5.rs                 # T5Encoder struct: FP16 safetensors, config, load, encode, drop, reload
+│   ├── t5_gguf.rs            # GgufT5Encoder: loads quantized T5 GGUF with standard tensor names
 │   └── clip.rs               # ClipEncoder struct: config, load, encode, drop, reload
 ├── flux/
 │   ├── mod.rs                # Module declarations + re-exports

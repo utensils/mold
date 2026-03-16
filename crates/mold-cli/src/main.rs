@@ -98,7 +98,15 @@ enum Commands {
     },
 
     /// List locally available models
+    #[command(alias = "ls")]
     List,
+
+    /// Show detailed model information
+    Info {
+        /// Model name (e.g. flux-dev:q4, sdxl-turbo:fp16)
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: String,
+    },
 
     /// Show server status and loaded models
     Ps,
@@ -172,6 +180,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::List => {
             commands::list::run().await?;
+        }
+        Commands::Info { model } => {
+            commands::info::run(&model)?;
         }
         Commands::Ps => {
             commands::ps::run().await?;

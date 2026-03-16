@@ -2306,6 +2306,7 @@ name = "mold-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "console 0.15.11",
  "dirs",
  "hf-hub",
  "indicatif 0.17.11",

@@ -1,4 +1,5 @@
 pub(crate) mod generate;
+pub mod info;
 pub mod list;
 pub mod ps;
 pub mod pull;
