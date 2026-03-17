@@ -268,48 +268,62 @@ pub fn check_memory_budget(
 
 // ── Pre-flight memory guard ──────────────────────────────────────────────────
 
-/// Check if loading a component of `size_bytes` would cause severe page reclamation
-/// on macOS. Returns Err with a user-friendly message if loading would likely freeze
-/// the system (component > 2x free memory). On CUDA or when memory info is unavailable,
-/// always returns Ok.
+/// Check if loading a component of `size_bytes` would exceed available system memory.
+/// Uses available memory (free + inactive/reclaimable) as the primary metric, since
+/// macOS moves recently-freed pages to inactive rather than free — these are trivially
+/// reclaimable with no I/O. Hard-fails if component exceeds 90% of available memory;
+/// warns (but proceeds) if component exceeds 2x free memory. On CUDA or when memory
+/// info is unavailable, always returns Ok.
 pub(crate) fn preflight_memory_check(component_name: &str, size_bytes: u64) -> anyhow::Result<()> {
     // --eager or MOLD_EAGER=1 bypasses the check
     if std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1") {
         return Ok(());
     }
 
-    let free = match free_system_memory_bytes() {
-        Some(f) if f > 0 => f,
+    let available = match available_system_memory_bytes() {
+        Some(a) if a > 0 => a,
         _ => return Ok(()), // No info or CUDA — can't check
     };
 
-    if size_bytes > free * 2 {
-        let available = available_system_memory_bytes().unwrap_or(0);
-        if size_bytes > available {
-            // Truly doesn't fit even with reclamation
-            anyhow::bail!(
-                "Not enough memory to load {} ({} needed, {} available).\n\
-                 Close other applications or use a smaller quantized model.",
-                component_name,
-                fmt_gb(size_bytes),
-                fmt_gb(available),
-            );
-        }
+    let free = free_system_memory_bytes();
+
+    preflight_check_budget(component_name, size_bytes, available, free)
+}
+
+/// Pure logic for the preflight memory check, factored out for testability.
+/// `available` = free + inactive (reclaimable); `free` = free pages only.
+///
+/// - Hard-fails if `size_bytes > 90%` of available (truly doesn't fit).
+/// - Warns if `size_bytes > 2 * free` but within available (page reclamation expected).
+fn preflight_check_budget(
+    component_name: &str,
+    size_bytes: u64,
+    available: u64,
+    free: Option<u64>,
+) -> anyhow::Result<()> {
+    // Hard fail: component won't fit even with full page reclamation
+    if size_bytes > available * 90 / 100 {
         anyhow::bail!(
-            "Loading {} ({}) would require reclaiming {} from other applications,\n\
-             which will make your system unresponsive.\n\n\
-             Free memory: {}, needed: {}\n\n\
-             Options:\n\
-             - Close other applications to free memory, then retry\n\
-             - Use a smaller model variant (e.g. :q4 instead of :q8)\n\
-             - Use --eager to bypass this check (may freeze your system)",
+            "Not enough memory to load {} ({} needed, {} available).\n\
+             Close other applications or use a smaller quantized model.",
             component_name,
             fmt_gb(size_bytes),
-            fmt_gb(size_bytes - free),
-            fmt_gb(free),
-            fmt_gb(size_bytes),
+            fmt_gb(available),
         );
     }
+
+    // Soft warning: fits in available but may trigger page reclamation
+    if let Some(f) = free {
+        if size_bytes > f * 2 {
+            tracing::warn!(
+                "{} ({}) exceeds free memory ({}), will reclaim inactive pages",
+                component_name,
+                fmt_gb(size_bytes),
+                fmt_gb(f),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -622,5 +636,88 @@ mod tests {
             400_000_000,
             QWEN3_FP16_VRAM_THRESHOLD
         ));
+    }
+
+    // --- preflight_check_budget (preflight memory check logic) ---
+
+    const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn budget_ok_when_plenty_of_memory() {
+        // 5 GB component, 20 GB available, 10 GB free — no issue
+        let result = preflight_check_budget("UNet", 5 * GB, 20 * GB, Some(10 * GB));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn budget_hard_fail_when_exceeds_90pct_available() {
+        // 19 GB component, 20 GB available → 19 > 18 (90% of 20) → fail
+        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(1 * GB));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Not enough memory"), "got: {msg}");
+    }
+
+    #[test]
+    fn budget_ok_at_exactly_90pct_available() {
+        // 18 GB component, 20 GB available → 18 == 18 (90% of 20) → pass (not >)
+        let result = preflight_check_budget("UNet", 18 * GB, 20 * GB, Some(1 * GB));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn budget_hard_fail_just_over_90pct() {
+        // Component barely over 90% of available
+        let available = 10 * GB;
+        let size = available * 90 / 100 + 1; // one byte over
+        let result = preflight_check_budget("Transformer", size, available, Some(0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn budget_ok_when_low_free_but_high_available() {
+        // The key scenario: 5 GB UNet, only 0.4 GB free, but 18 GB available
+        // Old code would bail here; new code proceeds with a warning
+        let result = preflight_check_budget("UNet", 5 * GB, 18 * GB, Some(400_000_000));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn budget_ok_with_no_free_info() {
+        // free = None (e.g. CUDA), available is sufficient → ok
+        let result = preflight_check_budget("UNet", 5 * GB, 20 * GB, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn budget_hard_fail_with_no_free_info() {
+        // free = None but available too low
+        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn budget_ok_small_component() {
+        // Tiny component always fits
+        let result = preflight_check_budget("CLIP-L", 250_000_000, 16 * GB, Some(8 * GB));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn budget_error_message_includes_component_name() {
+        let result = preflight_check_budget("MyModel", 19 * GB, 20 * GB, Some(1 * GB));
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("MyModel"),
+            "error should mention component name"
+        );
+    }
+
+    #[test]
+    fn budget_error_message_includes_sizes() {
+        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(1 * GB));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("19.0 GB"), "should show needed size");
+        assert!(msg.contains("20.0 GB"), "should show available size");
     }
 }
