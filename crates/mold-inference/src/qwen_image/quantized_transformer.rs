@@ -178,8 +178,11 @@ impl JointAttention {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
+        txt_mask: &Tensor,
+        img_cos: &Tensor,
+        img_sin: &Tensor,
+        txt_cos: &Tensor,
+        txt_sin: &Tensor,
         img_seq_len: usize,
     ) -> Result<(Tensor, Tensor)> {
         let (b, _, _) = img_hidden.dims3()?;
@@ -208,12 +211,14 @@ impl JointAttention {
         let (q_img, k_img) = self.qk_norm.forward(&q_img, &k_img)?;
         let (q_txt, k_txt) = self.added_qk_norm.forward(&q_txt, &k_txt)?;
 
-        let q_img = apply_rotary_emb(&q_img, cos, sin)?;
-        let k_img = apply_rotary_emb(&k_img, cos, sin)?;
+        let q_img = apply_rotary_emb(&q_img, img_cos, img_sin)?;
+        let k_img = apply_rotary_emb(&k_img, img_cos, img_sin)?;
+        let q_txt = apply_rotary_emb(&q_txt, txt_cos, txt_sin)?;
+        let k_txt = apply_rotary_emb(&k_txt, txt_cos, txt_sin)?;
 
-        let q = Tensor::cat(&[&q_txt, &q_img], 1)?;
-        let k = Tensor::cat(&[&k_txt, &k_img], 1)?;
-        let v = Tensor::cat(&[&v_txt, &v_img], 1)?;
+        let q = Tensor::cat(&[&q_img, &q_txt], 1)?;
+        let k = Tensor::cat(&[&k_img, &k_txt], 1)?;
+        let v = Tensor::cat(&[&v_img, &v_txt], 1)?;
 
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
@@ -221,18 +226,29 @@ impl JointAttention {
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let img_mask = Tensor::ones((b, img_seq_len), DType::U8, img_hidden.device())?;
+        let key_mask = Tensor::cat(&[&img_mask, txt_mask], 1)?
+            .unsqueeze(1)?
+            .unsqueeze(1)?;
+        let on_true = key_mask.zeros_like()?.to_dtype(attn_weights.dtype())?;
+        let on_false = Tensor::new(f32::NEG_INFINITY, attn_weights.device())?
+            .broadcast_as(key_mask.shape())?
+            .to_dtype(attn_weights.dtype())?;
+        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
+        attn_weights = attn_weights.broadcast_add(&key_mask)?;
         attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
         let attn = attn_weights.matmul(&v)?;
 
         let total_seq = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((b, total_seq, ()))?;
-        let txt_attn = attn.narrow(1, 0, txt_seq_len)?;
-        let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
+        let img_attn = attn.narrow(1, 0, img_seq_len)?;
+        let txt_attn = attn.narrow(1, img_seq_len, txt_seq_len)?;
 
-        Ok((
-            img_attn.apply(&self.to_out)?,
-            txt_attn.apply(&self.add_out_proj)?,
-        ))
+        let txt_out = txt_attn
+            .apply(&self.add_out_proj)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(img_hidden.dtype())?)?;
+
+        Ok((img_attn.apply(&self.to_out)?, txt_out))
     }
 }
 
@@ -269,9 +285,12 @@ impl QwenImageTransformerBlock {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
+        txt_mask: &Tensor,
         temb: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
+        img_cos: &Tensor,
+        img_sin: &Tensor,
+        txt_cos: &Tensor,
+        txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
         let img_mod = temb.silu()?.apply(&self.img_mod)?.unsqueeze(1)?;
@@ -297,9 +316,20 @@ impl QwenImageTransformerBlock {
             .broadcast_add(txt_shift_msa)?;
         let (img_attn, txt_attn) =
             self.attn
-                .forward(&img_attn_in, &txt_attn_in, cos, sin, img_seq_len)?;
+                .forward(
+                    &img_attn_in,
+                    &txt_attn_in,
+                    txt_mask,
+                    img_cos,
+                    img_sin,
+                    txt_cos,
+                    txt_sin,
+                    img_seq_len,
+                )?;
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
+        let txt_dtype = txt_hidden.dtype();
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -312,7 +342,10 @@ impl QwenImageTransformerBlock {
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
         let img_hidden = (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?;
+        let txt_dtype = txt_hidden.dtype();
+        let txt_hidden = (txt_hidden
+            + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -375,7 +408,7 @@ impl QuantizedQwenImageTransformer2DModel {
             rope_embedder: RopeEmbedder::new(
                 10000.0,
                 cfg.axes_dims_rope.clone(),
-                vec![512, 512, 512],
+                vec![2048, 2048, 2048],
                 &device,
                 DType::F32,
             )?,
@@ -384,12 +417,19 @@ impl QuantizedQwenImageTransformer2DModel {
         })
     }
 
-    pub fn forward(&self, x: &Tensor, t: &Tensor, encoder_hidden_states: &Tensor) -> Result<Tensor> {
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
+    ) -> Result<Tensor> {
         let out_dtype = x.dtype();
         let device = x.device();
         let x = x.to_dtype(DType::F32)?;
         let t = t.to_dtype(DType::F32)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
+        let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
 
         let (_b, _c, h, w) = x.dims4()?;
         let patch_size = self.cfg.patch_size;
@@ -398,17 +438,34 @@ impl QuantizedQwenImageTransformer2DModel {
         let x_5d = x.unsqueeze(2)?;
         let (x_patches, orig_size) = patchify(&x_5d, patch_size, 1)?;
         let mut img = x_patches.apply(&self.img_in)?;
-        let mut txt = self.txt_norm.forward(&encoder_hidden_states)?.apply(&self.txt_in)?;
+        let txt_mask = encoder_attention_mask.to_dtype(DType::F32)?;
+        let mut txt = self
+            .txt_norm
+            .forward(&encoder_hidden_states)?
+            .apply(&self.txt_in)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?)?;
 
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
         let img_pos_ids = create_coordinate_grid((1, h_tokens, w_tokens), (0, 0, 0), device)?;
         let (img_cos, img_sin) = self.rope_embedder.forward(&img_pos_ids)?;
+        let txt_seq_len = encoder_hidden_states.dim(1)?;
+        let txt_offset = h_tokens.max(w_tokens) as u32;
+        let mut txt_coords = Vec::with_capacity(txt_seq_len * 3);
+        for i in 0..txt_seq_len {
+            let pos = txt_offset + i as u32;
+            txt_coords.push(pos);
+            txt_coords.push(pos);
+            txt_coords.push(pos);
+        }
+        let txt_pos_ids = Tensor::from_vec(txt_coords, (txt_seq_len, 3), device)?;
+        let (txt_cos, txt_sin) = self.rope_embedder.forward(&txt_pos_ids)?;
 
         for block in &self.blocks {
-            let (new_img, new_txt) = block.forward(&img, &txt, &temb, &img_cos, &img_sin)?;
-            img = new_img;
-            txt = new_txt;
+            let (new_img, new_txt) =
+                block.forward(&img, &txt, &encoder_attention_mask, &temb, &img_cos, &img_sin, &txt_cos, &txt_sin)?;
+            img = new_img.clamp(-65504f32, 65504f32)?;
+            txt = new_txt.clamp(-65504f32, 65504f32)?;
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;

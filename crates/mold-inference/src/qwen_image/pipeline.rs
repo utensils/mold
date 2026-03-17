@@ -71,10 +71,21 @@ impl QwenImageTransformer {
         latents: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
     ) -> Result<Tensor> {
         match self {
-            Self::BF16(model) => Ok(model.forward(latents, t, encoder_hidden_states)?),
-            Self::Quantized(model) => Ok(model.forward(latents, t, encoder_hidden_states)?),
+            Self::BF16(model) => Ok(model.forward(
+                latents,
+                t,
+                encoder_hidden_states,
+                encoder_attention_mask,
+            )?),
+            Self::Quantized(model) => Ok(model.forward(
+                latents,
+                t,
+                encoder_hidden_states,
+                encoder_attention_mask,
+            )?),
         }
     }
 }
@@ -90,6 +101,21 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn debug_tensor_stats(name: &str, tensor: &Tensor) {
+        if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
+            return;
+        }
+        let stats = || -> Result<(f32, f32)> {
+            let min = tensor.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+            let max = tensor.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+            Ok((min, max))
+        };
+        match stats() {
+            Ok((min, max)) => eprintln!("[qwen-debug] {name}: min={min:.4} max={max:.4}"),
+            Err(err) => eprintln!("[qwen-debug] {name}: <failed: {err}>"),
+        }
+    }
+
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
         Self {
             loaded: None,
@@ -365,7 +391,7 @@ impl QwenImageEngine {
 
         self.progress.stage_start("Encoding prompt (Qwen2.5)");
         let encode_start = Instant::now();
-        let (encoder_hidden_states, _token_count) =
+        let (encoder_hidden_states, encoder_attention_mask, _token_count) =
             text_encoder.encode(&req.prompt, &device, dtype)?;
         self.progress
             .stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
@@ -432,7 +458,15 @@ impl QwenImageEngine {
             let t = scheduler.current_timestep();
             let t_tensor =
                 Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(latent_dtype)?;
-            let noise_pred = transformer.forward(&latents, &t_tensor, &encoder_hidden_states)?;
+            let noise_pred = transformer.forward(
+                &latents,
+                &t_tensor,
+                &encoder_hidden_states,
+                &encoder_attention_mask,
+            )?;
+            if step == 0 {
+                Self::debug_tensor_stats("noise_pred", &noise_pred);
+            }
             latents = scheduler.step(&noise_pred, &latents)?;
             self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
@@ -447,6 +481,7 @@ impl QwenImageEngine {
         // Drop transformer and embeddings
         drop(transformer);
         drop(encoder_hidden_states);
+        drop(encoder_attention_mask);
         self.progress.info("Freed Qwen-Image transformer");
 
         // --- Phase 3: Load VAE and decode ---
@@ -479,8 +514,11 @@ impl QwenImageEngine {
         let vae_decode_start = Instant::now();
 
         let latents = latents.to_device(&vae_device)?.to_dtype(vae_dtype)?;
+        Self::debug_tensor_stats("latents_pre_vae", &latents);
         let image = vae.decode(&latents)?;
+        Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
+        Self::debug_tensor_stats("image_postprocess", &image);
         let image = image.i(0)?;
 
         self.progress
@@ -571,7 +609,7 @@ impl InferenceEngine for QwenImageEngine {
         // 2. Encode prompt
         progress.stage_start("Encoding prompt (Qwen2.5)");
         let encode_start = Instant::now();
-        let (encoder_hidden_states, _token_count) =
+        let (encoder_hidden_states, encoder_attention_mask, _token_count) =
             loaded
                 .text_encoder
                 .encode(&req.prompt, &loaded.device, loaded.dtype)?;
@@ -628,8 +666,15 @@ impl InferenceEngine for QwenImageEngine {
                 let t = scheduler.current_timestep();
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                     .to_dtype(latent_dtype)?;
-                let noise_pred =
-                    transformer.forward(&latents, &t_tensor, &encoder_hidden_states)?;
+                let noise_pred = transformer.forward(
+                    &latents,
+                    &t_tensor,
+                    &encoder_hidden_states,
+                    &encoder_attention_mask,
+                )?;
+                if step == 0 {
+                    Self::debug_tensor_stats("noise_pred", &noise_pred);
+                }
                 latents = scheduler.step(&noise_pred, &latents)?;
                 progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
@@ -643,6 +688,7 @@ impl InferenceEngine for QwenImageEngine {
 
         // Free text embeddings and transformer
         drop(encoder_hidden_states);
+        drop(encoder_attention_mask);
         loaded.transformer = None;
         tracing::info!("Qwen-Image transformer dropped to free VRAM for VAE decode");
 
@@ -658,8 +704,11 @@ impl InferenceEngine for QwenImageEngine {
                 } else {
                     loaded.dtype
                 })?;
+        Self::debug_tensor_stats("latents_pre_vae", &latents);
         let image = loaded.vae.decode(&latents)?;
+        Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
+        Self::debug_tensor_stats("image_postprocess", &image);
         let image = image.i(0)?;
 
         progress.stage_done("VAE decode", vae_start.elapsed());

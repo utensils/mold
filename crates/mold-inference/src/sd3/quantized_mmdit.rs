@@ -722,10 +722,12 @@ impl JointBlock for MMDiTJointBlock {
         let (context_qkv, context_interm) = self.context_block.pre_attention(context, c)?;
         let (x_qkv, x_interm) = self.x_block.pre_attention(x, c)?;
         let (context_attn, x_attn) = joint_attn(&context_qkv, &x_qkv, num_heads)?;
+
         let context_out =
             self.context_block
                 .post_attention(&context_attn, context, &context_interm)?;
         let x_out = self.x_block.post_attention(&x_attn, x, &x_interm)?;
+
         Ok((context_out, x_out))
     }
 }
@@ -859,14 +861,14 @@ impl QuantizedMMDiT {
                 .pp("qkv")
                 .get(1, "weight") // probe for existence
                 .is_ok();
-            // Check for QK norm by probing ln_k
+            // Check for QK norm by probing ln_k (head_dim shape)
+            let head_dim = hidden_size / num_heads;
             let has_qk_norm = block_vb
                 .pp("x_block")
                 .pp("attn")
                 .pp("ln_k")
-                .get(1, "weight")
+                .get(head_dim, "weight")
                 .is_ok();
-
             let block: Box<dyn JointBlock + Send + Sync> = if has_attn2 {
                 Box::new(MMDiTXJointBlock::new(
                     hidden_size,
@@ -887,11 +889,12 @@ impl QuantizedMMDiT {
 
         // Check for QK norm on the final block
         let final_block_vb = vb.pp(format!("joint_blocks.{}", cfg.depth - 1));
+        let head_dim = hidden_size / num_heads;
         let final_has_qk_norm = final_block_vb
             .pp("x_block")
             .pp("attn")
             .pp("ln_k")
-            .get(1, "weight")
+            .get(head_dim, "weight")
             .is_ok();
 
         let context_qkv_only_block =

@@ -19,6 +19,21 @@ pub struct SkipLayerGuidanceConfig {
     pub layers: Vec<usize>,
 }
 
+fn debug_tensor_stats(name: &str, tensor: &Tensor) {
+    if std::env::var_os("MOLD_SD3_DEBUG").is_none() {
+        return;
+    }
+    let stats = || -> Result<(f32, f32)> {
+        let min = tensor.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+        let max = tensor.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
+        Ok((min, max))
+    };
+    match stats() {
+        Ok((min, max)) => eprintln!("[sd3-debug] {name}: min={min:.4} max={max:.4}"),
+        Err(err) => eprintln!("[sd3-debug] {name}: <failed: {err}>"),
+    }
+}
+
 /// Run the Euler flow-matching sampling loop for SD3.
 ///
 /// - `y`: Concatenated [y_cond, y_uncond] vector conditioning (batch=2)
@@ -69,8 +84,14 @@ pub fn euler_sample(
             context,
             None,
         )?;
+        if step == 0 {
+            debug_tensor_stats("noise_pred", &noise_pred);
+        }
 
         let mut guidance = apply_cfg(cfg_scale, &noise_pred)?;
+        if step == 0 {
+            debug_tensor_stats("guidance", &guidance);
+        }
 
         if let Some(slg_config) = slg_config {
             if (num_inference_steps as f64) * slg_config.start < (step as f64)
@@ -89,6 +110,9 @@ pub fn euler_sample(
         }
 
         x = (x + (guidance * (*s_prev - *s_curr))?)?;
+        if step + 1 == num_inference_steps {
+            debug_tensor_stats("latents_final", &x);
+        }
 
         progress.emit(ProgressEvent::DenoiseStep {
             step: step + 1,

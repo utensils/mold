@@ -1283,10 +1283,11 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             gated: false,
             sha256: None,
         },
-        // Tokenizer
+        // Tokenizer (Qwen2.5 tokenizer — Qwen-Image-2512 repo only ships
+        // split BPE files; the compiled tokenizer.json lives in the base model repo)
         ModelFile {
-            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
-            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            hf_repo: "Qwen/Qwen2.5-7B".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::TextTokenizer,
             size_bytes: 7_000_000, // ~7MB
             gated: false,

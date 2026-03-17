@@ -23,6 +23,14 @@ const LATENTS_STD: [f64; 16] = [
 const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
 const NUM_RES_BLOCKS: usize = 2;
 
+fn temporal_slice_index(kernel_size: usize) -> usize {
+    std::env::var("MOLD_QWEN_VAE_TEMPORAL_SLICE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&idx| idx < kernel_size)
+        .unwrap_or(kernel_size - 1)
+}
+
 fn load_3d_conv_as_2d(
     in_channels: usize,
     out_channels: usize,
@@ -34,7 +42,8 @@ fn load_3d_conv_as_2d(
         (out_channels, in_channels, kernel_size, kernel_size, kernel_size),
         "weight",
     )?;
-    let ws = ws.i((.., .., kernel_size - 1, .., ..))?.contiguous()?;
+    let slice_idx = temporal_slice_index(kernel_size);
+    let ws = ws.i((.., .., slice_idx, .., ..))?.contiguous()?;
     let bias = vb.get(out_channels, "bias").ok();
     Ok(Conv2d::new(
         ws,

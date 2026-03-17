@@ -219,8 +219,11 @@ impl JointAttention {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
+        txt_mask: &Tensor,
+        img_cos: &Tensor,
+        img_sin: &Tensor,
+        txt_cos: &Tensor,
+        txt_sin: &Tensor,
         img_seq_len: usize,
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let (b, _, _) = img_hidden.dims3()?;
@@ -253,8 +256,10 @@ impl JointAttention {
         let k_txt = self.apply_qk_norm(&k_txt, &self.norm_added_k)?;
 
         // Apply RoPE to image Q/K
-        let q_img = apply_rotary_emb(&q_img, cos, sin)?;
-        let k_img = apply_rotary_emb(&k_img, cos, sin)?;
+        let q_img = apply_rotary_emb(&q_img, img_cos, img_sin)?;
+        let k_img = apply_rotary_emb(&k_img, img_cos, img_sin)?;
+        let q_txt = apply_rotary_emb(&q_txt, txt_cos, txt_sin)?;
+        let k_txt = apply_rotary_emb(&k_txt, txt_cos, txt_sin)?;
 
         // Concatenate image + text along sequence dimension
         let q = Tensor::cat(&[&q_img, &q_txt], 1)?; // (B, img+txt, heads, head_dim)
@@ -268,7 +273,16 @@ impl JointAttention {
 
         // Scaled dot-product attention
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let attn = self.attention_dispatch(&q, &k, &v, scale, q.device())?;
+        let img_mask = Tensor::ones((b, img_seq_len), DType::U8, q.device())?;
+        let key_mask = Tensor::cat(&[&img_mask, txt_mask], 1)?
+            .unsqueeze(1)?
+            .unsqueeze(1)?;
+        let on_true = key_mask.zeros_like()?.to_dtype(q.dtype())?;
+        let on_false = Tensor::new(f32::NEG_INFINITY, q.device())?
+            .broadcast_as(key_mask.shape())?
+            .to_dtype(q.dtype())?;
+        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
+        let attn = self.attention_dispatch(&q, &k, &v, scale, q.device(), Some(&key_mask))?;
 
         // Reshape: (B, heads, total_seq, head_dim) -> (B, total_seq, inner_dim)
         let total_seq = img_seq_len + txt_seq_len;
@@ -280,7 +294,9 @@ impl JointAttention {
 
         // Output projections
         let img_out = img_attn.apply(&self.to_out)?;
-        let txt_out = txt_attn.apply(&self.add_out_proj)?;
+        let txt_out = txt_attn
+            .apply(&self.add_out_proj)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_hidden.dtype())?)?;
 
         Ok((img_out, txt_out))
     }
@@ -301,12 +317,16 @@ impl JointAttention {
         v: &Tensor,
         scale: f64,
         device: &Device,
+        key_mask: Option<&Tensor>,
     ) -> candle_core::Result<Tensor> {
         if device.is_metal() {
             candle_nn::ops::sdpa(q, k, v, None, false, scale as f32, 1.0)
         } else {
             // Basic attention for CUDA/CPU
             let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+            if let Some(mask) = key_mask {
+                attn_weights = attn_weights.broadcast_add(mask)?;
+            }
             attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
             attn_weights.matmul(v)
         }
@@ -389,9 +409,12 @@ impl QwenImageTransformerBlock {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
+        txt_mask: &Tensor,
         temb: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
+        img_cos: &Tensor,
+        img_sin: &Tensor,
+        txt_cos: &Tensor,
+        txt_sin: &Tensor,
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
 
@@ -425,12 +448,22 @@ impl QwenImageTransformerBlock {
 
         // Joint attention
         let (img_attn, txt_attn) =
-            self.attn
-                .forward(&img_scaled, &txt_scaled, cos, sin, img_seq_len)?;
+            self.attn.forward(
+                &img_scaled,
+                &txt_scaled,
+                txt_mask,
+                img_cos,
+                img_sin,
+                txt_cos,
+                txt_sin,
+                img_seq_len,
+            )?;
 
         // Gate + residual
         let img_hidden = (img_hidden + gate_msa.tanh()?.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + c_gate_msa.tanh()?.broadcast_mul(&txt_attn)?)?;
+        let txt_dtype = txt_hidden.dtype();
+        let txt_hidden = (txt_hidden + c_gate_msa.tanh()?.broadcast_mul(&txt_attn)?)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         // --- Feedforward ---
         // Image: norm + scale + FF + gate + residual
@@ -443,7 +476,9 @@ impl QwenImageTransformerBlock {
         let txt_normed = self.norm2_context.forward(&txt_hidden)?;
         let txt_scaled = txt_normed.broadcast_mul(&(c_scale_mlp + 1.0)?)?;
         let txt_ff = self.ff_context.forward(&txt_scaled)?;
-        let txt_hidden = (txt_hidden + c_gate_mlp.tanh()?.broadcast_mul(&txt_ff)?)?;
+        let txt_dtype = txt_hidden.dtype();
+        let txt_hidden = (txt_hidden + c_gate_mlp.tanh()?.broadcast_mul(&txt_ff)?)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -546,7 +581,7 @@ impl QwenImageTransformer2DModel {
 
         // 3D RoPE embedder
         // axes_lens = axes_dims_rope values used as max sequence lengths per axis
-        let axes_lens = vec![512, 512, 512]; // generous max for all axes
+        let axes_lens = vec![2048, 2048, 2048];
         let rope_embedder = RopeEmbedder::new(
             10000.0, // rope_theta
             cfg.axes_dims_rope.clone(),
@@ -585,6 +620,7 @@ impl QwenImageTransformer2DModel {
         x: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
     ) -> candle_core::Result<Tensor> {
         let device = x.device();
         let (_b, _c, h, w) = x.dims4()?;
@@ -600,19 +636,44 @@ impl QwenImageTransformer2DModel {
 
         // 3. Text embedding: norm + project
         let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
-        let txt_hidden = txt_normed.apply(&self.txt_in)?; // (B, txt_seq, joint_attention_dim)
+        let txt_mask = encoder_attention_mask
+            .to_device(device)?
+            .to_dtype(txt_normed.dtype())?;
+        let txt_hidden = txt_normed
+            .apply(&self.txt_in)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?)?;
 
         // 4. Create position IDs and RoPE embeddings for image tokens
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
         let img_pos_ids = create_coordinate_grid((1, h_tokens, w_tokens), (0, 0, 0), device)?;
         let (img_cos, img_sin) = self.rope_embedder.forward(&img_pos_ids)?;
+        let txt_seq_len = encoder_hidden_states.dim(1)?;
+        let txt_offset = h_tokens.max(w_tokens) as u32;
+        let mut txt_coords = Vec::with_capacity(txt_seq_len * 3);
+        for i in 0..txt_seq_len {
+            let pos = txt_offset + i as u32;
+            txt_coords.push(pos);
+            txt_coords.push(pos);
+            txt_coords.push(pos);
+        }
+        let txt_pos_ids = Tensor::from_vec(txt_coords, (txt_seq_len, 3), device)?;
+        let (txt_cos, txt_sin) = self.rope_embedder.forward(&txt_pos_ids)?;
 
         // 5. Process through all transformer blocks
         let mut img = img_hidden;
         let mut txt = txt_hidden;
         for block in &self.blocks {
-            let (new_img, new_txt) = block.forward(&img, &txt, &temb, &img_cos, &img_sin)?;
+            let (new_img, new_txt) = block.forward(
+                &img,
+                &txt,
+                encoder_attention_mask,
+                &temb,
+                &img_cos,
+                &img_sin,
+                &txt_cos,
+                &txt_sin,
+            )?;
             img = new_img;
             txt = new_txt;
         }
