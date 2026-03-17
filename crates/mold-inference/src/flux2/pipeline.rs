@@ -570,6 +570,7 @@ impl Flux2Engine {
             &state.vec,
             &timesteps,
             req.guidance,
+            &self.progress,
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
@@ -696,6 +697,7 @@ impl InferenceEngine for Flux2Engine {
             &state.vec,
             &timesteps,
             req.guidance,
+            progress,
         )?;
 
         // 6. Unpack latent to spatial

@@ -714,6 +714,7 @@ impl FluxEngine {
             &state.vec,
             &timesteps,
             req.guidance,
+            &self.progress,
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
@@ -898,6 +899,7 @@ impl InferenceEngine for FluxEngine {
             &state.vec,
             &timesteps,
             req.guidance,
+            progress,
         )?;
 
         // 7. Unpack latent to spatial

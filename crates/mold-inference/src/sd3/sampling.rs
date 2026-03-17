@@ -5,8 +5,10 @@
 
 use anyhow::Result;
 use candle_core::{DType, IndexOp, Tensor};
+use std::time::Instant;
 
 use super::transformer::SD3Transformer;
+use crate::progress::{ProgressEvent, ProgressReporter};
 
 /// Configuration for Skip Layer Guidance (SLG).
 /// Only supported for SD3.5 Medium (depth=24).
@@ -24,6 +26,7 @@ pub struct SkipLayerGuidanceConfig {
 /// - `cfg_scale`: Classifier-free guidance scale (1.0 = no guidance, e.g. turbo)
 /// - `time_shift`: Alpha for resolution-dependent timestep shifting (typically 3.0)
 /// - `is_quantized`: If true, use F32 dtype for noise (GGUF dequantizes to F32)
+/// - `progress`: Progress reporter for per-step denoising updates
 #[allow(clippy::too_many_arguments)]
 pub fn euler_sample(
     mmdit: &SD3Transformer,
@@ -36,6 +39,7 @@ pub fn euler_sample(
     width: usize,
     slg_config: Option<&SkipLayerGuidanceConfig>,
     is_quantized: bool,
+    progress: &ProgressReporter,
 ) -> Result<Tensor> {
     // SD3 uses the same 16-channel latent noise as FLUX
     // Quantized models (GGUF) dequantize to F32, so noise must also be F32
@@ -51,6 +55,7 @@ pub fn euler_sample(
         .collect();
 
     for (step, window) in sigmas.windows(2).enumerate() {
+        let step_start = Instant::now();
         let (s_curr, s_prev) = match window {
             [a, b] => (a, b),
             _ => continue,
@@ -84,6 +89,12 @@ pub fn euler_sample(
         }
 
         x = (x + (guidance * (*s_prev - *s_curr))?)?;
+
+        progress.emit(ProgressEvent::DenoiseStep {
+            step: step + 1,
+            total: num_inference_steps,
+            elapsed: step_start.elapsed(),
+        });
     }
     Ok(x)
 }

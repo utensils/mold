@@ -586,6 +586,7 @@ impl SD3Engine {
             width,
             slg_config.as_ref(),
             is_quantized,
+            &self.progress,
         )?;
 
         self.progress
@@ -751,6 +752,7 @@ impl InferenceEngine for SD3Engine {
             width,
             slg_config.as_ref(),
             loaded._is_quantized,
+            progress,
         )?;
 
         progress.stage_done(&denoise_label, denoise_start.elapsed());
