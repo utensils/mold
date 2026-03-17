@@ -4,6 +4,7 @@ use mold_core::{Config, ModelPaths};
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::sd15::SD15Engine;
+use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
 use crate::zimage::ZImageEngine;
 
@@ -72,6 +73,21 @@ pub fn create_engine(
                 load_strategy,
             )))
         }
+        "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => {
+            let is_turbo = model_name.contains("turbo");
+            let is_medium = model_name.contains("medium");
+            let t5_variant = std::env::var("MOLD_T5_VARIANT")
+                .ok()
+                .or_else(|| config.t5_variant.clone());
+            Ok(Box::new(SD3Engine::new(
+                model_name,
+                paths,
+                is_turbo,
+                is_medium,
+                t5_variant,
+                load_strategy,
+            )))
+        }
         "z-image" => {
             let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
                 .ok()
@@ -84,7 +100,7 @@ pub fn create_engine(
             )))
         }
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, sd15, sdxl, z-image",
+            "unknown model family '{}' for model '{}'. Supported: flux, sd15, sd3, sdxl, z-image",
             other,
             model_name
         ),
@@ -177,6 +193,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-model");
+    }
+
+    #[test]
+    fn resolve_family_from_manifest_sd3() {
+        let config = Config::default();
+        assert_eq!(resolve_family("sd3.5-large:q8", &config), "sd3");
+        assert_eq!(resolve_family("sd3.5-medium:q8", &config), "sd3");
+        assert_eq!(resolve_family("sd3.5-large-turbo:q8", &config), "sd3");
     }
 
     #[test]

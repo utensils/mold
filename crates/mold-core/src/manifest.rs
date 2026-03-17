@@ -422,9 +422,202 @@ pub fn known_manifests() -> Vec<ModelManifest> {
         },
     ];
     manifests.extend(sd15_manifests());
+    manifests.extend(sd3_manifests());
     manifests.extend(sdxl_manifests());
     manifests.extend(zimage_manifests());
     manifests
+}
+
+/// Shared SD3 component files (VAE, CLIP-L, CLIP-G, T5-XXL, tokenizers) — identical across all SD3.5 models.
+///
+/// SD3 uses three text encoders: CLIP-L (768-dim), CLIP-G (1280-dim), and T5-XXL (4096-dim).
+/// The VAE is embedded in the transformer safetensors for BF16, but GGUF models need a separate VAE.
+/// For separate text encoders, we use files from stabilityai/stable-diffusion-3.5-large.
+fn shared_sd3_files() -> Vec<ModelFile> {
+    vec![
+        // VAE: SD3 VAE is embedded in the monolithic safetensors from stabilityai.
+        // The mmap approach means only VAE weights (~300MB) get paged in, not the full file.
+        // The pipeline uses vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model") prefix.
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "sd3.5_large.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 16_460_000_000, // ~16.46GB monolithic (VAE portion ~300MB via mmap)
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-L encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/clip_l.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder,
+            size_bytes: 246_000_000, // ~246MB
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-G encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/clip_g.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder2,
+            size_bytes: 1_390_000_000, // ~1.39GB
+            gated: true,
+            sha256: None,
+        },
+        // T5-XXL encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/t5xxl_fp16.safetensors".to_string(),
+            component: ModelComponent::T5Encoder,
+            size_bytes: 9_200_000_000, // ~9.2GB
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-L tokenizer (same as FLUX/SDXL)
+        ModelFile {
+            hf_repo: "openai/clip-vit-large-patch14".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+            sha256: None,
+        },
+        // CLIP-G tokenizer (same as SDXL)
+        ModelFile {
+            hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer2,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+            sha256: None,
+        },
+        // T5 tokenizer (same as FLUX)
+        ModelFile {
+            hf_repo: "lmz/mt5-tokenizers".to_string(),
+            hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
+            component: ModelComponent::T5Tokenizer,
+            size_bytes: 2_400_000, // ~2.4MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// Size of shared SD3 components (CLIP-L, CLIP-G, T5-XXL, tokenizers) in GB.
+/// Does not include VAE since it is part of the transformer weights for SD3.
+pub const SHARED_SD3_COMPONENTS_GB: f32 = 10.8;
+
+/// All known SD3.5 model manifests.
+fn sd3_manifests() -> Vec<ModelManifest> {
+    vec![
+        // --- SD3.5 Large (depth=38, 8.1B) ---
+        ModelManifest {
+            name: "sd3.5-large:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Q8 — 8.1B MMDiT, high quality, 28 steps".to_string(),
+            size_gb: 8.5,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
+                    hf_filename: "sd3.5_large-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_500_000_000, // ~8.5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "sd3.5-large:q4".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Q4 — 8.1B MMDiT, smaller footprint, 28 steps".to_string(),
+            size_gb: 5.0,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
+                    hf_filename: "sd3.5_large-Q4_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_000_000_000, // ~5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // --- SD3.5 Large Turbo (depth=38, 8.1B, 4 steps, CFG=1.0) ---
+        ModelManifest {
+            name: "sd3.5-large-turbo:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Turbo Q8 — 8.1B MMDiT, fast 4-step generation".to_string(),
+            size_gb: 8.5,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-turbo-gguf".to_string(),
+                    hf_filename: "sd3.5_large_turbo-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_500_000_000, // ~8.5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // --- SD3.5 Medium (depth=24, 2.5B) ---
+        ModelManifest {
+            name: "sd3.5-medium:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Medium Q8 — 2.5B MMDiT, SLG support, 28 steps".to_string(),
+            size_gb: 2.7,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-medium-gguf".to_string(),
+                    hf_filename: "sd3.5_medium-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 2_700_000_000, // ~2.7GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+    ]
 }
 
 /// Shared SD1.5 component files (VAE, CLIP-L encoder, tokenizer) — identical across all SD1.5 models.
@@ -1241,7 +1434,28 @@ mod tests {
         assert!(find_manifest("dreamshaper-v8:fp16").is_some());
         assert!(find_manifest("realistic-vision-v5").is_some());
         assert!(find_manifest("realistic-vision-v5:fp16").is_some());
+        // SD3 models
+        assert!(find_manifest("sd3.5-large:q8").is_some());
+        assert!(find_manifest("sd3.5-large:q4").is_some());
+        assert!(find_manifest("sd3.5-large-turbo:q8").is_some());
+        assert!(find_manifest("sd3.5-medium:q8").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn sd3_resolves_to_q8() {
+        let manifest = find_manifest("sd3.5-large").unwrap();
+        assert_eq!(manifest.name, "sd3.5-large:q8");
+        assert_eq!(manifest.family, "sd3");
+        assert_eq!(manifest.defaults.steps, 28);
+        assert!((manifest.defaults.guidance - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn sd3_turbo_defaults() {
+        let manifest = find_manifest("sd3.5-large-turbo:q8").unwrap();
+        assert_eq!(manifest.defaults.steps, 4);
+        assert!((manifest.defaults.guidance - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -1260,8 +1474,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 6 SDXL + 4 Z-Image = 22
-        assert_eq!(known_manifests().len(), 22);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image = 26
+        assert_eq!(known_manifests().len(), 26);
     }
 
     #[test]
@@ -1323,6 +1537,43 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::ClipEncoder2),
                         "{} (sd15) should not have ClipEncoder2",
+                        manifest.name
+                    );
+                }
+                "sd3" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (sd3) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder),
+                        "{} (sd3) missing ClipEncoder (CLIP-L)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer),
+                        "{} (sd3) missing ClipTokenizer (CLIP-L)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder2),
+                        "{} (sd3) missing ClipEncoder2 (CLIP-G)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer2),
+                        "{} (sd3) missing ClipTokenizer2 (CLIP-G)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::T5Encoder),
+                        "{} (sd3) missing T5Encoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::T5Tokenizer),
+                        "{} (sd3) missing T5Tokenizer",
                         manifest.name
                     );
                 }
