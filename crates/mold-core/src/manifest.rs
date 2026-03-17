@@ -126,7 +126,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
             gated: true,             // BFL repos now require authentication
-            sha256: None,
+            sha256: Some("afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
@@ -134,7 +134,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::T5Encoder,
             size_bytes: 9_200_000_000, // ~9.2GB
             gated: false,
-            sha256: None,
+            sha256: Some("6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"),
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
@@ -142,7 +142,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder,
             size_bytes: 246_000_000, // ~246MB
             gated: false,
-            sha256: None,
+            sha256: Some("660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
         },
         ModelFile {
             hf_repo: "lmz/mt5-tokenizers".to_string(),
@@ -150,7 +150,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::T5Tokenizer,
             size_bytes: 2_400_000, // ~2.4MB
             gated: false,
-            sha256: None,
+            sha256: None, // non-LFS file, no SHA-256 from HF API
         },
         ModelFile {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
@@ -158,7 +158,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer,
             size_bytes: 600_000, // ~600KB
             gated: false,
-            sha256: None,
+            sha256: None, // non-LFS file, no SHA-256 from HF API
         },
     ]
 }
@@ -179,7 +179,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_000_000_000, // ~12GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "f6694941193b10148dbf1f0f498d4ccd3e9875c127fc53946213b68580c66f10",
+                    ),
                 });
                 files
             },
@@ -205,7 +207,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_000_000_000, // ~12GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d",
+                    ),
                 });
                 files
             },
@@ -231,7 +235,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_000_000_000, // ~7GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "da04c47a9b717bf9a4dd545e46d89e4a62fb44b9497bf9a5d13d622d592fbcda",
+                    ),
                 });
                 files
             },
@@ -257,7 +263,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_860_000_000, // ~9.86GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "9566d56031d7f8de184bb5a0393073956ec4e28b32db3f860bd2b87edca04d13",
+                    ),
                 });
                 files
             },
@@ -283,7 +291,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_510_000_000, // ~7.51GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "a798b7196d2fe614cf9bae9a617dbd9f2c14673e454c7f2f6a500347274630b5",
+                    ),
                 });
                 files
             },
@@ -309,7 +319,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_830_000_000, // ~9.83GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "a42fd143cec4d7194da281dc8d23a8fe54b16875a13423c042cb545d1da6fa50",
+                    ),
                 });
                 files
             },
@@ -335,7 +347,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 12_700_000_000, // ~12.7GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "0d085b1e3ae0b90e5dbf74da049a80a565617de622a147d28ee37a07761fbd90",
+                    ),
                 });
                 files
             },
@@ -362,7 +376,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 7_530_000_000, // ~7.53GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "be4c46e5492761f00c0d9ca15e78936fbe54c4ee65b16da8e0dbf5f2115ae6b2",
+                    ),
                 });
                 files
             },
@@ -389,7 +405,9 @@ pub fn known_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 9_860_000_000, // ~9.86GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "c50c13ebe1207b2c87b251ccf3a55b9eb54c84f73cee62503d17acd8a460953e",
+                    ),
                 });
                 files
             },
@@ -418,7 +436,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
             gated: false,
-            sha256: None,
+            sha256: Some("a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815"),
         },
         ModelFile {
             hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
@@ -426,7 +444,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder,
             size_bytes: 492_000_000, // ~492MB (CLIP-L)
             gated: false,
-            sha256: None,
+            sha256: Some("d008943c017f0092921106440254dbbe00b6a285f7883ec8ba160c3faad88334"),
         },
         ModelFile {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
@@ -434,7 +452,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer,
             size_bytes: 600_000, // ~600KB
             gated: false,
-            sha256: None,
+            sha256: None, // non-LFS file, no SHA-256 from HF API
         },
     ]
 }
@@ -459,7 +477,9 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 1_720_000_000, // ~1.72GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "19da7aaa4b880e59d56843f1fcb4dd9b599c28a1d9d9af7c1143057c8ffae9f1",
+                    ),
                 });
                 files
             },
@@ -486,7 +506,9 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 1_720_000_000, // ~1.72GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "89b54dc332757e6fff8caef7399e8061833d7d668d42fdbcc02b3e366921c5a6",
+                    ),
                 });
                 files
             },
@@ -512,7 +534,9 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 1_720_000_000, // ~1.72GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "4e0868e8fcae7d4ea8f8cdd3051704b3b47d741dc8e8629552d1a07f6efb8e32",
+                    ),
                 });
                 files
             },
@@ -537,7 +561,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 335_000_000, // ~335MB
             gated: false,
-            sha256: None,
+            sha256: Some("1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"),
         },
         ModelFile {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
@@ -545,7 +569,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder,
             size_bytes: 492_000_000, // ~492MB (CLIP-L)
             gated: false,
-            sha256: None,
+            sha256: Some("5c3d6454dd2d23414b56aa1b5858a72487a656937847b6fea8d0606d7a42cdbc"),
         },
         ModelFile {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
@@ -553,7 +577,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipEncoder2,
             size_bytes: 1_390_000_000, // ~1.39GB (CLIP-G / OpenCLIP)
             gated: false,
-            sha256: None,
+            sha256: Some("3a6032f63d37ae02bbc74ccd6a27440578cd71701f96532229d0154f55a8d3ff"),
         },
         ModelFile {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
@@ -561,7 +585,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer,
             size_bytes: 600_000, // ~600KB
             gated: false,
-            sha256: None,
+            sha256: None, // non-LFS file, no SHA-256 from HF API
         },
         ModelFile {
             hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
@@ -569,7 +593,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             component: ModelComponent::ClipTokenizer2,
             size_bytes: 600_000, // ~600KB
             gated: false,
-            sha256: None,
+            sha256: None, // non-LFS file, no SHA-256 from HF API
         },
     ]
 }
@@ -594,7 +618,9 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "83e012a805b84c7ca28e5646747c90a243c65c8ba4f070e2d7ddc9d74661e139",
+                    ),
                 });
                 files
             },
@@ -620,7 +646,9 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "c1217e273e6fd7570c2ae9d38172323ff0b6f8ac7f2000b3ba99d4851906ee1e",
+                    ),
                 });
                 files
             },
@@ -642,11 +670,13 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
                     hf_repo: "RunDiffusion/Juggernaut-XL-v9".to_string(),
-                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "cf1ee18eb36712683f50c1e674634875e2adf7413d7492d5f9aa7e69e1a8c17a",
+                    ),
                 });
                 files
             },
@@ -668,11 +698,13 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
                     hf_repo: "SG161222/RealVisXL_V5.0".to_string(),
-                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "ea10386073d39ffdde9fda426745b3f5e9dcd2af204c128ece0f4ea84570ffee",
+                    ),
                 });
                 files
             },
@@ -698,7 +730,9 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "933778ce76c1fc0ca918b37e1488411b8a99bbd3279c12f527a3ac995a340864",
+                    ),
                 });
                 files
             },
@@ -725,7 +759,9 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_140_000_000,
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "48fa46161a745f48d4054df3fe13804ee255486bca893403b60373c188fd1bdb",
+                    ),
                 });
                 files
             },
@@ -751,7 +787,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 3_960_000_000, // ~3.96GB
             gated: false,
-            sha256: None,
+            sha256: Some("328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223"),
         },
         ModelFile {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -759,7 +795,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 3_990_000_000, // ~3.99GB
             gated: false,
-            sha256: None,
+            sha256: Some("6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5"),
         },
         ModelFile {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -767,7 +803,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextEncoder,
             size_bytes: 99_600_000, // ~99.6MB
             gated: false,
-            sha256: None,
+            sha256: Some("7ca841ee75b9c61267c0c6148fd8d096d3d21b6d3e161256a9b878154f91fc52"),
         },
         // VAE
         ModelFile {
@@ -776,7 +812,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::Vae,
             size_bytes: 168_000_000, // ~168MB
             gated: false,
-            sha256: None,
+            sha256: Some("f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"),
         },
         // Qwen3 tokenizer
         ModelFile {
@@ -785,7 +821,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             component: ModelComponent::TextTokenizer,
             size_bytes: 11_400_000, // ~11.4MB
             gated: false,
-            sha256: None,
+            sha256: Some("aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"),
         },
     ]
 }
@@ -812,7 +848,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 9_970_000_000, // ~9.97GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "95facd593e2549e8252acb571c653d57f7ddb7f1060d4e81712f152555a88804",
+                    ),
                 });
                 files.push(ModelFile {
                     hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -821,7 +859,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 9_970_000_000, // ~9.97GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "a4bbe43ee184a1fb5af4b412d27555f532893bdc3165b1149e304ed82b5d7015",
+                    ),
                 });
                 files.push(ModelFile {
                     hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
@@ -830,7 +870,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::TransformerShard,
                     size_bytes: 4_670_000_000, // ~4.67GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "aba4e37a590e63210878160a718d916d80398f4e1f78ab6c9b2b2a00d92769fa",
+                    ),
                 });
                 files
             },
@@ -857,7 +899,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 6_580_000_000, // ~6.58GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "df1c5baa86d1398c979495a6072dbcee79444fdb884a2445582ba0769c44e9a1",
+                    ),
                 });
                 files
             },
@@ -883,7 +927,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 5_260_000_000, // ~5.26GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "319f627beac8059b7546f36a7b4d5097b7f4ee6a1fc37585d0f75ca1d12d01af",
+                    ),
                 });
                 files
             },
@@ -909,7 +955,9 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     component: ModelComponent::Transformer,
                     size_bytes: 3_860_000_000, // ~3.86GB
                     gated: false,
-                    sha256: None,
+                    sha256: Some(
+                        "14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd",
+                    ),
                 });
                 files
             },

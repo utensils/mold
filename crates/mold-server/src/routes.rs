@@ -179,7 +179,19 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
         .into_values()
         .map(|mut m| {
             m.is_loaded = is_loaded && m.name == loaded_name;
-            let mcfg = state.config.model_config(&m.name);
+            let mut mcfg = state.config.model_config(&m.name);
+            // Fall back to manifest defaults when config has no model-specific values
+            if mcfg.default_steps.is_none() {
+                if let Some(manifest) = mold_core::manifest::find_manifest(&m.name) {
+                    mcfg.default_steps = Some(manifest.defaults.steps);
+                    mcfg.default_guidance = Some(manifest.defaults.guidance);
+                    mcfg.default_width = Some(manifest.defaults.width);
+                    mcfg.default_height = Some(manifest.defaults.height);
+                    if mcfg.description.is_none() {
+                        mcfg.description = Some(manifest.description);
+                    }
+                }
+            }
             ModelInfoExtended {
                 default_steps: mcfg.effective_steps(&state.config),
                 default_guidance: mcfg.effective_guidance(),

@@ -151,19 +151,20 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 println!("{}", "─".repeat(nw + fw + 64).dimmed());
-                let mut total_disk: u64 = 0;
+                let mut all_unique_paths: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for (name, mcfg) in &config.models {
                     let family_raw = mcfg.family.as_deref().unwrap_or("");
                     let size = mold_core::manifest::find_manifest(name)
                         .map(|m| format!("{:.1}GB", m.size_gb))
                         .unwrap_or_else(|| "—".to_string());
-                    let disk_bytes: u64 = mcfg
-                        .all_file_paths()
+                    let model_paths = mcfg.all_file_paths();
+                    let disk_bytes: u64 = model_paths
                         .iter()
                         .filter_map(|p| std::fs::metadata(p).ok())
                         .map(|m| m.len())
                         .sum();
-                    total_disk += disk_bytes;
+                    all_unique_paths.extend(model_paths);
                     let disk = format_disk_size(disk_bytes);
                     println!(
                         "{:<nw$} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
@@ -179,6 +180,11 @@ pub async fn run() -> Result<()> {
                         nw = nw,
                     );
                 }
+                let total_disk: u64 = all_unique_paths
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .sum();
                 if config.models.len() > 1 && total_disk > 0 {
                     println!(
                         "{:>width$}",

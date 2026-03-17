@@ -41,6 +41,35 @@ fn resolve_file_path(
     }
 }
 
+/// Resolve a file path for verification: check ModelPaths (which honors env vars)
+/// first, then fall back to config-only resolution.
+fn resolve_verify_path(
+    resolved: Option<&ModelPaths>,
+    model_config: Option<&mold_core::config::ModelConfig>,
+    component: &ModelComponent,
+) -> Option<String> {
+    if let Some(paths) = resolved {
+        let path = match component {
+            ModelComponent::Transformer => Some(&paths.transformer),
+            ModelComponent::Vae => Some(&paths.vae),
+            ModelComponent::T5Encoder => paths.t5_encoder.as_ref(),
+            ModelComponent::ClipEncoder => paths.clip_encoder.as_ref(),
+            ModelComponent::T5Tokenizer => paths.t5_tokenizer.as_ref(),
+            ModelComponent::ClipTokenizer => paths.clip_tokenizer.as_ref(),
+            ModelComponent::ClipEncoder2 => paths.clip_encoder_2.as_ref(),
+            ModelComponent::ClipTokenizer2 => paths.clip_tokenizer_2.as_ref(),
+            ModelComponent::TextTokenizer => paths.text_tokenizer.as_ref(),
+            // Shards and text encoder files are multi-valued; fall through to config
+            ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+        };
+        if let Some(p) = path {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    // Fall back to config-only resolution for components ModelPaths doesn't cover
+    resolve_file_path(model_config, component)
+}
+
 fn format_family(family: &str) -> String {
     match family {
         "flux" => "FLUX.1".magenta().to_string(),
@@ -269,9 +298,11 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             if let Some(ref m) = manifest {
                 println!();
                 println!("  {}", "Integrity Check".bold());
+                let resolved_paths = ModelPaths::resolve(&canonical, &config);
                 let mut all_ok = true;
                 for file in &m.files {
-                    let local_path = resolve_file_path(model_config, &file.component);
+                    let local_path =
+                        resolve_verify_path(resolved_paths.as_ref(), model_config, &file.component);
                     match (local_path, file.sha256) {
                         (Some(path), Some(expected)) => match compute_sha256(&path) {
                             Ok(actual) if actual == expected => {
