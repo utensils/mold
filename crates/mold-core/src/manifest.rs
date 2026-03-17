@@ -425,6 +425,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
     manifests.extend(sd3_manifests());
     manifests.extend(sdxl_manifests());
     manifests.extend(zimage_manifests());
+    manifests.extend(flux2_manifests());
     manifests
 }
 
@@ -1166,6 +1167,76 @@ fn zimage_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+/// Shared Flux.2 Klein-4B component files (Qwen3 text encoder, VAE, tokenizer).
+///
+/// Klein uses Qwen3 (hidden_size=2560, 36 layers) — same model architecture as Z-Image's
+/// text encoder. The encoder stacks 3 hidden state outputs to produce joint_attention_dim=7680.
+fn shared_flux2_files() -> Vec<ModelFile> {
+    vec![
+        // Qwen3 text encoder (from the Klein repo)
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "text_encoder/model.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 5_400_000_000, // ~5.4GB estimated
+            gated: false,
+            sha256: None,
+        },
+        // VAE
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 335_000_000, // ~335MB estimated
+            gated: false,
+            sha256: None,
+        },
+        // Qwen3 tokenizer
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 11_400_000, // ~11.4MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// All known Flux.2 model manifests.
+fn flux2_manifests() -> Vec<ModelManifest> {
+    vec![
+        // Flux.2 Klein-4B BF16 (Apache 2.0, NOT gated)
+        ModelManifest {
+            name: "flux2-klein:bf16".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                .to_string(),
+            size_gb: 13.5,
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_700_000_000, // ~7.7GB estimated for 4B params in BF16
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 20,
+                guidance: 0.0, // Klein is distilled, no CFG needed
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None, // Uses flow-matching Euler
+            },
+        },
+    ]
+}
+
 /// Resolve a user-provided model name to its canonical `name:tag` form.
 ///
 /// - `flux-schnell` → `flux-schnell:q8` (FLUX default tag)
@@ -1439,7 +1510,20 @@ mod tests {
         assert!(find_manifest("sd3.5-large:q4").is_some());
         assert!(find_manifest("sd3.5-large-turbo:q8").is_some());
         assert!(find_manifest("sd3.5-medium:q8").is_some());
+        // Flux.2 models
+        assert!(find_manifest("flux2-klein:bf16").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn flux2_klein_defaults() {
+        let manifest = find_manifest("flux2-klein:bf16").unwrap();
+        assert_eq!(manifest.name, "flux2-klein:bf16");
+        assert_eq!(manifest.family, "flux2");
+        assert_eq!(manifest.defaults.steps, 20);
+        assert!((manifest.defaults.guidance - 0.0).abs() < 0.01);
+        assert_eq!(manifest.defaults.width, 1024);
+        assert_eq!(manifest.defaults.height, 1024);
     }
 
     #[test]
@@ -1474,8 +1558,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image = 26
-        assert_eq!(known_manifests().len(), 26);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 = 27
+        assert_eq!(known_manifests().len(), 27);
     }
 
     #[test]
@@ -1626,6 +1710,35 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::ClipEncoder),
                         "{} (z-image) should not have ClipEncoder",
+                        manifest.name
+                    );
+                }
+                "flux2" => {
+                    // Flux.2 uses Transformer + Qwen3 TextEncoder + TextTokenizer
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (flux2) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (flux2) missing TextEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} (flux2) missing TextTokenizer",
+                        manifest.name
+                    );
+                    // Flux.2 Klein does NOT use CLIP or T5
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} (flux2) should not have ClipEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        !components.contains(&ModelComponent::T5Encoder),
+                        "{} (flux2) should not have T5Encoder",
                         manifest.name
                     );
                 }

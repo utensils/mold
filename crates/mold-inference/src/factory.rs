@@ -3,6 +3,7 @@ use mold_core::{Config, ModelPaths};
 
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
+use crate::flux2::Flux2Engine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
@@ -99,8 +100,19 @@ pub fn create_engine(
                 load_strategy,
             )))
         }
+        "flux2" | "flux.2" | "flux2-klein" => {
+            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
+                .ok()
+                .or_else(|| config.qwen3_variant.clone());
+            Ok(Box::new(Flux2Engine::new(
+                model_name,
+                paths,
+                qwen3_variant,
+                load_strategy,
+            )))
+        }
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, sd15, sd3, sdxl, z-image",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image",
             other,
             model_name
         ),
@@ -201,6 +213,46 @@ mod tests {
         assert_eq!(resolve_family("sd3.5-large:q8", &config), "sd3");
         assert_eq!(resolve_family("sd3.5-medium:q8", &config), "sd3");
         assert_eq!(resolve_family("sd3.5-large-turbo:q8", &config), "sd3");
+    }
+
+    #[test]
+    fn resolve_family_from_manifest_flux2() {
+        let config = Config::default();
+        assert_eq!(resolve_family("flux2-klein:bf16", &config), "flux2");
+    }
+
+    #[test]
+    fn create_engine_flux2() {
+        let config = Config::default();
+        let engine = create_engine(
+            "flux2-klein:bf16".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+        )
+        .unwrap();
+        assert_eq!(engine.model_name(), "flux2-klein:bf16");
+    }
+
+    #[test]
+    fn create_engine_flux2_family_alias() {
+        // Config-based family alias "flux.2" should work
+        let mut config = Config::default();
+        config.models.insert(
+            "my-flux2".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("flux.2".to_string()),
+                ..Default::default()
+            },
+        );
+        let engine = create_engine(
+            "my-flux2".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+        )
+        .unwrap();
+        assert_eq!(engine.model_name(), "my-flux2");
     }
 
     #[test]
