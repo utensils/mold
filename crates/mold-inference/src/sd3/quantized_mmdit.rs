@@ -142,7 +142,8 @@ impl TimestepEmbedder {
             .to_dtype(DType::F32)?
             .matmul(&freqs.unsqueeze(0)?)?;
         let embedding = Tensor::cat(&[args.cos()?, args.sin()?], 1)?;
-        embedding.to_dtype(DType::F16)
+        // Keep F32 for quantized path (QMatMul dequantizes weights to F32)
+        Ok(embedding)
     }
 
     fn forward(&self, t: &Tensor) -> candle_core::Result<Tensor> {
@@ -186,8 +187,11 @@ impl Mlp {
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         // GeluPytorchTanh activation
-        x.apply(&self.fc1)?
+        // Ensure contiguous for quantized matmul
+        x.contiguous()?
+            .apply(&self.fc1)?
             .apply(&candle_nn::Activation::GeluPytorchTanh)?
+            .contiguous()?
             .apply(&self.fc2)
     }
 }
@@ -255,7 +259,8 @@ impl AttnProjections {
     }
 
     fn post_attention(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        self.proj.forward(x)
+        // Quantized matmul requires contiguous tensors (attention output is typically non-contiguous after reshape)
+        self.proj.forward(&x.contiguous()?)
     }
 }
 
@@ -300,7 +305,10 @@ fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> candle_core::Result<T
     let shift = shift.unsqueeze(1)?;
     let scale = scale.unsqueeze(1)?;
     let scale_plus_one = scale.broadcast_add(&Tensor::ones_like(&scale)?)?;
-    shift.broadcast_add(&x.broadcast_mul(&scale_plus_one)?)
+    // Ensure contiguous for downstream quantized matmul operations
+    shift
+        .broadcast_add(&x.broadcast_mul(&scale_plus_one)?)?
+        .contiguous()
 }
 
 /// Attention computation (non-flash, compatible with quantized models).
@@ -329,7 +337,8 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
     attn_scores
         .reshape((batch_size, num_heads, seqlen, head_dim))?
         .transpose(1, 2)?
-        .reshape((batch_size, seqlen, ()))
+        .reshape((batch_size, seqlen, ()))?
+        .contiguous()
 }
 
 fn joint_attn(
@@ -807,7 +816,8 @@ impl ContextQkvOnlyBlock {
 impl QuantizedMMDiT {
     /// Load a quantized MMDiT from GGUF weights.
     ///
-    /// `vb` should be pre-prefixed with `model.diffusion_model`.
+    /// GGUF files from city96 use unprefixed tensor names (e.g. `x_embedder.proj.weight`),
+    /// so `vb` should NOT have a `model.diffusion_model` prefix.
     pub fn new(cfg: &MMDiTConfig, vb: VarBuilder) -> Result<Self> {
         let hidden_size = cfg.head_size * cfg.depth;
         let num_heads = cfg.depth;
@@ -919,6 +929,12 @@ impl QuantizedMMDiT {
         context: &Tensor,
         skip_layers: Option<&[usize]>,
     ) -> Result<Tensor> {
+        // Quantized model operates in F32 (QMatMul dequantizes weights to F32)
+        let x = &x.to_dtype(DType::F32)?;
+        let t = &t.to_dtype(DType::F32)?;
+        let y = &y.to_dtype(DType::F32)?;
+        let context = &context.to_dtype(DType::F32)?;
+
         let h = x.dim(D::Minus2)?;
         let w = x.dim(D::Minus1)?;
         let cropped_pos_embed = self.pos_embedder.get_cropped_pos_embed(h, w)?;

@@ -23,6 +23,7 @@ pub struct SkipLayerGuidanceConfig {
 /// - `context`: Concatenated [context_cond, context_uncond] text embeddings (batch=2)
 /// - `cfg_scale`: Classifier-free guidance scale (1.0 = no guidance, e.g. turbo)
 /// - `time_shift`: Alpha for resolution-dependent timestep shifting (typically 3.0)
+/// - `is_quantized`: If true, use F32 dtype for noise (GGUF dequantizes to F32)
 #[allow(clippy::too_many_arguments)]
 pub fn euler_sample(
     mmdit: &SD3Transformer,
@@ -34,11 +35,14 @@ pub fn euler_sample(
     height: usize,
     width: usize,
     slg_config: Option<&SkipLayerGuidanceConfig>,
+    is_quantized: bool,
 ) -> Result<Tensor> {
     // SD3 uses the same 16-channel latent noise as FLUX
+    // Quantized models (GGUF) dequantize to F32, so noise must also be F32
+    let noise_dtype = if is_quantized { DType::F32 } else { DType::F16 };
     let mut x =
         candle_transformers::models::flux::sampling::get_noise(1, height, width, y.device())?
-            .to_dtype(DType::F16)?;
+            .to_dtype(noise_dtype)?;
 
     let sigmas: Vec<f64> = (0..=num_inference_steps)
         .map(|s| s as f64 / num_inference_steps as f64)

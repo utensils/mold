@@ -333,13 +333,12 @@ impl SD3Engine {
         let xformer_stage = Instant::now();
 
         let transformer = if is_quantized {
+            // GGUF files from city96 use unprefixed tensor names (no "model.diffusion_model.")
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
-            SD3Transformer::Quantized(QuantizedMMDiT::new(
-                &mmdit_config,
-                vb.pp("model.diffusion_model"),
-            )?)
+            SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
+            // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     std::slice::from_ref(&self.paths.transformer),
@@ -513,8 +512,19 @@ impl SD3Engine {
         self.progress.info("Freed SD3 triple encoder");
 
         // Concatenate cond/uncond for CFG
-        let context = candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?;
-        let y = candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?;
+        // For quantized models, cast embeddings to F32 (GGUF dequantizes to F32)
+        let (context, y) = if is_quantized {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
+                    .to_dtype(DType::F32)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
+            )
+        } else {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
+            )
+        };
 
         // --- Phase 2: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
@@ -536,13 +546,12 @@ impl SD3Engine {
         let xformer_stage = Instant::now();
 
         let transformer = if is_quantized {
+            // GGUF files from city96 use unprefixed tensor names
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
-            SD3Transformer::Quantized(QuantizedMMDiT::new(
-                &mmdit_config,
-                vb.pp("model.diffusion_model"),
-            )?)
+            SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
+            // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     std::slice::from_ref(&self.paths.transformer),
@@ -576,6 +585,7 @@ impl SD3Engine {
             height,
             width,
             slg_config.as_ref(),
+            is_quantized,
         )?;
 
         self.progress
@@ -606,7 +616,9 @@ impl SD3Engine {
         let vae_decode_start = Instant::now();
 
         // SD3 VAE scaling: x / 1.5305 + 0.0609
-        let img = autoencoder.decode(&((x / 1.5305)? + 0.0609)?)?;
+        // Cast to VAE dtype (quantized path outputs F32, VAE is F16/BF16)
+        let x = ((x / 1.5305)? + 0.0609)?.to_dtype(gpu_dtype)?;
+        let img = autoencoder.decode(&x)?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -697,9 +709,19 @@ impl InferenceEngine for SD3Engine {
             tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
         }
 
-        // Concatenate for CFG
-        let context = candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?;
-        let y = candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?;
+        // Concatenate for CFG (quantized models need F32)
+        let (context, y) = if loaded._is_quantized {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
+                    .to_dtype(DType::F32)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
+            )
+        } else {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
+            )
+        };
 
         // 2. Denoise
         let time_shift = 3.0;
@@ -728,6 +750,7 @@ impl InferenceEngine for SD3Engine {
             height,
             width,
             slg_config.as_ref(),
+            loaded._is_quantized,
         )?;
 
         progress.stage_done(&denoise_label, denoise_start.elapsed());
