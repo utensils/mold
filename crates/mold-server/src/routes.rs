@@ -1,9 +1,9 @@
 use axum::{
-    Json, Router,
     extract::State,
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
+    Json, Router,
 };
 use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
 use mold_inference::model_registry;

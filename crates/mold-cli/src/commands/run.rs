@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
-use mold_core::Config;
 use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
+use mold_core::Config;
 
 use super::generate;
 

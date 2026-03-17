@@ -8,11 +8,11 @@
 //! - Fused QKV projection (single `[dim, 3*dim]` weight instead of separate Q/K/V)
 //! - Different tensor naming (GGUF convention vs safetensors convention)
 
-use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::RmsNorm as CandleRmsNorm;
 use candle_transformers::models::z_image::transformer::{
-    ADALN_EMBED_DIM, Config, FREQUENCY_EMBEDDING_SIZE, LayerNormNoParams, MAX_PERIOD, RopeEmbedder,
-    apply_rotary_emb, create_coordinate_grid, patchify, unpatchify,
+    apply_rotary_emb, create_coordinate_grid, patchify, unpatchify, Config, LayerNormNoParams,
+    RopeEmbedder, ADALN_EMBED_DIM, FREQUENCY_EMBEDDING_SIZE, MAX_PERIOD,
 };
 use candle_transformers::quantized_nn::{self, Linear};
 use candle_transformers::quantized_var_builder::VarBuilder;

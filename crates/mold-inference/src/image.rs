@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use candle_core::Tensor;
 use mold_core::OutputFormat;
 

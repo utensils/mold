@@ -1,8 +1,8 @@
 use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::{
-    ModelComponent, SHARED_COMPONENTS_GB, SHARED_SD15_COMPONENTS_GB, SHARED_SDXL_COMPONENTS_GB,
-    SHARED_ZIMAGE_COMPONENTS_GB, find_manifest, resolve_model_name,
+    find_manifest, resolve_model_name, ModelComponent, SHARED_COMPONENTS_GB,
+    SHARED_SD15_COMPONENTS_GB, SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
 };
 use mold_core::{Config, ModelPaths};
 use sha2::{Digest, Sha256};

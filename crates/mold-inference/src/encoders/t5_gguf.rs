@@ -6,9 +6,9 @@
 //! the T5 encoder model manually.
 
 use anyhow::Result;
-use candle_core::quantized::QTensor;
 use candle_core::quantized::gguf_file;
-use candle_core::{D, DType, Device, Module, Tensor};
+use candle_core::quantized::QTensor;
+use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::Activation;
 use candle_transformers::models::with_tracing::QMatMul;
 use std::collections::HashMap;

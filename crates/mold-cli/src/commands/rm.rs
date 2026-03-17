@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
-use mold_core::Config;
 use mold_core::manifest::resolve_model_name;
+use mold_core::Config;
 
 use crate::AlreadyReported;
 
