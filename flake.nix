@@ -136,6 +136,7 @@
           apps.default = {
             type = "app";
             program = "${mold}/bin/mold";
+            meta.description = meta.description;
           };
 
           devshells.default = {
