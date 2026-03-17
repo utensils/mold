@@ -4,6 +4,7 @@ use mold_core::{Config, ModelPaths};
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::flux2::Flux2Engine;
+use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
@@ -111,8 +112,13 @@ pub fn create_engine(
                 load_strategy,
             )))
         }
+        "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new(
+            model_name,
+            paths,
+            load_strategy,
+        ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image",
             other,
             model_name
         ),
@@ -253,6 +259,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-flux2");
+    }
+
+    #[test]
+    fn resolve_family_from_manifest_qwen_image() {
+        let config = Config::default();
+        assert_eq!(resolve_family("qwen-image:bf16", &config), "qwen-image");
+    }
+
+    #[test]
+    fn create_engine_qwen_image() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-qwen-image".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("qwen-image".to_string()),
+                ..Default::default()
+            },
+        );
+        let engine = create_engine(
+            "my-qwen-image".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+        )
+        .unwrap();
+        assert_eq!(engine.model_name(), "my-qwen-image");
     }
 
     #[test]

@@ -426,6 +426,7 @@ pub fn known_manifests() -> Vec<ModelManifest> {
     manifests.extend(sdxl_manifests());
     manifests.extend(zimage_manifests());
     manifests.extend(flux2_manifests());
+    manifests.extend(qwen_image_manifests());
     manifests
 }
 
@@ -1237,6 +1238,107 @@ fn flux2_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+/// Shared Qwen-Image component files (VAE, text encoder shards, tokenizer).
+fn shared_qwen_image_files() -> Vec<ModelFile> {
+    vec![
+        // VAE
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 300_000_000, // ~300MB estimated
+            gated: false,
+            sha256: None,
+        },
+        // Qwen2.5-VL text encoder shards
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_900_000_000, // ~4.9GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_700_000_000, // ~4.7GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_700_000_000, // ~4.7GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 1_200_000_000, // ~1.2GB
+            gated: false,
+            sha256: None,
+        },
+        // Tokenizer
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 7_000_000, // ~7MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// All known Qwen-Image model manifests.
+fn qwen_image_manifests() -> Vec<ModelManifest> {
+    vec![
+        // BF16 full precision
+        ModelManifest {
+            name: "qwen-image:bf16".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 BF16 — 60-block flow-matching transformer".to_string(),
+            size_gb: 30.0,
+            files: {
+                let mut files = shared_qwen_image_files();
+                // Transformer shards
+                files.push(ModelFile {
+                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_900_000_000, // ~9.9GB estimated
+                    gated: false,
+                    sha256: None,
+                });
+                files.push(ModelFile {
+                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 4_700_000_000, // ~4.7GB estimated
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 30,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some("flow_match_euler"),
+            },
+        },
+    ]
+}
+
 /// Resolve a user-provided model name to its canonical `name:tag` form.
 ///
 /// - `flux-schnell` → `flux-schnell:q8` (FLUX default tag)
@@ -1558,8 +1660,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 = 27
-        assert_eq!(known_manifests().len(), 27);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 1 Qwen-Image = 28
+        assert_eq!(known_manifests().len(), 28);
     }
 
     #[test]
@@ -1739,6 +1841,31 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::T5Encoder),
                         "{} (flux2) should not have T5Encoder",
+                        manifest.name
+                    );
+                }
+                "qwen-image" => {
+                    // Qwen-Image uses TransformerShard (BF16 sharded)
+                    assert!(
+                        components.contains(&ModelComponent::Transformer)
+                            || components.contains(&ModelComponent::TransformerShard),
+                        "{} (qwen-image) missing Transformer or TransformerShard",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (qwen-image) missing TextEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} (qwen-image) missing TextTokenizer",
+                        manifest.name
+                    );
+                    // Qwen-Image does NOT use CLIP
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} (qwen-image) should not have ClipEncoder",
                         manifest.name
                     );
                 }
