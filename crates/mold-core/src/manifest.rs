@@ -1297,8 +1297,17 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
 
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 30,
+        guidance: 0.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: Some("flow_match_euler"),
+    };
+
     vec![
-        // BF16 full precision
+        // BF16 full precision (sharded safetensors from official repo)
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
@@ -1306,13 +1315,12 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             size_gb: 30.0,
             files: {
                 let mut files = shared_qwen_image_files();
-                // Transformer shards
                 files.push(ModelFile {
                     hf_repo: "Qwen/Qwen-Image-2512".to_string(),
                     hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 9_900_000_000, // ~9.9GB estimated
+                    size_bytes: 9_900_000_000,
                     gated: false,
                     sha256: None,
                 });
@@ -1321,20 +1329,71 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 4_700_000_000, // ~4.7GB estimated
+                    size_bytes: 4_700_000_000,
                     gated: false,
                     sha256: None,
                 });
                 files
             },
-            defaults: ManifestDefaults {
-                steps: 30,
-                guidance: 0.0,
-                width: 1024,
-                height: 1024,
-                is_schnell: false,
-                scheduler: Some("flow_match_euler"),
+            defaults: defaults.clone(),
+        },
+        // GGUF quantized variants (transformer only; shared components stay BF16)
+        ModelManifest {
+            name: "qwen-image:q8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q8 — quantized transformer, best quality".to_string(),
+            size_gb: 21.8,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_800_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
             },
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen-image:q6".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q6 — quantized, best quality/size trade-off".to_string(),
+            size_gb: 16.8,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 16_800_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen-image:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q4 — quantized, smallest practical footprint".to_string(),
+            size_gb: 12.3,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q4_K_S.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 12_300_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults,
         },
     ]
 }
@@ -1660,8 +1719,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 1 Qwen-Image = 28
-        assert_eq!(known_manifests().len(), 28);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image = 31
+        assert_eq!(known_manifests().len(), 31);
     }
 
     #[test]
