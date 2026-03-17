@@ -17,10 +17,12 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
+use candle_transformers::quantized_var_builder;
 use candle_transformers::models::z_image::{get_noise, postprocess_image};
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
+use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
 use super::sampling::{
     calculate_shift, QwenImageScheduler, BASE_IMAGE_SEQ_LEN, BASE_SHIFT, MAX_IMAGE_SEQ_LEN,
     MAX_SHIFT,
@@ -46,7 +48,7 @@ const QWEN2_FP16_VRAM_THRESHOLD: u64 = 16_000_000_000;
 /// Loaded Qwen-Image model components, ready for inference.
 struct LoadedQwenImage {
     /// Transformer wrapped in Option for drop-and-reload pattern.
-    transformer: Option<QwenImageTransformer2DModel>,
+    transformer: Option<QwenImageTransformer>,
     text_encoder: encoders::qwen2_text::Qwen2TextEncoder,
     vae: QwenImageVae,
     transformer_cfg: QwenImageConfig,
@@ -55,6 +57,26 @@ struct LoadedQwenImage {
     /// Device where the VAE lives (may be CPU if VRAM is tight)
     vae_device: Device,
     dtype: DType,
+    transformer_is_quantized: bool,
+}
+
+enum QwenImageTransformer {
+    BF16(QwenImageTransformer2DModel),
+    Quantized(QuantizedQwenImageTransformer2DModel),
+}
+
+impl QwenImageTransformer {
+    fn forward(
+        &self,
+        latents: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(model) => Ok(model.forward(latents, t, encoder_hidden_states)?),
+            Self::Quantized(model) => Ok(model.forward(latents, t, encoder_hidden_states)?),
+        }
+    }
 }
 
 /// Qwen-Image-2512 inference engine.
@@ -85,6 +107,15 @@ impl QwenImageEngine {
         } else {
             vec![self.paths.transformer.clone()]
         }
+    }
+
+    fn detect_is_quantized(&self) -> bool {
+        self.paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false)
     }
 
     /// Validate required paths exist.
@@ -119,11 +150,20 @@ impl QwenImageEngine {
         device: &Device,
         dtype: DType,
         cfg: &QwenImageConfig,
-    ) -> Result<QwenImageTransformer2DModel> {
-        let xformer_paths = self.transformer_paths();
-        let xformer_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
-        Ok(QwenImageTransformer2DModel::new(cfg, xformer_vb)?)
+    ) -> Result<QwenImageTransformer> {
+        if self.detect_is_quantized() {
+            let vb = quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, device)?;
+            Ok(QwenImageTransformer::Quantized(
+                QuantizedQwenImageTransformer2DModel::new(cfg, vb)?,
+            ))
+        } else {
+            let xformer_paths = self.transformer_paths();
+            let xformer_vb =
+                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
+            Ok(QwenImageTransformer::BF16(QwenImageTransformer2DModel::new(
+                cfg, xformer_vb,
+            )?))
+        }
     }
 
     /// Load VAE from disk.
@@ -179,13 +219,15 @@ impl QwenImageEngine {
         let device = crate::device::create_device(&self.progress)?;
         let dtype = device.bf16_default_to_f32();
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
+        let transformer_is_quantized = self.detect_is_quantized();
 
         // Load transformer
         let xformer_paths = self.transformer_paths();
-        let xformer_label = format!(
-            "Loading Qwen-Image transformer ({} shards)",
-            xformer_paths.len()
-        );
+        let xformer_label = if transformer_is_quantized {
+            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+        } else {
+            format!("Loading Qwen-Image transformer ({} shards)", xformer_paths.len())
+        };
         self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
@@ -246,6 +288,7 @@ impl QwenImageEngine {
             device,
             vae_device,
             dtype,
+            transformer_is_quantized,
         });
 
         tracing::info!(model = %self.model_name, "all Qwen-Image components loaded");
@@ -267,6 +310,7 @@ impl QwenImageEngine {
 
         let device = crate::device::create_device(&self.progress)?;
         let dtype = device.bf16_default_to_f32();
+        let transformer_is_quantized = self.detect_is_quantized();
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -343,10 +387,11 @@ impl QwenImageEngine {
             self.progress.info(&status);
         }
 
-        let xformer_label = format!(
-            "Loading Qwen-Image transformer ({} shards)",
-            xformer_paths.len()
-        );
+        let xformer_label = if transformer_is_quantized {
+            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+        } else {
+            format!("Loading Qwen-Image transformer ({} shards)", xformer_paths.len())
+        };
         self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
@@ -370,7 +415,12 @@ impl QwenImageEngine {
 
         let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
 
-        let mut latents = get_noise(1, 16, latent_h, latent_w, &device)?.to_dtype(dtype)?;
+        let latent_dtype = if transformer_is_quantized {
+            DType::F32
+        } else {
+            dtype
+        };
+        let mut latents = get_noise(1, 16, latent_h, latent_w, &device)?.to_dtype(latent_dtype)?;
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
@@ -380,7 +430,8 @@ impl QwenImageEngine {
         for step in 0..num_steps {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
-            let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+            let t_tensor =
+                Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(latent_dtype)?;
             let noise_pred = transformer.forward(&latents, &t_tensor, &encoder_hidden_states)?;
             latents = scheduler.step(&noise_pred, &latents)?;
             self.progress.emit(ProgressEvent::DenoiseStep {
@@ -552,8 +603,13 @@ impl InferenceEngine for QwenImageEngine {
         let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
 
         // 6. Generate initial noise
+        let latent_dtype = if loaded.transformer_is_quantized {
+            DType::F32
+        } else {
+            loaded.dtype
+        };
         let mut latents =
-            get_noise(1, 16, latent_h, latent_w, &loaded.device)?.to_dtype(loaded.dtype)?;
+            get_noise(1, 16, latent_h, latent_w, &loaded.device)?.to_dtype(latent_dtype)?;
 
         // 7. Denoising loop
         let num_steps = req.steps as usize;
@@ -571,7 +627,7 @@ impl InferenceEngine for QwenImageEngine {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
-                    .to_dtype(loaded.dtype)?;
+                    .to_dtype(latent_dtype)?;
                 let noise_pred =
                     transformer.forward(&latents, &t_tensor, &encoder_hidden_states)?;
                 latents = scheduler.step(&noise_pred, &latents)?;
@@ -646,5 +702,34 @@ impl InferenceEngine for QwenImageEngine {
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn qwen_image_detects_gguf_transformer() {
+        let engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            ModelPaths {
+                transformer: PathBuf::from("/tmp/qwen-image-Q4_K_S.gguf"),
+                transformer_shards: vec![],
+                vae: PathBuf::from("/tmp/vae.safetensors"),
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![],
+                text_tokenizer: Some(PathBuf::from("/tmp/tokenizer.json")),
+            },
+            LoadStrategy::Sequential,
+        );
+
+        assert!(engine.detect_is_quantized());
     }
 }

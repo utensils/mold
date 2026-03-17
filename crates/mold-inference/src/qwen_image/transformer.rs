@@ -95,7 +95,7 @@ struct TimestepProjEmbeddings {
 }
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
-const MAX_PERIOD: f64 = 10000.0;
+pub(crate) const MAX_PERIOD: f64 = 10000.0;
 
 impl TimestepProjEmbeddings {
     fn new(inner_dim: usize, vb: VarBuilder) -> candle_core::Result<Self> {
