@@ -6,6 +6,7 @@ use mold_core::{Config, MoldClient};
 fn format_family_padded(family: &str, width: usize) -> String {
     let label = match family {
         "flux" => "FLUX.1",
+        "sd15" => "SD1.5",
         "sdxl" => "SDXL",
         "z-image" => "Z-Image",
         other => other,
@@ -13,6 +14,7 @@ fn format_family_padded(family: &str, width: usize) -> String {
     let padded = format!("{:<width$}", label, width = width);
     match family {
         "flux" => padded.magenta().to_string(),
+        "sd15" => padded.green().to_string(),
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
         _ => padded,
@@ -178,6 +180,12 @@ mod tests {
     fn format_family_sdxl_contains_label() {
         let result = format_family_padded("sdxl", 10);
         assert!(result.contains("SDXL"));
+    }
+
+    #[test]
+    fn format_family_sd15_contains_label() {
+        let result = format_family_padded("sd15", 10);
+        assert!(result.contains("SD1.5"));
     }
 
     #[test]

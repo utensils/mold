@@ -20,7 +20,7 @@ impl std::error::Error for AlreadyReported {}
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "Local AI image generation — FLUX & SDXL diffusion models on your GPU"
+    about = "Local AI image generation — FLUX, SD1.5, SDXL & Z-Image diffusion models on your GPU"
 )]
 #[command(version, propagate_version = true)]
 struct Cli {

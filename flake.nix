@@ -1,5 +1,5 @@
 {
-  description = "mold — local AI image generation CLI for FLUX & SDXL diffusion models";
+  description = "mold — local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -111,7 +111,7 @@
               "";
 
           meta = with lib; {
-            description = "Local AI image generation CLI for FLUX & SDXL diffusion models";
+            description = "Local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
             homepage = "https://github.com/utensils/mold";
             license = licenses.mit;
             maintainers = [ ];
@@ -140,7 +140,7 @@
 
           devshells.default = {
             motd = ''
-              {202}mold{reset} — local AI image generation for FLUX & SDXL ({bold}${system}{reset})
+              {202}mold{reset} — local AI image generation for FLUX, SD1.5, SDXL & Z-Image ({bold}${system}{reset})
               $(type menu &>/dev/null && menu)
             '';
 

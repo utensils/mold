@@ -403,9 +403,129 @@ pub fn known_manifests() -> Vec<ModelManifest> {
             },
         },
     ];
+    manifests.extend(sd15_manifests());
     manifests.extend(sdxl_manifests());
     manifests.extend(zimage_manifests());
     manifests
+}
+
+/// Shared SD1.5 component files (VAE, CLIP-L encoder, tokenizer) — identical across all SD1.5 models.
+fn shared_sd15_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "stabilityai/sd-vae-ft-mse".to_string(),
+            hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 335_000_000, // ~335MB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
+            hf_filename: "text_encoder/model.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder,
+            size_bytes: 492_000_000, // ~492MB (CLIP-L)
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "openai/clip-vit-large-patch14".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// Size of shared SD1.5 components (VAE, CLIP-L, tokenizer) in GB.
+pub const SHARED_SD15_COMPONENTS_GB: f32 = 0.8;
+
+/// All known SD1.5 model manifests.
+fn sd15_manifests() -> Vec<ModelManifest> {
+    vec![
+        ModelManifest {
+            name: "sd15:fp16".to_string(),
+            family: "sd15".to_string(),
+            description: "Stable Diffusion 1.5 — canonical base model, huge LoRA ecosystem"
+                .to_string(),
+            size_gb: 1.7,
+            files: {
+                let mut files = shared_sd15_files();
+                files.push(ModelFile {
+                    hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_720_000_000, // ~1.72GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        ModelManifest {
+            name: "dreamshaper-v8:fp16".to_string(),
+            family: "sd15".to_string(),
+            description: "DreamShaper v8 — best versatile SD1.5, photorealistic + fantasy"
+                .to_string(),
+            size_gb: 1.7,
+            files: {
+                let mut files = shared_sd15_files();
+                files.push(ModelFile {
+                    hf_repo: "Lykon/dreamshaper-8".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_720_000_000, // ~1.72GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+        ModelManifest {
+            name: "realistic-vision-v5:fp16".to_string(),
+            family: "sd15".to_string(),
+            description: "Realistic Vision v5.1 — gold standard photorealistic SD1.5".to_string(),
+            size_gb: 1.7,
+            files: {
+                let mut files = shared_sd15_files();
+                files.push(ModelFile {
+                    hf_repo: "SG161222/Realistic_Vision_V5.1_noVAE".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_720_000_000, // ~1.72GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: Some("ddim"),
+            },
+        },
+    ]
 }
 
 /// Shared SDXL component files (VAE, dual-CLIP encoders, tokenizers) — identical across all SDXL models.
@@ -1066,6 +1186,13 @@ mod tests {
         assert!(find_manifest("flux-dev:q6").is_some());
         assert!(find_manifest("flux-krea:q4").is_some());
         assert!(find_manifest("flux-krea:q6").is_some());
+        // SD1.5 models
+        assert!(find_manifest("sd15").is_some());
+        assert!(find_manifest("sd15:fp16").is_some());
+        assert!(find_manifest("dreamshaper-v8").is_some());
+        assert!(find_manifest("dreamshaper-v8:fp16").is_some());
+        assert!(find_manifest("realistic-vision-v5").is_some());
+        assert!(find_manifest("realistic-vision-v5:fp16").is_some());
         assert!(find_manifest("nonexistent").is_none());
     }
 
@@ -1085,8 +1212,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 6 SDXL + 4 Z-Image = 19
-        assert_eq!(known_manifests().len(), 19);
+        // 9 FLUX + 3 SD1.5 + 6 SDXL + 4 Z-Image = 22
+        assert_eq!(known_manifests().len(), 22);
     }
 
     #[test]
@@ -1125,6 +1252,29 @@ mod tests {
                     assert!(
                         components.contains(&ModelComponent::T5Tokenizer),
                         "{} (flux) missing T5Tokenizer",
+                        manifest.name
+                    );
+                }
+                "sd15" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (sd15) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder),
+                        "{} (sd15) missing ClipEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer),
+                        "{} (sd15) missing ClipTokenizer",
+                        manifest.name
+                    );
+                    // SD1.5 does NOT use dual CLIP
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder2),
+                        "{} (sd15) should not have ClipEncoder2",
                         manifest.name
                     );
                 }
@@ -1281,6 +1431,74 @@ mod tests {
                 "FP16 should be larger than {}",
                 v.tag
             );
+        }
+    }
+
+    // --- SD1.5 tests ---
+
+    #[test]
+    fn sd15_manifest_exists() {
+        assert!(find_manifest("sd15").is_some());
+        assert!(find_manifest("sd15:fp16").is_some());
+    }
+
+    #[test]
+    fn sd15_default_tag_resolves() {
+        assert_eq!(resolve_model_name("sd15"), "sd15:fp16");
+    }
+
+    #[test]
+    fn dreamshaper_v8_resolves() {
+        let manifest = find_manifest("dreamshaper-v8").unwrap();
+        assert_eq!(manifest.name, "dreamshaper-v8:fp16");
+        assert_eq!(manifest.family, "sd15");
+        assert_eq!(manifest.defaults.steps, 25);
+        assert_eq!(manifest.defaults.width, 512);
+    }
+
+    #[test]
+    fn sd15_defaults() {
+        for manifest in known_manifests() {
+            if manifest.family == "sd15" {
+                assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+                assert_eq!(manifest.defaults.width, 512);
+                assert_eq!(manifest.defaults.height, 512);
+            }
+        }
+    }
+
+    #[test]
+    fn realistic_vision_v5_resolves() {
+        let manifest = find_manifest("realistic-vision-v5").unwrap();
+        assert_eq!(manifest.name, "realistic-vision-v5:fp16");
+        assert_eq!(manifest.family, "sd15");
+        assert_eq!(manifest.defaults.steps, 25);
+        assert_eq!(manifest.defaults.width, 512);
+        assert_eq!(manifest.defaults.guidance, 7.5);
+        assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+    }
+
+    #[test]
+    fn shared_sd15_files_not_gated() {
+        for file in shared_sd15_files() {
+            assert!(
+                !file.gated,
+                "SD1.5 shared file {} should not be gated",
+                file.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn sd15_manifests_have_scheduler() {
+        for manifest in known_manifests() {
+            if manifest.family == "sd15" {
+                assert!(
+                    manifest.defaults.scheduler.is_some(),
+                    "{} (sd15) should have a scheduler",
+                    manifest.name
+                );
+            }
         }
     }
 

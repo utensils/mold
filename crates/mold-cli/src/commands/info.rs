@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::{
     find_manifest, resolve_model_name, ModelComponent, SHARED_COMPONENTS_GB,
-    SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
+    SHARED_SD15_COMPONENTS_GB, SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
 };
 use mold_core::{Config, ModelPaths};
 use sha2::{Digest, Sha256};
@@ -44,6 +44,7 @@ fn resolve_file_path(
 fn format_family(family: &str) -> String {
     match family {
         "flux" => "FLUX.1".magenta().to_string(),
+        "sd15" => "SD1.5".green().to_string(),
         "sdxl" => "SDXL".yellow().to_string(),
         "z-image" => "Z-Image".cyan().to_string(),
         other => other.to_uppercase(),
@@ -96,6 +97,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
 
         // Size info
         let shared_gb = match m.family.as_str() {
+            "sd15" => SHARED_SD15_COMPONENTS_GB,
             "sdxl" => SHARED_SDXL_COMPONENTS_GB,
             "z-image" => SHARED_ZIMAGE_COMPONENTS_GB,
             _ => SHARED_COMPONENTS_GB,
@@ -376,6 +378,12 @@ mod tests {
     }
 
     #[test]
+    fn format_family_sd15() {
+        let result = format_family("sd15");
+        assert!(result.contains("SD1.5"));
+    }
+
+    #[test]
     fn format_family_unknown() {
         assert_eq!(format_family("other"), "OTHER");
     }
@@ -396,6 +404,12 @@ mod tests {
     #[test]
     fn sdxl_model_succeeds() {
         let result = run("sdxl-base", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sd15_model_succeeds() {
+        let result = run("sd15", false);
         assert!(result.is_ok());
     }
 
