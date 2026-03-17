@@ -7,6 +7,7 @@ pub mod flux;
 mod image;
 pub mod model_registry;
 pub mod progress;
+pub mod sd15;
 pub mod sdxl;
 pub mod zimage;
 
@@ -16,5 +17,6 @@ pub use factory::create_engine;
 pub use flux::FluxEngine;
 pub use model_registry::known_models;
 pub use progress::ProgressEvent;
+pub use sd15::SD15Engine;
 pub use sdxl::SDXLEngine;
 pub use zimage::ZImageEngine;

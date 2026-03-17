@@ -19,3 +19,43 @@ pub enum ProgressEvent {
 
 /// Callback type for receiving progress events.
 pub type ProgressCallback = Box<dyn Fn(ProgressEvent) + Send + Sync>;
+
+/// Wrapper around an optional progress callback with convenience methods.
+///
+/// Stored as a field in each engine so progress reporting can be borrowed
+/// independently from the engine's mutable model state.
+#[derive(Default)]
+pub struct ProgressReporter {
+    callback: Option<ProgressCallback>,
+}
+
+impl ProgressReporter {
+    pub fn emit(&self, event: ProgressEvent) {
+        if let Some(cb) = &self.callback {
+            cb(event);
+        }
+    }
+
+    pub fn stage_start(&self, name: &str) {
+        self.emit(ProgressEvent::StageStart {
+            name: name.to_string(),
+        });
+    }
+
+    pub fn stage_done(&self, name: &str, elapsed: Duration) {
+        self.emit(ProgressEvent::StageDone {
+            name: name.to_string(),
+            elapsed,
+        });
+    }
+
+    pub fn info(&self, message: &str) {
+        self.emit(ProgressEvent::Info {
+            message: message.to_string(),
+        });
+    }
+
+    pub fn set_callback(&mut self, callback: ProgressCallback) {
+        self.callback = Some(callback);
+    }
+}

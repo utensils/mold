@@ -18,7 +18,7 @@ use crate::device::{
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
-use crate::progress::{ProgressCallback, ProgressEvent};
+use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Z-Image scheduler shift constants (from reference implementation).
 const BASE_IMAGE_SEQ_LEN: usize = 256;
@@ -53,7 +53,7 @@ pub struct ZImageEngine {
     loaded: Option<LoadedZImage>,
     model_name: String,
     paths: ModelPaths,
-    on_progress: Option<ProgressCallback>,
+    progress: ProgressReporter,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
@@ -71,35 +71,10 @@ impl ZImageEngine {
             loaded: None,
             model_name,
             paths,
-            on_progress: None,
+            progress: ProgressReporter::default(),
             qwen3_variant,
             load_strategy,
         }
-    }
-
-    fn emit(&self, event: ProgressEvent) {
-        if let Some(cb) = &self.on_progress {
-            cb(event);
-        }
-    }
-
-    fn stage_start(&self, name: &str) {
-        self.emit(ProgressEvent::StageStart {
-            name: name.to_string(),
-        });
-    }
-
-    fn stage_done(&self, name: &str, elapsed: std::time::Duration) {
-        self.emit(ProgressEvent::StageDone {
-            name: name.to_string(),
-            elapsed,
-        });
-    }
-
-    fn info(&self, message: &str) {
-        self.emit(ProgressEvent::Info {
-            message: message.to_string(),
-        });
     }
 
     /// Resolve transformer shard paths: use `transformer_shards` if non-empty,
@@ -148,20 +123,6 @@ impl ZImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
-    /// Create a GPU device.
-    fn create_device(&self) -> Result<Device> {
-        if candle_core::utils::cuda_is_available() {
-            self.info("CUDA detected, using GPU");
-            Ok(Device::new_cuda(0)?)
-        } else if candle_core::utils::metal_is_available() {
-            self.info("Metal detected, using GPU");
-            Ok(Device::new_metal(0)?)
-        } else {
-            self.info("No GPU detected, using CPU");
-            Ok(Device::Cpu)
-        }
-    }
-
     /// Load transformer from disk.
     fn load_transformer(
         &self,
@@ -178,12 +139,8 @@ impl ZImageEngine {
                 QuantizedZImageTransformer2DModel::new(cfg, dtype, vb)?,
             ))
         } else {
-            let xformer_path_strs: Vec<&str> = xformer_paths
-                .iter()
-                .map(|p| p.to_str().expect("non-UTF8 path"))
-                .collect();
             let xformer_vb =
-                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_path_strs, dtype, device)? };
+                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
             Ok(ZImageTransformer::BF16(ZImageTransformer2DModel::new(
                 cfg, xformer_vb,
             )?))
@@ -194,11 +151,7 @@ impl ZImageEngine {
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<AutoEncoderKL> {
         let vae_cfg = VaeConfig::z_image();
         let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[self.paths.vae.to_str().expect("non-UTF8 path")],
-                dtype,
-                device,
-            )?
+            VarBuilder::from_mmaped_safetensors(&[self.paths.vae.as_path()], dtype, device)?
         };
         Ok(AutoEncoderKL::new(&vae_cfg, vae_vb)?)
     }
@@ -239,7 +192,7 @@ impl ZImageEngine {
                 } else {
                     "CPU, quantized"
                 };
-                self.info(&format!(
+                self.progress.info(&format!(
                     "Using Qwen3 {} ({}) on {} (explicit)",
                     variant.tag,
                     fmt_gb(variant.size_bytes),
@@ -259,7 +212,8 @@ impl ZImageEngine {
                 let on_gpu =
                     should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD);
                 let label = if on_gpu { "GPU" } else { "CPU" };
-                self.info(&format!("Using BF16 Qwen3 on {} (explicit)", label));
+                self.progress
+                    .info(&format!("Using BF16 Qwen3 on {} (explicit)", label));
                 Ok((bf16_paths, false, on_gpu, label.to_string()))
             }
 
@@ -270,9 +224,10 @@ impl ZImageEngine {
                     && fits_in_memory(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD)
                 {
                     if is_metal {
-                        self.info("Loading BF16 Qwen3 on GPU (unified memory)");
+                        self.progress
+                            .info("Loading BF16 Qwen3 on GPU (unified memory)");
                     } else {
-                        self.info(&format!(
+                        self.progress.info(&format!(
                             "Loading BF16 Qwen3 on GPU ({} free > {} threshold, drop-and-reload)",
                             fmt_gb(free_vram),
                             fmt_gb(QWEN3_FP16_VRAM_THRESHOLD),
@@ -292,7 +247,7 @@ impl ZImageEngine {
                             {
                                 Some(p) => p,
                                 None => {
-                                    self.info(&format!(
+                                    self.progress.info(&format!(
                                         "Downloading Qwen3 {} ({})...",
                                         variant.tag,
                                         fmt_gb(variant.size_bytes),
@@ -313,7 +268,7 @@ impl ZImageEngine {
                                 }
                             };
                             let on_gpu = is_cuda || is_metal;
-                            self.info(&format!(
+                            self.progress.info(&format!(
                                 "Using Qwen3 {} ({}) on {}",
                                 variant.tag,
                                 fmt_gb(variant.size_bytes),
@@ -340,7 +295,7 @@ impl ZImageEngine {
                         let path = match cached_file_path(smallest.hf_repo, smallest.hf_filename) {
                             Some(p) => p,
                             None => {
-                                self.info(&format!(
+                                self.progress.info(&format!(
                                     "Downloading Qwen3 {} ({})...",
                                     smallest.tag,
                                     fmt_gb(smallest.size_bytes),
@@ -354,7 +309,7 @@ impl ZImageEngine {
                                     })?
                             }
                         };
-                        self.info(&format!(
+                        self.progress.info(&format!(
                             "Memory tight — using smallest Qwen3 {} ({}) on GPU to reduce page pressure",
                             smallest.tag,
                             fmt_gb(smallest.size_bytes),
@@ -371,12 +326,12 @@ impl ZImageEngine {
                 // Fall back to BF16 on CPU (only if shards are available)
                 if have_bf16 {
                     if is_cuda || is_metal {
-                        self.info(&format!(
+                        self.progress.info(&format!(
                             "Loading BF16 Qwen3 on CPU ({} free, no variant fits on GPU)",
                             fmt_gb(free_vram),
                         ));
                     } else {
-                        self.info("No GPU detected, loading Qwen3 on CPU");
+                        self.progress.info("No GPU detected, loading Qwen3 on CPU");
                     }
                     return Ok((bf16_paths, false, false, "CPU".to_string()));
                 }
@@ -400,7 +355,7 @@ impl ZImageEngine {
         if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
             return Ok(path);
         }
-        self.info(&format!(
+        self.progress.info(&format!(
             "Downloading Qwen3 {} ({})...",
             variant.tag,
             fmt_gb(variant.size_bytes),
@@ -424,7 +379,7 @@ impl ZImageEngine {
         let is_gguf = self.detect_is_gguf();
         let text_tokenizer_path = self.validate_paths()?;
 
-        let device = self.create_device()?;
+        let device = crate::device::create_device(&self.progress)?;
         let dtype = device.bf16_default_to_f32();
         let transformer_cfg = Config::z_image_turbo();
 
@@ -438,12 +393,13 @@ impl ZImageEngine {
                 xformer_paths.len()
             )
         };
-        self.stage_start(&xformer_label);
+        self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
 
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
 
-        self.stage_done(&xformer_label, xformer_start.elapsed());
+        self.progress
+            .stage_done(&xformer_label, xformer_start.elapsed());
         tracing::info!(quantized = is_gguf, "Z-Image transformer loaded");
 
         // --- Decide where to place VAE and Qwen3 text encoder based on remaining VRAM ---
@@ -451,7 +407,8 @@ impl ZImageEngine {
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
         if free > 0 {
-            self.info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
+            self.progress
+                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
             tracing::info!(free_vram = free, "free VRAM after loading transformer");
         }
 
@@ -467,7 +424,7 @@ impl ZImageEngine {
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         if !vae_on_gpu && (is_cuda || is_metal) {
-            self.info(&format!(
+            self.progress.info(&format!(
                 "VAE on CPU ({} free < {} threshold for decode workspace)",
                 fmt_gb(free),
                 fmt_gb(VAE_DECODE_VRAM_THRESHOLD),
@@ -476,19 +433,20 @@ impl ZImageEngine {
 
         // Load VAE
         let vae_label = format!("Loading VAE ({})", vae_device_label);
-        self.stage_start(&vae_label);
+        self.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
-        self.stage_done(&vae_label, vae_start.elapsed());
+        self.progress.stage_done(&vae_label, vae_start.elapsed());
         tracing::info!(device = vae_device_label, "Z-Image VAE loaded");
 
         // --- Qwen3 text encoder: auto-select variant based on VRAM ---
-        self.stage_start("Selecting Qwen3 encoder");
+        self.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
         let qwen3_preference = self.qwen3_variant.as_deref();
         let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) =
             self.resolve_qwen3_variant(qwen3_preference, &device, free)?;
-        self.stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
+        self.progress
+            .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
         let te_device = if te_on_gpu {
             device.clone()
@@ -507,7 +465,7 @@ impl ZImageEngine {
                 te_device_label,
             )
         };
-        self.stage_start(&te_label);
+        self.progress.stage_start(&te_label);
         let te_start = Instant::now();
 
         let text_encoder = if is_qwen3_gguf {
@@ -525,7 +483,7 @@ impl ZImageEngine {
             )?
         };
 
-        self.stage_done(&te_label, te_start.elapsed());
+        self.progress.stage_done(&te_label, te_start.elapsed());
         tracing::info!(device = %te_device_label, quantized = is_qwen3_gguf, "Qwen3 text encoder loaded");
 
         self.loaded = Some(LoadedZImage {
@@ -566,10 +524,10 @@ impl ZImageEngine {
 
         // Check memory budget
         if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.info(&warning);
+            self.progress.info(&warning);
         }
 
-        let device = self.create_device()?;
+        let device = crate::device::create_device(&self.progress)?;
         let dtype = device.bf16_default_to_f32();
 
         let start = Instant::now();
@@ -586,16 +544,18 @@ impl ZImageEngine {
             "starting sequential Z-Image generation"
         );
 
-        self.info("Using sequential loading (load-use-drop) to minimize peak memory");
+        self.progress
+            .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Qwen3 text encoding ---
         let free = free_vram_bytes().unwrap_or(0);
-        self.stage_start("Selecting Qwen3 encoder");
+        self.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
         let qwen3_preference = self.qwen3_variant.as_deref();
         let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) =
             self.resolve_qwen3_variant(qwen3_preference, &device, free)?;
-        self.stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
+        self.progress
+            .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
         let te_device = if te_on_gpu {
             device.clone()
@@ -622,10 +582,10 @@ impl ZImageEngine {
         preflight_memory_check("Qwen3 text encoder", te_size)?;
 
         if let Some(status) = memory_status_string() {
-            self.info(&status);
+            self.progress.info(&status);
         }
 
-        self.stage_start(&te_label);
+        self.progress.stage_start(&te_label);
         let te_start = Instant::now();
 
         let mut text_encoder = if is_qwen3_gguf {
@@ -642,17 +602,18 @@ impl ZImageEngine {
                 te_dtype,
             )?
         };
-        self.stage_done(&te_label, te_start.elapsed());
+        self.progress.stage_done(&te_label, te_start.elapsed());
 
-        self.stage_start("Encoding prompt (Qwen3)");
+        self.progress.stage_start("Encoding prompt (Qwen3)");
         let encode_start = Instant::now();
         let (cap_feats, token_count) = text_encoder.encode(&req.prompt, &device, dtype)?;
         let cap_mask = Tensor::ones((1, token_count), DType::U8, &device)?;
-        self.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+        self.progress
+            .stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
 
         // Drop text encoder to free memory before loading transformer
         drop(text_encoder);
-        self.info("Freed Qwen3 text encoder");
+        self.progress.info("Freed Qwen3 text encoder");
         tracing::info!("Qwen3 text encoder dropped (sequential mode)");
 
         // --- Phase 2: Load transformer and denoise ---
@@ -665,7 +626,7 @@ impl ZImageEngine {
         preflight_memory_check("Z-Image transformer", xformer_size)?;
 
         if let Some(status) = memory_status_string() {
-            self.info(&status);
+            self.progress.info(&status);
         }
 
         let xformer_label = if is_gguf {
@@ -676,10 +637,11 @@ impl ZImageEngine {
                 xformer_paths.len()
             )
         };
-        self.stage_start(&xformer_label);
+        self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
-        self.stage_done(&xformer_label, xformer_start.elapsed());
+        self.progress
+            .stage_done(&xformer_label, xformer_start.elapsed());
 
         // Calculate latent dimensions
         let vae_align = 16;
@@ -705,7 +667,7 @@ impl ZImageEngine {
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
-        self.stage_start(&denoise_label);
+        self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         for step in 0..num_steps {
@@ -718,25 +680,26 @@ impl ZImageEngine {
             let latents_4d = latents.squeeze(2)?;
             let prev_latents = scheduler.step(&noise_pred_4d, &latents_4d)?;
             latents = prev_latents.unsqueeze(2)?;
-            self.emit(ProgressEvent::DenoiseStep {
+            self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.stage_done(&denoise_label, denoise_start.elapsed());
+        self.progress
+            .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer and text embeddings to free memory for VAE decode
         drop(transformer);
-        self.info("Freed Z-Image transformer");
+        self.progress.info("Freed Z-Image transformer");
         drop(cap_feats);
         drop(cap_mask);
         tracing::info!("Transformer dropped (sequential mode)");
 
         // --- Phase 3: Load VAE and decode ---
         if let Some(status) = memory_status_string() {
-            self.info(&status);
+            self.progress.info(&status);
         }
         // With sequential loading, we can always try GPU for VAE since transformer is freed
         let free_for_vae = free_vram_bytes().unwrap_or(0);
@@ -755,12 +718,12 @@ impl ZImageEngine {
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         let vae_label = format!("Loading VAE ({})", vae_device_label);
-        self.stage_start(&vae_label);
+        self.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
-        self.stage_done(&vae_label, vae_start.elapsed());
+        self.progress.stage_done(&vae_label, vae_start.elapsed());
 
-        self.stage_start("VAE decode");
+        self.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
         let latents = latents
@@ -771,7 +734,8 @@ impl ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?;
 
-        self.stage_done("VAE decode", vae_decode_start.elapsed());
+        self.progress
+            .stage_done("VAE decode", vae_decode_start.elapsed());
 
         // VAE dropped here
         let image_bytes = encode_image(&image, req.output_format, req.width, req.height)?;
@@ -810,46 +774,40 @@ impl InferenceEngine for ZImageEngine {
             bail!("model not loaded — call load() first");
         }
 
-        // Extract progress callback so we can emit events while loaded is mutably borrowed
-        let on_progress = &self.on_progress;
-        let emit = |event: ProgressEvent| {
-            if let Some(cb) = on_progress {
-                cb(event);
-            }
-        };
-        let stage_start = |name: &str| {
-            emit(ProgressEvent::StageStart {
-                name: name.to_string(),
-            });
-        };
-        let stage_done = |name: &str, elapsed: std::time::Duration| {
-            emit(ProgressEvent::StageDone {
-                name: name.to_string(),
-                elapsed,
-            });
-        };
+        // Borrow progress reporter separately from loaded state.
+        let progress = &self.progress;
 
         let start = Instant::now();
 
         // Reload transformer if it was dropped (offloaded) after previous VAE decode
-        let needs_reload = self.loaded.as_ref().unwrap().transformer.is_none();
+        let loaded_ref = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+        let needs_reload = loaded_ref.transformer.is_none();
         if needs_reload {
             {
-                let mut loaded_mut = self.loaded.take().unwrap();
+                let mut loaded_mut = self
+                    .loaded
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
                 let xformer_label = if loaded_mut.is_quantized {
                     "Reloading Z-Image transformer (GPU, quantized)"
                 } else {
                     "Reloading Z-Image transformer (GPU, BF16)"
                 };
-                stage_start(xformer_label);
+                progress.stage_start(xformer_label);
                 let reload_start = Instant::now();
                 self.reload_transformer(&mut loaded_mut)?;
-                stage_done(xformer_label, reload_start.elapsed());
+                progress.stage_done(xformer_label, reload_start.elapsed());
                 self.loaded = Some(loaded_mut);
             }
         }
 
-        let loaded = self.loaded.as_mut().unwrap();
+        let loaded = self
+            .loaded
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
         let seed = req.seed.unwrap_or_else(rand_seed);
         loaded.device.set_seed(seed)?;
 
@@ -870,14 +828,14 @@ impl InferenceEngine for ZImageEngine {
             } else {
                 "Reloading Qwen3 encoder (BF16)"
             };
-            stage_start(te_label);
+            progress.stage_start(te_label);
             let reload_start = Instant::now();
             loaded.text_encoder.reload()?;
-            stage_done(te_label, reload_start.elapsed());
+            progress.stage_done(te_label, reload_start.elapsed());
         }
 
         // 2. Encode prompt with Qwen3
-        stage_start("Encoding prompt (Qwen3)");
+        progress.stage_start("Encoding prompt (Qwen3)");
         let encode_start = Instant::now();
 
         let (cap_feats, token_count) =
@@ -886,7 +844,7 @@ impl InferenceEngine for ZImageEngine {
                 .encode(&req.prompt, &loaded.device, loaded.dtype)?;
         let cap_mask = Tensor::ones((1, token_count), DType::U8, &loaded.device)?;
 
-        stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+        progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
         tracing::info!(token_count, "text encoding complete");
 
         // Drop text encoder from GPU to free VRAM for denoising + VAE decode.
@@ -925,7 +883,7 @@ impl InferenceEngine for ZImageEngine {
         // 7. Denoising loop
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
-        stage_start(&denoise_label);
+        progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         // Scope the transformer borrow so it can be dropped before VAE decode
@@ -956,7 +914,7 @@ impl InferenceEngine for ZImageEngine {
 
                 // Add back frame dimension
                 latents = prev_latents.unsqueeze(2)?;
-                emit(ProgressEvent::DenoiseStep {
+                progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
                     total: num_steps,
                     elapsed: step_start.elapsed(),
@@ -964,7 +922,7 @@ impl InferenceEngine for ZImageEngine {
             }
         }
 
-        stage_done(&denoise_label, denoise_start.elapsed());
+        progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete");
 
         // Free text embeddings — no longer needed after denoising
@@ -978,7 +936,7 @@ impl InferenceEngine for ZImageEngine {
         tracing::info!("Z-Image transformer dropped from GPU to free VRAM for VAE decode");
 
         // 8. VAE decode (may be on CPU if VRAM is tight)
-        stage_start("VAE decode");
+        progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
         // Remove frame dimension: (B, C, 1, H, W) → (B, C, H, W)
@@ -997,7 +955,7 @@ impl InferenceEngine for ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?; // Remove batch dimension → [3, H, W]
 
-        stage_done("VAE decode", vae_start.elapsed());
+        progress.stage_done("VAE decode", vae_start.elapsed());
 
         // 9. Encode to output format
         let image_bytes = encode_image(&image, req.output_format, req.width, req.height)?;
@@ -1032,8 +990,12 @@ impl InferenceEngine for ZImageEngine {
         ZImageEngine::load(self)
     }
 
+    fn unload(&mut self) {
+        self.loaded = None;
+    }
+
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.on_progress = Some(callback);
+        self.progress.set_callback(callback);
     }
 }
 

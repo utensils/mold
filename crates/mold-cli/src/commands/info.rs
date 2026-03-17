@@ -2,13 +2,78 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::{
     find_manifest, resolve_model_name, ModelComponent, SHARED_COMPONENTS_GB,
-    SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
+    SHARED_SD15_COMPONENTS_GB, SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
 };
-use mold_core::Config;
+use mold_core::{Config, ModelPaths};
+use sha2::{Digest, Sha256};
+
+fn compute_sha256(path: &str) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1MB buffer
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn resolve_file_path(
+    model_config: Option<&mold_core::config::ModelConfig>,
+    component: &ModelComponent,
+) -> Option<String> {
+    let mcfg = model_config?;
+    match component {
+        ModelComponent::Transformer => mcfg.transformer.clone(),
+        ModelComponent::Vae => mcfg.vae.clone(),
+        ModelComponent::T5Encoder => mcfg.t5_encoder.clone(),
+        ModelComponent::ClipEncoder => mcfg.clip_encoder.clone(),
+        ModelComponent::T5Tokenizer => mcfg.t5_tokenizer.clone(),
+        ModelComponent::ClipTokenizer => mcfg.clip_tokenizer.clone(),
+        ModelComponent::ClipEncoder2 => mcfg.clip_encoder_2.clone(),
+        ModelComponent::ClipTokenizer2 => mcfg.clip_tokenizer_2.clone(),
+        ModelComponent::TextTokenizer => mcfg.text_tokenizer.clone(),
+        ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+    }
+}
+
+/// Resolve a file path for verification: check ModelPaths (which honors env vars)
+/// first, then fall back to config-only resolution.
+fn resolve_verify_path(
+    resolved: Option<&ModelPaths>,
+    model_config: Option<&mold_core::config::ModelConfig>,
+    component: &ModelComponent,
+) -> Option<String> {
+    if let Some(paths) = resolved {
+        let path = match component {
+            ModelComponent::Transformer => Some(&paths.transformer),
+            ModelComponent::Vae => Some(&paths.vae),
+            ModelComponent::T5Encoder => paths.t5_encoder.as_ref(),
+            ModelComponent::ClipEncoder => paths.clip_encoder.as_ref(),
+            ModelComponent::T5Tokenizer => paths.t5_tokenizer.as_ref(),
+            ModelComponent::ClipTokenizer => paths.clip_tokenizer.as_ref(),
+            ModelComponent::ClipEncoder2 => paths.clip_encoder_2.as_ref(),
+            ModelComponent::ClipTokenizer2 => paths.clip_tokenizer_2.as_ref(),
+            ModelComponent::TextTokenizer => paths.text_tokenizer.as_ref(),
+            // Shards and text encoder files are multi-valued; fall through to config
+            ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+        };
+        if let Some(p) = path {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    // Fall back to config-only resolution for components ModelPaths doesn't cover
+    resolve_file_path(model_config, component)
+}
 
 fn format_family(family: &str) -> String {
     match family {
         "flux" => "FLUX.1".magenta().to_string(),
+        "sd15" => "SD1.5".green().to_string(),
         "sdxl" => "SDXL".yellow().to_string(),
         "z-image" => "Z-Image".cyan().to_string(),
         other => other.to_uppercase(),
@@ -31,7 +96,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
     }
 }
 
-pub fn run(name: &str) -> Result<()> {
+pub fn run(name: &str, verify: bool) -> Result<()> {
     let canonical = resolve_model_name(name);
     let config = Config::load_or_default();
 
@@ -61,6 +126,7 @@ pub fn run(name: &str) -> Result<()> {
 
         // Size info
         let shared_gb = match m.family.as_str() {
+            "sd15" => SHARED_SD15_COMPONENTS_GB,
             "sdxl" => SHARED_SDXL_COMPONENTS_GB,
             "z-image" => SHARED_ZIMAGE_COMPONENTS_GB,
             _ => SHARED_COMPONENTS_GB,
@@ -204,6 +270,96 @@ pub fn run(name: &str) -> Result<()> {
         if !has_files {
             println!("  {}", "(no paths configured)".dimmed());
         }
+        // Estimated memory usage
+        if let Some(paths) = ModelPaths::resolve(&canonical, &config) {
+            let eager = mold_inference::device::estimate_peak_memory(
+                &paths,
+                mold_inference::LoadStrategy::Eager,
+            );
+            let sequential = mold_inference::device::estimate_peak_memory(
+                &paths,
+                mold_inference::LoadStrategy::Sequential,
+            );
+            println!();
+            println!("  {}", "Estimated Peak Memory".bold());
+            println!(
+                "  {:<20} {:.1}GB",
+                "Eager (--eager):".dimmed(),
+                eager as f64 / 1_073_741_824.0
+            );
+            println!(
+                "  {:<20} {:.1}GB",
+                "Sequential:".dimmed(),
+                sequential as f64 / 1_073_741_824.0
+            );
+        }
+        // SHA-256 verification
+        if verify {
+            if let Some(ref m) = manifest {
+                println!();
+                println!("  {}", "Integrity Check".bold());
+                let resolved_paths = ModelPaths::resolve(&canonical, &config);
+                let mut all_ok = true;
+                for file in &m.files {
+                    let local_path =
+                        resolve_verify_path(resolved_paths.as_ref(), model_config, &file.component);
+                    match (local_path, file.sha256) {
+                        (Some(path), Some(expected)) => match compute_sha256(&path) {
+                            Ok(actual) if actual == expected => {
+                                println!(
+                                    "  {} {} {}",
+                                    "OK".green(),
+                                    component_label(&file.component),
+                                    path.dimmed()
+                                );
+                            }
+                            Ok(actual) => {
+                                all_ok = false;
+                                println!(
+                                    "  {} {} — hash mismatch",
+                                    "FAIL".red().bold(),
+                                    component_label(&file.component)
+                                );
+                                println!("    expected: {}", expected.dimmed());
+                                println!("    actual:   {}", actual.dimmed());
+                            }
+                            Err(e) => {
+                                all_ok = false;
+                                println!(
+                                    "  {} {} — {}",
+                                    "ERR".red(),
+                                    component_label(&file.component),
+                                    e
+                                );
+                            }
+                        },
+                        (Some(_), None) => {
+                            println!(
+                                "  {} {} — no checksum available",
+                                "SKIP".yellow(),
+                                component_label(&file.component)
+                            );
+                        }
+                        (None, _) => {
+                            println!(
+                                "  {} {} — file not found locally",
+                                "SKIP".yellow(),
+                                component_label(&file.component)
+                            );
+                        }
+                    }
+                }
+                if all_ok {
+                    println!("  {}", "All verified files OK.".green());
+                }
+            } else {
+                println!();
+                println!(
+                    "  {} --verify requires a manifest model (not custom config)",
+                    "note:".dimmed()
+                );
+            }
+        }
     } else {
         println!(
             "  {:<16} {} — run {} to download",
@@ -253,33 +409,45 @@ mod tests {
     }
 
     #[test]
+    fn format_family_sd15() {
+        let result = format_family("sd15");
+        assert!(result.contains("SD1.5"));
+    }
+
+    #[test]
     fn format_family_unknown() {
         assert_eq!(format_family("other"), "OTHER");
     }
 
     #[test]
     fn unknown_model_returns_error() {
-        let result = run("nonexistent-model-xyz");
+        let result = run("nonexistent-model-xyz", false);
         assert!(result.is_err());
     }
 
     #[test]
     fn known_model_succeeds() {
         // flux-schnell is always in the manifest registry
-        let result = run("flux-schnell");
+        let result = run("flux-schnell", false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn sdxl_model_succeeds() {
-        let result = run("sdxl-base");
+        let result = run("sdxl-base", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sd15_model_succeeds() {
+        let result = run("sd15", false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn legacy_name_resolves() {
         // flux-dev-q4 should resolve to flux-dev:q4
-        let result = run("flux-dev-q4");
+        let result = run("flux-dev-q4", false);
         assert!(result.is_ok());
     }
 }

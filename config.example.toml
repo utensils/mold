@@ -14,7 +14,6 @@ server_port   = 7680
 default_width  = 768
 default_height = 768
 default_steps  = 4
-output_dir     = "~/.mold/outputs"
 
 # ── FLUX.1 Schnell Q8 ─────────────────────────────────────────────────────────
 # Fast 4-step model. Great for quick iteration and previews.

@@ -1,5 +1,5 @@
 {
-  description = "mold — local AI image generation CLI for FLUX & SDXL diffusion models";
+  description = "mold — local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -41,6 +41,12 @@
         let
           isLinux = system == "x86_64-linux";
           isDarwin = system == "aarch64-darwin";
+
+          # CUDA compute capability — override for different GPU architectures.
+          # Default "89" targets RTX 4090 (Ada Lovelace).
+          # Common values: "75" (Turing), "80" (Ampere A100), "86" (Ampere 3090),
+          # "89" (Ada 4090), "90" (Hopper H100).
+          cudaComputeCap = "89";
 
           pkgs = import inputs.nixpkgs {
             inherit system;
@@ -90,7 +96,7 @@
           }
           // lib.optionalAttrs isLinux {
             CUDA_PATH = "${pkgs.cudaPackages.cuda_nvcc}";
-            CUDA_COMPUTE_CAP = "89";
+            CUDA_COMPUTE_CAP = cudaComputeCap;
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
 
@@ -105,7 +111,7 @@
               "";
 
           meta = with lib; {
-            description = "Local AI image generation CLI for FLUX & SDXL diffusion models";
+            description = "Local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
             homepage = "https://github.com/utensils/mold";
             license = licenses.mit;
             maintainers = [ ];
@@ -130,11 +136,12 @@
           apps.default = {
             type = "app";
             program = "${mold}/bin/mold";
+            meta.description = meta.description;
           };
 
           devshells.default = {
             motd = ''
-              {202}mold{reset} — local AI image generation for FLUX & SDXL ({bold}${system}{reset})
+              {202}mold{reset} — local AI image generation for FLUX, SD1.5, SDXL & Z-Image ({bold}${system}{reset})
               $(type menu &>/dev/null && menu)
             '';
 
@@ -283,7 +290,10 @@
           treefmt = {
             projectRootFile = "flake.nix";
             programs.nixfmt.enable = true;
-            programs.rustfmt.enable = true;
+            programs.rustfmt = {
+              enable = true;
+              edition = "2021";
+            };
           };
         };
     };

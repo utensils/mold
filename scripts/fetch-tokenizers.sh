@@ -14,4 +14,8 @@ echo "Downloading CLIP tokenizer..."
 curl -fSL -o "$TOKENIZER_DIR/clip-vit-large-patch14.tokenizer.json" \
   "https://huggingface.co/openai/clip-vit-large-patch14/resolve/main/tokenizer.json"
 
+echo "Downloading Qwen3 tokenizer (Z-Image)..."
+curl -fSL -o "$TOKENIZER_DIR/qwen3-tokenizer.json" \
+  "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/resolve/main/tokenizer/tokenizer.json"
+
 echo "Done. Tokenizers saved to $TOKENIZER_DIR"

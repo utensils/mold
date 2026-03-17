@@ -4,10 +4,8 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use mold_core::{GenerateRequest, GenerateResponse, ImageData, OutputFormat};
+    use mold_core::{GenerateRequest, GenerateResponse, ImageData};
     use mold_inference::InferenceEngine;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     use crate::{routes::create_router, state::AppState};
@@ -135,6 +133,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn list_models_uses_manifest_defaults_for_unpulled() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        // SD1.5 model should have manifest defaults (512x512, guidance 7.5, 25 steps)
+        let sd15 = models.iter().find(|m| m["name"] == "sd15:fp16");
+        if let Some(sd15) = sd15 {
+            assert_eq!(sd15["default_width"], 512, "SD1.5 width should be 512");
+            assert_eq!(sd15["default_height"], 512, "SD1.5 height should be 512");
+            assert_eq!(sd15["default_steps"], 25, "SD1.5 steps should be 25");
+            assert_eq!(
+                sd15["default_guidance"], 7.5,
+                "SD1.5 guidance should be 7.5"
+            );
+        }
+
+        // FLUX schnell should have manifest defaults (1024x1024, guidance 0.0, 4 steps)
+        let schnell = models.iter().find(|m| m["name"] == "flux-schnell:q8");
+        if let Some(schnell) = schnell {
+            assert_eq!(schnell["default_width"], 1024);
+            assert_eq!(schnell["default_height"], 1024);
+            assert_eq!(schnell["default_steps"], 4);
+        }
     }
 
     // ── /api/generate — validation ───────────────────────────────────────────

@@ -166,6 +166,27 @@ mod tests {
     }
 
     #[test]
+    fn sd15_model_name_is_recognized() {
+        let config = test_config();
+        let (model, prompt) =
+            resolve_run_args(Some("sd15"), &["a".to_string(), "dog".to_string()], &config);
+        assert_eq!(model, "sd15:fp16");
+        assert_eq!(prompt.unwrap(), "a dog");
+    }
+
+    #[test]
+    fn dreamshaper_v8_model_is_recognized() {
+        let config = test_config();
+        let (model, prompt) = resolve_run_args(
+            Some("dreamshaper-v8"),
+            &["photorealistic".to_string()],
+            &config,
+        );
+        assert_eq!(model, "dreamshaper-v8:fp16");
+        assert_eq!(prompt.unwrap(), "photorealistic");
+    }
+
+    #[test]
     fn completions_return_models() {
         let candidates = complete_model_name();
         assert!(!candidates.is_empty());

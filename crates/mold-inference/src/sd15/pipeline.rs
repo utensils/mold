@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, Module, Tensor, D};
+use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
@@ -9,42 +9,37 @@ use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
-/// Loaded SDXL model components, ready for inference.
-struct LoadedSDXL {
+/// VAE scaling factor for SD1.5 models.
+const VAE_SCALE: f64 = 0.18215;
+
+/// Loaded SD1.5 model components, ready for inference.
+struct LoadedSD15 {
     unet: stable_diffusion::unet_2d::UNet2DConditionModel,
     vae: stable_diffusion::vae::AutoEncoderKL,
-    clip_l: stable_diffusion::clip::ClipTextTransformer,
-    clip_g: stable_diffusion::clip::ClipTextTransformer,
-    tokenizer_l: tokenizers::Tokenizer,
-    tokenizer_g: tokenizers::Tokenizer,
+    clip: stable_diffusion::clip::ClipTextTransformer,
+    tokenizer: tokenizers::Tokenizer,
     sd_config: stable_diffusion::StableDiffusionConfig,
     device: Device,
     dtype: DType,
 }
 
-/// SDXL inference engine backed by candle's stable_diffusion module.
-pub struct SDXLEngine {
-    loaded: Option<LoadedSDXL>,
+/// SD1.5 inference engine backed by candle's stable_diffusion module.
+///
+/// Simplified variant of SDXL: single CLIP-L encoder, smaller UNet, 512x512 default.
+pub struct SD15Engine {
+    loaded: Option<LoadedSD15>,
     model_name: String,
     paths: ModelPaths,
     scheduler_name: String,
-    is_turbo: bool,
     progress: ProgressReporter,
-    /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
 }
 
-/// VAE scaling factor for standard SDXL models.
-const VAE_SCALE_STANDARD: f64 = 0.18215;
-/// VAE scaling factor for SDXL Turbo models.
-const VAE_SCALE_TURBO: f64 = 0.13025;
-
-impl SDXLEngine {
+impl SD15Engine {
     pub fn new(
         model_name: String,
         paths: ModelPaths,
         scheduler_name: String,
-        is_turbo: bool,
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
@@ -52,44 +47,24 @@ impl SDXLEngine {
             model_name,
             paths,
             scheduler_name,
-            is_turbo,
             progress: ProgressReporter::default(),
             load_strategy,
         }
     }
 
-    /// Validate and return required SDXL paths.
-    fn validate_paths(
-        &self,
-    ) -> Result<(
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    )> {
+    /// Validate and return required SD1.5 paths (CLIP-L encoder + tokenizer).
+    fn validate_paths(&self) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
         let clip_encoder = self
             .paths
             .clip_encoder
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SDXL models"))?
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SD1.5 models"))?
             .clone();
         let clip_tokenizer = self
             .paths
             .clip_tokenizer
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SDXL models"))?
-            .clone();
-        let clip_encoder_2 = self
-            .paths
-            .clip_encoder_2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G encoder path required for SDXL models"))?
-            .clone();
-        let clip_tokenizer_2 = self
-            .paths
-            .clip_tokenizer_2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G tokenizer path required for SDXL models"))?
+            .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SD1.5 models"))?
             .clone();
 
         for (label, path) in [
@@ -97,32 +72,21 @@ impl SDXLEngine {
             ("vae", &self.paths.vae),
             ("clip_encoder (CLIP-L)", &clip_encoder),
             ("clip_tokenizer (CLIP-L)", &clip_tokenizer),
-            ("clip_encoder_2 (CLIP-G)", &clip_encoder_2),
-            ("clip_tokenizer_2 (CLIP-G)", &clip_tokenizer_2),
         ] {
             if !path.exists() {
                 bail!("{label} file not found: {}", path.display());
             }
         }
 
-        Ok((
-            clip_encoder,
-            clip_tokenizer,
-            clip_encoder_2,
-            clip_tokenizer_2,
-        ))
+        Ok((clip_encoder, clip_tokenizer))
     }
 
-    /// Create the SDXL config.
+    /// Create the SD1.5 config.
     fn sd_config(&self) -> stable_diffusion::StableDiffusionConfig {
-        if self.is_turbo {
-            stable_diffusion::StableDiffusionConfig::sdxl_turbo(None, None, None)
-        } else {
-            stable_diffusion::StableDiffusionConfig::sdxl(None, None, None)
-        }
+        stable_diffusion::StableDiffusionConfig::v1_5(None, None, None)
     }
 
-    /// Load all SDXL model components (Eager mode).
+    /// Load all SD1.5 model components (Eager mode).
     pub fn load(&mut self) -> Result<()> {
         if self.loaded.is_some() {
             return Ok(());
@@ -133,10 +97,9 @@ impl SDXLEngine {
             return Ok(());
         }
 
-        let (clip_encoder, clip_tokenizer, clip_encoder_2, clip_tokenizer_2) =
-            self.validate_paths()?;
+        let (clip_encoder, clip_tokenizer) = self.validate_paths()?;
 
-        tracing::info!(model = %self.model_name, "loading SDXL model components...");
+        tracing::info!(model = %self.model_name, "loading SD1.5 model components...");
 
         let device = crate::device::create_device(&self.progress)?;
         let dtype = if device.is_cuda() || device.is_metal() {
@@ -169,55 +132,35 @@ impl SDXLEngine {
 
         // Load CLIP-L encoder
         self.progress.stage_start("Loading CLIP-L encoder");
-        let clip_l_start = Instant::now();
-        let clip_l = stable_diffusion::build_clip_transformer(
+        let clip_start = Instant::now();
+        let clip = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
             &clip_encoder,
             &device,
             DType::F32,
         )?;
         self.progress
-            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+            .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
-        // Load CLIP-G encoder
-        self.progress.stage_start("Loading CLIP-G encoder");
-        let clip_g_start = Instant::now();
-        let clip2_config = sd_config
-            .clip2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
-        let clip_g = stable_diffusion::build_clip_transformer(
-            clip2_config,
-            &clip_encoder_2,
-            &device,
-            DType::F32,
-        )?;
-        self.progress
-            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
-
-        // Load tokenizers
-        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
+        // Load tokenizer
+        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
 
-        self.loaded = Some(LoadedSDXL {
+        self.loaded = Some(LoadedSD15 {
             unet,
             vae,
-            clip_l,
-            clip_g,
-            tokenizer_l,
-            tokenizer_g,
+            clip,
+            tokenizer,
             sd_config,
             device,
             dtype,
         });
 
-        tracing::info!(model = %self.model_name, "all SDXL components loaded successfully");
+        tracing::info!(model = %self.model_name, "all SD1.5 components loaded successfully");
         Ok(())
     }
 
-    /// Tokenize a prompt for a CLIP encoder, padding/truncating to max_len tokens.
+    /// Tokenize a prompt for the CLIP encoder, padding/truncating to max_len tokens.
     fn tokenize(
         tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
@@ -288,14 +231,12 @@ impl SDXLEngine {
         Ok(())
     }
 
-    /// Encode prompt with both CLIP encoders.
+    /// Encode prompt with the single CLIP-L encoder.
     #[allow(clippy::too_many_arguments)]
     fn encode_prompt(
         &self,
-        clip_l: &stable_diffusion::clip::ClipTextTransformer,
-        clip_g: &stable_diffusion::clip::ClipTextTransformer,
-        tokenizer_l: &tokenizers::Tokenizer,
-        tokenizer_g: &tokenizers::Tokenizer,
+        clip: &stable_diffusion::clip::ClipTextTransformer,
+        tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
         max_len: usize,
         device: &Device,
@@ -305,27 +246,15 @@ impl SDXLEngine {
         let use_cfg = guidance > 1.0;
 
         self.progress.stage_start("Encoding prompt (CLIP-L)");
-        let encode_l_start = Instant::now();
-        let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
-        let text_emb_l = clip_l.forward(&tokens_l)?;
+        let encode_start = Instant::now();
+        let tokens = Self::tokenize(tokenizer, prompt, max_len, device)?;
+        let text_embeddings = clip.forward(&tokens)?;
         self.progress
-            .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
-
-        self.progress.stage_start("Encoding prompt (CLIP-G)");
-        let encode_g_start = Instant::now();
-        let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
-        let text_emb_g = clip_g.forward(&tokens_g)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
-
-        let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
+            .stage_done("Encoding prompt (CLIP-L)", encode_start.elapsed());
 
         let text_embeddings = if use_cfg {
-            let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
-            let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
-            let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
-            let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
-            let uncond_embeddings = Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
+            let uncond_tokens = Self::tokenize(tokenizer, "", max_len, device)?;
+            let uncond_embeddings = clip.forward(&uncond_tokens)?;
             Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
         } else {
             text_embeddings
@@ -338,12 +267,10 @@ impl SDXLEngine {
     ///
     /// Loads components one at a time and drops them when done:
     /// 1. Load CLIP-L → encode → drop CLIP-L
-    /// 2. Load CLIP-G → encode → drop CLIP-G
-    /// 3. Load UNet → denoise → drop UNet
-    /// 4. Load VAE → decode → drop VAE
+    /// 2. Load UNet → denoise → drop UNet
+    /// 3. Load VAE → decode → drop VAE
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
-        let (clip_encoder, clip_tokenizer, clip_encoder_2, clip_tokenizer_2) =
-            self.validate_paths()?;
+        let (clip_encoder, clip_tokenizer) = self.validate_paths()?;
 
         // Check memory budget
         if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
@@ -373,59 +300,37 @@ impl SDXLEngine {
             seed, width, height,
             steps = req.steps,
             guidance,
-            "starting sequential SDXL generation"
+            "starting sequential SD1.5 generation"
         );
 
         self.progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Load both CLIP encoders, encode, then drop ---
-        // SDXL CLIP encoders are small (~1.7GB total) so we load both for encoding,
-        // then drop them together before loading the UNet.
+        // --- Phase 1: Load CLIP-L encoder, encode, then drop ---
         if let Some(status) = memory_status_string() {
             self.progress.info(&status);
         }
 
-        // Load tokenizers (kept in memory — tiny)
-        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
+        // Load tokenizer (kept in memory — tiny)
+        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
 
         // Load CLIP-L
         self.progress.stage_start("Loading CLIP-L encoder");
-        let clip_l_start = Instant::now();
-        let clip_l = stable_diffusion::build_clip_transformer(
+        let clip_start = Instant::now();
+        let clip = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
             &clip_encoder,
             &device,
             DType::F32,
         )?;
         self.progress
-            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
-
-        // Load CLIP-G
-        self.progress.stage_start("Loading CLIP-G encoder");
-        let clip_g_start = Instant::now();
-        let clip2_config = sd_config
-            .clip2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
-        let clip_g = stable_diffusion::build_clip_transformer(
-            clip2_config,
-            &clip_encoder_2,
-            &device,
-            DType::F32,
-        )?;
-        self.progress
-            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+            .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
         // Encode prompt
         let text_embeddings = self.encode_prompt(
-            &clip_l,
-            &clip_g,
-            &tokenizer_l,
-            &tokenizer_g,
+            &clip,
+            &tokenizer,
             &req.prompt,
             max_len,
             &device,
@@ -433,11 +338,10 @@ impl SDXLEngine {
             guidance,
         )?;
 
-        // Drop CLIP encoders to free memory
-        drop(clip_l);
-        drop(clip_g);
-        self.progress.info("Freed CLIP-L and CLIP-G encoders");
-        tracing::info!("CLIP encoders dropped (sequential mode)");
+        // Drop CLIP encoder to free memory
+        drop(clip);
+        self.progress.info("Freed CLIP-L encoder");
+        tracing::info!("CLIP encoder dropped (sequential mode)");
 
         // --- Phase 2: Load UNet and denoise ---
         let unet_size = std::fs::metadata(&self.paths.transformer)
@@ -487,12 +391,7 @@ impl SDXLEngine {
         self.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
-        let vae_scale = if self.is_turbo {
-            VAE_SCALE_TURBO
-        } else {
-            VAE_SCALE_STANDARD
-        };
-        let latents = (latents / vae_scale)?;
+        let latents = (latents / VAE_SCALE)?;
         let img = vae.decode(&latents.to_dtype(dtype)?)?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
@@ -502,14 +401,13 @@ impl SDXLEngine {
         self.progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
-        // VAE dropped here
         let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
             generation_time_ms,
             seed,
-            "sequential SDXL generation complete"
+            "sequential SD1.5 generation complete"
         );
 
         Ok(GenerateResponse {
@@ -527,7 +425,7 @@ impl SDXLEngine {
     }
 }
 
-impl InferenceEngine for SDXLEngine {
+impl InferenceEngine for SD15Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {
@@ -554,16 +452,14 @@ impl InferenceEngine for SDXLEngine {
             steps = req.steps,
             guidance,
             scheduler = %self.scheduler_name,
-            "starting SDXL generation"
+            "starting SD1.5 generation"
         );
 
-        // 1. Encode prompt with both CLIP encoders
+        // 1. Encode prompt with CLIP-L
         let max_len = loaded.sd_config.clip.max_position_embeddings;
         let text_embeddings = self.encode_prompt(
-            &loaded.clip_l,
-            &loaded.clip_g,
-            &loaded.tokenizer_l,
-            &loaded.tokenizer_g,
+            &loaded.clip,
+            &loaded.tokenizer,
             &req.prompt,
             max_len,
             &loaded.device,
@@ -571,7 +467,7 @@ impl InferenceEngine for SDXLEngine {
             guidance,
         )?;
 
-        // 3. Build scheduler
+        // 2. Build scheduler and create initial latents
         let latent_h = height / 8;
         let latent_w = width / 8;
         let scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
@@ -581,7 +477,7 @@ impl InferenceEngine for SDXLEngine {
                 * init_noise_sigma)?;
         latents = latents.to_dtype(loaded.dtype)?;
 
-        // 5. Denoising loop
+        // 3. Denoising loop
         self.denoise_loop(
             &loaded.unet,
             &text_embeddings,
@@ -591,30 +487,24 @@ impl InferenceEngine for SDXLEngine {
             req.steps,
         )?;
 
-        // 6. VAE decode
+        // 4. VAE decode
         self.progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
-        let vae_scale = if self.is_turbo {
-            VAE_SCALE_TURBO
-        } else {
-            VAE_SCALE_STANDARD
-        };
-        let latents = (latents / vae_scale)?;
+        let latents = (latents / VAE_SCALE)?;
         let img = loaded.vae.decode(&latents.to_dtype(loaded.dtype)?)?;
 
-        // 7. Post-process: [1, 3, H, W] → clamp → u8
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
-        let img = img.squeeze(0)?; // [3, H, W]
+        let img = img.squeeze(0)?;
 
         self.progress.stage_done("VAE decode", vae_start.elapsed());
 
-        // 8. Encode to image format
+        // 5. Encode to image format
         let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
-        tracing::info!(generation_time_ms, seed, "SDXL generation complete");
+        tracing::info!(generation_time_ms, seed, "SD1.5 generation complete");
 
         Ok(GenerateResponse {
             images: vec![ImageData {
@@ -640,7 +530,7 @@ impl InferenceEngine for SDXLEngine {
     }
 
     fn load(&mut self) -> Result<()> {
-        SDXLEngine::load(self)
+        SD15Engine::load(self)
     }
 
     fn unload(&mut self) {

@@ -33,5 +33,11 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     if req.steps > 100 {
         return Err(format!("steps ({}) must be <= 100", req.steps));
     }
+    if req.batch_size == 0 {
+        return Err("batch_size must be >= 1".to_string());
+    }
+    if req.batch_size > 16 {
+        return Err(format!("batch_size ({}) must be <= 16", req.batch_size));
+    }
     Ok(())
 }

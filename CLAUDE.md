@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # mold — Architecture & Development Guide
 
-> Local AI image generation CLI — FLUX, SDXL & Z-Image diffusion models on your GPU.
+> Local AI image generation CLI — FLUX, Stable Diffusion 1.5, SDXL & Z-Image diffusion models on your GPU.
 
-mold is a CLI tool for AI image generation using FLUX, SDXL, and Z-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX, Stable Diffusion 1.5, SDXL, and Z-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
 ## Build & Development Commands
 
@@ -50,7 +50,6 @@ cargo test                                           # All tests
 cargo test -p mold-core                              # Single crate
 cargo run -p mold-cli -- run "a cat"                 # Generate image
 cargo run -p mold-cli -- serve                       # Start server
-./scripts/deploy.sh                                  # Deploy to GPU host
 ```
 
 ### CI (GitHub Actions)
@@ -71,7 +70,7 @@ CI runs on every push and PR (`.github/workflows/ci.yml`): `cargo check`, `cargo
 ```
 crates/
 ├── mold-core/                # Shared types, API protocol, HTTP client, config, model manifests
-├── mold-inference/           # Candle-based inference engine (FLUX, SDXL, Z-Image)
+├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, Z-Image)
 ├── mold-server/              # Axum HTTP inference server (lib + binary)
 └── mold-cli/                 # Main binary — CLI (clap)
 ```
@@ -90,7 +89,7 @@ Shared library used by all other crates:
 
 ### mold-inference
 
-Three model families, each with its own pipeline implementing the `InferenceEngine` trait:
+Four model families, each with its own pipeline implementing the `InferenceEngine` trait:
 
 ```rust
 pub trait InferenceEngine: Send + Sync {
@@ -104,6 +103,7 @@ pub trait InferenceEngine: Send + Sync {
 
 **Engine factory** — `create_engine()` in `factory.rs` auto-detects the model family and returns:
 - `"flux"` → `FluxEngine` — T5 + CLIP-L text encoding, flow-matching transformer, VAE decode
+- `"sd15"` → `SD15Engine` — CLIP-L text encoding, UNet with DDIM, classifier-free guidance (512x512 default)
 - `"sdxl"` → `SDXLEngine` — Dual-CLIP (CLIP-L + CLIP-G), UNet with DDIM/Euler Ancestral, classifier-free guidance
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
 
@@ -128,6 +128,8 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 |--------|------|-------------|
 | `POST` | `/api/generate` | Generate images from prompt |
 | `GET` | `/api/models` | List available models |
+| `POST` | `/api/models/load` | Load/swap the active model |
+| `DELETE` | `/api/models/unload` | Unload model to free GPU memory |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 
@@ -152,12 +154,15 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --host <URL>            Override MOLD_HOST
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
+        --eager                 Keep all model components loaded simultaneously (faster, more memory)
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
-mold list                       List configured and available models
+mold list                       List configured and available models (with disk usage)
+mold info <MODEL> [--verify]    Show model details (memory estimates, optional SHA-256 verify)
+mold unload                     Unload the current model from server to free GPU memory
 mold ps                         Show server status + loaded models
 mold version                    Show version
 mold completions <SHELL>        Generate shell completions
@@ -172,7 +177,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port |
-| `MOLD_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+| `MOLD_LOG` | `warn` (CLI) / `info` (server) | Log level (trace, debug, info, warn, error) |
+| `MOLD_EAGER` | — | Set `1` to keep all model components loaded simultaneously |
 | `MOLD_TRANSFORMER_PATH` | — | Override transformer path |
 | `MOLD_VAE_PATH` | — | Override VAE path |
 | `MOLD_T5_PATH` | — | Override T5-XXL encoder path |
@@ -194,7 +200,6 @@ Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy �
 default_model = "flux-schnell:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
-output_dir = "."
 default_width = 1024
 default_height = 1024
 # t5_variant = "auto"

@@ -17,12 +17,15 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
             eprintln!("{} Unknown model: {}", "✗".red().bold(), model.bold());
             eprintln!();
             eprintln!("Available models:");
-            for m in known_manifests() {
+            let all = known_manifests();
+            let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
+            for m in &all {
                 eprintln!(
-                    "  {:<20} {:>5.1}GB  {}",
+                    "  {:<nw$} {:>5.1}GB  {}",
                     m.name.bold(),
                     m.size_gb,
                     m.description.dimmed(),
+                    nw = nw,
                 );
             }
             eprintln!();
@@ -39,6 +42,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     };
 
     let shared_gb = match manifest.family.as_str() {
+        "sd15" => mold_core::manifest::SHARED_SD15_COMPONENTS_GB,
         "sdxl" => mold_core::manifest::SHARED_SDXL_COMPONENTS_GB,
         "z-image" => mold_core::manifest::SHARED_ZIMAGE_COMPONENTS_GB,
         _ => mold_core::manifest::SHARED_COMPONENTS_GB,

@@ -20,7 +20,7 @@ impl std::error::Error for AlreadyReported {}
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "Local AI image generation — FLUX & SDXL diffusion models on your GPU"
+    about = "Local AI image generation — FLUX, SD1.5, SDXL & Z-Image diffusion models on your GPU"
 )]
 #[command(version, propagate_version = true)]
 struct Cli {
@@ -99,8 +99,8 @@ enum Commands {
 
     /// Start the inference server
     Serve {
-        /// Server port
-        #[arg(long, default_value = "7680")]
+        /// Server port (default: 7680, or MOLD_PORT env var)
+        #[arg(long, default_value_t = default_port())]
         port: u16,
 
         /// Bind address
@@ -141,7 +141,14 @@ enum Commands {
         /// Model name (e.g. flux-dev:q4, sdxl-turbo:fp16)
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: String,
+
+        /// Verify file integrity via SHA-256 checksums
+        #[arg(long)]
+        verify: bool,
     },
+
+    /// Unload the current model from the server to free GPU memory
+    Unload,
 
     /// Show server status and loaded models
     Ps,
@@ -181,7 +188,22 @@ async fn main() {
     }
 }
 
+fn default_port() -> u16 {
+    std::env::var("MOLD_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7680)
+}
+
 async fn run() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
@@ -239,8 +261,11 @@ async fn run() -> anyhow::Result<()> {
         Commands::List => {
             commands::list::run().await?;
         }
-        Commands::Info { model } => {
-            commands::info::run(&model)?;
+        Commands::Info { model, verify } => {
+            commands::info::run(&model, verify)?;
+        }
+        Commands::Unload => {
+            commands::unload::run().await?;
         }
         Commands::Ps => {
             commands::ps::run().await?;
