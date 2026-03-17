@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device, IndexOp};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
@@ -7,12 +7,12 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
 use crate::device::{
-    check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_use_gpu, t5_vram_threshold, CLIP_VRAM_THRESHOLD,
-    T5_VRAM_THRESHOLD,
+    CLIP_VRAM_THRESHOLD, T5_VRAM_THRESHOLD, check_memory_budget, fits_in_memory, fmt_gb,
+    free_vram_bytes, memory_status_string, preflight_memory_check, should_use_gpu,
+    t5_vram_threshold,
 };
 use crate::encoders;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{InferenceEngine, LoadStrategy, rand_seed};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -87,7 +87,7 @@ impl FluxEngine {
         default_t5_path: &std::path::Path,
     ) -> Result<(std::path::PathBuf, bool, String)> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
-        use mold_core::manifest::{find_t5_variant, known_t5_variants, T5_FP16_SIZE};
+        use mold_core::manifest::{T5_FP16_SIZE, find_t5_variant, known_t5_variants};
 
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();

@@ -1,5 +1,5 @@
-use mold_core::manifest::known_manifests;
 use mold_core::ModelInfo;
+use mold_core::manifest::known_manifests;
 
 /// Returns the list of known FLUX model variants with their HuggingFace repos.
 /// Delegates to the canonical manifest in `mold_core::manifest`.

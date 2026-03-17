@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::{
-    calculate_shift, get_noise, postprocess_image, AutoEncoderKL, Config,
-    FlowMatchEulerDiscreteScheduler, SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
+    AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler, SchedulerConfig, VaeConfig,
+    ZImageTransformer2DModel, calculate_shift, get_noise, postprocess_image,
 };
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -12,11 +12,11 @@ use std::time::Instant;
 use super::quantized_transformer::QuantizedZImageTransformer2DModel;
 use super::transformer::ZImageTransformer;
 use crate::device::{
-    check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, qwen3_vram_threshold, should_use_gpu, QWEN3_FP16_VRAM_THRESHOLD,
+    QWEN3_FP16_VRAM_THRESHOLD, check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes,
+    memory_status_string, preflight_memory_check, qwen3_vram_threshold, should_use_gpu,
 };
 use crate::encoders;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{InferenceEngine, LoadStrategy, rand_seed};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 

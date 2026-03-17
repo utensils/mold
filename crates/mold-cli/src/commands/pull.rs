@@ -1,11 +1,11 @@
 use anyhow::Result;
 use colored::Colorize;
 use mold_core::config::Config;
-use mold_core::download::{pull_model, DownloadError};
+use mold_core::download::{DownloadError, pull_model};
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
-use crate::output::status;
 use crate::AlreadyReported;
+use crate::output::status;
 
 /// Download a model and write its config. Returns the updated Config.
 pub async fn pull_and_configure(model: &str) -> Result<Config> {

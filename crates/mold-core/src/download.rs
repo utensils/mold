@@ -6,8 +6,8 @@ use hf_hub::{Repo, RepoType};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
-use crate::manifest::{paths_from_downloads, ModelComponent, ModelFile, ModelManifest};
 use crate::ModelPaths;
+use crate::manifest::{ModelComponent, ModelFile, ModelManifest, paths_from_downloads};
 
 #[derive(Debug, Error)]
 pub enum DownloadError {

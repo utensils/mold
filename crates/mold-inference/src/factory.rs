@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use mold_core::{Config, ModelPaths};
 
 use crate::engine::{InferenceEngine, LoadStrategy};

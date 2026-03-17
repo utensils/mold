@@ -163,7 +163,7 @@ async fn generate_local(
     eager: bool,
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
-    use mold_core::{validate_generate_request, ModelPaths};
+    use mold_core::{ModelPaths, validate_generate_request};
     use mold_inference::{LoadStrategy, ProgressEvent};
 
     let model_name = req.model.clone();

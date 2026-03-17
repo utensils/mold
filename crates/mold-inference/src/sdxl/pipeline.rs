@@ -1,11 +1,11 @@
-use anyhow::{bail, Result};
-use candle_core::{DType, Device, Module, Tensor, D};
+use anyhow::{Result, bail};
+use candle_core::{D, DType, Device, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{InferenceEngine, LoadStrategy, rand_seed};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 

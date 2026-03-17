@@ -1,5 +1,5 @@
-use crate::config::ModelConfig;
 use crate::ModelPaths;
+use crate::config::ModelConfig;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,9 +14,9 @@
 //!   `blk.{i}.ffn_down.weight`
 
 use anyhow::Result;
-use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
-use candle_core::{DType, Device, Module, Tensor, D};
+use candle_core::quantized::gguf_file;
+use candle_core::{D, DType, Device, Module, Tensor};
 use candle_transformers::models::with_tracing::QMatMul;
 use std::collections::HashMap;
 use std::path::Path;
