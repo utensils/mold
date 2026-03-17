@@ -2,16 +2,20 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::{Config, MoldClient};
 
-/// Pad plain text first, then colorize — ANSI escapes break `{:<N}` formatting.
-fn format_family_padded(family: &str, width: usize) -> String {
-    let label = match family {
+/// Map raw family key to display label.
+fn family_label(family: &str) -> &str {
+    match family {
         "flux" => "FLUX.1",
         "sd15" => "SD1.5",
         "sdxl" => "SDXL",
         "z-image" => "Z-Image",
         other => other,
-    };
-    let padded = format!("{:<width$}", label, width = width);
+    }
+}
+
+/// Pad plain text first, then colorize — ANSI escapes break `{:<N}` formatting.
+fn format_family_padded(family: &str, width: usize) -> String {
+    let padded = format!("{:<width$}", family_label(family), width = width);
     match family {
         "flux" => padded.magenta().to_string(),
         "sd15" => padded.green().to_string(),
@@ -31,13 +35,32 @@ fn format_disk_size(bytes: u64) -> String {
     }
 }
 
+/// Compute the minimum column width for a set of strings (with padding).
+fn col_width(items: impl Iterator<Item = usize>, header_len: usize, pad: usize) -> usize {
+    items.fold(header_len, |max, len| max.max(len)) + pad
+}
+
 pub async fn run() -> Result<()> {
     let client = MoldClient::from_env();
 
     match client.list_models_extended().await {
         Ok(models) => {
+            // Compute column widths from data
+            let nw = col_width(
+                models
+                    .iter()
+                    .map(|m| m.name.len() + if m.is_loaded { 2 } else { 0 }),
+                4, // "NAME"
+                2,
+            );
+            let fw = col_width(
+                models.iter().map(|m| family_label(&m.family).len()),
+                6, // "FAMILY"
+                2,
+            );
+
             println!(
-                "{:<18} {:<10} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                "{:<nw$} {:<fw$} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                 "NAME".bold(),
                 "FAMILY".bold(),
                 "SIZE".bold(),
@@ -46,8 +69,10 @@ pub async fn run() -> Result<()> {
                 "WIDTH".bold(),
                 "HEIGHT".bold(),
                 "DESCRIPTION".bold(),
+                nw = nw,
+                fw = fw,
             );
-            println!("{}", "─".repeat(100).dimmed());
+            println!("{}", "─".repeat(nw + fw + 56).dimmed());
 
             for model in &models {
                 let name = if model.is_loaded {
@@ -61,15 +86,16 @@ pub async fn run() -> Result<()> {
                     "—".to_string()
                 };
                 println!(
-                    "{:<18} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "{:<nw$} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                     name,
-                    format_family_padded(&model.family, 10),
+                    format_family_padded(&model.family, fw),
                     size,
                     model.defaults.default_steps,
                     format!("{:.1}", model.defaults.default_guidance),
                     model.defaults.default_width,
                     model.defaults.default_height,
                     model.defaults.description.dimmed(),
+                    nw = nw,
                 );
             }
 
@@ -80,11 +106,38 @@ pub async fn run() -> Result<()> {
         Err(_) => {
             let config = Config::load_or_default();
 
+            // Gather available-to-pull models (needed for column width computation)
+            let manifests = mold_core::manifest::known_manifests();
+            let available: Vec<_> = manifests
+                .iter()
+                .filter(|m| !config.models.contains_key(&m.name))
+                .collect();
+
+            // Compute name column width across both installed and available models
+            let nw = col_width(
+                config
+                    .models
+                    .keys()
+                    .map(|n| n.len())
+                    .chain(available.iter().map(|m| m.name.len())),
+                4, // "NAME"
+                2,
+            );
+            let fw = col_width(
+                config
+                    .models
+                    .values()
+                    .map(|c| family_label(c.family.as_deref().unwrap_or("")).len())
+                    .chain(available.iter().map(|m| family_label(&m.family).len())),
+                6, // "FAMILY"
+                2,
+            );
+
             if config.models.is_empty() {
                 println!("{} No models configured.", "●".dimmed());
             } else {
                 println!(
-                    "{:<18} {:<10} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "{:<nw$} {:<fw$} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                     "NAME".bold(),
                     "FAMILY".bold(),
                     "SIZE".bold(),
@@ -94,8 +147,10 @@ pub async fn run() -> Result<()> {
                     "WIDTH".bold(),
                     "HEIGHT".bold(),
                     "DESCRIPTION".bold(),
+                    nw = nw,
+                    fw = fw,
                 );
-                println!("{}", "─".repeat(108).dimmed());
+                println!("{}", "─".repeat(nw + fw + 64).dimmed());
                 let mut total_disk: u64 = 0;
                 for (name, mcfg) in &config.models {
                     let family_raw = mcfg.family.as_deref().unwrap_or("");
@@ -111,9 +166,9 @@ pub async fn run() -> Result<()> {
                     total_disk += disk_bytes;
                     let disk = format_disk_size(disk_bytes);
                     println!(
-                        "{:<18} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        "{:<nw$} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                         name,
-                        format_family_padded(family_raw, 10),
+                        format_family_padded(family_raw, fw),
                         size,
                         disk,
                         mcfg.effective_steps(&config),
@@ -121,33 +176,30 @@ pub async fn run() -> Result<()> {
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
                         mcfg.description.as_deref().unwrap_or("").dimmed(),
+                        nw = nw,
                     );
                 }
                 if config.models.len() > 1 && total_disk > 0 {
                     println!(
-                        "{:>37}",
-                        format!("Total: {}", format_disk_size(total_disk)).dimmed()
+                        "{:>width$}",
+                        format!("Total: {}", format_disk_size(total_disk)).dimmed(),
+                        width = nw + fw + 15,
                     );
                 }
             }
 
             // Show available-to-pull models
-            let manifests = mold_core::manifest::known_manifests();
-            let available: Vec<_> = manifests
-                .iter()
-                .filter(|m| !config.models.contains_key(&m.name))
-                .collect();
-
             if !available.is_empty() {
                 println!();
                 println!("Available to pull:");
                 for m in &available {
                     println!(
-                        "  {:<20} {} {:>5.1}GB  {}",
+                        "  {:<nw$} {} {:>5.1}GB  {}",
                         m.name.bold(),
-                        format_family_padded(&m.family, 10),
+                        format_family_padded(&m.family, fw),
                         m.size_gb,
                         m.description.dimmed(),
+                        nw = nw,
                     );
                 }
                 println!();
