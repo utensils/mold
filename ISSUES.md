@@ -76,20 +76,33 @@ MOLD_SD3_DEBUG=1 mold run sd3.5-large:q4 "a turtle"
 
 **Root Cause:** The `AutoencoderKLQwenImage` VAE uses a Wan video model architecture with 3D causal convolutions (`QwenImageCausalConv3d`). Our current VAE implementation uses a 2D temporal-slice approximation with candle's standard `AutoEncoderKL`, which doesn't match the actual architecture.
 
-**What's Needed:**
-- Implement proper `QwenImageCausalConv3d` layers (3D causal convolutions)
-- Handle the temporal dimension correctly for single-frame (image) generation
-- Apply per-channel latent normalization using the model's `latents_mean`/`latents_std` arrays
-- The `post_quant_conv` is a causal 3D convolution reducing from `z_dim*2` to `z_dim`
+**What's Needed (from research):**
 
-**Codex's Progress:**
-- Fixed text encoder: prompt formatting, penultimate hidden states, text masking, token ordering, RoPE bounds
-- Removed CUDA crashes and NaN collapse in denoiser
-- VAE remains the blocker
+Candle has **NO native Conv3d**. The only 3D-like code is `conv3d_temporal_2.rs` (hardcoded temporal_patch_size=2).
 
-**Reference:**
-- Diffusers `AutoencoderKLQwenImage`: uses `QwenImageCausalConv3d`, tiled encode/decode support
-- HuggingFace docs: https://huggingface.co/docs/diffusers/main/api/models/autoencoderkl_qwenimage
+**Recommended approach: Simulate 3D CausalConv via temporal slicing**
+
+For each 3D conv weight `[out_c, in_c, T_k, H_k, W_k]`, decompose into T_k separate Conv2d layers (one per temporal kernel slice). For single-frame (T=1) with k=3 and causal padding:
+- Input gets padded to `[B, C, 3, H', W']` (2 zero-pad frames + 1 real frame)
+- Slice 0: `Conv2d(weight[:,:,0,:,:])` on zeros → contributes 0 (no bias in these convs)
+- Slice 1: `Conv2d(weight[:,:,1,:,:])` on zeros → contributes 0
+- Slice 2: `Conv2d(weight[:,:,2,:,:])` on real frame → full contribution
+- **Optimization**: For T=1, only the last temporal slice actually contributes
+
+**Decoder architecture** (from safetensors weight inspection):
+```
+conv_in: CausalConv3d(16→384, k=3)
+mid_block: 2× ResBlock(384) + Attention(384, spatial-only)
+up_blocks: [384→384, 384→192, 192→96, 96→96] with temporal_upsample on blocks 0,1
+norm_out: RMSNorm(96)
+conv_out: CausalConv3d(96→3, k=3)
+```
+
+**Per-channel latent denormalization**: `latents = latents * std + mean` (16-channel arrays from VAE config)
+
+**Reference implementations:**
+- Diffusers `AutoencoderKLQwenImage` / `AutoencoderKLWan`
+- ComfyUI `comfy/ldm/wan/vae.py`
 
 **Files Involved:**
 - `crates/mold-inference/src/qwen_image/vae.rs` — needs rewrite
@@ -98,28 +111,36 @@ MOLD_SD3_DEBUG=1 mold run sd3.5-large:q4 "a turtle"
 
 ---
 
-## Flux.2 Klein — Not Yet Tested End-to-End
+## Flux.2 Klein — Critical Architecture Discrepancies Found
 
-**Status:** Engine scaffolded, not tested with real weights
+**Status:** Research complete, multiple fixes needed before end-to-end testing
 
-**Notes:**
-- Transformer architecture implemented (5 double + 20 single stream blocks)
-- Qwen3 encoder integration done (reuses Z-Image encoder)
-- VAE (`AutoencoderKLFlux2`) with `latent_channels=32` implemented
-- Sampling utilities adapted for 128-channel latents
-- Manifest entry for `flux2-klein:bf16` added
-- Model weights need to be downloaded and inference tested
+**Transformer config verified correct:** `in_channels=128`, `hidden_size=3072`, `num_heads=24`, `depth=5`, `depth_single=20`, `axes_dim=[32,32,32,32]`, `theta=2000`, `mlp_ratio=3.0`.
 
-**Potential Issues:**
-- The 4D RoPE `[32,32,32,32]` implementation may need verification
-- The Qwen3 encoder output stacking (3x for `joint_attention_dim=7680`) is untested
-- The Flux2 VAE (`latent_channels=32`) differs from FLUX.1 (`latent_channels=16`)
+**Critical Discrepancies (from diffusers `Flux2Transformer2DModel` + `pipeline_flux2_klein.py`):**
+
+| Issue | Priority | Our Code | Correct |
+|-------|----------|----------|---------|
+| Text encoding | CRITICAL | Repeats final Qwen3 layer 3x | Stack hidden states from layers 9, 18, 27 |
+| VAE latent normalization | CRITICAL | scale_factor/shift_factor | BatchNorm2d with running_mean/running_var from weights |
+| Chat template | HIGH | Raw prompt tokenization | `apply_chat_template(messages, enable_thinking=False)` |
+| MLP activation | HIGH | GELU (FLUX.1 style) | SwiGLU in single-stream blocks |
+| Linear bias | HIGH | bias=True throughout | bias=False on most layers |
+| Scheduler | HIGH | Simple linear (no shift) | Dynamic exponential time-shifting (shift=3.0) |
+| CFG guidance | MEDIUM | No CFG (guidance=0.0) | guidance_scale=4.0 with dual forward pass |
+| Single-stream fused layers | MEDIUM | Separate linear1/linear2 | Fused QKV+MLP projections |
+
+**VAE BatchNorm details:** The Flux.2 VAE uses `BatchNorm2d(128, affine=False)` on patchified latents (128 = 2×2×32 channels). Encoding normalizes with `(latents - running_mean) / sqrt(running_var + eps)`, decoding denormalizes with `latents * sqrt(running_var + eps) + running_mean`. The running stats must be loaded from the VAE weights.
+
+**Patchify/Unpatchify:** The pipeline patchifies latents `(B,32,H,W) → (B,128,H/2,W/2)` by grouping 2×2 spatial patches into channels, then packs to sequence `(B,H/2*W/2,128)`.
+
+**GGUF availability:** `unsloth/FLUX.2-klein-4B-GGUF` has 14 variants (Q2_K through BF16).
 
 **Files Involved:**
-- `crates/mold-inference/src/flux2/pipeline.rs`
-- `crates/mold-inference/src/flux2/transformer.rs`
-- `crates/mold-inference/src/flux2/sampling.rs`
-- `crates/mold-inference/src/flux2/vae.rs`
+- `crates/mold-inference/src/flux2/pipeline.rs` — text encoding, VAE decode, scheduler
+- `crates/mold-inference/src/flux2/transformer.rs` — SwiGLU, bias, fused layers
+- `crates/mold-inference/src/flux2/sampling.rs` — scheduler shift
+- `crates/mold-inference/src/flux2/vae.rs` — BatchNorm latent normalization
 
 ---
 
