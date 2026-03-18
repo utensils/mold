@@ -336,35 +336,24 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
     let headdim = q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (headdim as f64).sqrt();
 
-    // Cast to BF16 for attention (halves the massive [B*heads, seq, seq] matrix VRAM).
-    // Every reshape/transpose is followed by .contiguous() to prevent CUDA garbage reads.
-    let q = q.transpose(1, 2)?.contiguous()?.flatten_to(1)?.to_dtype(DType::F16)?.contiguous()?;
-    let k = k.transpose(1, 2)?.contiguous()?.flatten_to(1)?.to_dtype(DType::F16)?.contiguous()?;
+    // Keep everything in F32 — F16 matmul produces hidden NaN due to CUDA precision.
+    // Use chunked attention to manage VRAM (each chunk's weight matrix is small).
+    let q = q.transpose(1, 2)?.contiguous()?.flatten_to(1)?;
+    let k = k.transpose(1, 2)?.contiguous()?.flatten_to(1)?;
     let v_orig_shape = v.dims().to_vec();
-    let v = v.reshape((batch_size, seqlen, num_heads, ()))?;
-    // Check V values BEFORE F16 cast
-    if std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-        static V_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !V_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            let vf = v.to_dtype(DType::F32)?;
-            let mn = vf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            let mx = vf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            eprintln!("[sd3-attn] V before F16 cast: [{mn:.4},{mx:.4}] (F16 max=65504)");
-        }
-    }
     let v = v
+        .reshape((batch_size, seqlen, num_heads, ()))?
         .transpose(1, 2)?
         .contiguous()?
-        .flatten_to(1)?
-        .to_dtype(DType::F16)?
-        .contiguous()?;
+        .flatten_to(1)?;
 
     // Chunked attention: process query tokens in chunks to avoid OOM on the
     // massive [B*heads, full_seq, full_seq] attention matrix.
     // At 1024x1024 with batch=2: [76, 4429, 4429] F16 = ~3GB which OOMs on 24GB.
     // Chunk size 512: [76, 512, 4429] F16 = ~345MB per chunk — fits easily.
     let k_t = k.t()?.contiguous()?;
-    let chunk_size = 512;
+    // Chunk size 256: [76, 256, 4429] F32 = ~325MB per chunk (vs 5.5GB for full matrix)
+    let chunk_size = 256;
     let mut attn_chunks = Vec::new();
     let mut offset = 0;
     let mut _chunk_idx = 0;
@@ -372,9 +361,8 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
         let len = chunk_size.min(seqlen - offset);
         let q_chunk = q.narrow(1, offset, len)?.contiguous()?;
         let weights_chunk = (q_chunk.matmul(&k_t)? * softmax_scale)?;
-        // Softmax in F32 to avoid candle F16 softmax CUDA issues, then back to F16
-        let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk.to_dtype(DType::F32)?)?
-            .to_dtype(DType::F16)?;
+        // F32 softmax — chunked to keep VRAM bounded
+        let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk)?;
         // Trace softmax output on first chunk
         if _chunk_idx == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
             static SM_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -387,10 +375,9 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
             }
         }
         let scores_chunk = sm_chunk.contiguous()?.matmul(&v)?;
-        // Trace first few chunks on first call
+        // Trace ALL chunks on first call
         static CHUNK_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !CHUNK_DIAG.load(std::sync::atomic::Ordering::Relaxed)
-            && _chunk_idx < 3
             && std::env::var_os("MOLD_SD3_DEBUG").is_some()
         {
             let sf = scores_chunk.to_dtype(DType::F32)?;
@@ -407,13 +394,12 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
     }
     let attn_scores = Tensor::cat(&attn_chunks, 1)?;
 
-    // Cast back to F32, ensure contiguous for downstream quantized linear layers
+    // Already F32, ensure contiguous for downstream quantized linear layers
     let head_dim = v_orig_shape.last().copied().unwrap_or(headdim);
     attn_scores
         .reshape((batch_size, num_heads, seqlen, head_dim))?
         .transpose(1, 2)?
         .contiguous()?
-        .to_dtype(DType::F32)?
         .reshape((batch_size, seqlen, ()))?
         .contiguous()
 }
@@ -853,6 +839,19 @@ impl JointBlock for MMDiTJointBlock {
         let context_out =
             self.context_block
                 .post_attention(&context_attn, context, &context_interm)?;
+
+        if do_diag {
+            // Check x_attn BEFORE post_attention (is narrow'd view causing issues?)
+            let xac = x_attn.contiguous()?;
+            let mn = xac.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            let mx = xac.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            eprintln!("[sd3-blk0] x_attn (contiguous): [{mn:.4},{mx:.4}] shape={:?}", xac.shape());
+            // Also check context_out
+            let co = context_out.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            let cox = context_out.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            eprintln!("[sd3-blk0] context_out: [{co:.4},{cox:.4}]");
+        }
+
         let x_out = self.x_block.post_attention(&x_attn, x, &x_interm)?;
 
         if do_diag {
@@ -1096,10 +1095,18 @@ impl QuantizedMMDiT {
             context = result.0;
             x = result.1;
             // One-shot diagnostic for first forward pass
-            if i == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-                let xmin = x.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                let xmax = x.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                eprintln!("[sd3-debug] block 0 output: x=[{xmin:.4},{xmax:.4}]");
+            // Trace ALL blocks on first forward pass
+            {
+                static FWD_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !FWD_DIAG.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+                    let xmin = x.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                    let xmax = x.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                    eprintln!("[sd3-debug] block {i} output: x=[{xmin:.4},{xmax:.4}]");
+                    if !xmin.is_finite() || !xmax.is_finite() {
+                        FWD_DIAG.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("[sd3-debug] INF FIRST AT BLOCK {i}");
+                    }
+                }
             }
         }
 
