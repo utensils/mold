@@ -83,10 +83,13 @@ pub async fn run() -> Result<()> {
             println!("{}", "─".repeat(nw + fw + 56).dimmed());
 
             for model in &models {
+                // Pad plain text first, then colorize — ANSI escapes break `{:<N}`.
                 let name = if model.is_loaded {
-                    format!("{} ●", model.name).green().to_string()
+                    format!("{:<nw$}", format!("{} ●", model.name), nw = nw)
+                        .green()
+                        .to_string()
                 } else {
-                    model.name.clone()
+                    format!("{:<nw$}", model.name, nw = nw)
                 };
                 let size = if model.size_gb > 0.0 {
                     format!("{:.1}GB", model.size_gb)
@@ -94,7 +97,7 @@ pub async fn run() -> Result<()> {
                     "—".to_string()
                 };
                 println!(
-                    "{:<nw$} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "{} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                     name,
                     format_family_padded(&model.family, fw),
                     size,
@@ -103,7 +106,6 @@ pub async fn run() -> Result<()> {
                     model.defaults.default_width,
                     model.defaults.default_height,
                     colorize_description(&model.defaults.description),
-                    nw = nw,
                 );
             }
 
