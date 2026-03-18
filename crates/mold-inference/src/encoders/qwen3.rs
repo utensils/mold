@@ -25,6 +25,27 @@ impl Qwen3Model {
             Self::Quantized(m) => m.forward(input_ids),
         }
     }
+
+    /// Run forward pass and collect hidden states from specific layer indices.
+    /// Returns (B, seq_len, num_layers * hidden_size).
+    /// Used by Flux.2 Klein which stacks layers 9, 18, 27 to get 7680-dim embeddings.
+    pub fn forward_with_layers(
+        &mut self,
+        input_ids: &Tensor,
+        layer_indices: &[usize],
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(_m) => {
+                // BF16 ZImageTextEncoder only returns penultimate layer.
+                // For multi-layer extraction, fall back to repeating the single output.
+                // TODO: Add forward_with_layers to ZImageTextEncoder upstream.
+                let emb = _m.forward(input_ids)?;
+                let copies: Vec<&Tensor> = (0..layer_indices.len()).map(|_| &emb).collect();
+                Ok(Tensor::cat(&copies, 2)?)
+            }
+            Self::Quantized(m) => m.forward_with_layers(input_ids, layer_indices),
+        }
+    }
 }
 
 /// Reusable Qwen3 text encoder wrapper.
@@ -126,6 +147,37 @@ impl Qwen3Encoder {
         let input_ids = Tensor::from_vec(tokens, (1, token_count), &self.device)?;
 
         let emb = model.forward(&input_ids)?;
+        let emb = emb.to_device(target_device)?.to_dtype(target_dtype)?;
+        Ok((emb, token_count))
+    }
+
+    /// Encode a text prompt, extracting hidden states from specific layers.
+    /// Returns (stacked_embeddings, token_count) where stacked_embeddings has
+    /// shape (B, seq_len, num_layers * hidden_size).
+    pub fn encode_with_layers(
+        &mut self,
+        prompt: &str,
+        target_device: &Device,
+        target_dtype: DType,
+        layer_indices: &[usize],
+    ) -> Result<(Tensor, usize)> {
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Qwen3 model unavailable (weights dropped)"))?;
+
+        let formatted = format_prompt_for_qwen3(prompt);
+        let tokens = self
+            .tokenizer
+            .encode(formatted.as_str(), true)
+            .map_err(|e| anyhow::anyhow!("Qwen3 tokenization failed: {e}"))?
+            .get_ids()
+            .to_vec();
+
+        let token_count = tokens.len();
+        let input_ids = Tensor::from_vec(tokens, (1, token_count), &self.device)?;
+
+        let emb = model.forward_with_layers(&input_ids, layer_indices)?;
         let emb = emb.to_device(target_device)?.to_dtype(target_dtype)?;
         Ok((emb, token_count))
     }

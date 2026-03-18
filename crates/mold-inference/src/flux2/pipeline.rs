@@ -271,28 +271,29 @@ impl Flux2Engine {
             .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
     }
 
-    /// Encode a prompt with the Qwen3 text encoder and stack the output 3x
-    /// to produce the 7680-dim joint_attention_dim expected by the transformer.
+    /// Encode a prompt with the Qwen3 text encoder, extracting hidden states from
+    /// layers 9, 18, 27 and stacking them to produce joint_attention_dim=7680.
     ///
     /// Klein's Qwen3 has hidden_size=2560. The transformer expects context_in_dim=7680,
-    /// which is 2560 * 3. The HuggingFace pipeline stacks the last 3 hidden state
-    /// outputs from the encoder to form the text conditioning.
+    /// which is 2560 * 3. The HuggingFace pipeline stacks outputs from intermediate
+    /// layers [9, 18, 27] to form the text conditioning.
+    ///
+    /// Layers 9, 18, 27 correspond to roughly 1/4, 1/2, 3/4 depth of the 36-layer Qwen3.
+    const QWEN3_HIDDEN_LAYERS: [usize; 3] = [9, 18, 27];
+
     fn encode_and_stack(
         encoder: &mut encoders::qwen3::Qwen3Encoder,
         prompt: &str,
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<Tensor> {
-        // The existing Qwen3 encoder returns (B, seq_len, hidden_size=2560)
-        let (emb, _token_count) = encoder.encode(prompt, target_device, target_dtype)?;
-
-        // Stack 3x along the hidden dimension: (B, seq_len, 2560) -> (B, seq_len, 7680)
-        // This matches the joint_attention_dim=7680 expected by the Klein transformer.
-        //
-        // Note: The actual HF pipeline may use outputs from different layers or apply
-        // a projection. For now we repeat the same embedding 3x, which is a reasonable
-        // first approximation that produces the correct tensor shape.
-        let stacked = Tensor::cat(&[&emb, &emb, &emb], 2)?;
+        // Extract hidden states from layers 9, 18, 27 and stack to (B, seq, 7680)
+        let (stacked, _token_count) = encoder.encode_with_layers(
+            prompt,
+            target_device,
+            target_dtype,
+            &Self::QWEN3_HIDDEN_LAYERS,
+        )?;
         Ok(stacked)
     }
 

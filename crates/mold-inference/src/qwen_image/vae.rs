@@ -23,14 +23,11 @@ const LATENTS_STD: [f64; 16] = [
 const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
 const NUM_RES_BLOCKS: usize = 2;
 
-fn temporal_slice_index(kernel_size: usize) -> usize {
-    std::env::var("MOLD_QWEN_VAE_TEMPORAL_SLICE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&idx| idx < kernel_size)
-        .unwrap_or(kernel_size - 1)
-}
-
+/// Load a 5D causal conv3d weight as a 2D conv by extracting the last temporal slice.
+///
+/// For single-frame (T=1) inference with causal padding, only the last temporal kernel
+/// slice contributes (the first slices operate on zero-padded frames). This is exact,
+/// not an approximation.
 fn load_3d_conv_as_2d(
     in_channels: usize,
     out_channels: usize,
@@ -42,8 +39,9 @@ fn load_3d_conv_as_2d(
         (out_channels, in_channels, kernel_size, kernel_size, kernel_size),
         "weight",
     )?;
-    let slice_idx = temporal_slice_index(kernel_size);
-    let ws = ws.i((.., .., slice_idx, .., ..))?.contiguous()?;
+    // Last temporal slice: for T=1 with causal padding (2 zero frames + 1 real frame),
+    // only kernel[t=kernel_size-1] is applied to the real frame.
+    let ws = ws.i((.., .., kernel_size - 1, .., ..))?.contiguous()?;
     let bias = vb.get(out_channels, "bias").ok();
     Ok(Conv2d::new(
         ws,
@@ -199,16 +197,37 @@ impl Module for QwenImageMidBlock2d {
     }
 }
 
+/// Spatial-only upsample: nearest 2x → Conv2d.
 #[derive(Debug, Clone)]
 struct QwenImageUpsample2d {
+    /// Optional temporal conv for blocks with temporal_upsample.
+    /// For T=1 image inference: apply 1x1 conv (384→768), take first half of channels
+    /// (frame 0 of temporal interleave), then spatial upsample + conv.
+    time_conv: Option<Conv2d>,
+    time_conv_out_half: usize,
     conv: Conv2d,
 }
 
 impl QwenImageUpsample2d {
-    fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_dim: usize, out_dim: usize, has_temporal: bool, vb: VarBuilder) -> Result<Self> {
+        let time_conv = if has_temporal {
+            // time_conv weight is [dim*2, dim, 3, 1, 1] — a causal 3D conv with spatial kernel 1x1.
+            // For T=1 with causal padding, only the last temporal slice contributes.
+            let tc_vb = vb.pp("time_conv");
+            let tc_ws = tc_vb.get((in_dim * 2, in_dim, 3, 1, 1), "weight")?;
+            // Extract last temporal slice: [dim*2, dim, 1, 1]
+            let tc_ws = tc_ws.i((.., .., 2, .., ..))?.contiguous()?;
+            let tc_bias = tc_vb.get(in_dim * 2, "bias").ok();
+            Some(Conv2d::new(tc_ws, tc_bias, Default::default()))
+        } else {
+            None
+        };
+
         Ok(Self {
+            time_conv,
+            time_conv_out_half: in_dim,
             conv: conv2d(
-                in_dim,
+                if has_temporal { in_dim } else { in_dim },
                 out_dim,
                 3,
                 Conv2dConfig {
@@ -223,6 +242,14 @@ impl QwenImageUpsample2d {
 
 impl Module for QwenImageUpsample2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = if let Some(tc) = &self.time_conv {
+            // Apply temporal conv: (B, C, H, W) → (B, C*2, H, W)
+            let x = x.apply(tc)?;
+            // Temporal interleave for T=1: take first half of channels (frame 0)
+            x.narrow(1, 0, self.time_conv_out_half)?
+        } else {
+            x.clone()
+        };
         let (_, _, h, w) = x.dims4()?;
         x.upsample_nearest2d(h * 2, w * 2)?.apply(&self.conv)
     }
@@ -235,7 +262,13 @@ struct QwenImageUpBlock2d {
 }
 
 impl QwenImageUpBlock2d {
-    fn new(in_dim: usize, out_dim: usize, add_upsample: bool, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        in_dim: usize,
+        out_dim: usize,
+        add_upsample: bool,
+        has_temporal_upsample: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let mut resnets = Vec::with_capacity(NUM_RES_BLOCKS + 1);
         let mut current_dim = in_dim;
         for i in 0..=NUM_RES_BLOCKS {
@@ -249,7 +282,12 @@ impl QwenImageUpBlock2d {
         Ok(Self {
             resnets,
             upsample: if add_upsample {
-                Some(QwenImageUpsample2d::new(out_dim, out_dim / 2, vb.pp("upsamplers").pp("0"))?)
+                Some(QwenImageUpsample2d::new(
+                    out_dim,
+                    out_dim / 2,
+                    has_temporal_upsample,
+                    vb.pp("upsamplers").pp("0"),
+                )?)
             } else {
                 None
             },
@@ -288,6 +326,9 @@ impl QwenImageDecoder2d {
             BLOCK_OUT_CHANNELS[1],
             BLOCK_OUT_CHANNELS[0],
         ];
+        // Encoder temporal_downsample = [False, True, True].
+        // Decoder reverses this: blocks 0,1 have temporal upsample, block 2 does not.
+        let temporal_upsample = [true, true, false];
         let mut up_blocks = Vec::with_capacity(BLOCK_OUT_CHANNELS.len());
         for i in 0..BLOCK_OUT_CHANNELS.len() {
             let mut in_dim = dims[i];
@@ -296,10 +337,12 @@ impl QwenImageDecoder2d {
             }
             let out_dim = dims[i + 1];
             let add_upsample = i < BLOCK_OUT_CHANNELS.len() - 1;
+            let has_temporal = add_upsample && i < temporal_upsample.len() && temporal_upsample[i];
             up_blocks.push(QwenImageUpBlock2d::new(
                 in_dim,
                 out_dim,
                 add_upsample,
+                has_temporal,
                 vb.pp("up_blocks").pp(i),
             )?);
         }
