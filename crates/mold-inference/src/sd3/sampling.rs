@@ -54,14 +54,16 @@ pub fn euler_sample(
     width: usize,
     slg_config: Option<&SkipLayerGuidanceConfig>,
     is_quantized: bool,
+    seed: u64,
     progress: &ProgressReporter,
 ) -> Result<Tensor> {
     // SD3 uses the same 16-channel latent noise as FLUX
     // Quantized models (GGUF) dequantize to F32, so noise must also be F32
     let noise_dtype = if is_quantized { DType::F32 } else { DType::F16 };
+    let latent_h = height / 16 * 2;
+    let latent_w = width / 16 * 2;
     let mut x =
-        candle_transformers::models::flux::sampling::get_noise(1, height, width, y.device())?
-            .to_dtype(noise_dtype)?;
+        crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], y.device(), noise_dtype)?;
 
     let sigmas: Vec<f64> = (0..=num_inference_steps)
         .map(|s| s as f64 / num_inference_steps as f64)

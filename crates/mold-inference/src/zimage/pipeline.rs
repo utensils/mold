@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::{
-    calculate_shift, get_noise, postprocess_image, AutoEncoderKL, Config,
-    FlowMatchEulerDiscreteScheduler, SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
+    calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
+    SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
 };
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -532,7 +532,6 @@ impl ZImageEngine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -662,7 +661,8 @@ impl ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        let mut latents = get_noise(1, 16, latent_h, latent_w, &device)?.to_dtype(dtype)?;
+        let mut latents =
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
         latents = latents.unsqueeze(2)?;
 
         let num_steps = req.steps as usize;
@@ -809,7 +809,6 @@ impl InferenceEngine for ZImageEngine {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
         let seed = req.seed.unwrap_or_else(rand_seed);
-        loaded.device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -876,8 +875,12 @@ impl InferenceEngine for ZImageEngine {
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
         // 6. Generate initial noise: (B, 16, latent_h, latent_w) → add frame dim → (B, 16, 1, latent_h, latent_w)
-        let mut latents =
-            get_noise(1, 16, latent_h, latent_w, &loaded.device)?.to_dtype(loaded.dtype)?;
+        let mut latents = crate::engine::seeded_randn(
+            seed,
+            &[1, 16, latent_h, latent_w],
+            &loaded.device,
+            loaded.dtype,
+        )?;
         latents = latents.unsqueeze(2)?;
 
         // 7. Denoising loop

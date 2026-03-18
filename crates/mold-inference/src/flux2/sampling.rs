@@ -5,7 +5,9 @@
 //! - 4D positional IDs (vs FLUX.1's 3D)
 //! - No pooled text vector (Klein uses only timestep conditioning)
 
-use candle_core::{DType, Device, Result, Tensor};
+#[cfg(test)]
+use candle_core::Device;
+use candle_core::{DType, Result, Tensor};
 
 /// Generate initial noise for Flux.2 Klein.
 ///
@@ -16,6 +18,7 @@ use candle_core::{DType, Device, Result, Tensor};
 ///
 /// After patchifying in [`Flux2State::new`], this becomes the 128-channel
 /// sequence the transformer operates on.
+#[cfg(test)]
 pub fn get_noise(
     num_samples: usize,
     height: usize,

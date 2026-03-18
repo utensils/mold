@@ -447,7 +447,6 @@ impl SD3Engine {
         let is_quantized = self.detect_is_quantized();
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -586,6 +585,7 @@ impl SD3Engine {
             width,
             slg_config.as_ref(),
             is_quantized,
+            seed,
             &self.progress,
         )?;
 
@@ -668,7 +668,6 @@ impl InferenceEngine for SD3Engine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        loaded.device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -752,6 +751,7 @@ impl InferenceEngine for SD3Engine {
             width,
             slg_config.as_ref(),
             loaded._is_quantized,
+            seed,
             progress,
         )?;
 

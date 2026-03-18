@@ -521,7 +521,6 @@ impl FluxEngine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -682,7 +681,10 @@ impl FluxEngine {
 
         // Generate noise and build state
         let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
-        let img = flux::sampling::get_noise(1, height, width, &device)?.to_dtype(noise_dtype)?;
+        let latent_h = height / 16 * 2;
+        let latent_w = width / 16 * 2;
+        let img =
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, noise_dtype)?;
 
         let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
             (
@@ -793,7 +795,6 @@ impl InferenceEngine for FluxEngine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        loaded.device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -857,8 +858,14 @@ impl InferenceEngine for FluxEngine {
         } else {
             loaded.dtype
         };
-        let img =
-            flux::sampling::get_noise(1, height, width, &loaded.device)?.to_dtype(noise_dtype)?;
+        let latent_h = height / 16 * 2;
+        let latent_w = width / 16 * 2;
+        let img = crate::engine::seeded_randn(
+            seed,
+            &[1, 16, latent_h, latent_w],
+            &loaded.device,
+            noise_dtype,
+        )?;
 
         // For quantized model, state tensors must be F32
         let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {

@@ -538,10 +538,11 @@ impl Flux2Engine {
         self.progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
 
-        // Set seed immediately before noise generation for reproducibility
-        // (must be after text encoding which consumes GPU RNG state)
-        device.set_seed(seed)?;
-        let img = sampling::get_noise(1, height, width, &device)?.to_dtype(gpu_dtype)?;
+        // Generate noise with seed for reproducibility
+        let latent_h = height.div_ceil(8);
+        let latent_w = width.div_ceil(8);
+        let img =
+            crate::engine::seeded_randn(seed, &[1, 32, latent_h, latent_w], &device, gpu_dtype)?;
         let state = Flux2State::new(&txt_emb, &img)?;
 
         // Flux.2 empirical mu schedule (resolution + step-count dependent)
@@ -663,9 +664,15 @@ impl InferenceEngine for Flux2Engine {
             tracing::info!("Qwen3 encoder dropped from GPU to free VRAM for denoising");
         }
 
-        // 2. Generate initial noise (set seed here, after text encoding which consumes GPU RNG)
-        loaded.device.set_seed(seed)?;
-        let img = sampling::get_noise(1, height, width, &loaded.device)?.to_dtype(loaded.dtype)?;
+        // 2. Generate initial noise with seed for reproducibility
+        let latent_h = height.div_ceil(8);
+        let latent_w = width.div_ceil(8);
+        let img = crate::engine::seeded_randn(
+            seed,
+            &[1, 32, latent_h, latent_w],
+            &loaded.device,
+            loaded.dtype,
+        )?;
 
         // 3. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;

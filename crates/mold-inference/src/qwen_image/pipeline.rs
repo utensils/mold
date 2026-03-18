@@ -17,7 +17,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::z_image::{get_noise, postprocess_image};
+use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
@@ -355,7 +355,6 @@ impl QwenImageEngine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -464,7 +463,8 @@ impl QwenImageEngine {
         } else {
             dtype
         };
-        let mut latents = get_noise(1, 16, latent_h, latent_w, &device)?.to_dtype(latent_dtype)?;
+        let mut latents =
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, latent_dtype)?;
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
@@ -604,7 +604,6 @@ impl InferenceEngine for QwenImageEngine {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
         let seed = req.seed.unwrap_or_else(rand_seed);
-        loaded.device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -663,8 +662,12 @@ impl InferenceEngine for QwenImageEngine {
         } else {
             loaded.dtype
         };
-        let mut latents =
-            get_noise(1, 16, latent_h, latent_w, &loaded.device)?.to_dtype(latent_dtype)?;
+        let mut latents = crate::engine::seeded_randn(
+            seed,
+            &[1, 16, latent_h, latent_w],
+            &loaded.device,
+            latent_dtype,
+        )?;
 
         // 7. Denoising loop
         let num_steps = req.steps as usize;

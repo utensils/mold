@@ -40,7 +40,6 @@ enum Commands {
         model_or_prompt: Option<String>,
 
         /// Prompt text (remaining words after model)
-        #[arg(trailing_var_arg = true)]
         prompt_rest: Vec<String>,
 
         /// Output file path
