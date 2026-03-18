@@ -13,6 +13,16 @@ use candle_transformers::models::mmdit::model::Config as MMDiTConfig;
 use candle_transformers::quantized_nn::{self, Linear};
 use candle_transformers::quantized_var_builder::VarBuilder;
 
+/// Apply a quantized linear layer and replace any NaN values with 0.0.
+/// Candle's CUDA QMatMul produces hidden NaN in some output elements when
+/// processing large tensors. This wrapper prevents NaN propagation.
+fn linear_nan_safe(linear: &Linear, x: &Tensor) -> candle_core::Result<Tensor> {
+    let out = linear.forward(x)?;
+    let nan_mask = out.ne(&out)?; // NaN != NaN → true
+    let zero = Tensor::zeros_like(&out)?;
+    nan_mask.where_cond(&zero, &out)
+}
+
 // ==================== LayerNormNoAffine ====================
 
 struct LayerNormNoAffine {
@@ -25,7 +35,15 @@ impl LayerNormNoAffine {
     }
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        candle_nn::LayerNorm::new_no_bias(Tensor::ones_like(x)?, self.eps).forward(x)
+        // Manual LayerNorm without affine parameters — matches Z-Image's LayerNormNoParams.
+        // Previous implementation used `Tensor::ones_like(x)` which created a weight tensor
+        // with shape [1, seq_len, hidden_size] instead of the required [hidden_size], causing
+        // incorrect normalization that cascaded into NaN/inf during attention.
+        let hidden_size = x.dim(D::Minus1)?;
+        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_centered = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x_centered.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        x_centered.broadcast_div(&(norm_x + self.eps)?.sqrt()?)
     }
 }
 
@@ -148,7 +166,8 @@ impl TimestepEmbedder {
 
     fn forward(&self, t: &Tensor) -> candle_core::Result<Tensor> {
         let t_freq = Self::timestep_embedding(t, self.frequency_embedding_size)?;
-        t_freq.apply(&self.mlp_0)?.silu()?.apply(&self.mlp_2)
+        let x = linear_nan_safe(&self.mlp_0, &t_freq)?.silu()?;
+        linear_nan_safe(&self.mlp_2, &x)
     }
 }
 
@@ -167,7 +186,8 @@ impl VectorEmbedder {
     }
 
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        x.apply(&self.mlp_0)?.silu()?.apply(&self.mlp_2)
+        let x = linear_nan_safe(&self.mlp_0, x)?.silu()?;
+        linear_nan_safe(&self.mlp_2, &x)
     }
 }
 
@@ -188,11 +208,9 @@ impl Mlp {
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         // GeluPytorchTanh activation
         // Ensure contiguous for quantized matmul
-        x.contiguous()?
-            .apply(&self.fc1)?
-            .apply(&candle_nn::Activation::GeluPytorchTanh)?
-            .contiguous()?
-            .apply(&self.fc2)
+        let x = linear_nan_safe(&self.fc1, &x.contiguous()?)?;
+        let x = x.apply(&candle_nn::Activation::GeluPytorchTanh)?.contiguous()?;
+        linear_nan_safe(&self.fc2, &x)
     }
 }
 
@@ -237,7 +255,7 @@ impl AttnProjections {
     }
 
     fn pre_attention(&self, x: &Tensor) -> candle_core::Result<Qkv> {
-        let qkv = self.qkv.forward(x)?;
+        let qkv = linear_nan_safe(&self.qkv, x)?;
         let Qkv { q, k, v } = split_qkv(&qkv, self.head_dim)?;
         let q = match self.ln_q.as_ref() {
             None => q,
@@ -270,7 +288,7 @@ impl AttnProjections {
             eprintln!("[sd3-proj] attention output (before proj): [{mn:.4},{mx:.4}] shape={:?} dtype={:?}", x.shape(), x.dtype());
         }
         // Quantized matmul requires contiguous tensors
-        self.proj.forward(&x.contiguous()?)
+        linear_nan_safe(&self.proj, &x.contiguous()?)
     }
 }
 
@@ -289,7 +307,7 @@ impl QkvOnlyAttnProjections {
     }
 
     fn pre_attention(&self, x: &Tensor) -> candle_core::Result<Qkv> {
-        let qkv = self.qkv.forward(x)?;
+        let qkv = linear_nan_safe(&self.qkv, x)?;
         split_qkv(&qkv, self.head_dim)
     }
 }
@@ -305,102 +323,121 @@ struct Qkv {
 fn split_qkv(qkv: &Tensor, head_dim: usize) -> candle_core::Result<Qkv> {
     let (batch_size, seq_len, _) = qkv.dims3()?;
     let qkv = qkv.reshape((batch_size, seq_len, 3, (), head_dim))?;
+    // Treat Q, K, V symmetrically — all get reshaped back to (B, seq, dim).
+    // Previously V was left as 4D which caused shape inconsistencies in attention.
     let q = qkv.get_on_dim(2, 0)?.reshape((batch_size, seq_len, ()))?;
     let k = qkv.get_on_dim(2, 1)?.reshape((batch_size, seq_len, ()))?;
-    let v = qkv.get_on_dim(2, 2)?;
+    let v = qkv.get_on_dim(2, 2)?.reshape((batch_size, seq_len, ()))?;
     Ok(Qkv { q, k, v })
 }
 
 fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> candle_core::Result<Tensor> {
     let shift = shift.unsqueeze(1)?;
     let scale = scale.unsqueeze(1)?;
-    let scale_plus_one = scale.broadcast_add(&Tensor::ones_like(&scale)?)?;
+    // Use scalar addition instead of Tensor::ones_like to avoid unnecessary allocation
+    // and potential precision issues from broadcasting a full-shape tensor.
+    let scale_plus_one = (scale + 1.0)?;
     // Ensure contiguous for downstream quantized matmul operations
     shift
         .broadcast_add(&x.broadcast_mul(&scale_plus_one)?)?
         .contiguous()
 }
 
-/// Attention computation in BF16 — matches ComfyUI/sd.cpp approach.
+/// Attention using standard (batch, heads, seq, head_dim) layout.
 ///
-/// ComfyUI dequantizes GGUF to F16 and runs attention in F16.
-/// sd.cpp uses ggml's native F16 attention kernels.
-/// Our quantized linears output F32, so we cast Q/K/V to BF16 for attention
-/// (halving the [B*heads, seq, seq] matrix from ~5.5GB to ~2.75GB at 1024x1024)
-/// then cast back to F32 for downstream quantized linear layers.
+/// Previous approach used flatten_to(1) to merge batch+heads, then manual
+/// chunked matmul — this produced hidden NaN in the Q@K^T matmul on CUDA.
+/// This version keeps the 4D layout (batch, heads, seq, head_dim) and uses
+/// standard matmul + softmax_last_dim without flattening.
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_core::Result<Tensor> {
     let batch_size = q.dim(0)?;
     let seqlen = q.dim(1)?;
     let q = q.reshape((batch_size, seqlen, num_heads, ()))?;
     let k = k.reshape((batch_size, seqlen, num_heads, ()))?;
+    let v = v.reshape((batch_size, seqlen, num_heads, ()))?;
     let headdim = q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (headdim as f64).sqrt();
 
-    // Keep everything in F32 — F16 matmul produces hidden NaN due to CUDA precision.
-    // Use chunked attention to manage VRAM (each chunk's weight matrix is small).
-    let q = q.transpose(1, 2)?.contiguous()?.flatten_to(1)?;
-    let k = k.transpose(1, 2)?.contiguous()?.flatten_to(1)?;
-    let v_orig_shape = v.dims().to_vec();
-    let v = v
-        .reshape((batch_size, seqlen, num_heads, ()))?
-        .transpose(1, 2)?
-        .contiguous()?
-        .flatten_to(1)?;
+    // (batch, heads, seq, head_dim)
+    let q = q.transpose(1, 2)?.contiguous()?;
+    let k = k.transpose(1, 2)?.contiguous()?;
+    let v = v.transpose(1, 2)?.contiguous()?;
 
-    // Chunked attention: process query tokens in chunks to avoid OOM on the
-    // massive [B*heads, full_seq, full_seq] attention matrix.
-    // At 1024x1024 with batch=2: [76, 4429, 4429] F16 = ~3GB which OOMs on 24GB.
-    // Chunk size 512: [76, 512, 4429] F16 = ~345MB per chunk — fits easily.
-    let k_t = k.t()?.contiguous()?;
-    // Chunk size 256: [76, 256, 4429] F32 = ~325MB per chunk (vs 5.5GB for full matrix)
+    // Q @ K^T → (batch, heads, seq_q, seq_k)
+    // Use chunked attention to avoid OOM on the [B, heads, full_seq, full_seq] matrix.
     let chunk_size = 256;
+    let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
     let mut attn_chunks = Vec::new();
     let mut offset = 0;
-    let mut _chunk_idx = 0;
     while offset < seqlen {
         let len = chunk_size.min(seqlen - offset);
-        let q_chunk = q.narrow(1, offset, len)?.contiguous()?;
+        let q_chunk = q.narrow(2, offset, len)?.contiguous()?;
         let weights_chunk = (q_chunk.matmul(&k_t)? * softmax_scale)?;
-        // F32 softmax — chunked to keep VRAM bounded
-        let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk)?;
-        // Trace softmax output on first chunk
-        if _chunk_idx == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-            static SM_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !SM_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let smf = sm_chunk.to_dtype(DType::F32)?;
-                let mn = smf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                let mx = smf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                let sm = smf.sum_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                eprintln!("[sd3-attn] softmax chunk0: [{mn:.6},{mx:.6}] sum={sm:.2}");
+        // Replace hidden NaN from CUDA matmul with 0.0 (NaN != NaN trick)
+        let nan_mask = weights_chunk.ne(&weights_chunk)?;
+        let zero = Tensor::zeros_like(&weights_chunk)?;
+        let weights_chunk = nan_mask.where_cond(&zero, &weights_chunk)?;
+
+        // Diagnostic: check each step for NaN/inf on first chunk of first call
+        if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+            static STEP_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !STEP_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let nan_count = nan_mask.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>().unwrap_or(-1.0);
+                let wf = weights_chunk.to_dtype(DType::F32)?;
+                let wmn = wf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let wmx = wf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                eprintln!("[sd3-step] after nan_to_zero: nan_count={nan_count} weights=[{wmn:.4},{wmx:.4}]");
             }
         }
-        let scores_chunk = sm_chunk.contiguous()?.matmul(&v)?;
-        // Trace ALL chunks on first call
-        static CHUNK_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !CHUNK_DIAG.load(std::sync::atomic::Ordering::Relaxed)
-            && std::env::var_os("MOLD_SD3_DEBUG").is_some()
-        {
-            let sf = scores_chunk.to_dtype(DType::F32)?;
-            let mn = sf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            let mx = sf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            let wf = weights_chunk.to_dtype(DType::F32)?;
-            let wmn = wf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            let wmx = wf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            eprintln!("[sd3-chunk] chunk {_chunk_idx} (offset={offset},len={len}): weights=[{wmn:.4},{wmx:.4}] scores=[{mn:.4},{mx:.4}]");
+
+        let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk)?;
+
+        if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+            static SM_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SM_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let sf = sm_chunk.to_dtype(DType::F32)?;
+                let smn = sf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let smx = sf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let ssum = sf.sum_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                eprintln!("[sd3-step] softmax: [{smn:.6},{smx:.6}] sum={ssum:.2}");
+            }
+        }
+
+        let scores_chunk = sm_chunk.matmul(&v)?;
+        // Also NaN-guard the sm@V matmul output
+        let nan_mask2 = scores_chunk.ne(&scores_chunk)?;
+        let zero2 = Tensor::zeros_like(&scores_chunk)?;
+        let scores_chunk = nan_mask2.where_cond(&zero2, &scores_chunk)?;
+
+        if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+            static SC_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SC_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let scf = scores_chunk.to_dtype(DType::F32)?;
+                let scmn = scf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let scmx = scf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                eprintln!("[sd3-step] scores (sm@V): [{scmn:.4},{scmx:.4}]");
+            }
         }
         attn_chunks.push(scores_chunk);
         offset += len;
-        _chunk_idx += 1;
     }
-    let attn_scores = Tensor::cat(&attn_chunks, 1)?;
+    let attn = Tensor::cat(&attn_chunks, 2)?;
 
-    // Already F32, ensure contiguous for downstream quantized linear layers
-    let head_dim = v_orig_shape.last().copied().unwrap_or(headdim);
-    attn_scores
-        .reshape((batch_size, num_heads, seqlen, head_dim))?
-        .transpose(1, 2)?
+    // Trace attention output on first call
+    if std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+        static ATTN_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !ATTN_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let af = attn.to_dtype(DType::F32)?;
+            let mn = af.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let mx = af.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            eprintln!("[sd3-attn] attention output: [{mn:.4},{mx:.4}] shape={:?}", attn.shape());
+        }
+    }
+
+    // Back to (batch, seq, heads * head_dim) for downstream linear layers
+    attn.transpose(1, 2)?
         .contiguous()?
-        .reshape((batch_size, seqlen, ()))?
+        .reshape((batch_size, seqlen, num_heads * headdim))?
         .contiguous()
 }
 
@@ -463,7 +500,7 @@ impl DiTBlock {
         x: &Tensor,
         c: &Tensor,
     ) -> candle_core::Result<(Qkv, ModulateIntermediates)> {
-        let modulation = c.silu()?.apply(&self.ada_ln_modulation_1)?;
+        let modulation = linear_nan_safe(&self.ada_ln_modulation_1, &c.silu()?)?;
         let chunks = modulation.chunk(6, D::Minus1)?;
         let (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp) = (
             chunks[0].clone(),
@@ -591,7 +628,7 @@ impl SelfAttnDiTBlock {
         x: &Tensor,
         c: &Tensor,
     ) -> candle_core::Result<(Qkv, Qkv, SelfAttnModulateIntermediates)> {
-        let modulation = c.silu()?.apply(&self.ada_ln_modulation_1)?;
+        let modulation = linear_nan_safe(&self.ada_ln_modulation_1, &c.silu()?)?;
         let chunks = modulation.chunk(9, D::Minus1)?;
         let (
             shift_msa,
@@ -680,7 +717,7 @@ impl QkvOnlyDiTBlock {
     }
 
     fn pre_attention(&self, x: &Tensor, c: &Tensor) -> candle_core::Result<Qkv> {
-        let modulation = c.silu()?.apply(&self.ada_ln_modulation_1)?;
+        let modulation = linear_nan_safe(&self.ada_ln_modulation_1, &c.silu()?)?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift_msa, scale_msa) = (chunks[0].clone(), chunks[1].clone());
         let norm_x = self.norm1.forward(x)?;
@@ -720,12 +757,12 @@ impl FinalLayer {
     }
 
     fn forward(&self, x: &Tensor, c: &Tensor) -> candle_core::Result<Tensor> {
-        let modulation = c.silu()?.apply(&self.ada_ln_modulation_1)?;
+        let modulation = linear_nan_safe(&self.ada_ln_modulation_1, &c.silu()?)?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (chunks[0].clone(), chunks[1].clone());
         let norm_x = self.norm_final.forward(x)?;
         let modulated_x = modulate(&norm_x, &shift, &scale)?;
-        self.linear.forward(&modulated_x)
+        linear_nan_safe(&self.linear, &modulated_x)
     }
 }
 
@@ -1081,7 +1118,22 @@ impl QuantizedMMDiT {
         let c = self.timestep_embedder.forward(t)?;
         let y = self.vector_embedder.forward(y)?;
         let c = (c + y)?;
-        let context = self.context_embedder.forward(context)?;
+        let context = linear_nan_safe(&self.context_embedder, context)?;
+
+        // Diagnostic: check if embeddings are finite before any block runs
+        if std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+            static EMB_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !EMB_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let stats = |name: &str, t: &Tensor| {
+                    let mn = t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    let mx = t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    eprintln!("[sd3-emb] {name}: [{mn:.4},{mx:.4}] shape={:?}", t.shape());
+                };
+                stats("x (patch+pos)", &x);
+                stats("c (timestep+y)", &c);
+                stats("context (encoded)", &context);
+            }
+        }
 
         // Joint blocks
         let (mut context, mut x) = (context, x);
