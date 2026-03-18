@@ -119,12 +119,28 @@ impl MoldClient {
     }
 
     /// Check whether an error is a 404 "model not found" from the server.
-    /// Useful for triggering client-side pull when the server doesn't have the model.
+    /// Useful for triggering a server-side pull when the model isn't downloaded.
     pub fn is_model_not_found(err: &anyhow::Error) -> bool {
         if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
             return reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND);
         }
         false
+    }
+
+    /// Ask the server to pull (download) a model. Blocks until the download
+    /// completes on the server side. The server updates its in-memory config
+    /// so subsequent generate/load requests can find the model.
+    pub async fn pull_model(&self, model: &str) -> Result<String> {
+        let resp = self
+            .client
+            .post(format!("{}/api/models/pull", self.base_url))
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(resp)
     }
 
     pub fn host(&self) -> &str {

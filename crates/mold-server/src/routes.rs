@@ -85,6 +85,18 @@ async fn ensure_model_ready(
         return create_and_load_engine(state, model_name, paths).await;
     }
 
+    // Config miss — re-read from disk in case config.toml was updated
+    // externally (e.g., manual edit or `mold pull` from another process).
+    {
+        let fresh_config = mold_core::Config::load_or_default();
+        if let Some(paths) = ModelPaths::resolve(model_name, &fresh_config) {
+            let mut config = state.config.write().await;
+            *config = fresh_config;
+            drop(config);
+            return create_and_load_engine(state, model_name, paths).await;
+        }
+    }
+
     // Model paths not found — tell the client to pull or report unknown model
     if mold_core::manifest::find_manifest(model_name).is_some() {
         return Err((

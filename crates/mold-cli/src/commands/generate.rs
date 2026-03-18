@@ -126,12 +126,11 @@ pub async fn run(
             Err(e) if MoldClient::is_model_not_found(&e) => {
                 pb.finish_and_clear();
                 status!(
-                    "{} Model '{}' not on server — pulling...",
+                    "{} Model '{}' not on server — server is downloading...",
                     "●".cyan(),
                     model.bold()
                 );
-                super::pull::pull_and_configure(model).await?;
-                // Retry after pull — the server can now find the model files
+                // Ask the server to pull the model (works for both local and remote servers)
                 let pb2 = ProgressBar::new_spinner();
                 if piped {
                     pb2.set_draw_target(indicatif::ProgressDrawTarget::stderr());
@@ -141,10 +140,12 @@ pub async fn run(
                         .template("{spinner:.green} {msg}")
                         .unwrap(),
                 );
-                pb2.set_message("Retrying generation...");
+                pb2.set_message(format!("Server pulling {}...", model));
                 pb2.enable_steady_tick(Duration::from_millis(100));
-                let response = client.generate(req.clone()).await?;
+                client.pull_model(model).await?;
                 pb2.finish_and_clear();
+                status!("{} Pull complete, generating...", "✓".green());
+                let response = client.generate(req.clone()).await?;
                 response
             }
             Err(e) if MoldClient::is_connection_error(&e) => {
