@@ -13,3 +13,4 @@
 # Nix / direnv
 .direnv/
 result
+/target/coverage/

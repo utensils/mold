@@ -48,6 +48,8 @@ cargo clippy                                         # Lint
 cargo fmt --check                                    # Format check
 cargo test                                           # All tests
 cargo test -p mold-core                              # Single crate
+./scripts/coverage.sh                                # Test coverage summary
+./scripts/coverage.sh --html                         # HTML coverage report
 cargo run -p mold-cli -- run "a cat"                 # Generate image
 cargo run -p mold-cli -- serve                       # Start server
 ```
