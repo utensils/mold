@@ -60,36 +60,34 @@ fn load_3d_conv1x1_as_2d(in_channels: usize, out_channels: usize, vb: VarBuilder
     Ok(Conv2d::new(ws, bias, Default::default()))
 }
 
+/// Channel-wise RMS normalization matching the Wan VAE's `RMS_norm`.
+///
+/// The Python reference uses `F.normalize(x, dim=1) * scale * gamma` where
+/// `scale = sqrt(dim)`. Since `F.normalize` divides by the L2 norm
+/// `sqrt(sum(x^2, dim=1))` = `sqrt(C) * sqrt(mean(x^2, dim=1))`, the `sqrt(C)`
+/// from `scale` cancels with the `sqrt(C)` in the denominator. The net effect
+/// is simply `x / RMS(x) * gamma` — NO extra sqrt(C) scaling.
 #[derive(Debug, Clone)]
 struct QwenImageRmsNorm2d {
     gamma: Tensor,
-    scale: f64,
 }
 
 impl QwenImageRmsNorm2d {
     fn for_image(channels: usize, vb: VarBuilder) -> Result<Self> {
         let gamma = vb.get((channels, 1, 1), "gamma")?;
-        Ok(Self {
-            gamma,
-            scale: (channels as f64).sqrt(),
-        })
+        Ok(Self { gamma })
     }
 
     fn for_feature(channels: usize, vb: VarBuilder) -> Result<Self> {
         let gamma = vb.get((channels, 1, 1, 1), "gamma")?.reshape((channels, 1, 1))?;
-        Ok(Self {
-            gamma,
-            scale: (channels as f64).sqrt(),
-        })
+        Ok(Self { gamma })
     }
 }
 
 impl Module for QwenImageRmsNorm2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let rms = (x.sqr()?.mean_keepdim(1)? + 1e-6)?.sqrt()?;
-        let x = x.broadcast_div(&rms)?;
-        let x = (x * self.scale)?;
-        x.broadcast_mul(&self.gamma)
+        x.broadcast_div(&rms)?.broadcast_mul(&self.gamma)
     }
 }
 
@@ -197,37 +195,21 @@ impl Module for QwenImageMidBlock2d {
     }
 }
 
-/// Spatial-only upsample: nearest 2x → Conv2d.
+/// Spatial upsample: nearest 2x → Conv2d.
+///
+/// The time_conv weights in the safetensors are for video temporal upsampling
+/// and are correctly skipped for single-frame (T=1) image generation —
+/// the Wan VAE only uses time_conv when feat_cache is available (streaming video).
 #[derive(Debug, Clone)]
 struct QwenImageUpsample2d {
-    /// Optional temporal conv for blocks with temporal_upsample.
-    /// For T=1 image inference: apply 1x1 conv (384→768), take first half of channels
-    /// (frame 0 of temporal interleave), then spatial upsample + conv.
-    time_conv: Option<Conv2d>,
-    time_conv_out_half: usize,
     conv: Conv2d,
 }
 
 impl QwenImageUpsample2d {
-    fn new(in_dim: usize, out_dim: usize, has_temporal: bool, vb: VarBuilder) -> Result<Self> {
-        let time_conv = if has_temporal {
-            // time_conv weight is [dim*2, dim, 3, 1, 1] — a causal 3D conv with spatial kernel 1x1.
-            // For T=1 with causal padding, only the last temporal slice contributes.
-            let tc_vb = vb.pp("time_conv");
-            let tc_ws = tc_vb.get((in_dim * 2, in_dim, 3, 1, 1), "weight")?;
-            // Extract last temporal slice: [dim*2, dim, 1, 1]
-            let tc_ws = tc_ws.i((.., .., 2, .., ..))?.contiguous()?;
-            let tc_bias = tc_vb.get(in_dim * 2, "bias").ok();
-            Some(Conv2d::new(tc_ws, tc_bias, Default::default()))
-        } else {
-            None
-        };
-
+    fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            time_conv,
-            time_conv_out_half: in_dim,
             conv: conv2d(
-                if has_temporal { in_dim } else { in_dim },
+                in_dim,
                 out_dim,
                 3,
                 Conv2dConfig {
@@ -242,14 +224,6 @@ impl QwenImageUpsample2d {
 
 impl Module for QwenImageUpsample2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = if let Some(tc) = &self.time_conv {
-            // Apply temporal conv: (B, C, H, W) → (B, C*2, H, W)
-            let x = x.apply(tc)?;
-            // Temporal interleave for T=1: take first half of channels (frame 0)
-            x.narrow(1, 0, self.time_conv_out_half)?
-        } else {
-            x.clone()
-        };
         let (_, _, h, w) = x.dims4()?;
         x.upsample_nearest2d(h * 2, w * 2)?.apply(&self.conv)
     }
@@ -262,13 +236,7 @@ struct QwenImageUpBlock2d {
 }
 
 impl QwenImageUpBlock2d {
-    fn new(
-        in_dim: usize,
-        out_dim: usize,
-        add_upsample: bool,
-        has_temporal_upsample: bool,
-        vb: VarBuilder,
-    ) -> Result<Self> {
+    fn new(in_dim: usize, out_dim: usize, add_upsample: bool, vb: VarBuilder) -> Result<Self> {
         let mut resnets = Vec::with_capacity(NUM_RES_BLOCKS + 1);
         let mut current_dim = in_dim;
         for i in 0..=NUM_RES_BLOCKS {
@@ -282,12 +250,7 @@ impl QwenImageUpBlock2d {
         Ok(Self {
             resnets,
             upsample: if add_upsample {
-                Some(QwenImageUpsample2d::new(
-                    out_dim,
-                    out_dim / 2,
-                    has_temporal_upsample,
-                    vb.pp("upsamplers").pp("0"),
-                )?)
+                Some(QwenImageUpsample2d::new(out_dim, out_dim / 2, vb.pp("upsamplers").pp("0"))?)
             } else {
                 None
             },
@@ -326,9 +289,6 @@ impl QwenImageDecoder2d {
             BLOCK_OUT_CHANNELS[1],
             BLOCK_OUT_CHANNELS[0],
         ];
-        // Encoder temporal_downsample = [False, True, True].
-        // Decoder reverses this: blocks 0,1 have temporal upsample, block 2 does not.
-        let temporal_upsample = [true, true, false];
         let mut up_blocks = Vec::with_capacity(BLOCK_OUT_CHANNELS.len());
         for i in 0..BLOCK_OUT_CHANNELS.len() {
             let mut in_dim = dims[i];
@@ -337,12 +297,10 @@ impl QwenImageDecoder2d {
             }
             let out_dim = dims[i + 1];
             let add_upsample = i < BLOCK_OUT_CHANNELS.len() - 1;
-            let has_temporal = add_upsample && i < temporal_upsample.len() && temporal_upsample[i];
             up_blocks.push(QwenImageUpBlock2d::new(
                 in_dim,
                 out_dim,
                 add_upsample,
-                has_temporal,
                 vb.pp("up_blocks").pp(i),
             )?);
         }
@@ -401,5 +359,61 @@ impl QwenImageVae {
             .broadcast_add(&self.latents_mean)?;
         let denormed = denormed.apply(&self.post_quant_conv)?;
         denormed.apply(&self.decoder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rms_norm_no_spurious_scaling() {
+        // RMS norm should compute x / RMS(x) * gamma — no sqrt(C) factor.
+        // For a constant tensor, RMS = |x|, so output = sign(x) * gamma.
+        let dev = candle_core::Device::Cpu;
+        let gamma = Tensor::ones((4, 1, 1), DType::F32, &dev).unwrap();
+        let norm = QwenImageRmsNorm2d { gamma };
+
+        // Input: [1, 4, 1, 1] all 2.0 → RMS per channel = 2.0 → output = 1.0
+        let x = Tensor::full(2.0f32, (1, 4, 1, 1), &dev).unwrap();
+        let out = norm.forward(&x).unwrap();
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        for v in &vals {
+            assert!(
+                (v - 1.0).abs() < 0.01,
+                "expected ~1.0 but got {v} (would be ~2.0 with spurious sqrt(C))"
+            );
+        }
+    }
+
+    #[test]
+    fn rms_norm_gamma_broadcast() {
+        // Verify gamma broadcasts correctly over (B, C, H, W)
+        let dev = candle_core::Device::Cpu;
+        let gamma_vals: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let gamma = Tensor::from_vec(gamma_vals, (4, 1, 1), &dev).unwrap();
+        let norm = QwenImageRmsNorm2d { gamma };
+
+        let x = Tensor::full(1.0f32, (1, 4, 2, 2), &dev).unwrap();
+        let out = norm.forward(&x).unwrap();
+        // RMS of [1,1,1,1] over channel dim = 1.0, so out = x * gamma
+        // Channel 0: 1.0, Channel 1: 2.0, Channel 2: 3.0, Channel 3: 4.0
+        let c0 = out.i((0, 0, 0, 0)).unwrap().to_scalar::<f32>().unwrap();
+        let c1 = out.i((0, 1, 0, 0)).unwrap().to_scalar::<f32>().unwrap();
+        assert!((c0 - 1.0).abs() < 0.01, "channel 0: expected 1.0, got {c0}");
+        assert!((c1 - 2.0).abs() < 0.01, "channel 1: expected 2.0, got {c1}");
+    }
+
+    #[test]
+    fn latent_denormalization_formula() {
+        // Verify: denormed = latents * std + mean
+        let dev = candle_core::Device::Cpu;
+        let mean = Tensor::from_vec(vec![0.5f32, -0.5], (1, 2, 1, 1), &dev).unwrap();
+        let std = Tensor::from_vec(vec![2.0f32, 3.0], (1, 2, 1, 1), &dev).unwrap();
+        let latents = Tensor::full(1.0f32, (1, 2, 1, 1), &dev).unwrap();
+        let result = latents.broadcast_mul(&std).unwrap().broadcast_add(&mean).unwrap();
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        assert!((vals[0] - 2.5).abs() < 1e-6, "1.0 * 2.0 + 0.5 = 2.5");
+        assert!((vals[1] - 2.5).abs() < 1e-6, "1.0 * 3.0 + (-0.5) = 2.5");
     }
 }
