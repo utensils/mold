@@ -26,10 +26,10 @@ pub struct Flux2VaeConfig {
     pub norm_num_groups: usize,
     pub use_quant_conv: bool,
     pub use_post_quant_conv: bool,
-    /// Scale factor for latent space normalization.
-    pub scale_factor: f64,
-    /// Shift factor for latent space normalization.
-    pub shift_factor: f64,
+    /// Number of patchified channels: latent_channels * patch_h * patch_w.
+    pub patchified_channels: usize,
+    /// BatchNorm epsilon for latent normalization.
+    pub batch_norm_eps: f64,
 }
 
 impl Flux2VaeConfig {
@@ -44,10 +44,8 @@ impl Flux2VaeConfig {
             norm_num_groups: 32,
             use_quant_conv: true,
             use_post_quant_conv: true,
-            // These values need to be calibrated from the HF model config.
-            // Using FLUX.1 defaults as a starting point; they may need adjustment.
-            scale_factor: 0.3611,
-            shift_factor: 0.1159,
+            patchified_channels: 32 * 2 * 2, // latent_channels * patch_size[0] * patch_size[1] = 128
+            batch_norm_eps: 0.0001,
         }
     }
 }
@@ -295,15 +293,18 @@ impl Module for Decoder {
 
 /// Flux.2 VAE (AutoencoderKLFlux2).
 ///
-/// Decodes 32-channel latents to RGB images. Uses quant_conv/post_quant_conv
-/// layers and has a different latent channel count than FLUX.1.
+/// Decodes 32-channel latents to RGB images. Uses BatchNorm2d with running
+/// statistics for latent denormalization (not scale_factor/shift_factor like FLUX.1).
+/// The denormalization operates on patchified latents (128 channels after 2x2 patchifying).
 #[derive(Debug, Clone)]
 pub struct Flux2AutoEncoder {
     decoder: Decoder,
-    /// Optional post-quantization conv (latent_channels -> latent_channels).
     post_quant_conv: Option<Conv2d>,
-    scale_factor: f64,
-    shift_factor: f64,
+    /// BatchNorm running_mean for patchified latent channels (128,).
+    bn_running_mean: Tensor,
+    /// BatchNorm sqrt(running_var + eps) for patchified latent channels (128,).
+    bn_running_std: Tensor,
+    latent_channels: usize,
 }
 
 impl Flux2AutoEncoder {
@@ -322,21 +323,52 @@ impl Flux2AutoEncoder {
             None
         };
 
+        // Load BatchNorm running statistics for latent denormalization.
+        // The BN operates on patchified latents (128 channels = 32 * 2 * 2).
+        let bn_vb = vb.pp("bn");
+        let bn_running_mean = bn_vb
+            .get(cfg.patchified_channels, "running_mean")?
+            .reshape((1, cfg.patchified_channels, 1, 1))?;
+        let bn_running_var = bn_vb.get(cfg.patchified_channels, "running_var")?;
+        let bn_running_std = (bn_running_var + cfg.batch_norm_eps)?
+            .sqrt()?
+            .reshape((1, cfg.patchified_channels, 1, 1))?;
+
         Ok(Self {
             decoder,
             post_quant_conv,
-            scale_factor: cfg.scale_factor,
-            shift_factor: cfg.shift_factor,
+            bn_running_mean,
+            bn_running_std,
+            latent_channels: cfg.latent_channels,
         })
     }
 
     /// Decode latents to pixel space.
     ///
-    /// Input: (B, 32, H, W) latent tensor
+    /// Input: (B, 32, H, W) latent tensor (unpatchified, from denoising)
     /// Output: (B, 3, H*8, W*8) RGB image in [-1, 1]
     pub fn decode(&self, xs: &Tensor) -> Result<Tensor> {
-        // Undo scale+shift normalization
-        let xs = ((xs / self.scale_factor)? + self.shift_factor)?;
+        let (b, c, h, w) = xs.dims4()?;
+
+        // Patchify: (B, 32, H, W) → (B, 128, H/2, W/2)
+        // Folds 2x2 spatial patches into channel dimension
+        let xs = xs
+            .reshape((b, c, h / 2, 2, w / 2, 2))?
+            .permute((0, 1, 3, 5, 2, 4))?
+            .reshape((b, c * 4, h / 2, w / 2))?;
+
+        // BatchNorm denormalization: latents * sqrt(var + eps) + mean
+        let xs = xs
+            .broadcast_mul(&self.bn_running_std)?
+            .broadcast_add(&self.bn_running_mean)?;
+
+        // Unpatchify: (B, 128, H/2, W/2) → (B, 32, H, W)
+        let xs = xs
+            .reshape((b, self.latent_channels, 4, h / 2, w / 2))?
+            .permute((0, 1, 3, 4, 2))?
+            .reshape((b, self.latent_channels, h / 2, w / 2, 2, 2))?
+            .permute((0, 1, 2, 4, 3, 5))?
+            .reshape((b, self.latent_channels, h, w))?;
 
         // Apply post_quant_conv if present
         let xs = if let Some(pqc) = &self.post_quant_conv {
