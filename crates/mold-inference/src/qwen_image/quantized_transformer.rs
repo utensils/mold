@@ -51,12 +51,16 @@ impl TimestepProjEmbeddings {
             linear1: quantized_nn::linear(
                 FREQUENCY_EMBEDDING_SIZE,
                 inner_dim,
-                vb.pp("time_text_embed").pp("timestep_embedder").pp("linear_1"),
+                vb.pp("time_text_embed")
+                    .pp("timestep_embedder")
+                    .pp("linear_1"),
             )?,
             linear2: quantized_nn::linear(
                 inner_dim,
                 inner_dim,
-                vb.pp("time_text_embed").pp("timestep_embedder").pp("linear_2"),
+                vb.pp("time_text_embed")
+                    .pp("timestep_embedder")
+                    .pp("linear_2"),
             )?,
         })
     }
@@ -120,8 +124,14 @@ struct QkNorm {
 
 impl QkNorm {
     fn new(head_dim: usize, eps: f64, vb: VarBuilder, q_name: &str, k_name: &str) -> Result<Self> {
-        let norm_q_w = vb.pp(q_name).get(head_dim, "weight")?.dequantize(vb.device())?;
-        let norm_k_w = vb.pp(k_name).get(head_dim, "weight")?.dequantize(vb.device())?;
+        let norm_q_w = vb
+            .pp(q_name)
+            .get(head_dim, "weight")?
+            .dequantize(vb.device())?;
+        let norm_k_w = vb
+            .pp(k_name)
+            .get(head_dim, "weight")?
+            .dequantize(vb.device())?;
         Ok(Self {
             norm_q: CandleRmsNorm::new(norm_q_w, eps),
             norm_k: CandleRmsNorm::new(norm_k_w, eps),
@@ -188,25 +198,37 @@ impl JointAttention {
         let (b, _, _) = img_hidden.dims3()?;
         let txt_seq_len = txt_hidden.dim(1)?;
 
-        let q_img = img_hidden
-            .apply(&self.to_q)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let k_img = img_hidden
-            .apply(&self.to_k)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let v_img = img_hidden
-            .apply(&self.to_v)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let q_img =
+            img_hidden
+                .apply(&self.to_q)?
+                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let k_img =
+            img_hidden
+                .apply(&self.to_k)?
+                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let v_img =
+            img_hidden
+                .apply(&self.to_v)?
+                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
 
-        let q_txt = txt_hidden
-            .apply(&self.add_q_proj)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let k_txt = txt_hidden
-            .apply(&self.add_k_proj)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let v_txt = txt_hidden
-            .apply(&self.add_v_proj)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
+        let q_txt = txt_hidden.apply(&self.add_q_proj)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let k_txt = txt_hidden.apply(&self.add_k_proj)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let v_txt = txt_hidden.apply(&self.add_v_proj)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
 
         let (q_img, k_img) = self.qk_norm.forward(&q_img, &k_img)?;
         let (q_txt, k_txt) = self.added_qk_norm.forward(&q_txt, &k_txt)?;
@@ -244,9 +266,11 @@ impl JointAttention {
         let img_attn = attn.narrow(1, 0, img_seq_len)?;
         let txt_attn = attn.narrow(1, img_seq_len, txt_seq_len)?;
 
-        let txt_out = txt_attn
-            .apply(&self.add_out_proj)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(img_hidden.dtype())?)?;
+        let txt_out = txt_attn.apply(&self.add_out_proj)?.broadcast_mul(
+            &txt_mask
+                .unsqueeze(D::Minus1)?
+                .to_dtype(img_hidden.dtype())?,
+        )?;
 
         Ok((img_attn.apply(&self.to_out)?, txt_out))
     }
@@ -297,11 +321,35 @@ impl QwenImageTransformerBlock {
         let txt_mod = temb.silu()?.apply(&self.txt_mod)?.unsqueeze(1)?;
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
-        let (img_shift_msa, img_scale_msa, img_gate_msa, img_shift_mlp, img_scale_mlp, img_gate_mlp) = (
-            &img_chunks[0], &img_chunks[1], &img_chunks[2], &img_chunks[3], &img_chunks[4], &img_chunks[5],
+        let (
+            img_shift_msa,
+            img_scale_msa,
+            img_gate_msa,
+            img_shift_mlp,
+            img_scale_mlp,
+            img_gate_mlp,
+        ) = (
+            &img_chunks[0],
+            &img_chunks[1],
+            &img_chunks[2],
+            &img_chunks[3],
+            &img_chunks[4],
+            &img_chunks[5],
         );
-        let (txt_shift_msa, txt_scale_msa, txt_gate_msa, txt_shift_mlp, txt_scale_mlp, txt_gate_mlp) = (
-            &txt_chunks[0], &txt_chunks[1], &txt_chunks[2], &txt_chunks[3], &txt_chunks[4], &txt_chunks[5],
+        let (
+            txt_shift_msa,
+            txt_scale_msa,
+            txt_gate_msa,
+            txt_shift_mlp,
+            txt_scale_mlp,
+            txt_gate_mlp,
+        ) = (
+            &txt_chunks[0],
+            &txt_chunks[1],
+            &txt_chunks[2],
+            &txt_chunks[3],
+            &txt_chunks[4],
+            &txt_chunks[5],
         );
 
         let img_attn_in = self
@@ -314,18 +362,16 @@ impl QwenImageTransformerBlock {
             .forward(txt_hidden)?
             .broadcast_mul(&(txt_scale_msa + 1.0)?)?
             .broadcast_add(txt_shift_msa)?;
-        let (img_attn, txt_attn) =
-            self.attn
-                .forward(
-                    &img_attn_in,
-                    &txt_attn_in,
-                    txt_mask,
-                    img_cos,
-                    img_sin,
-                    txt_cos,
-                    txt_sin,
-                    img_seq_len,
-                )?;
+        let (img_attn, txt_attn) = self.attn.forward(
+            &img_attn_in,
+            &txt_attn_in,
+            txt_mask,
+            img_cos,
+            img_sin,
+            txt_cos,
+            txt_sin,
+            img_seq_len,
+        )?;
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_dtype = txt_hidden.dtype();
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
@@ -341,11 +387,12 @@ impl QwenImageTransformerBlock {
             .forward(&txt_hidden)?
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
-        let img_hidden = (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
+        let img_hidden =
+            (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
         let txt_dtype = txt_hidden.dtype();
         let txt_hidden = (txt_hidden
             + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -358,11 +405,20 @@ struct OutputLayer {
 }
 
 impl OutputLayer {
-    fn new(inner_dim: usize, out_channels: usize, patch_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        inner_dim: usize,
+        out_channels: usize,
+        patch_size: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let output_dim = patch_size * patch_size * out_channels;
         Ok(Self {
             norm_final: LayerNormNoParams::new(1e-6),
-            adaln_linear: quantized_nn::linear(inner_dim, 2 * inner_dim, vb.pp("norm_out").pp("linear"))?,
+            adaln_linear: quantized_nn::linear(
+                inner_dim,
+                2 * inner_dim,
+                vb.pp("norm_out").pp("linear"),
+            )?,
             linear: quantized_nn::linear(inner_dim, output_dim, vb.pp("proj_out"))?,
         })
     }
@@ -397,13 +453,20 @@ impl QuantizedQwenImageTransformer2DModel {
         let device = vb.device().clone();
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            blocks.push(QwenImageTransformerBlock::new(cfg, vb.pp("transformer_blocks").pp(i))?);
+            blocks.push(QwenImageTransformerBlock::new(
+                cfg,
+                vb.pp("transformer_blocks").pp(i),
+            )?);
         }
         Ok(Self {
             time_embed: TimestepProjEmbeddings::new(cfg.inner_dim, vb.clone())?,
             img_in: quantized_nn::linear(cfg.in_channels, cfg.inner_dim, vb.pp("img_in"))?,
             txt_in: quantized_nn::linear(cfg.joint_attention_dim, cfg.inner_dim, vb.pp("txt_in"))?,
-            txt_norm: quantized_nn::RmsNorm::new(cfg.joint_attention_dim, cfg.norm_eps, vb.pp("txt_norm"))?,
+            txt_norm: quantized_nn::RmsNorm::new(
+                cfg.joint_attention_dim,
+                cfg.norm_eps,
+                vb.pp("txt_norm"),
+            )?,
             blocks,
             rope_embedder: RopeEmbedder::new(
                 10000.0,
@@ -462,8 +525,16 @@ impl QuantizedQwenImageTransformer2DModel {
         let (txt_cos, txt_sin) = self.rope_embedder.forward(&txt_pos_ids)?;
 
         for block in &self.blocks {
-            let (new_img, new_txt) =
-                block.forward(&img, &txt, &encoder_attention_mask, &temb, &img_cos, &img_sin, &txt_cos, &txt_sin)?;
+            let (new_img, new_txt) = block.forward(
+                &img,
+                &txt,
+                &encoder_attention_mask,
+                &temb,
+                &img_cos,
+                &img_sin,
+                &txt_cos,
+                &txt_sin,
+            )?;
             img = new_img.clamp(-65504f32, 65504f32)?;
             txt = new_txt.clamp(-65504f32, 65504f32)?;
         }

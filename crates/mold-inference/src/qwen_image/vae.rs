@@ -36,7 +36,13 @@ fn load_3d_conv_as_2d(
     vb: VarBuilder,
 ) -> Result<Conv2d> {
     let ws = vb.get(
-        (out_channels, in_channels, kernel_size, kernel_size, kernel_size),
+        (
+            out_channels,
+            in_channels,
+            kernel_size,
+            kernel_size,
+            kernel_size,
+        ),
         "weight",
     )?;
     // Last temporal slice: for T=1 with causal padding (2 zero frames + 1 real frame),
@@ -53,7 +59,11 @@ fn load_3d_conv_as_2d(
     ))
 }
 
-fn load_3d_conv1x1_as_2d(in_channels: usize, out_channels: usize, vb: VarBuilder) -> Result<Conv2d> {
+fn load_3d_conv1x1_as_2d(
+    in_channels: usize,
+    out_channels: usize,
+    vb: VarBuilder,
+) -> Result<Conv2d> {
     let ws = vb.get((out_channels, in_channels, 1, 1, 1), "weight")?;
     let ws = ws.i((.., .., 0, .., ..))?.contiguous()?;
     let bias = vb.get(out_channels, "bias").ok();
@@ -79,7 +89,9 @@ impl QwenImageRmsNorm2d {
     }
 
     fn for_feature(channels: usize, vb: VarBuilder) -> Result<Self> {
-        let gamma = vb.get((channels, 1, 1, 1), "gamma")?.reshape((channels, 1, 1))?;
+        let gamma = vb
+            .get((channels, 1, 1, 1), "gamma")?
+            .reshape((channels, 1, 1))?;
         Ok(Self { gamma })
     }
 }
@@ -145,7 +157,11 @@ impl QwenImageResidualBlock2d {
             norm2: QwenImageRmsNorm2d::for_feature(out_dim, vb.pp("norm2"))?,
             conv2: load_3d_conv_as_2d(out_dim, out_dim, 3, 1, vb.pp("conv2"))?,
             conv_shortcut: if in_dim != out_dim {
-                Some(load_3d_conv1x1_as_2d(in_dim, out_dim, vb.pp("conv_shortcut"))?)
+                Some(load_3d_conv1x1_as_2d(
+                    in_dim,
+                    out_dim,
+                    vb.pp("conv_shortcut"),
+                )?)
             } else {
                 None
             },
@@ -250,7 +266,11 @@ impl QwenImageUpBlock2d {
         Ok(Self {
             resnets,
             upsample: if add_upsample {
-                Some(QwenImageUpsample2d::new(out_dim, out_dim / 2, vb.pp("upsamplers").pp("0"))?)
+                Some(QwenImageUpsample2d::new(
+                    out_dim,
+                    out_dim / 2,
+                    vb.pp("upsamplers").pp("0"),
+                )?)
             } else {
                 None
             },
@@ -335,7 +355,11 @@ pub(crate) struct QwenImageVae {
 }
 
 impl QwenImageVae {
-    pub fn load(vae_path: &std::path::Path, device: &candle_core::Device, dtype: DType) -> Result<Self> {
+    pub fn load(
+        vae_path: &std::path::Path,
+        device: &candle_core::Device,
+        dtype: DType,
+    ) -> Result<Self> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[vae_path], dtype, device)? };
         let post_quant_conv = load_3d_conv1x1_as_2d(16, 16, vb.pp("post_quant_conv"))?;
         let decoder = QwenImageDecoder2d::new(vb.pp("decoder"))?;
@@ -411,7 +435,11 @@ mod tests {
         let mean = Tensor::from_vec(vec![0.5f32, -0.5], (1, 2, 1, 1), &dev).unwrap();
         let std = Tensor::from_vec(vec![2.0f32, 3.0], (1, 2, 1, 1), &dev).unwrap();
         let latents = Tensor::full(1.0f32, (1, 2, 1, 1), &dev).unwrap();
-        let result = latents.broadcast_mul(&std).unwrap().broadcast_add(&mean).unwrap();
+        let result = latents
+            .broadcast_mul(&std)
+            .unwrap()
+            .broadcast_add(&mean)
+            .unwrap();
         let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
         assert!((vals[0] - 2.5).abs() < 1e-6, "1.0 * 2.0 + 0.5 = 2.5");
         assert!((vals[1] - 2.5).abs() < 1e-6, "1.0 * 3.0 + (-0.5) = 2.5");

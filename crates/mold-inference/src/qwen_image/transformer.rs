@@ -294,9 +294,11 @@ impl JointAttention {
 
         // Output projections
         let img_out = img_attn.apply(&self.to_out)?;
-        let txt_out = txt_attn
-            .apply(&self.add_out_proj)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_hidden.dtype())?)?;
+        let txt_out = txt_attn.apply(&self.add_out_proj)?.broadcast_mul(
+            &txt_mask
+                .unsqueeze(D::Minus1)?
+                .to_dtype(txt_hidden.dtype())?,
+        )?;
 
         Ok((img_out, txt_out))
     }
@@ -447,17 +449,16 @@ impl QwenImageTransformerBlock {
         let txt_scaled = txt_normed.broadcast_mul(&(c_scale_msa + 1.0)?)?;
 
         // Joint attention
-        let (img_attn, txt_attn) =
-            self.attn.forward(
-                &img_scaled,
-                &txt_scaled,
-                txt_mask,
-                img_cos,
-                img_sin,
-                txt_cos,
-                txt_sin,
-                img_seq_len,
-            )?;
+        let (img_attn, txt_attn) = self.attn.forward(
+            &img_scaled,
+            &txt_scaled,
+            txt_mask,
+            img_cos,
+            img_sin,
+            txt_cos,
+            txt_sin,
+            img_seq_len,
+        )?;
 
         // Gate + residual
         let img_hidden = (img_hidden + gate_msa.tanh()?.broadcast_mul(&img_attn)?)?;

@@ -17,8 +17,8 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::quantized_var_builder;
 use candle_transformers::models::z_image::{get_noise, postprocess_image};
+use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
@@ -74,18 +74,12 @@ impl QwenImageTransformer {
         encoder_attention_mask: &Tensor,
     ) -> Result<Tensor> {
         match self {
-            Self::BF16(model) => Ok(model.forward(
-                latents,
-                t,
-                encoder_hidden_states,
-                encoder_attention_mask,
-            )?),
-            Self::Quantized(model) => Ok(model.forward(
-                latents,
-                t,
-                encoder_hidden_states,
-                encoder_attention_mask,
-            )?),
+            Self::BF16(model) => {
+                Ok(model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)?)
+            }
+            Self::Quantized(model) => {
+                Ok(model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)?)
+            }
         }
     }
 }
@@ -186,9 +180,9 @@ impl QwenImageEngine {
             let xformer_paths = self.transformer_paths();
             let xformer_vb =
                 unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
-            Ok(QwenImageTransformer::BF16(QwenImageTransformer2DModel::new(
-                cfg, xformer_vb,
-            )?))
+            Ok(QwenImageTransformer::BF16(
+                QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
+            ))
         }
     }
 
@@ -252,7 +246,10 @@ impl QwenImageEngine {
         let xformer_label = if transformer_is_quantized {
             "Loading Qwen-Image transformer (GPU, quantized)".to_string()
         } else {
-            format!("Loading Qwen-Image transformer ({} shards)", xformer_paths.len())
+            format!(
+                "Loading Qwen-Image transformer ({} shards)",
+                xformer_paths.len()
+            )
         };
         self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
@@ -416,7 +413,10 @@ impl QwenImageEngine {
         let xformer_label = if transformer_is_quantized {
             "Loading Qwen-Image transformer (GPU, quantized)".to_string()
         } else {
-            format!("Loading Qwen-Image transformer ({} shards)", xformer_paths.len())
+            format!(
+                "Loading Qwen-Image transformer ({} shards)",
+                xformer_paths.len()
+            )
         };
         self.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
@@ -609,10 +609,9 @@ impl InferenceEngine for QwenImageEngine {
         // 2. Encode prompt
         progress.stage_start("Encoding prompt (Qwen2.5)");
         let encode_start = Instant::now();
-        let (encoder_hidden_states, encoder_attention_mask, _token_count) =
-            loaded
-                .text_encoder
-                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
+        let (encoder_hidden_states, encoder_attention_mask, _token_count) = loaded
+            .text_encoder
+            .encode(&req.prompt, &loaded.device, loaded.dtype)?;
         progress.stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
 
         // Drop text encoder from GPU to free VRAM for denoising

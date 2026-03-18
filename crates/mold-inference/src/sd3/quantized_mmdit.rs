@@ -209,7 +209,9 @@ impl Mlp {
         // GeluPytorchTanh activation
         // Ensure contiguous for quantized matmul
         let x = linear_nan_safe(&self.fc1, &x.contiguous()?)?;
-        let x = x.apply(&candle_nn::Activation::GeluPytorchTanh)?.contiguous()?;
+        let x = x
+            .apply(&candle_nn::Activation::GeluPytorchTanh)?
+            .contiguous()?;
         linear_nan_safe(&self.fc2, &x)
     }
 }
@@ -380,9 +382,14 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
 
         // Diagnostic: check each step for NaN/inf on first chunk of first call
         if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-            static STEP_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static STEP_DIAG: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !STEP_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let nan_count = nan_mask.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>().unwrap_or(-1.0);
+                let nan_count = nan_mask
+                    .to_dtype(DType::F32)?
+                    .sum_all()?
+                    .to_scalar::<f32>()
+                    .unwrap_or(-1.0);
                 let wf = weights_chunk.to_dtype(DType::F32)?;
                 let wmn = wf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
                 let wmx = wf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
@@ -393,7 +400,8 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
         let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk)?;
 
         if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-            static SM_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static SM_STEP: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !SM_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let sf = sm_chunk.to_dtype(DType::F32)?;
                 let smn = sf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
@@ -410,7 +418,8 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
         let scores_chunk = nan_mask2.where_cond(&zero2, &scores_chunk)?;
 
         if offset == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-            static SC_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static SC_STEP: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !SC_STEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let scf = scores_chunk.to_dtype(DType::F32)?;
                 let scmn = scf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
@@ -430,7 +439,10 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
             let af = attn.to_dtype(DType::F32)?;
             let mn = af.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
             let mx = af.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
-            eprintln!("[sd3-attn] attention output: [{mn:.4},{mx:.4}] shape={:?}", attn.shape());
+            eprintln!(
+                "[sd3-attn] attention output: [{mn:.4},{mx:.4}] shape={:?}",
+                attn.shape()
+            );
         }
     }
 
@@ -541,11 +553,17 @@ impl DiTBlock {
         macro_rules! trace {
             ($name:expr, $t:expr) => {
                 if do_diag {
-                    let mn = $t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-                    let mx = $t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    let mn = $t
+                        .min_all()
+                        .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                        .unwrap_or(f32::NAN);
+                    let mx = $t
+                        .max_all()
+                        .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                        .unwrap_or(f32::NAN);
                     eprintln!("[sd3-post] {}: [{mn:.4},{mx:.4}]", $name);
                 }
-            }
+            };
         }
 
         trace!("attn_proj", &attn_out);
@@ -854,23 +872,47 @@ impl JointBlock for MMDiTJointBlock {
             && std::env::var_os("MOLD_SD3_DEBUG").is_some();
         if do_diag {
             let stats = |name: &str, t: &Tensor| -> String {
-                let mn = t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-                let mx = t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                let mn = t
+                    .min_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN);
+                let mx = t
+                    .max_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN);
                 format!("{name}=[{mn:.4},{mx:.4}]")
             };
-            eprintln!("[sd3-blk0] pre_attn: {} {} {} {} gate_msa={} gate_mlp={}",
-                stats("x_q", &x_qkv.q), stats("x_k", &x_qkv.k),
-                stats("ctx_q", &context_qkv.q), stats("ctx_k", &context_qkv.k),
-                stats("x_gate", &x_interm.gate_msa), stats("x_gmlp", &x_interm.gate_mlp));
+            eprintln!(
+                "[sd3-blk0] pre_attn: {} {} {} {} gate_msa={} gate_mlp={}",
+                stats("x_q", &x_qkv.q),
+                stats("x_k", &x_qkv.k),
+                stats("ctx_q", &context_qkv.q),
+                stats("ctx_k", &context_qkv.k),
+                stats("x_gate", &x_interm.gate_msa),
+                stats("x_gmlp", &x_interm.gate_mlp)
+            );
         }
 
         let (context_attn, x_attn) = joint_attn(&context_qkv, &x_qkv, num_heads)?;
 
         if do_diag {
-            let mn = |t: &Tensor| t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            let mx = |t: &Tensor| t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            eprintln!("[sd3-blk0] attn out: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
-                mn(&x_attn), mx(&x_attn), mn(&context_attn), mx(&context_attn));
+            let mn = |t: &Tensor| {
+                t.min_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN)
+            };
+            let mx = |t: &Tensor| {
+                t.max_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN)
+            };
+            eprintln!(
+                "[sd3-blk0] attn out: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
+                mn(&x_attn),
+                mx(&x_attn),
+                mn(&context_attn),
+                mx(&context_attn)
+            );
         }
 
         let context_out =
@@ -880,22 +922,50 @@ impl JointBlock for MMDiTJointBlock {
         if do_diag {
             // Check x_attn BEFORE post_attention (is narrow'd view causing issues?)
             let xac = x_attn.contiguous()?;
-            let mn = xac.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            let mx = xac.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            eprintln!("[sd3-blk0] x_attn (contiguous): [{mn:.4},{mx:.4}] shape={:?}", xac.shape());
+            let mn = xac
+                .min_all()
+                .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                .unwrap_or(f32::NAN);
+            let mx = xac
+                .max_all()
+                .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                .unwrap_or(f32::NAN);
+            eprintln!(
+                "[sd3-blk0] x_attn (contiguous): [{mn:.4},{mx:.4}] shape={:?}",
+                xac.shape()
+            );
             // Also check context_out
-            let co = context_out.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            let cox = context_out.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            let co = context_out
+                .min_all()
+                .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                .unwrap_or(f32::NAN);
+            let cox = context_out
+                .max_all()
+                .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                .unwrap_or(f32::NAN);
             eprintln!("[sd3-blk0] context_out: [{co:.4},{cox:.4}]");
         }
 
         let x_out = self.x_block.post_attention(&x_attn, x, &x_interm)?;
 
         if do_diag {
-            let mn = |t: &Tensor| t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            let mx = |t: &Tensor| t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-            eprintln!("[sd3-blk0] post_attn: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
-                mn(&x_out), mx(&x_out), mn(&context_out), mx(&context_out));
+            let mn = |t: &Tensor| {
+                t.min_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN)
+            };
+            let mx = |t: &Tensor| {
+                t.max_all()
+                    .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN)
+            };
+            eprintln!(
+                "[sd3-blk0] post_attn: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
+                mn(&x_out),
+                mx(&x_out),
+                mn(&context_out),
+                mx(&context_out)
+            );
         }
 
         Ok((context_out, x_out))
@@ -1122,11 +1192,18 @@ impl QuantizedMMDiT {
 
         // Diagnostic: check if embeddings are finite before any block runs
         if std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-            static EMB_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static EMB_DIAG: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !EMB_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let stats = |name: &str, t: &Tensor| {
-                    let mn = t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
-                    let mx = t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    let mn = t
+                        .min_all()
+                        .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                        .unwrap_or(f32::NAN);
+                    let mx = t
+                        .max_all()
+                        .and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>())
+                        .unwrap_or(f32::NAN);
                     eprintln!("[sd3-emb] {name}: [{mn:.4},{mx:.4}] shape={:?}", t.shape());
                 };
                 stats("x (patch+pos)", &x);
@@ -1149,10 +1226,21 @@ impl QuantizedMMDiT {
             // One-shot diagnostic for first forward pass
             // Trace ALL blocks on first forward pass
             {
-                static FWD_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                if !FWD_DIAG.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
-                    let xmin = x.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
-                    let xmax = x.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                static FWD_DIAG: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !FWD_DIAG.load(std::sync::atomic::Ordering::Relaxed)
+                    && std::env::var_os("MOLD_SD3_DEBUG").is_some()
+                {
+                    let xmin = x
+                        .min_all()?
+                        .to_dtype(DType::F32)?
+                        .to_scalar::<f32>()
+                        .unwrap_or(f32::NAN);
+                    let xmax = x
+                        .max_all()?
+                        .to_dtype(DType::F32)?
+                        .to_scalar::<f32>()
+                        .unwrap_or(f32::NAN);
                     eprintln!("[sd3-debug] block {i} output: x=[{xmin:.4},{xmax:.4}]");
                     if !xmin.is_finite() || !xmax.is_finite() {
                         FWD_DIAG.store(true, std::sync::atomic::Ordering::Relaxed);

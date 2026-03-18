@@ -125,7 +125,11 @@ struct Attention {
 }
 
 impl Attention {
-    fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Qwen2TextEncoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Qwen2TextEncoderConfig,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
@@ -192,8 +196,8 @@ impl Attention {
 
         let key_states =
             candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?.contiguous()?;
-        let value_states =
-            candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?.contiguous()?;
+        let value_states = candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
+            .contiguous()?;
 
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
         let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
@@ -220,7 +224,11 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(rotary_emb: Arc<RotaryEmbedding>, cfg: &Qwen2TextEncoderConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Qwen2TextEncoderConfig,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let self_attn = Attention::new(rotary_emb, cfg, vb.pp("self_attn"))?;
         let mlp = Mlp::new(cfg, vb.pp("mlp"))?;
         let input_layernorm = candle_transformers::models::with_tracing::RmsNorm::new(
@@ -275,7 +283,11 @@ impl Qwen2TextModel {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
-            layers.push(DecoderLayer::new(rotary_emb.clone(), cfg, vb_l.pp(layer_idx))?);
+            layers.push(DecoderLayer::new(
+                rotary_emb.clone(),
+                cfg,
+                vb_l.pp(layer_idx),
+            )?);
         }
         Ok(Self {
             embed_tokens,
@@ -330,7 +342,11 @@ impl Qwen2TextModel {
         mask.where_cond(&on_true, &on_false).map_err(Into::into)
     }
 
-    fn forward_penultimate(&self, input_ids: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward_penultimate(
+        &self,
+        input_ids: &Tensor,
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let (b_size, seq_len) = input_ids.dims2()?;
         let attention_mask = match attn_mask {
             Some(mask) => Some(self.prepare_attention_mask(mask)?),

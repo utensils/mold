@@ -64,7 +64,18 @@ pub async fn run(
     let response = if local {
         // --local: skip server, go straight to local inference
         status!("{} Using local GPU inference", "●".cyan());
-        generate_local(&req, &config, t5_variant, qwen3_variant, eager, width, height, steps, guidance).await?
+        generate_local(
+            &req,
+            &config,
+            t5_variant,
+            qwen3_variant,
+            eager,
+            width,
+            height,
+            steps,
+            guidance,
+        )
+        .await?
     } else {
         // Try remote server first
         let client = match &host {
@@ -94,7 +105,18 @@ pub async fn run(
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
                 status!("{} Using local GPU inference", "●".cyan());
-                generate_local(&req, &config, t5_variant, qwen3_variant, eager, width, height, steps, guidance).await?
+                generate_local(
+                    &req,
+                    &config,
+                    t5_variant,
+                    qwen3_variant,
+                    eager,
+                    width,
+                    height,
+                    steps,
+                    guidance,
+                )
+                .await?
             }
             Err(e) => return Err(e),
         }

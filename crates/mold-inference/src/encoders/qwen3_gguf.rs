@@ -375,6 +375,8 @@ impl GgufQwen3Encoder {
         // Stack along dim 2 and reshape: (B, num_layers, seq, hidden) → (B, seq, num_layers * hidden)
         let stacked = Tensor::stack(&collected, 1)?;
         let (b, _n, s, h) = stacked.dims4()?;
-        Ok(stacked.permute((0, 2, 1, 3))?.reshape((b, s, collected.len() * h))?)
+        Ok(stacked
+            .permute((0, 2, 1, 3))?
+            .reshape((b, s, collected.len() * h))?)
     }
 }

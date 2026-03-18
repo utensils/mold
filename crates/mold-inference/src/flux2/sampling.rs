@@ -201,9 +201,12 @@ mod tests {
         let img = Tensor::randn(0f32, 1., (1, 32, 128, 128), &dev).unwrap();
         // Patchify: (1, 32, 64, 2, 64, 2) -> (1, 64*64, 128)
         let patched = img
-            .reshape((1, 32, 64, 2, 64, 2)).unwrap()
-            .permute((0, 2, 4, 1, 3, 5)).unwrap()
-            .reshape((1, 64 * 64, 128)).unwrap();
+            .reshape((1, 32, 64, 2, 64, 2))
+            .unwrap()
+            .permute((0, 2, 4, 1, 3, 5))
+            .unwrap()
+            .reshape((1, 64 * 64, 128))
+            .unwrap();
         let recovered = unpack(&patched, 1024, 1024).unwrap();
         assert_eq!(recovered.dims(), &[1, 32, 128, 128]);
     }

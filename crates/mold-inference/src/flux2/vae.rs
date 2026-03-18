@@ -330,9 +330,12 @@ impl Flux2AutoEncoder {
             .get(cfg.patchified_channels, "running_mean")?
             .reshape((1, cfg.patchified_channels, 1, 1))?;
         let bn_running_var = bn_vb.get(cfg.patchified_channels, "running_var")?;
-        let bn_running_std = (bn_running_var + cfg.batch_norm_eps)?
-            .sqrt()?
-            .reshape((1, cfg.patchified_channels, 1, 1))?;
+        let bn_running_std = (bn_running_var + cfg.batch_norm_eps)?.sqrt()?.reshape((
+            1,
+            cfg.patchified_channels,
+            1,
+            1,
+        ))?;
 
         Ok(Self {
             decoder,
