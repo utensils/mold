@@ -151,6 +151,7 @@
               pkgs.openssl
               pkgs.git
               pkgs.viu
+              pkgs.cargo-llvm-cov
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
@@ -265,6 +266,22 @@
                 name = "fmt-check";
                 help = "cargo fmt --check";
                 command = "cargo fmt --check \"$@\"";
+              }
+              {
+                category = "check";
+                name = "coverage";
+                help = "test coverage report (--html for browsable report)";
+                command = ''
+                  LLVM_COV="$(find /nix/store -maxdepth 3 -name llvm-cov 2>/dev/null | head -1)"
+                  LLVM_PROFDATA="$(find /nix/store -maxdepth 3 -name llvm-profdata 2>/dev/null | head -1)"
+                  export LLVM_COV LLVM_PROFDATA
+                  if [ "''${1:-}" = "--html" ]; then
+                    cargo llvm-cov --workspace --html --no-cfg-coverage --output-dir target/coverage
+                    echo "Report: target/coverage/html/index.html"
+                  else
+                    cargo llvm-cov --workspace --no-cfg-coverage --skip-functions
+                  fi
+                '';
               }
               {
                 category = "run";
