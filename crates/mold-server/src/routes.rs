@@ -260,6 +260,8 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
 pub struct ModelInfoExtended {
     #[serde(flatten)]
     pub info: ModelInfo,
+    /// Whether the model files are downloaded and available for inference.
+    pub downloaded: bool,
     #[schema(example = 4)]
     pub default_steps: u32,
     #[schema(example = 3.5)]
@@ -331,7 +333,9 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
                     }
                 }
             }
+            let downloaded = config.models.contains_key(&m.name);
             ModelInfoExtended {
+                downloaded,
                 default_steps: mcfg.effective_steps(&config),
                 default_guidance: mcfg.effective_guidance(),
                 default_width: mcfg.effective_width(&config),

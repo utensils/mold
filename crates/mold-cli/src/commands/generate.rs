@@ -115,7 +115,10 @@ pub async fn run(
                 .template("{spinner:.green} {msg}")
                 .unwrap(),
         );
-        pb.set_message("Connecting to server...");
+        pb.set_message(format!(
+            "Generating on server ({}x{}, {} steps)...",
+            effective_width, effective_height, effective_steps
+        ));
         pb.enable_steady_tick(Duration::from_millis(100));
 
         match client.generate(req.clone()).await {

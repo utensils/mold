@@ -11,6 +11,9 @@ pub struct ModelInfoExtended {
     pub info: ModelInfo,
     #[serde(flatten)]
     pub defaults: ModelDefaults,
+    /// Whether the model is downloaded on the server.
+    #[serde(default)]
+    pub downloaded: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
