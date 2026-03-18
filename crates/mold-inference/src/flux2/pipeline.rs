@@ -557,8 +557,9 @@ impl Flux2Engine {
         let img = sampling::get_noise(1, height, width, &device)?.to_dtype(gpu_dtype)?;
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // Klein is distilled — use linear schedule (no time-shifting)
-        let timesteps = sampling::get_schedule(req.steps as usize, None);
+        // Flux.2 empirical mu schedule (resolution + step-count dependent)
+        let image_seq_len = (height / 16) * (width / 16);
+        let timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
         self.progress.stage_start(&denoise_label);
@@ -682,8 +683,9 @@ impl InferenceEngine for Flux2Engine {
         // 3. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // 4. Get timestep schedule (linear for distilled model)
-        let timesteps = sampling::get_schedule(req.steps as usize, None);
+        // 4. Flux.2 empirical mu schedule (resolution + step-count dependent)
+        let image_seq_len = (height / 16) * (width / 16);
+        let timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
         progress.stage_start(&denoise_label);

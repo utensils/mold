@@ -109,33 +109,59 @@ impl Flux2State {
     }
 }
 
-/// Compute the flow-matching timestep schedule.
+/// Compute the Flux.2 flow-matching timestep schedule.
 ///
-/// Same as FLUX.1: linearly spaced from 1.0 to 0.0 with optional time-shift.
-/// For Klein (distilled), use `shift=None` (no time-shift, like Schnell).
-pub fn get_schedule(num_steps: usize, shift: Option<(usize, f64, f64)>) -> Vec<f64> {
+/// Uses `compute_empirical_mu` (from BFL's official flux2 code) to calculate
+/// a resolution-and-step-dependent mu, then applies `generalized_time_snr_shift`.
+/// This is NOT the same as FLUX.1's simple linear interpolation schedule.
+///
+/// For 1024x1024 at 4 steps: produces [1.0, 0.967, 0.908, 0.767, 0.0].
+pub fn get_schedule(num_steps: usize, image_seq_len: usize) -> Vec<f64> {
+    let mu = compute_empirical_mu(image_seq_len, num_steps);
     let timesteps: Vec<f64> = (0..=num_steps)
         .map(|v| v as f64 / num_steps as f64)
         .rev()
         .collect();
-    match shift {
-        None => timesteps,
-        Some((image_seq_len, y1, y2)) => {
-            let (x1, x2) = (256., 4096.);
-            let m = (y2 - y1) / (x2 - x1);
-            let b = y1 - m * x1;
-            let mu = m * image_seq_len as f64 + b;
-            timesteps
-                .into_iter()
-                .map(|v| time_shift(mu, 1., v))
-                .collect()
-        }
-    }
+    timesteps
+        .into_iter()
+        .map(|t| generalized_time_snr_shift(t, mu, 1.0))
+        .collect()
 }
 
-fn time_shift(mu: f64, sigma: f64, t: f64) -> f64 {
+/// BFL's empirical mu computation for Flux.2 timestep scheduling.
+///
+/// A piecewise linear function of both image sequence length and step count,
+/// calibrated with empirical coefficients. For `image_seq_len > 4300`, only
+/// the 200-step calibration line is used (step count becomes irrelevant).
+fn compute_empirical_mu(image_seq_len: usize, num_steps: usize) -> f64 {
+    let (a1, b1) = (8.738_095_24e-05, 1.898_333_33);
+    let (a2, b2) = (0.000_169_27, 0.456_666_66);
+    let seq = image_seq_len as f64;
+
+    if image_seq_len > 4300 {
+        return a2 * seq + b2;
+    }
+
+    let m_200 = a2 * seq + b2;
+    let m_10 = a1 * seq + b1;
+    let a = (m_200 - m_10) / 190.0;
+    let b = m_200 - 200.0 * a;
+    a * num_steps as f64 + b
+}
+
+/// Generalized SNR time shift: `exp(mu) / (exp(mu) + (1/t - 1)^sigma)`.
+///
+/// Compresses timesteps toward 1.0 (more denoising in later steps).
+/// With sigma=1.0, this simplifies to `exp(mu) / (exp(mu) + 1/t - 1)`.
+fn generalized_time_snr_shift(t: f64, mu: f64, sigma: f64) -> f64 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
     let e = mu.exp();
-    e / (e + (1. / t - 1.).powf(sigma))
+    e / (e + (1.0 / t - 1.0).powf(sigma))
 }
 
 /// Unpack transformer output back to spatial format.
@@ -177,22 +203,38 @@ mod tests {
     }
 
     #[test]
-    fn schedule_no_shift_is_linear() {
-        let s = get_schedule(4, None);
+    fn schedule_endpoints() {
+        let s = get_schedule(4, 4096);
         assert_eq!(s.len(), 5); // num_steps + 1
         assert!((s[0] - 1.0).abs() < 1e-10);
         assert!((s[4] - 0.0).abs() < 1e-10);
     }
 
     #[test]
-    fn schedule_with_shift_differs_from_linear() {
-        let linear = get_schedule(4, None);
-        let shifted = get_schedule(4, Some((4096, 0.5, 1.15)));
-        // Shifted schedule should have different intermediate values
-        assert!((shifted[1] - linear[1]).abs() > 0.01);
-        // But same endpoints
-        assert!((shifted[0] - 1.0).abs() < 1e-10);
-        assert!((shifted[4] - 0.0).abs() < 1e-10);
+    fn schedule_1024x1024_4steps_matches_bfl() {
+        // BFL reference values for 1024x1024 (seq_len=4096) at 4 steps
+        let s = get_schedule(4, 4096);
+        assert!((s[0] - 1.0).abs() < 1e-4, "t0={}", s[0]);
+        assert!((s[1] - 0.9674).abs() < 0.005, "t1={}", s[1]);
+        assert!((s[2] - 0.9081).abs() < 0.005, "t2={}", s[2]);
+        assert!((s[3] - 0.7672).abs() < 0.005, "t3={}", s[3]);
+        assert!((s[4] - 0.0).abs() < 1e-4, "t4={}", s[4]);
+    }
+
+    #[test]
+    fn schedule_is_not_linear() {
+        let s = get_schedule(4, 4096);
+        // With empirical mu shift, intermediate values are compressed toward 1.0
+        // A linear schedule would have [1.0, 0.75, 0.5, 0.25, 0.0]
+        assert!(s[1] > 0.9, "t1={} should be > 0.9 (shifted)", s[1]);
+        assert!(s[2] > 0.85, "t2={} should be > 0.85 (shifted)", s[2]);
+    }
+
+    #[test]
+    fn empirical_mu_increases_with_resolution() {
+        let mu_small = compute_empirical_mu(256, 4);
+        let mu_large = compute_empirical_mu(4096, 4);
+        assert!(mu_large > mu_small, "larger images should have higher mu");
     }
 
     #[test]
