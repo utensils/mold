@@ -217,8 +217,11 @@ impl SD3Engine {
                     for variant in known_t5_variants() {
                         let threshold = t5_vram_threshold(variant.size_bytes);
                         if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
-                            let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
-                            {
+                            let path = match cached_file_path(
+                                variant.hf_repo,
+                                variant.hf_filename,
+                                Some("shared/t5-gguf"),
+                            ) {
                                 Some(p) => p,
                                 None => {
                                     self.progress.info(&format!(
@@ -226,13 +229,17 @@ impl SD3Engine {
                                         variant.tag,
                                         fmt_gb(variant.size_bytes),
                                     ));
-                                    download_single_file_sync(variant.hf_repo, variant.hf_filename)
-                                        .map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "failed to download T5 {}: {e}",
-                                                variant.tag
-                                            )
-                                        })?
+                                    download_single_file_sync(
+                                        variant.hf_repo,
+                                        variant.hf_filename,
+                                        Some("shared/t5-gguf"),
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "failed to download T5 {}: {e}",
+                                            variant.tag
+                                        )
+                                    })?
                                 }
                             };
                             self.progress.info(&format!(
@@ -279,7 +286,9 @@ impl SD3Engine {
     ) -> Result<std::path::PathBuf> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
 
-        if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
+        if let Some(path) =
+            cached_file_path(variant.hf_repo, variant.hf_filename, Some("shared/t5-gguf"))
+        {
             return Ok(path);
         }
         self.progress.info(&format!(
@@ -287,7 +296,7 @@ impl SD3Engine {
             variant.tag,
             fmt_gb(variant.size_bytes),
         ));
-        download_single_file_sync(variant.hf_repo, variant.hf_filename)
+        download_single_file_sync(variant.hf_repo, variant.hf_filename, Some("shared/t5-gguf"))
             .map_err(|e| anyhow::anyhow!("failed to download T5 {}: {e}", variant.tag))
     }
 

@@ -292,48 +292,19 @@ impl Config {
         }
     }
 
-    /// Returns true if `~/.mold/` exists (legacy layout).
-    fn legacy_dir_exists() -> bool {
+    /// The root mold directory: `~/.mold/` on all platforms.
+    pub fn mold_dir() -> PathBuf {
         dirs::home_dir()
-            .map(|h| h.join(".mold").is_dir())
-            .unwrap_or(false)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".mold")
     }
 
     pub fn config_path() -> PathBuf {
-        // Legacy: ~/.mold/config.toml if ~/.mold/ exists
-        if Self::legacy_dir_exists() {
-            return dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".mold")
-                .join("config.toml");
-        }
-        // XDG: ~/.config/mold/config.toml
-        dirs::config_dir()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".config")
-            })
-            .join("mold")
-            .join("config.toml")
+        Self::mold_dir().join("config.toml")
     }
 
     pub fn data_dir() -> PathBuf {
-        // Legacy: ~/.mold/ if it exists
-        if Self::legacy_dir_exists() {
-            return dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".mold");
-        }
-        // XDG: ~/.local/share/mold/
-        dirs::data_dir()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".local")
-                    .join("share")
-            })
-            .join("mold")
+        Self::mold_dir()
     }
 
     pub fn resolved_models_dir(&self) -> PathBuf {

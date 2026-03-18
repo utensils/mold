@@ -31,6 +31,22 @@ pub async fn run(
     // Load config and pull model-specific defaults.
     let config = Config::load_or_default();
     let model_cfg = config.model_config(model);
+    // Fall back to manifest defaults for models not yet in config (e.g. unpulled)
+    let model_cfg = if model_cfg.default_steps.is_none() {
+        if let Some(manifest) = mold_core::manifest::find_manifest(model) {
+            mold_core::ModelConfig {
+                default_steps: Some(manifest.defaults.steps),
+                default_guidance: Some(manifest.defaults.guidance),
+                default_width: Some(manifest.defaults.width),
+                default_height: Some(manifest.defaults.height),
+                ..model_cfg
+            }
+        } else {
+            model_cfg
+        }
+    } else {
+        model_cfg
+    };
 
     let effective_width = width.unwrap_or_else(|| model_cfg.effective_width(&config));
     let effective_height = height.unwrap_or_else(|| model_cfg.effective_height(&config));
@@ -105,6 +121,30 @@ pub async fn run(
         match client.generate(req.clone()).await {
             Ok(response) => {
                 pb.finish_and_clear();
+                response
+            }
+            Err(e) if MoldClient::is_model_not_found(&e) => {
+                pb.finish_and_clear();
+                status!(
+                    "{} Model '{}' not on server — pulling...",
+                    "●".cyan(),
+                    model.bold()
+                );
+                super::pull::pull_and_configure(model).await?;
+                // Retry after pull — the server can now find the model files
+                let pb2 = ProgressBar::new_spinner();
+                if piped {
+                    pb2.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                }
+                pb2.set_style(
+                    ProgressStyle::default_spinner()
+                        .template("{spinner:.green} {msg}")
+                        .unwrap(),
+                );
+                pb2.set_message("Retrying generation...");
+                pb2.enable_steady_tick(Duration::from_millis(100));
+                let response = client.generate(req.clone()).await?;
+                pb2.finish_and_clear();
                 response
             }
             Err(e) if MoldClient::is_connection_error(&e) => {

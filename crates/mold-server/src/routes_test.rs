@@ -70,6 +70,11 @@ mod tests {
         create_router(state)
     }
 
+    fn app_empty() -> axum::Router {
+        let state = AppState::empty(mold_core::Config::default());
+        create_router(state)
+    }
+
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
         // Use "mock-model" to match MockEngine::model_name() — avoids hot-swap path.
         format!(
@@ -104,6 +109,16 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn health_when_no_model() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     // ── /api/status ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -121,6 +136,22 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("application/json"));
+    }
+
+    #[tokio::test]
+    async fn status_when_no_model() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["models_loaded"], serde_json::json!([]));
     }
 
     // ── /api/models ──────────────────────────────────────────────────────────
@@ -294,5 +325,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ── /api/generate — unknown model ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn generate_unknown_model_returns_400() {
+        let app = app_empty();
+        let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── /api/generate — known but not downloaded model returns 404 ───────────
+
+    #[tokio::test]
+    async fn generate_known_model_not_downloaded_returns_404() {
+        let app = app_empty();
+        // flux-schnell:q8 is a known manifest model but not configured/downloaded
+        let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── /api/openapi.json ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn openapi_json_returns_valid_spec() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(
+                Request::get("/api/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Must have openapi version field
+        assert!(
+            spec["openapi"].is_string(),
+            "spec should have openapi version"
+        );
+        // Must have paths
+        assert!(spec["paths"].is_object(), "spec should have paths");
+        // Must have our generate endpoint
+        assert!(
+            spec["paths"]["/api/generate"].is_object(),
+            "spec should have /api/generate path"
+        );
+    }
+
+    // ── /api/docs ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn docs_returns_html() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/api/docs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/html"),
+            "docs should return HTML, got: {ct}"
+        );
     }
 }

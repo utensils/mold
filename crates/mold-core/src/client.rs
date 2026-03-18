@@ -118,6 +118,15 @@ impl MoldClient {
         false
     }
 
+    /// Check whether an error is a 404 "model not found" from the server.
+    /// Useful for triggering client-side pull when the server doesn't have the model.
+    pub fn is_model_not_found(err: &anyhow::Error) -> bool {
+        if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
+            return reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND);
+        }
+        false
+    }
+
     pub fn host(&self) -> &str {
         &self.base_url
     }

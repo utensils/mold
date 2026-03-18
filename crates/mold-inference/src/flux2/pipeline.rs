@@ -194,8 +194,11 @@ impl Flux2Engine {
                     for variant in known_qwen3_variants() {
                         let threshold = qwen3_vram_threshold(variant.size_bytes);
                         if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
-                            let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
-                            {
+                            let path = match cached_file_path(
+                                variant.hf_repo,
+                                variant.hf_filename,
+                                Some("shared/qwen3-gguf"),
+                            ) {
                                 Some(p) => p,
                                 None => {
                                     self.progress.info(&format!(
@@ -203,13 +206,17 @@ impl Flux2Engine {
                                         variant.tag,
                                         fmt_gb(variant.size_bytes),
                                     ));
-                                    download_single_file_sync(variant.hf_repo, variant.hf_filename)
-                                        .map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "failed to download Qwen3 {}: {e}",
-                                                variant.tag
-                                            )
-                                        })?
+                                    download_single_file_sync(
+                                        variant.hf_repo,
+                                        variant.hf_filename,
+                                        Some("shared/qwen3-gguf"),
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "failed to download Qwen3 {}: {e}",
+                                            variant.tag
+                                        )
+                                    })?
                                 }
                             };
                             self.progress.info(&format!(
@@ -246,7 +253,11 @@ impl Flux2Engine {
     ) -> Result<std::path::PathBuf> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
 
-        if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
+        if let Some(path) = cached_file_path(
+            variant.hf_repo,
+            variant.hf_filename,
+            Some("shared/qwen3-gguf"),
+        ) {
             return Ok(path);
         }
         self.progress.info(&format!(
@@ -254,8 +265,12 @@ impl Flux2Engine {
             variant.tag,
             fmt_gb(variant.size_bytes),
         ));
-        download_single_file_sync(variant.hf_repo, variant.hf_filename)
-            .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
+        download_single_file_sync(
+            variant.hf_repo,
+            variant.hf_filename,
+            Some("shared/qwen3-gguf"),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
     }
 
     /// Encode a prompt with the Qwen3 text encoder, extracting hidden states from

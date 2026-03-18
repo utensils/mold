@@ -117,6 +117,27 @@ impl ModelManifest {
     }
 }
 
+/// Determine the clean storage path for a model file relative to the models directory.
+///
+/// - **Transformer / TransformerShard**: `<model-name>/<hf_filename>` (model-specific)
+/// - **All other components** (VAE, encoders, tokenizers): `shared/<family>/<hf_filename>` (shared)
+///
+/// Model names are sanitized: colons become dashes (e.g., `flux-schnell:q8` → `flux-schnell-q8`).
+/// HF filename paths (e.g., `text_encoder/model-00001-of-00003.safetensors`) are preserved as-is,
+/// creating subdirectories under the target directory.
+pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
+    let sanitized_name = manifest.name.replace(':', "-");
+
+    match file.component {
+        ModelComponent::Transformer | ModelComponent::TransformerShard => {
+            PathBuf::from(&sanitized_name).join(&file.hf_filename)
+        }
+        _ => PathBuf::from("shared")
+            .join(&manifest.family)
+            .join(&file.hf_filename),
+    }
+}
+
 /// Shared FLUX component files (VAE, T5, CLIP, tokenizers) — identical across all FLUX models.
 fn shared_flux_files() -> Vec<ModelFile> {
     vec![
@@ -1641,6 +1662,95 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_path_transformer_is_model_specific() {
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        let transformer_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = storage_path(&manifest, transformer_file);
+        assert!(
+            path.starts_with("flux-schnell-q8"),
+            "transformer should be under model-specific dir, got: {}",
+            path.display()
+        );
+        assert!(path.to_string_lossy().contains("flux1-schnell-Q8_0.gguf"));
+    }
+
+    #[test]
+    fn storage_path_shared_components_under_family() {
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        for file in &manifest.files {
+            let path = storage_path(&manifest, file);
+            match file.component {
+                ModelComponent::Transformer | ModelComponent::TransformerShard => {
+                    assert!(path.starts_with("flux-schnell-q8"));
+                }
+                _ => {
+                    assert!(
+                        path.starts_with("shared/flux"),
+                        "shared component {:?} should be under shared/flux, got: {}",
+                        file.component,
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn storage_path_zimage_preserves_nested_filenames() {
+        let manifest = find_manifest("z-image-turbo:q8").unwrap();
+        let encoder_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let path = storage_path(&manifest, encoder_file);
+        // Nested HF filename like "text_encoder/model-00001-of-00003.safetensors"
+        // should be preserved under shared/z-image/
+        assert!(
+            path.starts_with("shared/z-image"),
+            "got: {}",
+            path.display()
+        );
+        assert!(path.to_string_lossy().contains("text_encoder/"));
+    }
+
+    #[test]
+    fn storage_path_sdxl_transformer_is_model_specific() {
+        let manifest = find_manifest("sdxl-base:fp16").unwrap();
+        let transformer_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = storage_path(&manifest, transformer_file);
+        assert!(
+            path.starts_with("sdxl-base-fp16"),
+            "got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn storage_path_colon_sanitized() {
+        let manifest = find_manifest("flux-dev:q4").unwrap();
+        let transformer_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = storage_path(&manifest, transformer_file);
+        assert!(
+            !path.to_string_lossy().contains(':'),
+            "colons should be replaced with dashes"
+        );
+        assert!(path.starts_with("flux-dev-q4"));
+    }
 
     #[test]
     fn resolve_name_with_tag() {
