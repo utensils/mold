@@ -98,20 +98,25 @@ fn hf_cache_dir() -> PathBuf {
 
 /// Hardlink `src` to `dst`, falling back to copy if hardlink fails (cross-filesystem).
 /// Idempotent: skips if `dst` already exists with the same size as `src`.
+///
+/// The source path is canonicalized to resolve hf-hub's symlink chain
+/// (`snapshots/<sha>/file → ../../blobs/<hash>`) before any filesystem ops.
 fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), DownloadError> {
+    // Resolve symlinks — hf-hub cache returns symlink paths that can cause
+    // ENOENT on some filesystems when passed directly to hard_link or copy.
+    let real_src = src.canonicalize().map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "source file not found after download: {} ({e})",
+            src.display()
+        ))
+    })?;
+
     if dst.exists() {
-        if let (Ok(src_meta), Ok(dst_meta)) = (src.metadata(), dst.metadata()) {
+        if let (Ok(src_meta), Ok(dst_meta)) = (real_src.metadata(), dst.metadata()) {
             if src_meta.len() == dst_meta.len() {
                 return Ok(());
             }
         }
-    }
-    // Validate source exists before attempting placement
-    if !src.exists() {
-        return Err(DownloadError::FilePlacement(format!(
-            "source file not found after download: {}",
-            src.display()
-        )));
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -122,14 +127,17 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
         })?;
     }
     // Try hardlink first (zero extra disk space, instant)
-    if std::fs::hard_link(src, dst).is_ok() {
-        return Ok(());
+    match std::fs::hard_link(&real_src, dst) {
+        Ok(()) => return Ok(()),
+        Err(_e) => {
+            // Expected on cross-filesystem setups; fall through to copy
+        }
     }
-    // Fall back to copy (cross-filesystem)
-    std::fs::copy(src, dst).map_err(|e| {
+    // Fall back to copy (cross-filesystem or hard_link unsupported)
+    std::fs::copy(&real_src, dst).map_err(|e| {
         DownloadError::FilePlacement(format!(
             "failed to copy {} → {}: {e}",
-            src.display(),
+            real_src.display(),
             dst.display()
         ))
     })?;
