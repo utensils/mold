@@ -2,6 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::{Config, MoldClient};
 
+use crate::output::colorize_description;
+
 /// Map raw family key to display label.
 fn family_label(family: &str) -> &str {
     match family {
@@ -100,7 +102,7 @@ pub async fn run() -> Result<()> {
                     format!("{:.1}", model.defaults.default_guidance),
                     model.defaults.default_width,
                     model.defaults.default_height,
-                    model.defaults.description.dimmed(),
+                    colorize_description(&model.defaults.description),
                     nw = nw,
                 );
             }
@@ -182,7 +184,7 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", mcfg.effective_guidance()),
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
-                        mcfg.description.as_deref().unwrap_or("").dimmed(),
+                        colorize_description(mcfg.description.as_deref().unwrap_or("")),
                         nw = nw,
                     );
                 }
@@ -210,7 +212,7 @@ pub async fn run() -> Result<()> {
                         m.name.bold(),
                         format_family_padded(&m.family, fw),
                         m.size_gb,
-                        m.description.dimmed(),
+                        colorize_description(&m.description),
                         nw = nw,
                     );
                 }

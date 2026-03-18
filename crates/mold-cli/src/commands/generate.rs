@@ -50,7 +50,12 @@ pub async fn run(
     };
 
     if let Some(desc) = &model_cfg.description {
-        status!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
+        status!(
+            "{} {} — {}",
+            "●".green(),
+            model.bold(),
+            crate::output::colorize_description(desc)
+        );
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",

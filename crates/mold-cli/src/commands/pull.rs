@@ -24,7 +24,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                     "  {:<nw$} {:>5.1}GB  {}",
                     m.name.bold(),
                     m.size_gb,
-                    m.description.dimmed(),
+                    crate::output::colorize_description(&m.description),
                     nw = nw,
                 );
             }
@@ -55,7 +55,10 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
         manifest.size_gb,
         total_gb,
     );
-    status!("  {}", manifest.description.dimmed());
+    status!(
+        "  {}",
+        crate::output::colorize_description(&manifest.description)
+    );
     status!("");
 
     let paths = match pull_model(&manifest).await {

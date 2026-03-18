@@ -24,6 +24,17 @@ macro_rules! status {
 
 pub(crate) use status;
 
+/// Colorize a model description: render `[beta]` prefix in bright red bold,
+/// rest dimmed. Non-beta descriptions are fully dimmed.
+pub fn colorize_description(desc: &str) -> String {
+    use colored::Colorize;
+    if let Some(rest) = desc.strip_prefix("[beta] ") {
+        format!("{} {}", "[beta]".bright_red().bold(), rest.dimmed())
+    } else {
+        format!("{}", desc.dimmed())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
