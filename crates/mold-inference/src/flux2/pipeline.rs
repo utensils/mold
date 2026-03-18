@@ -4,12 +4,13 @@
 //!
 //! Key differences from FLUX.1:
 //! - Uses Qwen3 text encoder (not T5 + CLIP)
-//! - Qwen3 outputs are stacked 3x to produce joint_attention_dim=7680
+//! - Qwen3 hidden states from layers 9, 18, 27 are stacked to produce joint_attention_dim=7680
 //! - VAE has latent_channels=32 (not 16)
 //! - Transformer has 128 input channels (not 64)
 //! - 4D RoPE (not 3D)
-//! - Klein is distilled (no guidance embedding, no classifier-free guidance)
+//! - Klein is distilled (no guidance embedding)
 //! - No pooled text vector input
+//! - Dynamic exponential time-shifting scheduler (shift=3.0)
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -556,8 +557,12 @@ impl Flux2Engine {
         let img = sampling::get_noise(1, height, width, &device)?.to_dtype(gpu_dtype)?;
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // Klein is distilled — use linear schedule (no time-shift)
-        let timesteps = sampling::get_schedule(req.steps as usize, None);
+        // Klein uses dynamic exponential time-shifting (shift=3.0, base_shift=0.5, max_shift=1.15)
+        let latent_h = height.div_ceil(16) * 2;
+        let latent_w = width.div_ceil(16) * 2;
+        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        let timesteps =
+            sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)));
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len());
         self.progress.stage_start(&denoise_label);
@@ -681,8 +686,12 @@ impl InferenceEngine for Flux2Engine {
         // 3. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // 4. Get timestep schedule (Klein is distilled — no time-shift)
-        let timesteps = sampling::get_schedule(req.steps as usize, None);
+        // 4. Get timestep schedule with dynamic exponential time-shifting
+        let latent_h = height.div_ceil(16) * 2;
+        let latent_w = width.div_ceil(16) * 2;
+        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        let timesteps =
+            sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)));
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len());
         progress.stage_start(&denoise_label);

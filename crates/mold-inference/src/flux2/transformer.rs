@@ -351,23 +351,32 @@ impl SelfAttention {
     }
 }
 
+/// SwiGLU MLP used in Flux.2 double-stream blocks.
+///
+/// Projects to 2*mlp_sz, splits into gate+value, applies SiLU gating,
+/// then projects back down.
 #[derive(Debug, Clone)]
 struct Mlp {
     lin1: Linear,
     lin2: Linear,
+    mlp_sz: usize,
 }
 
 impl Mlp {
     fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder) -> Result<Self> {
-        let lin1 = candle_nn::linear(in_sz, mlp_sz, vb.pp("0"))?;
+        // SwiGLU: project to 2*mlp_sz (gate + value), output mlp_sz after gating
+        let lin1 = candle_nn::linear(in_sz, mlp_sz * 2, vb.pp("0"))?;
         let lin2 = candle_nn::linear(mlp_sz, in_sz, vb.pp("2"))?;
-        Ok(Self { lin1, lin2 })
+        Ok(Self { lin1, lin2, mlp_sz })
     }
 }
 
 impl candle_core::Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.apply(&self.lin1)?.gelu()?.apply(&self.lin2)
+        let x = xs.apply(&self.lin1)?;
+        let gate = x.narrow(D::Minus1, 0, self.mlp_sz)?.silu()?;
+        let val = x.narrow(D::Minus1, self.mlp_sz, self.mlp_sz)?;
+        (gate * val)?.apply(&self.lin2)
     }
 }
 
@@ -483,7 +492,8 @@ impl SingleStreamBlock {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
         let head_dim = h_sz / cfg.num_heads;
-        let linear1 = candle_nn::linear(h_sz, h_sz * 3 + mlp_sz, vb.pp("linear1"))?;
+        // Fused projection: QKV (3*h_sz) + SwiGLU gate+value (2*mlp_sz)
+        let linear1 = candle_nn::linear(h_sz, h_sz * 3 + mlp_sz * 2, vb.pp("linear1"))?;
         let linear2 = candle_nn::linear(h_sz + mlp_sz, h_sz, vb.pp("linear2"))?;
         let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
         let pre_norm = layer_norm(h_sz, vb.pp("pre_norm"))?;
@@ -510,11 +520,16 @@ impl SingleStreamBlock {
         let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
         let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
-        let mlp = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz)?;
+        // SwiGLU: linear1 outputs [QKV (3*h_sz), gate (mlp_sz), value (mlp_sz)]
+        let mlp_portion = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz * 2)?;
         let q = q.apply(&self.norm.query_norm)?;
         let k = k.apply(&self.norm.key_norm)?;
         let attn = attention(&q, &k, &v, pe)?;
-        let output = Tensor::cat(&[attn, mlp.gelu()?], 2)?.apply(&self.linear2)?;
+        // SwiGLU activation: split MLP portion into gate and value
+        let mlp_gate = mlp_portion.narrow(D::Minus1, 0, self.mlp_sz)?.silu()?;
+        let mlp_val = mlp_portion.narrow(D::Minus1, self.mlp_sz, self.mlp_sz)?;
+        let mlp_out = (mlp_gate * mlp_val)?;
+        let output = Tensor::cat(&[attn, mlp_out], 2)?.apply(&self.linear2)?;
         xs + mod_.gate(&output)
     }
 }
