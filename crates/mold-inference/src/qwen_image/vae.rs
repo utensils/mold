@@ -444,4 +444,48 @@ mod tests {
         assert!((vals[0] - 2.5).abs() < 1e-6, "1.0 * 2.0 + 0.5 = 2.5");
         assert!((vals[1] - 2.5).abs() < 1e-6, "1.0 * 3.0 + (-0.5) = 2.5");
     }
+
+    #[test]
+    fn test_latent_constants_length() {
+        assert_eq!(
+            LATENTS_MEAN.len(),
+            16,
+            "LATENTS_MEAN must have 16 elements (one per latent channel)"
+        );
+        assert_eq!(
+            LATENTS_STD.len(),
+            16,
+            "LATENTS_STD must have 16 elements (one per latent channel)"
+        );
+    }
+
+    #[test]
+    fn test_latent_std_all_positive() {
+        for (i, &val) in LATENTS_STD.iter().enumerate() {
+            assert!(
+                val > 0.0,
+                "LATENTS_STD[{i}] = {val} is not positive; zero or negative std would cause division issues in denormalization"
+            );
+        }
+    }
+
+    #[test]
+    fn test_block_out_channels_architecture() {
+        // The decoder uses BLOCK_OUT_CHANNELS to define the up-block channel progression.
+        // It must have exactly 4 elements with an ascending-then-plateau pattern.
+        assert_eq!(BLOCK_OUT_CHANNELS.len(), 4, "expected 4 decoder stages");
+        assert_eq!(BLOCK_OUT_CHANNELS, [96, 192, 384, 384]);
+
+        // Channels should increase monotonically (non-strictly at the plateau)
+        for i in 1..BLOCK_OUT_CHANNELS.len() {
+            assert!(
+                BLOCK_OUT_CHANNELS[i] >= BLOCK_OUT_CHANNELS[i - 1],
+                "block_out_channels should be non-decreasing: [{}]={} < [{}]={}",
+                i,
+                BLOCK_OUT_CHANNELS[i],
+                i - 1,
+                BLOCK_OUT_CHANNELS[i - 1]
+            );
+        }
+    }
 }

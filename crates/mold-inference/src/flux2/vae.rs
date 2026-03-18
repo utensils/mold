@@ -466,4 +466,77 @@ mod tests {
         // Channel 1: 1.0 * sqrt(9.0001) + (-1.0) ≈ 2.0
         assert!((vals[1] - 2.0).abs() < 0.01, "ch1: {}", vals[1]);
     }
+
+    #[test]
+    fn test_klein_decoder_channel_progression() {
+        let cfg = Flux2VaeConfig::klein();
+        // Must have exactly 4 stages
+        assert_eq!(cfg.block_out_channels.len(), 4, "expected 4 decoder stages");
+        // Last two channels must be equal (the plateau at the deepest resolution)
+        assert_eq!(
+            cfg.block_out_channels[2], cfg.block_out_channels[3],
+            "last two block_out_channels should be equal: {} != {}",
+            cfg.block_out_channels[2], cfg.block_out_channels[3]
+        );
+    }
+
+    #[test]
+    fn test_patchify_non_square() {
+        // Patchify with non-square spatial dims: (1, 32, 8, 16) → (1, 128, 4, 8)
+        let dev = Device::Cpu;
+        let b = 1usize;
+        let c = 32usize;
+        let h = 8usize;
+        let w = 16usize;
+        let xs = Tensor::randn(0f32, 1., (b, c, h, w), &dev).unwrap();
+
+        let patched = xs
+            .reshape((b, c, h / 2, 2, w / 2, 2))
+            .unwrap()
+            .permute((0, 1, 3, 5, 2, 4))
+            .unwrap()
+            .reshape((b, c * 4, h / 2, w / 2))
+            .unwrap();
+
+        assert_eq!(
+            patched.dims(),
+            &[1, 128, 4, 8],
+            "non-square patchify should produce (1, 128, H/2, W/2)"
+        );
+    }
+
+    #[test]
+    fn test_bn_denormalization_zero_variance() {
+        // When variance is 0, eps prevents division by zero: sqrt(0 + eps) > 0
+        let dev = Device::Cpu;
+        let eps = 0.0001f64;
+        let var = Tensor::from_vec(vec![0.0f32, 0.0], (1, 2), &dev).unwrap();
+        let std = (var + eps)
+            .unwrap()
+            .sqrt()
+            .unwrap()
+            .reshape((1, 2, 1, 1))
+            .unwrap();
+        let mean = Tensor::zeros((1, 2, 1, 1), candle_core::DType::F32, &dev).unwrap();
+
+        let latents = Tensor::ones((1, 2, 1, 1), candle_core::DType::F32, &dev).unwrap();
+        let result = latents
+            .broadcast_mul(&std)
+            .unwrap()
+            .broadcast_add(&mean)
+            .unwrap();
+
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        let expected_std = (eps as f32).sqrt(); // sqrt(0.0001) = 0.01
+        for (i, &v) in vals.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "channel {i} produced non-finite value with zero variance"
+            );
+            assert!(
+                (v - expected_std).abs() < 1e-6,
+                "channel {i}: expected {expected_std}, got {v}"
+            );
+        }
+    }
 }

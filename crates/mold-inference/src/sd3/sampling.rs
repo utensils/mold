@@ -138,3 +138,133 @@ fn apply_cfg(cfg_scale: f64, noise_pred: &Tensor) -> Result<Tensor> {
     Ok(((cfg_scale * noise_pred.narrow(0, 0, 1)?)?
         - ((cfg_scale - 1.0) * noise_pred.narrow(0, 1, 1)?)?)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn test_time_snr_shift_alpha_1() {
+        // alpha=1 means no shift: output should equal input for all t
+        for i in 0..=100 {
+            let t = i as f64 / 100.0;
+            let shifted = time_snr_shift(1.0, t);
+            assert!(
+                (shifted - t).abs() < 1e-12,
+                "alpha=1 should be identity: time_snr_shift(1.0, {t}) = {shifted}, expected {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_time_snr_shift_boundaries() {
+        // t=0 -> 0 and t=1 -> 1 for any positive alpha
+        for alpha in [0.5, 1.0, 3.0, 10.0, 100.0] {
+            let at_zero = time_snr_shift(alpha, 0.0);
+            let at_one = time_snr_shift(alpha, 1.0);
+            assert!(
+                at_zero.abs() < 1e-12,
+                "time_snr_shift({alpha}, 0.0) = {at_zero}, expected 0.0"
+            );
+            assert!(
+                (at_one - 1.0).abs() < 1e-12,
+                "time_snr_shift({alpha}, 1.0) = {at_one}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_time_snr_shift_midpoint() {
+        // alpha=3, t=0.5: 3*0.5 / (1 + 2*0.5) = 1.5/2.0 = 0.75
+        let result = time_snr_shift(3.0, 0.5);
+        assert!(
+            (result - 0.75).abs() < 1e-12,
+            "time_snr_shift(3.0, 0.5) = {result}, expected 0.75"
+        );
+    }
+
+    #[test]
+    fn test_time_snr_shift_monotonic() {
+        // For alpha=3, the function should be non-decreasing over [0, 1]
+        let alpha = 3.0;
+        let mut prev = time_snr_shift(alpha, 0.0);
+        for i in 1..=100 {
+            let t = i as f64 / 100.0;
+            let curr = time_snr_shift(alpha, t);
+            assert!(
+                curr >= prev - 1e-12,
+                "non-monotonic at t={t}: {curr} < {prev}"
+            );
+            prev = curr;
+        }
+    }
+
+    #[test]
+    fn test_apply_cfg_scale_1() {
+        // cfg=1: 1*cond - 0*uncond = cond
+        let dev = Device::Cpu;
+        let cond = Tensor::new(&[[1.0f32, 2.0, 3.0]], &dev).unwrap();
+        let uncond = Tensor::new(&[[10.0f32, 20.0, 30.0]], &dev).unwrap();
+        let noise_pred = Tensor::cat(&[&cond, &uncond], 0).unwrap();
+
+        let result = apply_cfg(1.0, &noise_pred).unwrap();
+        let result_vec: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        let cond_vec: Vec<f32> = cond.flatten_all().unwrap().to_vec1().unwrap();
+        for (r, c) in result_vec.iter().zip(cond_vec.iter()) {
+            assert!(
+                (r - c).abs() < 1e-6,
+                "cfg=1 should return cond: got {r}, expected {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_cfg_scale_7_5() {
+        // cfg=7.5: 7.5*cond - 6.5*uncond
+        let dev = Device::Cpu;
+        let cond = Tensor::new(&[[2.0f32, 4.0]], &dev).unwrap();
+        let uncond = Tensor::new(&[[1.0f32, 1.0]], &dev).unwrap();
+        let noise_pred = Tensor::cat(&[&cond, &uncond], 0).unwrap();
+
+        let result = apply_cfg(7.5, &noise_pred).unwrap();
+        let result_vec: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        // expected: 7.5*[2,4] - 6.5*[1,1] = [15-6.5, 30-6.5] = [8.5, 23.5]
+        let expected = [8.5f32, 23.5];
+        for (r, e) in result_vec.iter().zip(expected.iter()) {
+            assert!(
+                (r - e).abs() < 1e-4,
+                "cfg=7.5 mismatch: got {r}, expected {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sigma_schedule_endpoints() {
+        // Reproduce the sigma schedule from euler_sample:
+        // sigmas = (0..=steps).map(|s| s/steps).rev().map(time_snr_shift(alpha, .))
+        let num_steps = 28;
+        let alpha = 3.0;
+        let sigmas: Vec<f64> = (0..=num_steps)
+            .map(|s| s as f64 / num_steps as f64)
+            .rev()
+            .map(|t| time_snr_shift(alpha, t))
+            .collect();
+
+        assert_eq!(
+            sigmas.len(),
+            num_steps + 1,
+            "schedule length should be steps+1"
+        );
+        assert!(
+            (sigmas[0] - 1.0).abs() < 1e-12,
+            "first sigma should be 1.0, got {}",
+            sigmas[0]
+        );
+        assert!(
+            sigmas[sigmas.len() - 1].abs() < 1e-12,
+            "last sigma should be 0.0, got {}",
+            sigmas[sigmas.len() - 1]
+        );
+    }
+}

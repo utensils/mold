@@ -146,3 +146,50 @@ impl MoldClient {
         Ok(resp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_trims_trailing_slash() {
+        let client = MoldClient::new("http://localhost:7680/");
+        assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn test_new_no_slash_unchanged() {
+        let client = MoldClient::new("http://localhost:7680");
+        assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn test_new_multiple_slashes() {
+        let client = MoldClient::new("http://localhost:7680///");
+        assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn test_from_env_uses_mold_host() {
+        // Use a unique value so parallel tests don't collide
+        let unique_url = "http://test-host-env:9999";
+        unsafe { std::env::set_var("MOLD_HOST", unique_url) };
+        let client = MoldClient::from_env();
+        assert_eq!(client.host(), unique_url);
+        unsafe { std::env::remove_var("MOLD_HOST") };
+    }
+
+    #[test]
+    fn test_from_env_default_when_unset() {
+        unsafe { std::env::remove_var("MOLD_HOST") };
+        let client = MoldClient::from_env();
+        assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn test_is_connection_error_non_connect() {
+        // A generic anyhow error is not a connection error
+        let err = anyhow::anyhow!("something went wrong");
+        assert!(!MoldClient::is_connection_error(&err));
+    }
+}

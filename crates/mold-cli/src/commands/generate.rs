@@ -459,4 +459,38 @@ mod tests {
         // Verify pipe detection is available (used at runtime to route output)
         let _piped = crate::output::is_piped();
     }
+
+    #[test]
+    fn test_default_filename_empty_model() {
+        let name = default_filename("", 100, "png", 1, 0);
+        assert_eq!(name, "mold--100.png");
+        // Batch variant with empty model
+        let batch_name = default_filename("", 100, "png", 2, 1);
+        assert_eq!(batch_name, "mold--100-1.png");
+    }
+
+    #[test]
+    fn test_default_filename_special_chars() {
+        // Colons are sanitized to dashes
+        let name = default_filename("model:tag:extra", 42, "png", 1, 0);
+        assert_eq!(name, "mold-model-tag-extra-42.png");
+        assert!(!name.contains(':'));
+
+        // Other special characters pass through
+        let name2 = default_filename("my_model.v2", 42, "png", 1, 0);
+        assert_eq!(name2, "mold-my_model.v2-42.png");
+    }
+
+    #[test]
+    fn test_default_filename_jpeg_extension() {
+        // "jpeg" extension passes through as-is
+        let name = default_filename("flux-dev:q4", 500, "jpeg", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q4-500.jpeg");
+        assert!(name.ends_with(".jpeg"));
+
+        // "jpg" extension also works
+        let name2 = default_filename("flux-dev:q4", 500, "jpg", 1, 0);
+        assert_eq!(name2, "mold-flux-dev-q4-500.jpg");
+        assert!(name2.ends_with(".jpg"));
+    }
 }
