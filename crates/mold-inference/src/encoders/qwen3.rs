@@ -25,6 +25,27 @@ impl Qwen3Model {
             Self::Quantized(m) => m.forward(input_ids),
         }
     }
+
+    /// Run forward pass and collect hidden states from specific layer indices.
+    /// Returns (B, seq_len, num_layers * hidden_size).
+    /// Used by Flux.2 Klein which stacks layers 9, 18, 27 to get 7680-dim embeddings.
+    pub fn forward_with_layers(
+        &mut self,
+        input_ids: &Tensor,
+        layer_indices: &[usize],
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(m) => {
+                // BF16 ZImageTextEncoder only returns penultimate layer.
+                // For multi-layer extraction, fall back to repeating the single output.
+                // TODO: Add forward_with_layers to ZImageTextEncoder upstream.
+                let emb = m.forward(input_ids)?;
+                let copies: Vec<&Tensor> = (0..layer_indices.len()).map(|_| &emb).collect();
+                Ok(Tensor::cat(&copies, 2)?)
+            }
+            Self::Quantized(m) => m.forward_with_layers(input_ids, layer_indices),
+        }
+    }
 }
 
 /// Reusable Qwen3 text encoder wrapper.
@@ -48,6 +69,15 @@ fn format_prompt_for_qwen3(prompt: &str) -> String {
         "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
         prompt
     )
+}
+
+/// Format a user prompt for the Qwen3 chat template used by Flux.2 Klein.
+///
+/// Flux.2 Klein uses `enable_thinking=False` which adds an explicit empty thinking
+/// block (`<think>\n\n</think>\n\n`) after the assistant prefix. This signals the
+/// model to skip thinking mode and produce text encoding directly.
+fn format_prompt_for_flux2(prompt: &str) -> String {
+    format!("{}<think>\n\n</think>\n\n", format_prompt_for_qwen3(prompt))
 }
 
 impl Qwen3Encoder {
@@ -130,6 +160,40 @@ impl Qwen3Encoder {
         Ok((emb, token_count))
     }
 
+    /// Encode a text prompt, extracting hidden states from specific layers.
+    /// Returns (stacked_embeddings, token_count) where stacked_embeddings has
+    /// shape (B, seq_len, num_layers * hidden_size).
+    ///
+    /// Uses the Flux.2 Klein chat template (with empty thinking block) since
+    /// only Flux.2 Klein calls this method.
+    pub fn encode_with_layers(
+        &mut self,
+        prompt: &str,
+        target_device: &Device,
+        target_dtype: DType,
+        layer_indices: &[usize],
+    ) -> Result<(Tensor, usize)> {
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Qwen3 model unavailable (weights dropped)"))?;
+
+        let formatted = format_prompt_for_flux2(prompt);
+        let tokens = self
+            .tokenizer
+            .encode(formatted.as_str(), true)
+            .map_err(|e| anyhow::anyhow!("Qwen3 tokenization failed: {e}"))?
+            .get_ids()
+            .to_vec();
+
+        let token_count = tokens.len();
+        let input_ids = Tensor::from_vec(tokens, (1, token_count), &self.device)?;
+
+        let emb = model.forward_with_layers(&input_ids, layer_indices)?;
+        let emb = emb.to_device(target_device)?.to_dtype(target_dtype)?;
+        Ok((emb, token_count))
+    }
+
     /// Drop model weights to free memory (e.g. GPU VRAM after encoding).
     pub fn drop_weights(&mut self) {
         self.model = None;
@@ -155,5 +219,37 @@ impl Qwen3Encoder {
             self.model = Some(Qwen3Model::BF16(ZImageTextEncoder::new(&te_cfg, vb)?));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn z_image_chat_template() {
+        let result = format_prompt_for_qwen3("a cat");
+        assert!(result.starts_with("<|im_start|>user\n"));
+        assert!(result.contains("a cat"));
+        assert!(result.ends_with("<|im_start|>assistant\n"));
+        assert!(!result.contains("<think>"));
+    }
+
+    #[test]
+    fn flux2_chat_template_includes_thinking() {
+        let result = format_prompt_for_flux2("a sunset");
+        assert!(result.starts_with("<|im_start|>user\n"));
+        assert!(result.contains("a sunset"));
+        assert!(result.contains("<|im_start|>assistant\n"));
+        assert!(result.contains("<think>\n\n</think>\n\n"));
+        assert!(result.ends_with("<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn templates_differ_only_in_thinking_block() {
+        let z = format_prompt_for_qwen3("test");
+        let f = format_prompt_for_flux2("test");
+        // Flux.2 template = Z-Image template + thinking block
+        assert_eq!(f, format!("{z}<think>\n\n</think>\n\n"));
     }
 }

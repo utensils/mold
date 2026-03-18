@@ -34,6 +34,8 @@ pub fn t5_vram_threshold(model_size_bytes: u64) -> u64 {
 pub const T5_VRAM_THRESHOLD: u64 = 16_000_000_000;
 /// Minimum free VRAM (bytes) required to place CLIP-L on GPU: ~246MB model + 500MB headroom.
 pub const CLIP_VRAM_THRESHOLD: u64 = 800_000_000;
+/// Minimum free VRAM (bytes) required to place CLIP-G on GPU: ~1.39GB model + ~1.4GB headroom.
+pub const CLIPG_VRAM_THRESHOLD: u64 = 2_800_000_000;
 
 /// Compute VRAM threshold for a Qwen3 text encoder of a given size.
 /// Uses the same headroom formula as T5 (model size + 2GB activations).

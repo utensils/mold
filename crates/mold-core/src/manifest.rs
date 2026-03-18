@@ -422,9 +422,204 @@ pub fn known_manifests() -> Vec<ModelManifest> {
         },
     ];
     manifests.extend(sd15_manifests());
+    manifests.extend(sd3_manifests());
     manifests.extend(sdxl_manifests());
     manifests.extend(zimage_manifests());
+    manifests.extend(flux2_manifests());
+    manifests.extend(qwen_image_manifests());
     manifests
+}
+
+/// Shared SD3 component files (VAE, CLIP-L, CLIP-G, T5-XXL, tokenizers) — identical across all SD3.5 models.
+///
+/// SD3 uses three text encoders: CLIP-L (768-dim), CLIP-G (1280-dim), and T5-XXL (4096-dim).
+/// The VAE is embedded in the transformer safetensors for BF16, but GGUF models need a separate VAE.
+/// For separate text encoders, we use files from stabilityai/stable-diffusion-3.5-large.
+fn shared_sd3_files() -> Vec<ModelFile> {
+    vec![
+        // VAE: SD3 VAE is embedded in the monolithic safetensors from stabilityai.
+        // The mmap approach means only VAE weights (~300MB) get paged in, not the full file.
+        // The pipeline uses vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model") prefix.
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "sd3.5_large.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 16_460_000_000, // ~16.46GB monolithic (VAE portion ~300MB via mmap)
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-L encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/clip_l.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder,
+            size_bytes: 246_000_000, // ~246MB
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-G encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/clip_g.safetensors".to_string(),
+            component: ModelComponent::ClipEncoder2,
+            size_bytes: 1_390_000_000, // ~1.39GB
+            gated: true,
+            sha256: None,
+        },
+        // T5-XXL encoder
+        ModelFile {
+            hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
+            hf_filename: "text_encoders/t5xxl_fp16.safetensors".to_string(),
+            component: ModelComponent::T5Encoder,
+            size_bytes: 9_200_000_000, // ~9.2GB
+            gated: true,
+            sha256: None,
+        },
+        // CLIP-L tokenizer (same as FLUX/SDXL)
+        ModelFile {
+            hf_repo: "openai/clip-vit-large-patch14".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+            sha256: None,
+        },
+        // CLIP-G tokenizer (same as SDXL)
+        ModelFile {
+            hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::ClipTokenizer2,
+            size_bytes: 600_000, // ~600KB
+            gated: false,
+            sha256: None,
+        },
+        // T5 tokenizer (same as FLUX)
+        ModelFile {
+            hf_repo: "lmz/mt5-tokenizers".to_string(),
+            hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
+            component: ModelComponent::T5Tokenizer,
+            size_bytes: 2_400_000, // ~2.4MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// Size of shared SD3 components (CLIP-L, CLIP-G, T5-XXL, tokenizers) in GB.
+/// Does not include VAE since it is part of the transformer weights for SD3.
+pub const SHARED_SD3_COMPONENTS_GB: f32 = 10.8;
+
+/// All known SD3.5 model manifests.
+fn sd3_manifests() -> Vec<ModelManifest> {
+    vec![
+        // --- SD3.5 Large (depth=38, 8.1B) ---
+        ModelManifest {
+            name: "sd3.5-large:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Q8 — 8.1B MMDiT, high quality, 28 steps".to_string(),
+            size_gb: 8.5,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
+                    hf_filename: "sd3.5_large-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_500_000_000, // ~8.5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "sd3.5-large:q4".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Q4 — 8.1B MMDiT, smaller footprint, 28 steps".to_string(),
+            size_gb: 5.0,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
+                    hf_filename: "sd3.5_large-Q4_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_000_000_000, // ~5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // --- SD3.5 Large Turbo (depth=38, 8.1B, 4 steps, CFG=1.0) ---
+        ModelManifest {
+            name: "sd3.5-large-turbo:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Large Turbo Q8 — 8.1B MMDiT, fast 4-step generation".to_string(),
+            size_gb: 8.5,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-large-turbo-gguf".to_string(),
+                    hf_filename: "sd3.5_large_turbo-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_500_000_000, // ~8.5GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // --- SD3.5 Medium (depth=24, 2.5B) ---
+        ModelManifest {
+            name: "sd3.5-medium:q8".to_string(),
+            family: "sd3".to_string(),
+            description: "SD3.5 Medium Q8 — 2.5B MMDiT, SLG support, 28 steps".to_string(),
+            size_gb: 2.7,
+            files: {
+                let mut files = shared_sd3_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/stable-diffusion-3.5-medium-gguf".to_string(),
+                    hf_filename: "sd3.5_medium-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 2_700_000_000, // ~2.7GB
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 28,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+    ]
 }
 
 /// Shared SD1.5 component files (VAE, CLIP-L encoder, tokenizer) — identical across all SD1.5 models.
@@ -973,6 +1168,251 @@ fn zimage_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+/// Shared Flux.2 Klein-4B component files (Qwen3 text encoder, VAE, tokenizer).
+///
+/// Klein uses Qwen3 (hidden_size=2560, 36 layers) — same model architecture as Z-Image's
+/// text encoder. The encoder stacks 3 hidden state outputs to produce joint_attention_dim=7680.
+fn shared_flux2_files() -> Vec<ModelFile> {
+    vec![
+        // Qwen3 text encoder shard 1 (from the Klein repo, 2 shards)
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00002.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_970_000_000, // ~4.97GB
+            gated: false,
+            sha256: None,
+        },
+        // Qwen3 text encoder shard 2
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00002.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 3_080_000_000, // ~3.08GB
+            gated: false,
+            sha256: None,
+        },
+        // VAE
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 160_000_000, // ~160MB
+            gated: false,
+            sha256: None,
+        },
+        // Qwen3 tokenizer
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 11_400_000, // ~11.4MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// All known Flux.2 model manifests.
+fn flux2_manifests() -> Vec<ModelManifest> {
+    vec![
+        // Flux.2 Klein-4B BF16 (Apache 2.0, NOT gated)
+        ModelManifest {
+            name: "flux2-klein:bf16".to_string(),
+            family: "flux2".to_string(),
+            description:
+                "[beta] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                    .to_string(),
+            size_gb: 13.5,
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_700_000_000, // ~7.7GB estimated for 4B params in BF16
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0, // Klein is distilled, no CFG needed
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None, // Uses flow-matching Euler
+            },
+        },
+    ]
+}
+
+/// Shared Qwen-Image component files (VAE, text encoder shards, tokenizer).
+fn shared_qwen_image_files() -> Vec<ModelFile> {
+    vec![
+        // VAE
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 300_000_000, // ~300MB estimated
+            gated: false,
+            sha256: None,
+        },
+        // Qwen2.5-VL text encoder shards
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_900_000_000, // ~4.9GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_700_000_000, // ~4.7GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_700_000_000, // ~4.7GB
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+            hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 1_200_000_000, // ~1.2GB
+            gated: false,
+            sha256: None,
+        },
+        // Tokenizer (Qwen2.5 tokenizer — Qwen-Image-2512 repo only ships
+        // split BPE files; the compiled tokenizer.json lives in the base model repo)
+        ModelFile {
+            hf_repo: "Qwen/Qwen2.5-7B".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 7_000_000, // ~7MB
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// All known Qwen-Image model manifests.
+fn qwen_image_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 30,
+        guidance: 0.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: Some("flow_match_euler"),
+    };
+
+    vec![
+        // BF16 full precision (sharded safetensors from official repo)
+        ModelManifest {
+            name: "qwen-image:bf16".to_string(),
+            family: "qwen-image".to_string(),
+            description: "[beta] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
+                .to_string(),
+            size_gb: 30.0,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_900_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files.push(ModelFile {
+                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 4_700_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: defaults.clone(),
+        },
+        // GGUF quantized variants (transformer only; shared components stay BF16)
+        ModelManifest {
+            name: "qwen-image:q8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "[beta] Qwen-Image-2512 Q8 — quantized transformer, best quality"
+                .to_string(),
+            size_gb: 21.8,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_800_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen-image:q6".to_string(),
+            family: "qwen-image".to_string(),
+            description: "[beta] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
+                .to_string(),
+            size_gb: 16.8,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 16_800_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen-image:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: "[beta] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
+                .to_string(),
+            size_gb: 12.3,
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q4_K_S.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 12_300_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults,
+        },
+    ]
+}
+
 /// Resolve a user-provided model name to its canonical `name:tag` form.
 ///
 /// - `flux-schnell` → `flux-schnell:q8` (FLUX default tag)
@@ -1241,7 +1681,41 @@ mod tests {
         assert!(find_manifest("dreamshaper-v8:fp16").is_some());
         assert!(find_manifest("realistic-vision-v5").is_some());
         assert!(find_manifest("realistic-vision-v5:fp16").is_some());
+        // SD3 models
+        assert!(find_manifest("sd3.5-large:q8").is_some());
+        assert!(find_manifest("sd3.5-large:q4").is_some());
+        assert!(find_manifest("sd3.5-large-turbo:q8").is_some());
+        assert!(find_manifest("sd3.5-medium:q8").is_some());
+        // Flux.2 models
+        assert!(find_manifest("flux2-klein:bf16").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn flux2_klein_defaults() {
+        let manifest = find_manifest("flux2-klein:bf16").unwrap();
+        assert_eq!(manifest.name, "flux2-klein:bf16");
+        assert_eq!(manifest.family, "flux2");
+        assert_eq!(manifest.defaults.steps, 4);
+        assert!((manifest.defaults.guidance - 0.0).abs() < 0.01);
+        assert_eq!(manifest.defaults.width, 1024);
+        assert_eq!(manifest.defaults.height, 1024);
+    }
+
+    #[test]
+    fn sd3_resolves_to_q8() {
+        let manifest = find_manifest("sd3.5-large").unwrap();
+        assert_eq!(manifest.name, "sd3.5-large:q8");
+        assert_eq!(manifest.family, "sd3");
+        assert_eq!(manifest.defaults.steps, 28);
+        assert!((manifest.defaults.guidance - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn sd3_turbo_defaults() {
+        let manifest = find_manifest("sd3.5-large-turbo:q8").unwrap();
+        assert_eq!(manifest.defaults.steps, 4);
+        assert!((manifest.defaults.guidance - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -1260,8 +1734,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 6 SDXL + 4 Z-Image = 22
-        assert_eq!(known_manifests().len(), 22);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image = 31
+        assert_eq!(known_manifests().len(), 31);
     }
 
     #[test]
@@ -1326,6 +1800,43 @@ mod tests {
                         manifest.name
                     );
                 }
+                "sd3" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (sd3) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder),
+                        "{} (sd3) missing ClipEncoder (CLIP-L)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer),
+                        "{} (sd3) missing ClipTokenizer (CLIP-L)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipEncoder2),
+                        "{} (sd3) missing ClipEncoder2 (CLIP-G)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::ClipTokenizer2),
+                        "{} (sd3) missing ClipTokenizer2 (CLIP-G)",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::T5Encoder),
+                        "{} (sd3) missing T5Encoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::T5Tokenizer),
+                        "{} (sd3) missing T5Tokenizer",
+                        manifest.name
+                    );
+                }
                 "sdxl" => {
                     assert!(
                         components.contains(&ModelComponent::Transformer),
@@ -1375,6 +1886,60 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::ClipEncoder),
                         "{} (z-image) should not have ClipEncoder",
+                        manifest.name
+                    );
+                }
+                "flux2" => {
+                    // Flux.2 uses Transformer + Qwen3 TextEncoder + TextTokenizer
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (flux2) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (flux2) missing TextEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} (flux2) missing TextTokenizer",
+                        manifest.name
+                    );
+                    // Flux.2 Klein does NOT use CLIP or T5
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} (flux2) should not have ClipEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        !components.contains(&ModelComponent::T5Encoder),
+                        "{} (flux2) should not have T5Encoder",
+                        manifest.name
+                    );
+                }
+                "qwen-image" => {
+                    // Qwen-Image uses TransformerShard (BF16 sharded)
+                    assert!(
+                        components.contains(&ModelComponent::Transformer)
+                            || components.contains(&ModelComponent::TransformerShard),
+                        "{} (qwen-image) missing Transformer or TransformerShard",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (qwen-image) missing TextEncoder",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextTokenizer),
+                        "{} (qwen-image) missing TextTokenizer",
+                        manifest.name
+                    );
+                    // Qwen-Image does NOT use CLIP
+                    assert!(
+                        !components.contains(&ModelComponent::ClipEncoder),
+                        "{} (qwen-image) should not have ClipEncoder",
                         manifest.name
                     );
                 }

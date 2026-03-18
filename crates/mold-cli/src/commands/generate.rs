@@ -50,7 +50,12 @@ pub async fn run(
     };
 
     if let Some(desc) = &model_cfg.description {
-        status!("{} {} — {}", "●".green(), model.bold(), desc.dimmed());
+        status!(
+            "{} {} — {}",
+            "●".green(),
+            model.bold(),
+            crate::output::colorize_description(desc)
+        );
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",
@@ -64,7 +69,18 @@ pub async fn run(
     let response = if local {
         // --local: skip server, go straight to local inference
         status!("{} Using local GPU inference", "●".cyan());
-        generate_local(&req, &config, t5_variant, qwen3_variant, eager).await?
+        generate_local(
+            &req,
+            &config,
+            t5_variant,
+            qwen3_variant,
+            eager,
+            width,
+            height,
+            steps,
+            guidance,
+        )
+        .await?
     } else {
         // Try remote server first
         let client = match &host {
@@ -94,7 +110,18 @@ pub async fn run(
             Err(e) if MoldClient::is_connection_error(&e) => {
                 pb.finish_and_clear();
                 status!("{} Using local GPU inference", "●".cyan());
-                generate_local(&req, &config, t5_variant, qwen3_variant, eager).await?
+                generate_local(
+                    &req,
+                    &config,
+                    t5_variant,
+                    qwen3_variant,
+                    eager,
+                    width,
+                    height,
+                    steps,
+                    guidance,
+                )
+                .await?
             }
             Err(e) => return Err(e),
         }
@@ -161,6 +188,10 @@ async fn generate_local(
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
     eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
@@ -196,11 +227,20 @@ async fn generate_local(
                 // Re-resolve model defaults now that config has the manifest values.
                 // The request was built before the pull, so dimensions/guidance/steps
                 // may be wrong (global defaults instead of model-specific ones).
+                // Only override values the user didn't explicitly set via CLI flags.
                 let model_cfg = effective_config.model_config(&model_name);
-                req.width = model_cfg.effective_width(effective_config);
-                req.height = model_cfg.effective_height(effective_config);
-                req.steps = model_cfg.effective_steps(effective_config);
-                req.guidance = model_cfg.effective_guidance();
+                if cli_width.is_none() {
+                    req.width = model_cfg.effective_width(effective_config);
+                }
+                if cli_height.is_none() {
+                    req.height = model_cfg.effective_height(effective_config);
+                }
+                if cli_steps.is_none() {
+                    req.steps = model_cfg.effective_steps(effective_config);
+                }
+                if cli_guidance.is_none() {
+                    req.guidance = model_cfg.effective_guidance();
+                }
                 status!(
                     "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
                     "●".cyan(),
@@ -350,12 +390,17 @@ async fn generate_local(
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
+#[allow(clippy::too_many_arguments)]
 async fn generate_local(
     _req: &GenerateRequest,
     _config: &Config,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
     _eager: bool,
+    _cli_width: Option<u32>,
+    _cli_height: Option<u32>,
+    _cli_steps: Option<u32>,
+    _cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

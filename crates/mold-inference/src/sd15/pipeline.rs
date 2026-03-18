@@ -289,7 +289,6 @@ impl SD15Engine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -363,7 +362,8 @@ impl SD15Engine {
         let scheduler = sd_config.build_scheduler(req.steps as usize)?;
         let init_noise_sigma = scheduler.init_noise_sigma();
         let mut latents =
-            (Tensor::randn(0f32, 1f32, &[1, 4, latent_h, latent_w], &device)? * init_noise_sigma)?;
+            (crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], &device, DType::F32)?
+                * init_noise_sigma)?;
         latents = latents.to_dtype(dtype)?;
 
         self.denoise_loop(
@@ -440,7 +440,6 @@ impl InferenceEngine for SD15Engine {
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
-        loaded.device.set_seed(seed)?;
 
         let width = req.width as usize;
         let height = req.height as usize;
@@ -472,9 +471,12 @@ impl InferenceEngine for SD15Engine {
         let latent_w = width / 8;
         let scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
         let init_noise_sigma = scheduler.init_noise_sigma();
-        let mut latents =
-            (Tensor::randn(0f32, 1f32, &[1, 4, latent_h, latent_w], &loaded.device)?
-                * init_noise_sigma)?;
+        let mut latents = (crate::engine::seeded_randn(
+            seed,
+            &[1, 4, latent_h, latent_w],
+            &loaded.device,
+            DType::F32,
+        )? * init_noise_sigma)?;
         latents = latents.to_dtype(loaded.dtype)?;
 
         // 3. Denoising loop

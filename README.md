@@ -4,17 +4,18 @@
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
-Local AI image generation CLI — run FLUX, Stable Diffusion 1.5, SDXL, and Z-Image diffusion models directly on your GPU, with a built-in inference server for remote rendering.
+Local AI image generation CLI — run FLUX, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, and more diffusion models directly on your GPU, with a built-in inference server for remote rendering.
 
 ## What it does
 
 - **Just works**: `mold run "a cat"` — auto-pulls model, runs locally on your GPU
-- **Four model families**: FLUX.1 (schnell, dev, krea), SD1.5 (base, DreamShaper, Realistic Vision), SDXL (base, turbo, DreamShaper, Juggernaut, RealVis, Playground), and Z-Image (turbo)
+- **Seven model families**: FLUX.1, SD3.5, SD1.5, SDXL, Z-Image, Flux.2 Klein (beta), and Qwen-Image (beta)
 - **Model management**: `mold pull`, `mold list`, `mold rm`, `mold ps` — download, list, remove, and manage models
 - **Remote capable**: Point at a GPU server with `MOLD_HOST` or run `mold serve` for a REST API
 - **Pipe-friendly**: `mold run "a cat" | viu -` — composable with Unix tools
-- **Quantized models**: GGUF Q4/Q6/Q8 for FLUX and Z-Image, FP16 safetensors for SD1.5 and SDXL
+- **Quantized models**: GGUF Q4/Q6/Q8 for FLUX, SD3.5, and Z-Image; FP16/BF16 safetensors for SD1.5, SDXL, and Flux.2
 - **Smart memory management**: Sequential loading, drop-and-reload, quantized encoder auto-fallback
+- **Deterministic seeds**: `--seed 42` produces identical output every run
 
 ## Requirements
 
@@ -99,6 +100,15 @@ MOLD_HOST=http://gpu-host:7680 mold run "a sunset"
 | `realvis-xl:fp16` | 25 | 5.1GB | Photorealism, versatile |
 | `playground-v2.5:fp16` | 25 | 5.1GB | Aesthetic quality, artistic |
 
+### SD3.5 (GGUF quantized)
+
+| Name | Steps | Size | Description |
+|------|-------|------|-------------|
+| `sd3.5-large:q8` | 28 | 8.5GB | 8.1B MMDiT, high quality |
+| `sd3.5-large:q4` | 28 | 5.0GB | 8.1B MMDiT, smaller footprint |
+| `sd3.5-large-turbo:q8` | 4 | 8.5GB | Fast 4-step generation |
+| `sd3.5-medium:q8` | 28 | 2.7GB | 2.5B MMDiT, Skip Layer Guidance |
+
 ### Z-Image (GGUF quantized)
 
 | Name | Steps | Size | Description |
@@ -106,6 +116,23 @@ MOLD_HOST=http://gpu-host:7680 mold run "a sunset"
 | `z-image-turbo:q8` | 9 | 6.6GB | Fast 9-step, Qwen3 text encoder |
 | `z-image-turbo:q4` | 9 | 3.8GB | Smaller footprint, good quality |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision BF16 |
+
+### Flux.2 Klein (beta)
+
+| Name | Steps | Size | Description |
+|------|-------|------|-------------|
+| `flux2-klein:bf16` | 4 | 13.5GB | 4B param distilled, Apache 2.0 |
+
+> **Beta:** Flux.2 Klein generates images but quality is not yet production-ready. Text conditioning and fine detail accuracy are still being improved. See [#4](https://github.com/utensils/mold/issues/4).
+
+### Qwen-Image (beta)
+
+| Name | Steps | Size | Description |
+|------|-------|------|-------------|
+| `qwen-image:q4` | 30 | 12.3GB | 20B transformer, Q4 quantized |
+| `qwen-image:q8` | 30 | 21.8GB | 20B transformer, Q8 quantized |
+
+> **Beta:** Qwen-Image pipeline runs end-to-end but output quality is poor — the denoiser does not produce coherent images yet. The VAE has been verified correct; the issue is in the transformer/scheduler path. See [#5](https://github.com/utensils/mold/issues/5).
 
 Bare model names default to `:q8` (FLUX/Z-Image) or `:fp16` (SD1.5/SDXL).
 
@@ -177,7 +204,7 @@ mold completions fish | source
 ```
 mold-cli       Single binary: CLI + serve (mold run / serve / pull / list / completions)
 mold-server    Axum REST server (library, used by mold-cli via `mold serve`)
-mold-inference FLUX + SD1.5 + SDXL + Z-Image engines (candle ML, smart GPU/CPU placement)
+mold-inference FLUX + SD3.5 + SD1.5 + SDXL + Z-Image + Flux.2 + Qwen-Image engines (candle ML)
 mold-core      Shared types, config, model manifests, HuggingFace download client
 ```
 

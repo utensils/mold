@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # mold — Architecture & Development Guide
 
-> Local AI image generation CLI — FLUX, Stable Diffusion 1.5, SDXL & Z-Image diffusion models on your GPU.
+> Local AI image generation CLI — FLUX, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2, & Qwen-Image diffusion models on your GPU.
 
-mold is a CLI tool for AI image generation using FLUX, Stable Diffusion 1.5, SDXL, and Z-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX.1, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2 Klein, and Qwen-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
 
 ## Build & Development Commands
 
@@ -89,7 +89,7 @@ Shared library used by all other crates:
 
 ### mold-inference
 
-Four model families, each with its own pipeline implementing the `InferenceEngine` trait:
+Seven model families, each with its own pipeline implementing the `InferenceEngine` trait:
 
 ```rust
 pub trait InferenceEngine: Send + Sync {
@@ -105,6 +105,9 @@ pub trait InferenceEngine: Send + Sync {
 - `"flux"` → `FluxEngine` — T5 + CLIP-L text encoding, flow-matching transformer, VAE decode
 - `"sd15"` → `SD15Engine` — CLIP-L text encoding, UNet with DDIM, classifier-free guidance (512x512 default)
 - `"sdxl"` → `SDXLEngine` — Dual-CLIP (CLIP-L + CLIP-G), UNet with DDIM/Euler Ancestral, classifier-free guidance
+- `"sd3"` → `SD3Engine` — Triple encoder (CLIP-L + CLIP-G + T5-XXL), quantized MMDiT with NaN-safe inference
+- `"flux2"` → `Flux2Engine` — Qwen3 text encoder (GGUF, layers 9/18/27), shared modulation transformer, BN-VAE (beta)
+- `"qwen-image"` → `QwenImageEngine` — Qwen2.5-VL text encoder, 3D causal VAE (2D temporal-slice), flow-matching (beta)
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
 
 **Key architectural patterns:**

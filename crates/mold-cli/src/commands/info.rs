@@ -73,9 +73,12 @@ fn resolve_verify_path(
 fn format_family(family: &str) -> String {
     match family {
         "flux" => "FLUX.1".magenta().to_string(),
-        "sd15" => "SD1.5".green().to_string(),
+        "flux2" => "FLUX.2".bright_magenta().to_string(),
+        "sd15" => "SD 1.5".green().to_string(),
+        "sd3" | "sd3.5" => "SD 3.5".bright_green().to_string(),
         "sdxl" => "SDXL".yellow().to_string(),
         "z-image" => "Z-Image".cyan().to_string(),
+        "qwen-image" | "qwen_image" => "Qwen-Image".bright_cyan().to_string(),
         other => other.to_uppercase(),
     }
 }
@@ -411,7 +414,7 @@ mod tests {
     #[test]
     fn format_family_sd15() {
         let result = format_family("sd15");
-        assert!(result.contains("SD1.5"));
+        assert!(result.contains("SD 1.5"));
     }
 
     #[test]

@@ -347,4 +347,36 @@ impl GgufQwen3Encoder {
 
         Ok(xs)
     }
+
+    /// Run forward pass and collect hidden states from specific layers.
+    /// Returns outputs stacked and reshaped: (B, seq_len, num_layers * hidden_size).
+    /// Used by Flux.2 Klein which needs layers 9, 18, 27 stacked to 7680-dim.
+    pub fn forward_with_layers(
+        &mut self,
+        input_ids: &Tensor,
+        layer_indices: &[usize],
+    ) -> Result<Tensor> {
+        let (_batch, seq_len) = input_ids.dims2()?;
+        let mut xs = self.embedding.forward(input_ids)?;
+        let (cos, sin) = compute_rope(seq_len, xs.device())?;
+        let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
+
+        let max_layer = layer_indices.iter().copied().max().unwrap_or(0);
+        let n_run = (max_layer + 1).min(self.blocks.len());
+        let mut collected: Vec<Tensor> = Vec::with_capacity(layer_indices.len());
+
+        for (i, block) in self.blocks[..n_run].iter_mut().enumerate() {
+            xs = block.forward(&xs, &cos, &sin, &mask)?;
+            if layer_indices.contains(&i) {
+                collected.push(xs.clone());
+            }
+        }
+
+        // Stack along dim 2 and reshape: (B, num_layers, seq, hidden) → (B, seq, num_layers * hidden)
+        let stacked = Tensor::stack(&collected, 1)?;
+        let (b, _n, s, h) = stacked.dims4()?;
+        Ok(stacked
+            .permute((0, 2, 1, 3))?
+            .reshape((b, s, collected.len() * h))?)
+    }
 }

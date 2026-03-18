@@ -2,13 +2,18 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::{Config, MoldClient};
 
+use crate::output::colorize_description;
+
 /// Map raw family key to display label.
 fn family_label(family: &str) -> &str {
     match family {
         "flux" => "FLUX.1",
-        "sd15" => "SD1.5",
+        "flux2" => "FLUX.2",
+        "sd15" => "SD 1.5",
+        "sd3" | "sd3.5" => "SD 3.5",
         "sdxl" => "SDXL",
         "z-image" => "Z-Image",
+        "qwen-image" | "qwen_image" => "Qwen-Image",
         other => other,
     }
 }
@@ -18,9 +23,12 @@ fn format_family_padded(family: &str, width: usize) -> String {
     let padded = format!("{:<width$}", family_label(family), width = width);
     match family {
         "flux" => padded.magenta().to_string(),
+        "flux2" => padded.bright_magenta().to_string(),
         "sd15" => padded.green().to_string(),
+        "sd3" | "sd3.5" => padded.bright_green().to_string(),
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
+        "qwen-image" | "qwen_image" => padded.bright_cyan().to_string(),
         _ => padded,
     }
 }
@@ -94,7 +102,7 @@ pub async fn run() -> Result<()> {
                     format!("{:.1}", model.defaults.default_guidance),
                     model.defaults.default_width,
                     model.defaults.default_height,
-                    model.defaults.description.dimmed(),
+                    colorize_description(&model.defaults.description),
                     nw = nw,
                 );
             }
@@ -176,7 +184,7 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", mcfg.effective_guidance()),
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
-                        mcfg.description.as_deref().unwrap_or("").dimmed(),
+                        colorize_description(mcfg.description.as_deref().unwrap_or("")),
                         nw = nw,
                     );
                 }
@@ -204,7 +212,7 @@ pub async fn run() -> Result<()> {
                         m.name.bold(),
                         format_family_padded(&m.family, fw),
                         m.size_gb,
-                        m.description.dimmed(),
+                        colorize_description(&m.description),
                         nw = nw,
                     );
                 }
@@ -243,7 +251,7 @@ mod tests {
     #[test]
     fn format_family_sd15_contains_label() {
         let result = format_family_padded("sd15", 10);
-        assert!(result.contains("SD1.5"));
+        assert!(result.contains("SD 1.5"));
     }
 
     #[test]
