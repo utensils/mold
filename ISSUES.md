@@ -68,7 +68,7 @@ MOLD_SD3_DEBUG=1 mold run sd3.5-large:q4 "a turtle"
 
 ## Qwen-Image-2512 — VAE Decode Produces Wrong Output
 
-**Status:** Architecture mismatch identified by codex
+**Status:** time_conv fix applied, needs end-to-end testing
 
 **Symptom:** Qwen-Image generates degenerate images:
 - Default temporal slice: near-white frames
@@ -111,9 +111,9 @@ conv_out: CausalConv3d(96→3, k=3)
 
 ---
 
-## Flux.2 Klein — Critical Architecture Discrepancies Found
+## Flux.2 Klein — Architecture Fixes Applied
 
-**Status:** Research complete, multiple fixes needed before end-to-end testing
+**Status:** Critical fixes applied, ready for end-to-end testing with real weights
 
 **Transformer config verified correct:** `in_channels=128`, `hidden_size=3072`, `num_heads=24`, `depth=5`, `depth_single=20`, `axes_dim=[32,32,32,32]`, `theta=2000`, `mlp_ratio=3.0`.
 
@@ -121,14 +121,14 @@ conv_out: CausalConv3d(96→3, k=3)
 
 | Issue | Priority | Our Code | Correct |
 |-------|----------|----------|---------|
-| Text encoding | CRITICAL | Repeats final Qwen3 layer 3x | Stack hidden states from layers 9, 18, 27 |
+| Text encoding | FIXED | ~~Repeats final Qwen3 layer 3x~~ | Stack hidden states from layers 9, 18, 27 |
 | VAE latent normalization | CRITICAL | scale_factor/shift_factor | BatchNorm2d with running_mean/running_var from weights |
 | Chat template | HIGH | Raw prompt tokenization | `apply_chat_template(messages, enable_thinking=False)` |
-| MLP activation | HIGH | GELU (FLUX.1 style) | SwiGLU in single-stream blocks |
+| MLP activation | FIXED | ~~GELU~~ | SwiGLU in both single + double-stream blocks |
 | Linear bias | HIGH | bias=True throughout | bias=False on most layers |
-| Scheduler | HIGH | Simple linear (no shift) | Dynamic exponential time-shifting (shift=3.0) |
+| Scheduler | FIXED | ~~Simple linear~~ | Dynamic exponential time-shifting (0.5, 1.15) |
 | CFG guidance | MEDIUM | No CFG (guidance=0.0) | guidance_scale=4.0 with dual forward pass |
-| Single-stream fused layers | MEDIUM | Separate linear1/linear2 | Fused QKV+MLP projections |
+| Single-stream fused layers | FIXED | ~~Separate~~ | linear1 outputs 3*h+2*mlp for fused QKV+SwiGLU |
 
 **VAE BatchNorm details:** The Flux.2 VAE uses `BatchNorm2d(128, affine=False)` on patchified latents (128 = 2×2×32 channels). Encoding normalizes with `(latents - running_mean) / sqrt(running_var + eps)`, decoding denormalizes with `latents * sqrt(running_var + eps) + running_mean`. The running stats must be loaded from the VAE weights.
 
