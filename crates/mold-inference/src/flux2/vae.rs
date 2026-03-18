@@ -13,6 +13,7 @@ use candle_nn::{conv2d, group_norm, Conv2d, Conv2dConfig, GroupNorm, Linear, Mod
 
 /// Flux.2 VAE configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Flux2VaeConfig {
     pub in_channels: usize,
     pub out_channels: usize,
@@ -373,5 +374,96 @@ impl Flux2AutoEncoder {
         };
 
         xs.apply(&self.decoder)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn klein_vae_config() {
+        let cfg = Flux2VaeConfig::klein();
+        assert_eq!(cfg.latent_channels, 32);
+        assert_eq!(cfg.block_out_channels, vec![128, 256, 512, 512]);
+        assert_eq!(cfg.patchified_channels, 128); // 32 * 2 * 2
+        assert!(cfg.use_post_quant_conv);
+    }
+
+    #[test]
+    fn patchify_unpatchify_roundtrip() {
+        let dev = Device::Cpu;
+        let b = 1;
+        let c = 32;
+        let h = 8;
+        let w = 8;
+        let xs = Tensor::randn(0f32, 1., (b, c, h, w), &dev).unwrap();
+
+        // Patchify: (1, 32, 8, 8) → (1, 128, 4, 4)
+        let patched = xs
+            .reshape((b, c, h / 2, 2, w / 2, 2))
+            .unwrap()
+            .permute((0, 1, 3, 5, 2, 4))
+            .unwrap()
+            .reshape((b, c * 4, h / 2, w / 2))
+            .unwrap();
+        assert_eq!(patched.dims(), &[1, 128, 4, 4]);
+
+        // Unpatchify: (1, 128, 4, 4) → (1, 32, 8, 8)
+        let unpatched = patched
+            .reshape((b, c, 4, h / 2, w / 2))
+            .unwrap()
+            .permute((0, 1, 3, 4, 2))
+            .unwrap()
+            .reshape((b, c, h / 2, w / 2, 2, 2))
+            .unwrap()
+            .permute((0, 1, 2, 4, 3, 5))
+            .unwrap()
+            .reshape((b, c, h, w))
+            .unwrap();
+        assert_eq!(unpatched.dims(), &[1, 32, 8, 8]);
+
+        // Values should match
+        let diff = (xs - unpatched)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            diff < 1e-6,
+            "patchify/unpatchify roundtrip failed: diff={diff}"
+        );
+    }
+
+    #[test]
+    fn bn_denormalization_formula() {
+        let dev = Device::Cpu;
+        // Simulate: denormed = latents * sqrt(var + eps) + mean
+        let mean = Tensor::from_vec(vec![1.0f32, -1.0], (1, 2, 1, 1), &dev).unwrap();
+        let var = Tensor::from_vec(vec![4.0f32, 9.0], (1, 2), &dev).unwrap();
+        let eps = 0.0001;
+        let std = (var + eps)
+            .unwrap()
+            .sqrt()
+            .unwrap()
+            .reshape((1, 2, 1, 1))
+            .unwrap();
+
+        let latents = Tensor::ones((1, 2, 1, 1), candle_core::DType::F32, &dev).unwrap();
+        let result = latents
+            .broadcast_mul(&std)
+            .unwrap()
+            .broadcast_add(&mean)
+            .unwrap();
+
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        // Channel 0: 1.0 * sqrt(4.0001) + 1.0 ≈ 3.0
+        assert!((vals[0] - 3.0).abs() < 0.01, "ch0: {}", vals[0]);
+        // Channel 1: 1.0 * sqrt(9.0001) + (-1.0) ≈ 2.0
+        assert!((vals[1] - 2.0).abs() < 0.01, "ch1: {}", vals[1]);
     }
 }

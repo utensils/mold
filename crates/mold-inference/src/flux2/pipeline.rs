@@ -10,7 +10,7 @@
 //! - 4D RoPE (not 3D)
 //! - Klein is distilled (no guidance embedding)
 //! - No pooled text vector input
-//! - Dynamic exponential time-shifting scheduler (shift=3.0)
+//! - Linear timestep schedule (distilled, no time-shifting)
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -557,10 +557,7 @@ impl Flux2Engine {
         let img = sampling::get_noise(1, height, width, &device)?.to_dtype(gpu_dtype)?;
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // Klein uses dynamic exponential time-shifting (shift=3.0, base_shift=0.5, max_shift=1.15)
-        let latent_h = height.div_ceil(16) * 2;
-        let latent_w = width.div_ceil(16) * 2;
-        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        // Klein is distilled — use linear schedule (no time-shifting)
         let timesteps = sampling::get_schedule(req.steps as usize, None);
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
@@ -685,10 +682,7 @@ impl InferenceEngine for Flux2Engine {
         // 3. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // 4. Get timestep schedule with dynamic exponential time-shifting
-        let latent_h = height.div_ceil(16) * 2;
-        let latent_w = width.div_ceil(16) * 2;
-        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        // 4. Get timestep schedule (linear for distilled model)
         let timesteps = sampling::get_schedule(req.steps as usize, None);
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);

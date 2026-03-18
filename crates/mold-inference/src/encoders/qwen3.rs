@@ -224,3 +224,35 @@ impl Qwen3Encoder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn z_image_chat_template() {
+        let result = format_prompt_for_qwen3("a cat");
+        assert!(result.starts_with("<|im_start|>user\n"));
+        assert!(result.contains("a cat"));
+        assert!(result.ends_with("<|im_start|>assistant\n"));
+        assert!(!result.contains("<think>"));
+    }
+
+    #[test]
+    fn flux2_chat_template_includes_thinking() {
+        let result = format_prompt_for_flux2("a sunset");
+        assert!(result.starts_with("<|im_start|>user\n"));
+        assert!(result.contains("a sunset"));
+        assert!(result.contains("<|im_start|>assistant\n"));
+        assert!(result.contains("<think>\n\n</think>\n\n"));
+        assert!(result.ends_with("<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn templates_differ_only_in_thinking_block() {
+        let z = format_prompt_for_qwen3("test");
+        let f = format_prompt_for_flux2("test");
+        // Flux.2 template = Z-Image template + thinking block
+        assert_eq!(f, format!("{z}<think>\n\n</think>\n\n"));
+    }
+}

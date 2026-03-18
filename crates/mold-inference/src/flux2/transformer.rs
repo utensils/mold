@@ -400,6 +400,7 @@ impl DoubleStreamBlock {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img: &Tensor,
@@ -744,5 +745,59 @@ impl Flux2TransformerWrapper {
             });
         }
         Ok(img)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn klein_config_dimensions() {
+        let cfg = Flux2Config::klein();
+        assert_eq!(cfg.in_channels, 128);
+        assert_eq!(cfg.hidden_size, 3072);
+        assert_eq!(cfg.num_heads, 24);
+        assert_eq!(cfg.hidden_size / cfg.num_heads, 128); // head_dim
+        assert_eq!(cfg.depth, 5);
+        assert_eq!(cfg.depth_single_blocks, 20);
+        assert_eq!(cfg.axes_dim, vec![32, 32, 32, 32]);
+        assert_eq!(cfg.theta, 2000);
+        assert!(!cfg.guidance_embed); // distilled
+    }
+
+    #[test]
+    fn klein_mlp_sizes() {
+        let cfg = Flux2Config::klein();
+        let h_sz = cfg.hidden_size; // 3072
+        let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize; // 9216
+        assert_eq!(mlp_sz, 9216);
+        // Double-stream MLP: lin1 = (h_sz, 2*mlp_sz), lin2 = (mlp_sz, h_sz)
+        assert_eq!(h_sz * 3 + mlp_sz * 2, 27648); // single fused projection
+        assert_eq!(h_sz + mlp_sz, 12288); // single output projection
+    }
+
+    #[test]
+    fn klein_context_dim_matches_qwen3() {
+        let cfg = Flux2Config::klein();
+        // Qwen3 hidden_size=2560, stacked 3 layers = 7680
+        assert_eq!(cfg.context_in_dim, 7680);
+        assert_eq!(cfg.context_in_dim, 2560 * 3);
+    }
+
+    #[test]
+    fn timestep_embedding_shape() {
+        let dev = candle_core::Device::Cpu;
+        let t = Tensor::full(0.5f32, 2, &dev).unwrap();
+        let emb = timestep_embedding(&t, 256, DType::F32).unwrap();
+        assert_eq!(emb.dims(), &[2, 256]);
+    }
+
+    #[test]
+    fn rope_4d_shape() {
+        let dev = candle_core::Device::Cpu;
+        let pos = Tensor::zeros((1, 16), DType::F32, &dev).unwrap();
+        let r = rope(&pos, 32, 2000).unwrap();
+        assert_eq!(r.dims(), &[1, 16, 16, 2, 2]);
     }
 }
