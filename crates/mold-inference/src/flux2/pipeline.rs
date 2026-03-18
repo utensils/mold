@@ -561,10 +561,9 @@ impl Flux2Engine {
         let latent_h = height.div_ceil(16) * 2;
         let latent_w = width.div_ceil(16) * 2;
         let image_seq_len = (latent_h / 2) * (latent_w / 2);
-        let timesteps =
-            sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)));
+        let timesteps = sampling::get_schedule(req.steps as usize, None);
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
         self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -690,10 +689,9 @@ impl InferenceEngine for Flux2Engine {
         let latent_h = height.div_ceil(16) * 2;
         let latent_w = width.div_ceil(16) * 2;
         let image_seq_len = (latent_h / 2) * (latent_w / 2);
-        let timesteps =
-            sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)));
+        let timesteps = sampling::get_schedule(req.steps as usize, None);
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
         tracing::info!(steps = timesteps.len(), "running denoising loop...");

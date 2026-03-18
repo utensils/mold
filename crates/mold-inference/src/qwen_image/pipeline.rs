@@ -99,13 +99,17 @@ impl QwenImageEngine {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
             return;
         }
-        let stats = || -> Result<(f32, f32)> {
-            let min = tensor.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
-            let max = tensor.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>()?;
-            Ok((min, max))
+        let stats = || -> Result<(f32, f32, f32)> {
+            let t = tensor.to_dtype(DType::F32)?;
+            let min = t.min_all()?.to_scalar::<f32>()?;
+            let max = t.max_all()?.to_scalar::<f32>()?;
+            let mean = t.mean_all()?.to_scalar::<f32>()?;
+            Ok((min, max, mean))
         };
         match stats() {
-            Ok((min, max)) => eprintln!("[qwen-debug] {name}: min={min:.4} max={max:.4}"),
+            Ok((min, max, mean)) => {
+                eprintln!("[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4}")
+            }
             Err(err) => eprintln!("[qwen-debug] {name}: <failed: {err}>"),
         }
     }

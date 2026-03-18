@@ -1174,12 +1174,21 @@ fn zimage_manifests() -> Vec<ModelManifest> {
 /// text encoder. The encoder stacks 3 hidden state outputs to produce joint_attention_dim=7680.
 fn shared_flux2_files() -> Vec<ModelFile> {
     vec![
-        // Qwen3 text encoder (from the Klein repo)
+        // Qwen3 text encoder shard 1 (from the Klein repo, 2 shards)
         ModelFile {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
-            hf_filename: "text_encoder/model.safetensors".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00002.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 5_400_000_000, // ~5.4GB estimated
+            size_bytes: 4_970_000_000, // ~4.97GB
+            gated: false,
+            sha256: None,
+        },
+        // Qwen3 text encoder shard 2
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00002.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 3_080_000_000, // ~3.08GB
             gated: false,
             sha256: None,
         },
@@ -1188,7 +1197,7 @@ fn shared_flux2_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
             hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 335_000_000, // ~335MB estimated
+            size_bytes: 160_000_000, // ~160MB
             gated: false,
             sha256: None,
         },
@@ -1227,7 +1236,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: ManifestDefaults {
-                steps: 20,
+                steps: 4,
                 guidance: 0.0, // Klein is distilled, no CFG needed
                 width: 1024,
                 height: 1024,
@@ -1682,7 +1691,7 @@ mod tests {
         let manifest = find_manifest("flux2-klein:bf16").unwrap();
         assert_eq!(manifest.name, "flux2-klein:bf16");
         assert_eq!(manifest.family, "flux2");
-        assert_eq!(manifest.defaults.steps, 20);
+        assert_eq!(manifest.defaults.steps, 4);
         assert!((manifest.defaults.guidance - 0.0).abs() < 0.01);
         assert_eq!(manifest.defaults.width, 1024);
         assert_eq!(manifest.defaults.height, 1024);

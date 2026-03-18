@@ -71,6 +71,18 @@ fn format_prompt_for_qwen3(prompt: &str) -> String {
     )
 }
 
+/// Format a user prompt for the Qwen3 chat template used by Flux.2 Klein.
+///
+/// Flux.2 Klein uses `enable_thinking=False` which adds an explicit empty thinking
+/// block (`<think>\n\n</think>\n\n`) after the assistant prefix. This signals the
+/// model to skip thinking mode and produce text encoding directly.
+fn format_prompt_for_flux2(prompt: &str) -> String {
+    format!(
+        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+        prompt
+    )
+}
+
 impl Qwen3Encoder {
     /// Load a BF16 Qwen3 encoder from safetensors shards.
     pub fn load_bf16(
@@ -154,6 +166,9 @@ impl Qwen3Encoder {
     /// Encode a text prompt, extracting hidden states from specific layers.
     /// Returns (stacked_embeddings, token_count) where stacked_embeddings has
     /// shape (B, seq_len, num_layers * hidden_size).
+    ///
+    /// Uses the Flux.2 Klein chat template (with empty thinking block) since
+    /// only Flux.2 Klein calls this method.
     pub fn encode_with_layers(
         &mut self,
         prompt: &str,
@@ -166,7 +181,7 @@ impl Qwen3Encoder {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Qwen3 model unavailable (weights dropped)"))?;
 
-        let formatted = format_prompt_for_qwen3(prompt);
+        let formatted = format_prompt_for_flux2(prompt);
         let tokens = self
             .tokenizer
             .encode(formatted.as_str(), true)
