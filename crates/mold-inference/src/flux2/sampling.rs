@@ -165,3 +165,58 @@ pub fn to_state_dtype(t: &Tensor, is_quantized: bool) -> Result<Tensor> {
         Ok(t.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_noise_shape() {
+        let t = get_noise(1, 1024, 1024, &Device::Cpu).unwrap();
+        assert_eq!(t.dims(), &[1, 32, 128, 128]);
+    }
+
+    #[test]
+    fn schedule_no_shift_is_linear() {
+        let s = get_schedule(4, None);
+        assert_eq!(s.len(), 5); // num_steps + 1
+        assert!((s[0] - 1.0).abs() < 1e-10);
+        assert!((s[4] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn schedule_with_shift_differs_from_linear() {
+        let linear = get_schedule(4, None);
+        let shifted = get_schedule(4, Some((4096, 0.5, 1.15)));
+        // Shifted schedule should have different intermediate values
+        assert!((shifted[1] - linear[1]).abs() > 0.01);
+        // But same endpoints
+        assert!((shifted[0] - 1.0).abs() < 1e-10);
+        assert!((shifted[4] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn unpack_roundtrips_with_patchify() {
+        let dev = Device::Cpu;
+        let img = Tensor::randn(0f32, 1., (1, 32, 128, 128), &dev).unwrap();
+        // Patchify: (1, 32, 64, 2, 64, 2) -> (1, 64*64, 128)
+        let patched = img
+            .reshape((1, 32, 64, 2, 64, 2)).unwrap()
+            .permute((0, 2, 4, 1, 3, 5)).unwrap()
+            .reshape((1, 64 * 64, 128)).unwrap();
+        let recovered = unpack(&patched, 1024, 1024).unwrap();
+        assert_eq!(recovered.dims(), &[1, 32, 128, 128]);
+    }
+
+    #[test]
+    fn flux2_state_builds_correct_shapes() {
+        let dev = Device::Cpu;
+        let txt = Tensor::randn(0f32, 1., (1, 50, 7680), &dev).unwrap();
+        let img = Tensor::randn(0f32, 1., (1, 32, 128, 128), &dev).unwrap();
+        let state = Flux2State::new(&txt, &img).unwrap();
+        assert_eq!(state.img.dims(), &[1, 64 * 64, 128]); // patchified
+        assert_eq!(state.img_ids.dims(), &[1, 64 * 64, 4]); // 4D IDs
+        assert_eq!(state.txt.dims(), &[1, 50, 7680]);
+        assert_eq!(state.txt_ids.dims(), &[1, 50, 4]);
+    }
+}
