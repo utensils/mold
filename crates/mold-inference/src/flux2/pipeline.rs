@@ -184,26 +184,12 @@ impl Flux2Engine {
                 Ok((bf16_paths, false, on_gpu, label.to_string()))
             }
 
-            // Auto mode (default): try BF16 on GPU, then quantized on GPU, then BF16 on CPU
+            // Auto mode: prefer GGUF for Flux.2 because multi-layer extraction
+            // (layers 9, 18, 27) only works with the GGUF encoder. The BF16
+            // ZImageTextEncoder only returns the final layer and falls back to
+            // repeating it 3x, which severely degrades text conditioning.
             _ => {
-                // Can BF16 fit on GPU?
-                if have_bf16
-                    && fits_in_memory(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD)
-                {
-                    if is_metal {
-                        self.progress
-                            .info("Loading BF16 Qwen3 on GPU (unified memory)");
-                    } else {
-                        self.progress.info(&format!(
-                            "Loading BF16 Qwen3 on GPU ({} free > {} threshold)",
-                            fmt_gb(free_vram),
-                            fmt_gb(QWEN3_FP16_VRAM_THRESHOLD),
-                        ));
-                    }
-                    return Ok((bf16_paths, false, true, "GPU".to_string()));
-                }
-
-                // BF16 won't fit — try quantized variants (largest first)
+                // Try quantized variants (largest first) — preferred for Flux.2
                 if is_cuda || is_metal {
                     for variant in known_qwen3_variants() {
                         let threshold = qwen3_vram_threshold(variant.size_bytes);
