@@ -1220,8 +1220,9 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:bf16".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
-                .to_string(),
+            description:
+                "[beta] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                    .to_string(),
             size_gb: 13.5,
             files: {
                 let mut files = shared_flux2_files();
@@ -1321,7 +1322,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 BF16 — 60-block flow-matching transformer".to_string(),
+            description: "[beta] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
+                .to_string(),
             size_gb: 30.0,
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1351,7 +1353,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q8 — quantized transformer, best quality".to_string(),
+            description: "[beta] Qwen-Image-2512 Q8 — quantized transformer, best quality"
+                .to_string(),
             size_gb: 21.8,
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1370,7 +1373,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q6".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q6 — quantized, best quality/size trade-off".to_string(),
+            description: "[beta] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
+                .to_string(),
             size_gb: 16.8,
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1389,7 +1393,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q4".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q4 — quantized, smallest practical footprint".to_string(),
+            description: "[beta] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
+                .to_string(),
             size_gb: 12.3,
             files: {
                 let mut files = shared_qwen_image_files();

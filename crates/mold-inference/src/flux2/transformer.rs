@@ -141,19 +141,13 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 
 #[derive(Debug, Clone)]
 struct EmbedNd {
-    #[allow(unused)]
-    dim: usize,
     theta: usize,
     axes_dim: Vec<usize>,
 }
 
 impl EmbedNd {
-    fn new(dim: usize, theta: usize, axes_dim: Vec<usize>) -> Self {
-        Self {
-            dim,
-            theta,
-            axes_dim,
-        }
+    fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
+        Self { theta, axes_dim }
     }
 }
 
@@ -619,8 +613,7 @@ impl Flux2Transformer {
         }
 
         let final_layer = LastLayer::new(cfg.hidden_size, cfg.in_channels, vb.clone())?;
-        let pe_dim = cfg.hidden_size / cfg.num_heads;
-        let pe_embedder = EmbedNd::new(pe_dim, cfg.theta, cfg.axes_dim.to_vec());
+        let pe_embedder = EmbedNd::new(cfg.theta, cfg.axes_dim.to_vec());
 
         Ok(Self {
             img_in,

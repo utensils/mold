@@ -120,7 +120,7 @@ impl Flux2Engine {
         if !self.paths.text_encoder_files.is_empty() {
             self.paths.text_encoder_files.clone()
         } else {
-            // Fallback: check if t5_encoder path is set (used as generic encoder path)
+            // Fallback: t5_encoder field is reused as the generic text encoder path
             self.paths
                 .t5_encoder
                 .as_ref()

@@ -49,8 +49,7 @@ pub(crate) fn rand_seed() -> u64 {
 /// `Tensor::randn()` separately, which is fragile because intervening GPU
 /// ops can consume RNG state.
 ///
-/// On CPU, generates noise on a temporary CUDA device (seed 0) then
-/// transfers, since candle's CPU backend doesn't support `set_seed()`.
+/// On CPU, `set_seed` is skipped (candle's CPU backend doesn't support it).
 /// In practice all inference runs on GPU so this path is rarely hit.
 pub(crate) fn seeded_randn(
     seed: u64,

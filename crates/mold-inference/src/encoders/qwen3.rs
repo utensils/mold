@@ -35,11 +35,11 @@ impl Qwen3Model {
         layer_indices: &[usize],
     ) -> Result<Tensor> {
         match self {
-            Self::BF16(_m) => {
+            Self::BF16(m) => {
                 // BF16 ZImageTextEncoder only returns penultimate layer.
                 // For multi-layer extraction, fall back to repeating the single output.
                 // TODO: Add forward_with_layers to ZImageTextEncoder upstream.
-                let emb = _m.forward(input_ids)?;
+                let emb = m.forward(input_ids)?;
                 let copies: Vec<&Tensor> = (0..layer_indices.len()).map(|_| &emb).collect();
                 Ok(Tensor::cat(&copies, 2)?)
             }
@@ -77,10 +77,7 @@ fn format_prompt_for_qwen3(prompt: &str) -> String {
 /// block (`<think>\n\n</think>\n\n`) after the assistant prefix. This signals the
 /// model to skip thinking mode and produce text encoding directly.
 fn format_prompt_for_flux2(prompt: &str) -> String {
-    format!(
-        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-        prompt
-    )
+    format!("{}<think>\n\n</think>\n\n", format_prompt_for_qwen3(prompt))
 }
 
 impl Qwen3Encoder {

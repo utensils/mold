@@ -5,32 +5,7 @@
 //! - 4D positional IDs (vs FLUX.1's 3D)
 //! - No pooled text vector (Klein uses only timestep conditioning)
 
-#[cfg(test)]
-use candle_core::Device;
-use candle_core::{DType, Result, Tensor};
-
-/// Generate initial noise for Flux.2 Klein.
-///
-/// The VAE produces latents with 32 channels and built-in 2x2 patchifying,
-/// so the transformer sees 128-channel tokens. The noise shape matches
-/// the VAE latent space before patchifying:
-/// `(batch, latent_channels=32, height/8, width/8)`
-///
-/// After patchifying in [`Flux2State::new`], this becomes the 128-channel
-/// sequence the transformer operates on.
-#[cfg(test)]
-pub fn get_noise(
-    num_samples: usize,
-    height: usize,
-    width: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    // Flux.2 VAE has 3 downsample stages (factor 8) with patch_size=[2,2].
-    // Latent spatial dims = pixel_dims / 8.
-    let latent_h = height.div_ceil(8);
-    let latent_w = width.div_ceil(8);
-    Tensor::randn(0f32, 1., (num_samples, 32, latent_h, latent_w), device)
-}
+use candle_core::{Result, Tensor};
 
 /// Sampling state for Flux.2 Klein-4B.
 ///
@@ -54,7 +29,7 @@ impl Flux2State {
     /// Build sampling state from text embeddings and noise.
     ///
     /// - `txt_emb`: (1, txt_len, 7680) from Qwen3 encoder (stacked 3x hidden states)
-    /// - `img`: (B, 32, H/8, W/8) noise tensor from [`get_noise`]
+    /// - `img`: (B, 32, H/8, W/8) noise tensor
     ///
     /// The image is patchified with 2x2 patches, producing:
     /// - `img`: (B, (H/8/2)*(W/8/2), 32*4=128) tokens
@@ -182,28 +157,10 @@ pub fn unpack(xs: &Tensor, height: usize, width: usize) -> Result<Tensor> {
         .reshape((b, c_ph_pw / 4, ph * 2, pw * 2))
 }
 
-/// Convert a raw DType (BF16/F32/F16) tensor to the appropriate type for
-/// the denoising state. Quantized models need F32 state tensors.
-///
-/// Not used for Klein (BF16 only), but kept for future GGUF support.
-#[allow(dead_code)]
-pub fn to_state_dtype(t: &Tensor, is_quantized: bool) -> Result<Tensor> {
-    if is_quantized {
-        t.to_dtype(DType::F32)
-    } else {
-        Ok(t.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn get_noise_shape() {
-        let t = get_noise(1, 1024, 1024, &Device::Cpu).unwrap();
-        assert_eq!(t.dims(), &[1, 32, 128, 128]);
-    }
+    use candle_core::Device;
 
     #[test]
     fn schedule_endpoints() {

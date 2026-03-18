@@ -13,8 +13,8 @@ use candle_nn::{conv2d, group_norm, Conv2d, Conv2dConfig, GroupNorm, Linear, Mod
 
 /// Flux.2 VAE configuration.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Flux2VaeConfig {
+    #[allow(dead_code)]
     pub in_channels: usize,
     pub out_channels: usize,
     pub block_out_channels: Vec<usize>,
