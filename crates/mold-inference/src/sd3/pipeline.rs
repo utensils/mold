@@ -789,7 +789,9 @@ impl InferenceEngine for SD3Engine {
         let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
 
         // SD3 VAE scaling: x / 1.5305 + 0.0609
-        let img = autoencoder.decode(&((x / 1.5305)? + 0.0609)?)?;
+        // Quantized denoiser outputs F32; cast to match VAE dtype (F16 on GPU).
+        let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
+        let img = autoencoder.decode(&x)?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
