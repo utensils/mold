@@ -111,6 +111,8 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
         ))
     })?;
 
+    // Check if dst already has the correct content (idempotent skip).
+    // Use metadata() which follows symlinks — only skip if the real target matches.
     if dst.exists() {
         if let (Ok(src_meta), Ok(dst_meta)) = (real_src.metadata(), dst.metadata()) {
             if src_meta.len() == dst_meta.len() {
@@ -118,6 +120,16 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
             }
         }
     }
+
+    // Remove stale destination before placement. A previous hard_link on an
+    // hf-hub symlink creates a relative symlink that dangles from the new
+    // location (e.g. shared/sd3/file → ../../blobs/hash, which doesn't exist
+    // relative to shared/sd3/). symlink_metadata() sees these even though
+    // exists() returns false for dangling symlinks.
+    if dst.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(dst);
+    }
+
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             DownloadError::FilePlacement(format!(
