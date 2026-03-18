@@ -184,6 +184,7 @@ impl JointAttention {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img_hidden: &Tensor,
@@ -305,6 +306,7 @@ impl QwenImageTransformerBlock {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img_hidden: &Tensor,

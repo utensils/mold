@@ -215,6 +215,7 @@ impl JointAttention {
     /// Joint attention forward pass.
     ///
     /// Returns (image_output, text_output).
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img_hidden: &Tensor,
@@ -407,6 +408,7 @@ impl QwenImageTransformerBlock {
     /// `cos`, `sin`: RoPE embeddings for image positions
     ///
     /// Returns (img_hidden, txt_hidden).
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img_hidden: &Tensor,

@@ -390,6 +390,7 @@ async fn generate_local(
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
+#[allow(clippy::too_many_arguments)]
 async fn generate_local(
     _req: &GenerateRequest,
     _config: &Config,
