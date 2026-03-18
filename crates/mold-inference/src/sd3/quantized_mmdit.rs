@@ -259,7 +259,17 @@ impl AttnProjections {
     }
 
     fn post_attention(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        // Quantized matmul requires contiguous tensors (attention output is typically non-contiguous after reshape)
+        // Trace attention output before proj
+        static PROJ_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !PROJ_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+            && std::env::var_os("MOLD_SD3_DEBUG").is_some()
+        {
+            let xf = x.to_dtype(DType::F32)?;
+            let mn = xf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let mx = xf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            eprintln!("[sd3-proj] attention output (before proj): [{mn:.4},{mx:.4}] shape={:?} dtype={:?}", x.shape(), x.dtype());
+        }
+        // Quantized matmul requires contiguous tensors
         self.proj.forward(&x.contiguous()?)
     }
 }
@@ -311,7 +321,13 @@ fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> candle_core::Result<T
         .contiguous()
 }
 
-/// Attention computation (non-flash, compatible with quantized models).
+/// Attention computation in BF16 — matches ComfyUI/sd.cpp approach.
+///
+/// ComfyUI dequantizes GGUF to F16 and runs attention in F16.
+/// sd.cpp uses ggml's native F16 attention kernels.
+/// Our quantized linears output F32, so we cast Q/K/V to BF16 for attention
+/// (halving the [B*heads, seq, seq] matrix from ~5.5GB to ~2.75GB at 1024x1024)
+/// then cast back to F32 for downstream quantized linear layers.
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_core::Result<Tensor> {
     let batch_size = q.dim(0)?;
     let seqlen = q.dim(1)?;
@@ -320,23 +336,84 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, num_heads: usize) -> candle_cor
     let headdim = q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (headdim as f64).sqrt();
 
-    // (B, seq, heads, dim) -> (B, heads, seq, dim)
-    let q = q.transpose(1, 2)?.flatten_to(1)?;
-    let k = k.transpose(1, 2)?.flatten_to(1)?;
+    // Cast to BF16 for attention (halves the massive [B*heads, seq, seq] matrix VRAM).
+    // Every reshape/transpose is followed by .contiguous() to prevent CUDA garbage reads.
+    let q = q.transpose(1, 2)?.contiguous()?.flatten_to(1)?.to_dtype(DType::F16)?.contiguous()?;
+    let k = k.transpose(1, 2)?.contiguous()?.flatten_to(1)?.to_dtype(DType::F16)?.contiguous()?;
     let v_orig_shape = v.dims().to_vec();
+    let v = v.reshape((batch_size, seqlen, num_heads, ()))?;
+    // Check V values BEFORE F16 cast
+    if std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+        static V_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !V_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let vf = v.to_dtype(DType::F32)?;
+            let mn = vf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let mx = vf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            eprintln!("[sd3-attn] V before F16 cast: [{mn:.4},{mx:.4}] (F16 max=65504)");
+        }
+    }
     let v = v
-        .reshape((batch_size, seqlen, num_heads, ()))?
         .transpose(1, 2)?
-        .flatten_to(1)?;
+        .contiguous()?
+        .flatten_to(1)?
+        .to_dtype(DType::F16)?
+        .contiguous()?;
 
-    let attn_weights = (q.matmul(&k.t()?)? * softmax_scale)?;
-    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v)?;
+    // Chunked attention: process query tokens in chunks to avoid OOM on the
+    // massive [B*heads, full_seq, full_seq] attention matrix.
+    // At 1024x1024 with batch=2: [76, 4429, 4429] F16 = ~3GB which OOMs on 24GB.
+    // Chunk size 512: [76, 512, 4429] F16 = ~345MB per chunk — fits easily.
+    let k_t = k.t()?.contiguous()?;
+    let chunk_size = 512;
+    let mut attn_chunks = Vec::new();
+    let mut offset = 0;
+    let mut _chunk_idx = 0;
+    while offset < seqlen {
+        let len = chunk_size.min(seqlen - offset);
+        let q_chunk = q.narrow(1, offset, len)?.contiguous()?;
+        let weights_chunk = (q_chunk.matmul(&k_t)? * softmax_scale)?;
+        // Softmax in F32 to avoid candle F16 softmax CUDA issues, then back to F16
+        let sm_chunk = candle_nn::ops::softmax_last_dim(&weights_chunk.to_dtype(DType::F32)?)?
+            .to_dtype(DType::F16)?;
+        // Trace softmax output on first chunk
+        if _chunk_idx == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+            static SM_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SM_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let smf = sm_chunk.to_dtype(DType::F32)?;
+                let mn = smf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let mx = smf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let sm = smf.sum_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                eprintln!("[sd3-attn] softmax chunk0: [{mn:.6},{mx:.6}] sum={sm:.2}");
+            }
+        }
+        let scores_chunk = sm_chunk.contiguous()?.matmul(&v)?;
+        // Trace first few chunks on first call
+        static CHUNK_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !CHUNK_DIAG.load(std::sync::atomic::Ordering::Relaxed)
+            && _chunk_idx < 3
+            && std::env::var_os("MOLD_SD3_DEBUG").is_some()
+        {
+            let sf = scores_chunk.to_dtype(DType::F32)?;
+            let mn = sf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let mx = sf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let wf = weights_chunk.to_dtype(DType::F32)?;
+            let wmn = wf.min_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            let wmx = wf.max_all()?.to_scalar::<f32>().unwrap_or(f32::NAN);
+            eprintln!("[sd3-chunk] chunk {_chunk_idx} (offset={offset},len={len}): weights=[{wmn:.4},{wmx:.4}] scores=[{mn:.4},{mx:.4}]");
+        }
+        attn_chunks.push(scores_chunk);
+        offset += len;
+        _chunk_idx += 1;
+    }
+    let attn_scores = Tensor::cat(&attn_chunks, 1)?;
 
-    // Unflatten heads back: (B*heads, seq, dim) -> (B, heads, seq, dim) -> (B, seq, heads*dim)
+    // Cast back to F32, ensure contiguous for downstream quantized linear layers
     let head_dim = v_orig_shape.last().copied().unwrap_or(headdim);
     attn_scores
         .reshape((batch_size, num_heads, seqlen, head_dim))?
         .transpose(1, 2)?
+        .contiguous()?
+        .to_dtype(DType::F32)?
         .reshape((batch_size, seqlen, ()))?
         .contiguous()
 }
@@ -433,12 +510,38 @@ impl DiTBlock {
         mod_interm: &ModulateIntermediates,
     ) -> candle_core::Result<Tensor> {
         let attn_out = self.attn.post_attention(attn)?;
-        let x = x.broadcast_add(&attn_out.broadcast_mul(&mod_interm.gate_msa.unsqueeze(1)?)?)?;
+
+        // Trace post_attention on first call
+        static PA_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let do_diag = !PA_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+            && std::env::var_os("MOLD_SD3_DEBUG").is_some();
+        macro_rules! trace {
+            ($name:expr, $t:expr) => {
+                if do_diag {
+                    let mn = $t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    let mx = $t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                    eprintln!("[sd3-post] {}: [{mn:.4},{mx:.4}]", $name);
+                }
+            }
+        }
+
+        trace!("attn_proj", &attn_out);
+        let gated_attn = attn_out.broadcast_mul(&mod_interm.gate_msa.unsqueeze(1)?)?;
+        trace!("gated_attn", &gated_attn);
+        let x = x.broadcast_add(&gated_attn)?;
+        trace!("x+gated", &x);
 
         let norm_x = self.norm2.forward(&x)?;
+        trace!("norm_x", &norm_x);
         let modulated_x = modulate(&norm_x, &mod_interm.shift_mlp, &mod_interm.scale_mlp)?;
+        trace!("modulated", &modulated_x);
         let mlp_out = self.mlp.forward(&modulated_x)?;
-        x.broadcast_add(&mlp_out.broadcast_mul(&mod_interm.gate_mlp.unsqueeze(1)?)?)
+        trace!("mlp_out", &mlp_out);
+        let gated_mlp = mlp_out.broadcast_mul(&mod_interm.gate_mlp.unsqueeze(1)?)?;
+        trace!("gated_mlp", &gated_mlp);
+        let result = x.broadcast_add(&gated_mlp)?;
+        trace!("final", &result);
+        Ok(result)
     }
 }
 
@@ -721,12 +824,43 @@ impl JointBlock for MMDiTJointBlock {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let (context_qkv, context_interm) = self.context_block.pre_attention(context, c)?;
         let (x_qkv, x_interm) = self.x_block.pre_attention(x, c)?;
+
+        // Trace block internals on first call
+        static BLK_DIAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let do_diag = !BLK_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+            && std::env::var_os("MOLD_SD3_DEBUG").is_some();
+        if do_diag {
+            let stats = |name: &str, t: &Tensor| -> String {
+                let mn = t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                let mx = t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+                format!("{name}=[{mn:.4},{mx:.4}]")
+            };
+            eprintln!("[sd3-blk0] pre_attn: {} {} {} {} gate_msa={} gate_mlp={}",
+                stats("x_q", &x_qkv.q), stats("x_k", &x_qkv.k),
+                stats("ctx_q", &context_qkv.q), stats("ctx_k", &context_qkv.k),
+                stats("x_gate", &x_interm.gate_msa), stats("x_gmlp", &x_interm.gate_mlp));
+        }
+
         let (context_attn, x_attn) = joint_attn(&context_qkv, &x_qkv, num_heads)?;
+
+        if do_diag {
+            let mn = |t: &Tensor| t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            let mx = |t: &Tensor| t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            eprintln!("[sd3-blk0] attn out: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
+                mn(&x_attn), mx(&x_attn), mn(&context_attn), mx(&context_attn));
+        }
 
         let context_out =
             self.context_block
                 .post_attention(&context_attn, context, &context_interm)?;
         let x_out = self.x_block.post_attention(&x_attn, x, &x_interm)?;
+
+        if do_diag {
+            let mn = |t: &Tensor| t.min_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            let mx = |t: &Tensor| t.max_all().and_then(|v| v.to_dtype(DType::F32)?.to_scalar::<f32>()).unwrap_or(f32::NAN);
+            eprintln!("[sd3-blk0] post_attn: x=[{:.4},{:.4}] ctx=[{:.4},{:.4}]",
+                mn(&x_out), mx(&x_out), mn(&context_out), mx(&context_out));
+        }
 
         Ok((context_out, x_out))
     }
@@ -961,6 +1095,12 @@ impl QuantizedMMDiT {
             let result = joint_block.forward(&context, &x, &c, self.num_heads)?;
             context = result.0;
             x = result.1;
+            // One-shot diagnostic for first forward pass
+            if i == 0 && std::env::var_os("MOLD_SD3_DEBUG").is_some() {
+                let xmin = x.min_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                let xmax = x.max_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(f32::NAN);
+                eprintln!("[sd3-debug] block 0 output: x=[{xmin:.4},{xmax:.4}]");
+            }
         }
 
         // Final context QKV only block
