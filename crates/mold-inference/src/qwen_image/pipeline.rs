@@ -38,8 +38,8 @@ use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
-/// The VAE is small (~300MB) but decode at high resolution needs workspace.
-const VAE_DECODE_VRAM_THRESHOLD: u64 = 4_000_000_000;
+/// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
+const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
@@ -99,17 +99,31 @@ impl QwenImageEngine {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
             return;
         }
-        let stats = || -> Result<(f32, f32, f32)> {
+        let stats = || -> Result<String> {
             let t = tensor.to_dtype(DType::F32)?;
             let min = t.min_all()?.to_scalar::<f32>()?;
             let max = t.max_all()?.to_scalar::<f32>()?;
             let mean = t.mean_all()?.to_scalar::<f32>()?;
-            Ok((min, max, mean))
+            // NaN detection: x != x is true for NaN (IEEE 754)
+            let nan_count = t
+                .ne(&t)?
+                .to_dtype(DType::F32)?
+                .sum_all()?
+                .to_scalar::<f32>()? as u64;
+            let total = t.elem_count();
+            if nan_count > 0 {
+                Ok(format!(
+                    "[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4} NaN={nan_count}/{total} ({:.1}%)",
+                    nan_count as f64 / total as f64 * 100.0
+                ))
+            } else {
+                Ok(format!(
+                    "[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4}"
+                ))
+            }
         };
         match stats() {
-            Ok((min, max, mean)) => {
-                eprintln!("[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4}")
-            }
+            Ok(msg) => eprintln!("{msg}"),
             Err(err) => eprintln!("[qwen-debug] {name}: <failed: {err}>"),
         }
     }
