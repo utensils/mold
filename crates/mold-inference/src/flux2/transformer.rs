@@ -529,7 +529,8 @@ impl LastLayer {
 
     fn forward(&self, xs: &Tensor, vec: &Tensor) -> Result<Tensor> {
         let chunks = vec.silu()?.apply(&self.ada_ln_modulation)?.chunk(2, 1)?;
-        let (shift, scale) = (&chunks[0], &chunks[1]);
+        // AdaLayerNormContinuous: scale first, shift second (differs from modulation order)
+        let (scale, shift) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
             .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
