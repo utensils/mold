@@ -252,4 +252,47 @@ mod tests {
         // Flux.2 template = Z-Image template + thinking block
         assert_eq!(f, format!("{z}<think>\n\n</think>\n\n"));
     }
+
+    #[test]
+    fn test_qwen3_template_empty_prompt() {
+        let result = format_prompt_for_qwen3("");
+        assert_eq!(
+            result,
+            "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"
+        );
+        // Flux.2 variant should also handle empty prompt
+        let flux_result = format_prompt_for_flux2("");
+        assert!(flux_result.contains("<|im_end|>"));
+        assert!(flux_result.ends_with("<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn test_flux2_template_preserves_special_chars() {
+        let prompt = "a <robot> in {brackets} & symbols <>";
+        let result = format_prompt_for_flux2(prompt);
+        // Special characters must pass through unescaped
+        assert!(result.contains("<robot>"));
+        assert!(result.contains("{brackets}"));
+        assert!(result.contains("& symbols <>"));
+        // The template markers must still be intact around the prompt
+        assert!(result.starts_with("<|im_start|>user\n"));
+        assert!(result.contains("<|im_end|>"));
+    }
+
+    #[test]
+    fn test_templates_exact_structure() {
+        let prompt = "hello";
+        let qwen3 = format_prompt_for_qwen3(prompt);
+        // Verify exact character-level structure
+        assert_eq!(
+            qwen3,
+            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
+        );
+
+        let flux2 = format_prompt_for_flux2(prompt);
+        assert_eq!(
+            flux2,
+            "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+    }
 }

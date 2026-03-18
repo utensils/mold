@@ -794,4 +794,63 @@ mod tests {
         let r = rope(&pos, 32, 2000).unwrap();
         assert_eq!(r.dims(), &[1, 16, 16, 2, 2]);
     }
+
+    #[test]
+    fn test_timestep_embedding_dtype_preserved() {
+        let dev = candle_core::Device::Cpu;
+        let t = Tensor::full(0.5f32, 2, &dev).unwrap();
+        let emb = timestep_embedding(&t, 128, DType::BF16).unwrap();
+        assert_eq!(emb.dtype(), DType::BF16);
+        assert_eq!(emb.dims(), &[2, 128]);
+    }
+
+    #[test]
+    fn test_timestep_embedding_values_bounded() {
+        let dev = candle_core::Device::Cpu;
+        let t = Tensor::full(0.7f32, 1, &dev).unwrap();
+        let emb = timestep_embedding(&t, 64, DType::F32).unwrap();
+        let flat = emb.flatten_all().unwrap();
+        let vals: Vec<f32> = flat.to_vec1().unwrap();
+        for v in &vals {
+            assert!(
+                *v >= -1.0 && *v <= 1.0,
+                "embedding value {v} outside [-1, 1] (sin/cos bounds)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rope_odd_dim_fails() {
+        let dev = candle_core::Device::Cpu;
+        let pos = Tensor::zeros((1, 4), DType::F32, &dev).unwrap();
+        let result = rope(&pos, 33, 2000);
+        assert!(result.is_err(), "rope with odd dim should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("odd"),
+            "error should mention 'odd', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_klein_config_vec_in_dim_zero() {
+        let cfg = Flux2Config::klein();
+        // Klein uses timestep-only conditioning (no pooled text embeddings),
+        // so vec_in_dim must be 0 to skip the vector_in MLP embedder.
+        assert_eq!(
+            cfg.vec_in_dim, 0,
+            "Klein vec_in_dim must be 0 (no pooled text vector)"
+        );
+        // Confirm the constructor logic: vec_in_dim == 0 means vector_in is None.
+        // This is the architectural invariant enforced in Flux2Transformer::new().
+        assert!(
+            cfg.vec_in_dim == 0,
+            "vec_in_dim > 0 would create an unused MlpEmbedder for Klein"
+        );
+        // Also verify that guidance_embed is false (distilled model, no CFG).
+        assert!(
+            !cfg.guidance_embed,
+            "Klein is a distilled model; guidance_embed must be false"
+        );
+    }
 }

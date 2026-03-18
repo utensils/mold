@@ -110,3 +110,78 @@ pub fn sd3_vae_vb_rename(name: &str) -> String {
     }
     result.join(".")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rename_down_blocks() {
+        assert_eq!(
+            sd3_vae_vb_rename("down_blocks.0.resnets.0.norm1.weight"),
+            "down.0.block.0.norm1.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_up_blocks_reversal() {
+        // up_blocks index 0 maps to 3
+        assert_eq!(
+            sd3_vae_vb_rename("up_blocks.0.resnets.0.conv1.weight"),
+            "up.3.block.0.conv1.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_up_blocks_1() {
+        // up_blocks index 1 maps to 2
+        assert_eq!(
+            sd3_vae_vb_rename("up_blocks.1.resnets.0.conv1.weight"),
+            "up.2.block.0.conv1.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_mid_block_resnets() {
+        // mid_block resnets.0 -> block_1, resnets.1 -> block_2
+        assert_eq!(
+            sd3_vae_vb_rename("mid_block.resnets.0.norm1.weight"),
+            "mid.block_1.norm1.weight"
+        );
+        assert_eq!(
+            sd3_vae_vb_rename("mid_block.resnets.1.conv1.weight"),
+            "mid.block_2.conv1.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_attentions() {
+        assert_eq!(
+            sd3_vae_vb_rename("mid_block.attentions.0.group_norm.weight"),
+            "mid.attn_1.norm.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_downsamplers() {
+        // downsamplers.0 -> downsample (skips the 0)
+        assert_eq!(
+            sd3_vae_vb_rename("down_blocks.2.downsamplers.0.conv.weight"),
+            "down.2.downsample.conv.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_upsamplers() {
+        // upsamplers.0 -> upsample (skips the 0), up_blocks index 1 -> 2
+        assert_eq!(
+            sd3_vae_vb_rename("up_blocks.1.upsamplers.0.conv.weight"),
+            "up.2.upsample.conv.weight"
+        );
+    }
+
+    #[test]
+    fn test_rename_conv_norm_out() {
+        assert_eq!(sd3_vae_vb_rename("conv_norm_out.weight"), "norm_out.weight");
+    }
+}
