@@ -6,7 +6,7 @@ Tracking document for SD3.5, Flux.2 Klein, and Qwen-Image-2512 engine issues on 
 
 ## SD3.5 (Quantized GGUF) — Black Images
 
-**Status:** Root cause identified, fix in progress
+**Status:** FIXED (commit 9394e8b)
 
 **Symptom:** `mold run sd3.5-large:q4 "prompt"` completes all 28 denoising steps but produces an all-black 1024x1024 image (18KB PNG). The denoised latent contains `inf`/`NaN`.
 
@@ -58,7 +58,7 @@ MOLD_SD3_DEBUG=1 mold run sd3.5-large:q4 "a turtle"
 
 ## SD3.5 — `--steps` and `--width`/`--height` CLI flags ignored
 
-**Status:** Not yet investigated
+**Status:** FIXED (commit 9394e8b)
 
 **Symptom:** The `--steps`, `--width`, and `--height` CLI arguments don't override the model's default values from the manifest/config. The model always uses its defaults (28 steps, 1024x1024 for sd3.5-large).
 
