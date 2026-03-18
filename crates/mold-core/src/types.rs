@@ -119,6 +119,52 @@ pub struct GpuInfo {
     pub vram_used_mb: u64,
 }
 
+// ── SSE streaming wire types ─────────────────────────────────────────────────
+
+/// Progress event for SSE streaming. Mirrors `mold_inference::ProgressEvent`
+/// but uses `u64` milliseconds instead of `Duration` for JSON serialization.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SseProgressEvent {
+    StageStart {
+        name: String,
+    },
+    StageDone {
+        name: String,
+        elapsed_ms: u64,
+    },
+    Info {
+        message: String,
+    },
+    DenoiseStep {
+        step: usize,
+        total: usize,
+        elapsed_ms: u64,
+    },
+}
+
+/// Completion event sent when image generation finishes successfully.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseCompleteEvent {
+    /// Base64-encoded image data.
+    pub image: String,
+    pub format: OutputFormat,
+    #[schema(example = 1024)]
+    pub width: u32,
+    #[schema(example = 1024)]
+    pub height: u32,
+    #[schema(example = 42)]
+    pub seed_used: u64,
+    #[schema(example = 1234)]
+    pub generation_time_ms: u64,
+}
+
+/// Error event sent when generation fails during SSE streaming.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseErrorEvent {
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +270,66 @@ mod tests {
     #[test]
     fn output_format_default_is_png() {
         assert_eq!(OutputFormat::default(), OutputFormat::Png);
+    }
+
+    // ── SSE type tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sse_progress_stage_start_roundtrip() {
+        let event = SseProgressEvent::StageStart {
+            name: "Loading T5 encoder".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"stage_start""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, SseProgressEvent::StageStart { name } if name == "Loading T5 encoder")
+        );
+    }
+
+    #[test]
+    fn sse_progress_denoise_step_roundtrip() {
+        let event = SseProgressEvent::DenoiseStep {
+            step: 5,
+            total: 28,
+            elapsed_ms: 1234,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"denoise_step""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::DenoiseStep {
+                step: 5,
+                total: 28,
+                elapsed_ms: 1234
+            }
+        ));
+    }
+
+    #[test]
+    fn sse_complete_event_roundtrip() {
+        let event = SseCompleteEvent {
+            image: "iVBOR...".to_string(),
+            format: OutputFormat::Png,
+            width: 1024,
+            height: 1024,
+            seed_used: 42,
+            generation_time_ms: 5000,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: SseCompleteEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.width, 1024);
+        assert_eq!(back.seed_used, 42);
+    }
+
+    #[test]
+    fn sse_error_event_roundtrip() {
+        let event = SseErrorEvent {
+            message: "something failed".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: SseErrorEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message, "something failed");
     }
 }

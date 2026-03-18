@@ -418,4 +418,124 @@ mod tests {
             "docs should return HTML, got: {ct}"
         );
     }
+
+    // ── /api/generate/stream — SSE streaming ────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_valid_request_returns_sse() {
+        let app = app_with(MockEngine::ready());
+        let body = generate_body("a robot", 768, 768);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/event-stream"),
+            "stream should return text/event-stream, got: {ct}"
+        );
+
+        // Collect body and verify it contains a complete event with base64 image
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("event: complete"),
+            "stream should contain a complete event"
+        );
+        assert!(
+            text.contains("\"image\""),
+            "complete event should contain base64 image"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_empty_prompt_returns_422() {
+        let app = app_with(MockEngine::ready());
+        let body = generate_body("", 768, 768);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn stream_unknown_model_returns_400() {
+        let app = app_empty();
+        let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn stream_known_model_not_downloaded_returns_404() {
+        let app = app_empty();
+        let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stream_engine_error_returns_sse_error() {
+        let app = app_with(MockEngine::failing());
+        let body = generate_body("a cat", 768, 768);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // SSE stream starts with 200 — error is in the event stream
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("event: error"),
+            "stream should contain an error event"
+        );
+        assert!(
+            text.contains("mock engine error"),
+            "error event should contain the engine error message"
+        );
+    }
 }

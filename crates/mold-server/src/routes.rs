@@ -1,20 +1,29 @@
 use axum::{
     extract::State,
     http::{header, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{delete, get, post},
     Json, Router,
 };
-use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
+use base64::Engine as _;
+use mold_core::{
+    GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent,
+};
 use mold_inference::model_registry;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::state::AppState;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(generate, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
+    paths(generate, generate_stream, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
@@ -23,6 +32,9 @@ use crate::state::AppState;
         mold_core::ModelInfo,
         mold_core::ServerStatus,
         mold_core::GpuInfo,
+        mold_core::SseProgressEvent,
+        mold_core::SseCompleteEvent,
+        mold_core::SseErrorEvent,
         ModelInfoExtended,
         LoadModelBody,
     )),
@@ -44,6 +56,7 @@ pub fn create_router(state: AppState) -> Router {
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
         .route("/api/generate", post(generate))
+        .route("/api/generate/stream", post(generate_stream))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
@@ -57,19 +70,32 @@ pub fn create_router(state: AppState) -> Router {
 
 // ── Model readiness ──────────────────────────────────────────────────────────
 
-/// Ensure the requested model is loaded and ready for inference.
-/// Handles: no engine, model swap, and lazy loading.
-/// Does NOT auto-pull — returns 404 so the client can pull and retry.
-async fn ensure_model_ready(
+/// Internal SSE message type for the streaming channel.
+enum SseMessage {
+    Progress(SseProgressEvent),
+    Complete(SseCompleteEvent),
+    Error(SseErrorEvent),
+}
+
+/// Convert an inference-crate progress event to an SSE wire event.
+fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
+    event.into()
+}
+
+/// Check model availability without loading. Returns:
+/// - `Ok(None)` — model is already loaded and ready
+/// - `Ok(Some(paths))` — model paths resolved, needs loading
+/// - `Err(...)` — model not found (404) or unknown model (400)
+async fn check_model_available(
     state: &AppState,
     model_name: &str,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<Option<ModelPaths>, (StatusCode, String)> {
     // Fast path: engine exists, correct model, already loaded
     {
         let engine = state.engine.lock().await;
         if let Some(ref e) = *engine {
             if e.model_name() == model_name && e.is_loaded() {
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -79,21 +105,17 @@ async fn ensure_model_ready(
         let config = state.config.read().await;
         ModelPaths::resolve(model_name, &config)
     };
-
     if let Some(paths) = paths {
-        // Paths exist — create engine and load
-        return create_and_load_engine(state, model_name, paths).await;
+        return Ok(Some(paths));
     }
 
-    // Config miss — re-read from disk in case config.toml was updated
-    // externally (e.g., manual edit or `mold pull` from another process).
+    // Config miss — re-read from disk in case config.toml was updated externally
     {
         let fresh_config = mold_core::Config::load_or_default();
         if let Some(paths) = ModelPaths::resolve(model_name, &fresh_config) {
             let mut config = state.config.write().await;
             *config = fresh_config;
-            drop(config);
-            return create_and_load_engine(state, model_name, paths).await;
+            return Ok(Some(paths));
         }
     }
 
@@ -110,14 +132,28 @@ async fn ensure_model_ready(
     ))
 }
 
+/// Ensure the requested model is loaded and ready for inference.
+async fn ensure_model_ready(
+    state: &AppState,
+    model_name: &str,
+) -> Result<(), (StatusCode, String)> {
+    match check_model_available(state, model_name).await? {
+        Some(paths) => create_and_load_engine(state, model_name, paths, None).await,
+        None => Ok(()),
+    }
+}
+
 /// Create an inference engine and load it into AppState.
+/// When `progress_tx` is `Some`, a progress callback is installed before
+/// `engine.load()` so loading stages are streamed to the SSE client.
 async fn create_and_load_engine(
     state: &AppState,
     model_name: &str,
     paths: ModelPaths,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
 ) -> Result<(), (StatusCode, String)> {
     let config = state.config.read().await;
-    let new_engine = mold_inference::create_engine(
+    let mut new_engine = mold_inference::create_engine(
         model_name.to_string(),
         paths,
         &config,
@@ -130,6 +166,14 @@ async fn create_and_load_engine(
         )
     })?;
     drop(config);
+
+    // Install progress callback for SSE streaming (captures load events)
+    if let Some(tx) = progress_tx {
+        let tx = tx.clone();
+        new_engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+        }));
+    }
 
     let mut engine = state.engine.lock().await;
 
@@ -251,6 +295,134 @@ async fn generate(
 
 fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
     mold_core::validate_generate_request(req)
+}
+
+// ── /api/generate/stream (SSE) ───────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/generate/stream",
+    tag = "generation",
+    request_body = mold_core::GenerateRequest,
+    responses(
+        (status = 200, description = "SSE event stream with progress and result"),
+        (status = 404, description = "Model not downloaded"),
+        (status = 422, description = "Invalid request parameters"),
+        (status = 500, description = "Inference error"),
+    )
+)]
+async fn generate_stream(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::GenerateRequest>,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, (StatusCode, String)>
+{
+    tracing::info!(
+        model = %req.model,
+        prompt = %req.prompt,
+        "generate/stream request"
+    );
+
+    // Validate before starting the SSE stream (returns HTTP error, not SSE event)
+    if let Err(e) = validate_generate_request(&req) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+    }
+
+    // Check model availability (404/400 returned as HTTP errors before SSE starts)
+    let model_paths = check_model_available(&state, &req.model).await?;
+
+    // Create SSE channel
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+
+    // Spawn background task for model loading + inference
+    let bg_tx = tx;
+    tokio::spawn(async move {
+        // Load model if needed (with progress events)
+        if let Some(paths) = model_paths {
+            if let Err((_, msg)) =
+                create_and_load_engine(&state, &req.model, paths, Some(&bg_tx)).await
+            {
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent { message: msg }));
+                return;
+            }
+        }
+
+        // Run inference in blocking thread with progress callback
+        let engine = state.engine.clone();
+        let gen_tx = bg_tx.clone();
+        let gen_req = req.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut guard = engine.blocking_lock();
+                let e = guard.as_mut().unwrap();
+                // Install progress callback for the generate phase
+                let progress_tx = gen_tx.clone();
+                e.set_on_progress(Box::new(move |event| {
+                    let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
+                }));
+                e.generate(&gen_req)
+            }))
+        })
+        .await;
+
+        match result {
+            Ok(Ok(Ok(mut response))) => {
+                let img = response.images.remove(0);
+                let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
+                    image: base64::engine::general_purpose::STANDARD.encode(&img.data),
+                    format: img.format,
+                    width: img.width,
+                    height: img.height,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }));
+            }
+            Ok(Ok(Err(e))) => {
+                tracing::error!("generation error: {e:#}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: format!("generation error: {e}"),
+                }));
+            }
+            Ok(Err(panic_payload)) => {
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                tracing::error!("inference panicked: {msg}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: format!("inference panicked: {msg}"),
+                }));
+            }
+            Err(join_err) => {
+                tracing::error!("inference task join error: {join_err:?}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: "inference task failed".to_string(),
+                }));
+            }
+        }
+    });
+
+    // Build SSE stream from the channel receiver
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|msg| {
+        let event = match msg {
+            SseMessage::Progress(p) => SseEvent::default()
+                .event("progress")
+                .data(serde_json::to_string(&p).unwrap()),
+            SseMessage::Complete(c) => SseEvent::default()
+                .event("complete")
+                .data(serde_json::to_string(&c).unwrap()),
+            SseMessage::Error(e) => SseEvent::default()
+                .event("error")
+                .data(serde_json::to_string(&e).unwrap()),
+        };
+        Ok::<_, Infallible>(event)
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    ))
 }
 
 // ── /api/models ───────────────────────────────────────────────────────────────

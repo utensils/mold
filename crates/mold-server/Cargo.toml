@@ -28,4 +28,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+futures-core = "0.3"
+tokio-stream = "0.1"
 utoipa = { version = "5", features = ["preserve_order"] }

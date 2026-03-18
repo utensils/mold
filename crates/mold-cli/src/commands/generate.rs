@@ -1,7 +1,9 @@
 use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use mold_core::{Config, GenerateRequest, GenerateResponse, MoldClient, OutputFormat};
+use mold_core::{
+    Config, GenerateRequest, GenerateResponse, MoldClient, OutputFormat, SseProgressEvent,
+};
 use std::io::Write;
 use std::time::Duration;
 
@@ -98,77 +100,30 @@ pub async fn run(
         )
         .await?
     } else {
-        // Try remote server first
+        // Try remote server: SSE streaming first, then blocking API fallback
         let client = match &host {
             Some(h) => MoldClient::new(h),
             None => MoldClient::from_env(),
         };
 
-        let pb = ProgressBar::new_spinner();
-        if piped {
-            // Don't render spinner to stdout when piped — it would corrupt binary output.
-            // Draw to stderr instead.
-            pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-        }
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
-        );
-        pb.set_message(format!(
-            "Generating on server ({}x{}, {} steps)...",
-            effective_width, effective_height, effective_steps
-        ));
-        pb.enable_steady_tick(Duration::from_millis(100));
-
-        match client.generate(req.clone()).await {
-            Ok(response) => {
-                pb.finish_and_clear();
-                response
-            }
-            Err(e) if MoldClient::is_model_not_found(&e) => {
-                pb.finish_and_clear();
-                status!(
-                    "{} Model '{}' not on server — server is downloading...",
-                    "●".cyan(),
-                    model.bold()
-                );
-                // Ask the server to pull the model (works for both local and remote servers)
-                let pb2 = ProgressBar::new_spinner();
-                if piped {
-                    pb2.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-                }
-                pb2.set_style(
-                    ProgressStyle::default_spinner()
-                        .template("{spinner:.green} {msg}")
-                        .unwrap(),
-                );
-                pb2.set_message(format!("Server pulling {}...", model));
-                pb2.enable_steady_tick(Duration::from_millis(100));
-                client.pull_model(model).await?;
-                pb2.finish_and_clear();
-                status!("{} Pull complete, generating...", "✓".green());
-                let response = client.generate(req.clone()).await?;
-                response
-            }
-            Err(e) if MoldClient::is_connection_error(&e) => {
-                pb.finish_and_clear();
-                status!("{} Using local GPU inference", "●".cyan());
-                generate_local(
-                    &req,
-                    &config,
-                    t5_variant,
-                    qwen3_variant,
-                    eager,
-                    width,
-                    height,
-                    steps,
-                    guidance,
-                )
-                .await?
-            }
-            Err(e) => return Err(e),
-        }
+        generate_remote(
+            &client,
+            &req,
+            &config,
+            model,
+            piped,
+            effective_width,
+            effective_height,
+            effective_steps,
+            t5_variant,
+            qwen3_variant,
+            eager,
+            width,
+            height,
+            steps,
+            guidance,
+        )
+        .await?
     };
 
     // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
@@ -225,6 +180,284 @@ pub async fn run(
     Ok(())
 }
 
+/// Render SSE progress events using indicatif progress bars.
+/// Used by both local GPU inference and remote SSE streaming.
+async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>) {
+    let pb = ProgressBar::new_spinner();
+    if is_piped() {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    }
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    // No steady tick — redraws only on events to avoid flickering with
+    // hf-hub's download bars (which write to stderr independently).
+    pb.tick();
+
+    let mut denoise_bar: Option<ProgressBar> = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            SseProgressEvent::StageStart { name } => {
+                if let Some(db) = denoise_bar.take() {
+                    db.finish_and_clear();
+                }
+                pb.set_message(format!("{}...", name));
+                pb.tick();
+            }
+            SseProgressEvent::StageDone { name, elapsed_ms } => {
+                if let Some(db) = denoise_bar.take() {
+                    db.finish_and_clear();
+                }
+                let secs = elapsed_ms as f64 / 1000.0;
+                pb.suspend(|| {
+                    status!(
+                        "  {} {} {}",
+                        "✓".green(),
+                        name,
+                        format!("[{:.1}s]", secs).dimmed(),
+                    );
+                });
+            }
+            SseProgressEvent::Info { message } => {
+                pb.suspend(|| {
+                    status!("  {} {}", "·".dimmed(), message.dimmed());
+                });
+            }
+            SseProgressEvent::DenoiseStep {
+                step,
+                total,
+                elapsed_ms,
+            } => {
+                let db = denoise_bar.get_or_insert_with(|| {
+                    pb.disable_steady_tick();
+                    pb.set_message("");
+
+                    let bar = ProgressBar::new(total as u64);
+                    if is_piped() {
+                        bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                    }
+                    bar.set_style(
+                        ProgressStyle::default_bar()
+                            .template(
+                                "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
+                            )
+                            .unwrap()
+                            .progress_chars("━╸─"),
+                    );
+                    bar.enable_steady_tick(Duration::from_millis(100));
+                    bar
+                });
+                let elapsed_secs = elapsed_ms as f64 / 1000.0;
+                let it_s = if elapsed_secs > 0.0 {
+                    1.0 / elapsed_secs
+                } else {
+                    0.0
+                };
+                db.set_message(format!("{:.2} it/s", it_s));
+                db.set_position(step as u64);
+            }
+        }
+    }
+    if let Some(db) = denoise_bar.take() {
+        db.finish_and_clear();
+    }
+    pb.finish_and_clear();
+}
+
+/// Remote generation: try SSE streaming first, fall back to blocking API.
+#[allow(clippy::too_many_arguments)]
+async fn generate_remote(
+    client: &MoldClient,
+    req: &GenerateRequest,
+    config: &Config,
+    model: &str,
+    piped: bool,
+    effective_width: u32,
+    effective_height: u32,
+    effective_steps: u32,
+    t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    // Try SSE streaming first
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let render = tokio::spawn(render_progress(rx));
+
+    match client.generate_stream(req, tx).await {
+        Ok(Some(response)) => {
+            let _ = render.await;
+            Ok(response)
+        }
+        Ok(None) => {
+            // Server doesn't support SSE — fall back to blocking API with spinner
+            let _ = render.await;
+            generate_remote_blocking(
+                client,
+                req,
+                config,
+                model,
+                piped,
+                effective_width,
+                effective_height,
+                effective_steps,
+                t5_variant,
+                qwen3_variant,
+                eager,
+                cli_width,
+                cli_height,
+                cli_steps,
+                cli_guidance,
+            )
+            .await
+        }
+        Err(e) if MoldClient::is_model_not_found(&e) => {
+            let _ = render.await;
+            status!(
+                "{} Model '{}' not on server — server is downloading...",
+                "●".cyan(),
+                model.bold()
+            );
+            let pb = ProgressBar::new_spinner();
+            if piped {
+                pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+            }
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg}")
+                    .unwrap(),
+            );
+            pb.set_message(format!("Server pulling {}...", model));
+            pb.enable_steady_tick(Duration::from_millis(100));
+            client.pull_model(model).await?;
+            pb.finish_and_clear();
+            status!("{} Pull complete, generating...", "✓".green());
+
+            // Retry with SSE streaming after pull
+            let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+            let render2 = tokio::spawn(render_progress(rx2));
+            match client.generate_stream(req, tx2).await {
+                Ok(Some(response)) => {
+                    let _ = render2.await;
+                    Ok(response)
+                }
+                _ => {
+                    // Fall back to blocking if SSE still fails
+                    let _ = render2.await;
+                    Ok(client.generate(req.clone()).await?)
+                }
+            }
+        }
+        Err(e) if MoldClient::is_connection_error(&e) => {
+            let _ = render.await;
+            status!("{} Using local GPU inference", "●".cyan());
+            generate_local(
+                req,
+                config,
+                t5_variant,
+                qwen3_variant,
+                eager,
+                cli_width,
+                cli_height,
+                cli_steps,
+                cli_guidance,
+            )
+            .await
+        }
+        Err(e) => {
+            let _ = render.await;
+            Err(e)
+        }
+    }
+}
+
+/// Blocking remote generation with a simple spinner (fallback for servers without SSE).
+#[allow(clippy::too_many_arguments)]
+async fn generate_remote_blocking(
+    client: &MoldClient,
+    req: &GenerateRequest,
+    config: &Config,
+    model: &str,
+    piped: bool,
+    effective_width: u32,
+    effective_height: u32,
+    effective_steps: u32,
+    t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    let pb = ProgressBar::new_spinner();
+    if piped {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    }
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(format!(
+        "Generating on server ({}x{}, {} steps)...",
+        effective_width, effective_height, effective_steps
+    ));
+    pb.enable_steady_tick(Duration::from_millis(100));
+
+    match client.generate(req.clone()).await {
+        Ok(response) => {
+            pb.finish_and_clear();
+            Ok(response)
+        }
+        Err(e) if MoldClient::is_model_not_found(&e) => {
+            pb.finish_and_clear();
+            status!(
+                "{} Model '{}' not on server — server is downloading...",
+                "●".cyan(),
+                model.bold()
+            );
+            let pb2 = ProgressBar::new_spinner();
+            if piped {
+                pb2.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+            }
+            pb2.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} {msg}")
+                    .unwrap(),
+            );
+            pb2.set_message(format!("Server pulling {}...", model));
+            pb2.enable_steady_tick(Duration::from_millis(100));
+            client.pull_model(model).await?;
+            pb2.finish_and_clear();
+            status!("{} Pull complete, generating...", "✓".green());
+            Ok(client.generate(req.clone()).await?)
+        }
+        Err(e) if MoldClient::is_connection_error(&e) => {
+            pb.finish_and_clear();
+            status!("{} Using local GPU inference", "●".cyan());
+            generate_local(
+                req,
+                config,
+                t5_variant,
+                qwen3_variant,
+                eager,
+                cli_width,
+                cli_height,
+                cli_steps,
+                cli_guidance,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(any(feature = "cuda", feature = "metal"))]
 async fn generate_local(
     req: &GenerateRequest,
@@ -239,7 +472,7 @@ async fn generate_local(
 ) -> Result<GenerateResponse> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
-    use mold_inference::{LoadStrategy, ProgressEvent};
+    use mold_inference::LoadStrategy;
 
     let model_name = req.model.clone();
     let (paths, auto_config);
@@ -268,10 +501,6 @@ async fn generate_local(
                 auto_config = updated_config;
                 effective_config = &auto_config;
 
-                // Re-resolve model defaults now that config has the manifest values.
-                // The request was built before the pull, so dimensions/guidance/steps
-                // may be wrong (global defaults instead of model-specific ones).
-                // Only override values the user didn't explicitly set via CLI flags.
                 let model_cfg = effective_config.model_config(&model_name);
                 if cli_width.is_none() {
                     req.width = model_cfg.effective_width(effective_config);
@@ -314,24 +543,22 @@ async fn generate_local(
     if let Some(ref variant) = qwen3_variant_override {
         std::env::set_var("MOLD_QWEN3_VARIANT", variant);
     }
-    // Determine load strategy: --eager flag or MOLD_EAGER=1 env var → Eager, else Sequential
     let is_eager = eager || std::env::var("MOLD_EAGER").map_or(false, |v| v == "1");
     let load_strategy = if is_eager {
         LoadStrategy::Eager
     } else {
         LoadStrategy::Sequential
     };
-    // Propagate eager flag so preflight_memory_check can see it
     if is_eager {
         std::env::set_var("MOLD_EAGER", "1");
     }
     let mut engine =
         mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
 
-    // Set up progress channel for UI updates from the blocking inference thread
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+    // Set up progress channel — convert ProgressEvent → SseProgressEvent for unified rendering
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
     engine.set_on_progress(Box::new(move |event| {
-        let _ = tx.send(event);
+        let _ = tx.send(event.into());
     }));
 
     let req = req.clone();
@@ -342,93 +569,10 @@ async fn generate_local(
         engine.generate(&req)
     });
 
-    // Render progress events as they arrive (always to stderr when piped)
-    let render = tokio::spawn(async move {
-        let pb = ProgressBar::new_spinner();
-        if is_piped() {
-            pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-        }
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        // No steady tick — redraws only on events to avoid flickering with
-        // hf-hub's download bars (which write to stderr independently).
-        pb.tick();
-
-        let mut denoise_bar: Option<ProgressBar> = None;
-        while let Some(event) = rx.recv().await {
-            match event {
-                ProgressEvent::StageStart { name } => {
-                    if let Some(db) = denoise_bar.take() {
-                        db.finish_and_clear();
-                    }
-                    pb.set_message(format!("{}...", name));
-                    pb.tick();
-                }
-                ProgressEvent::StageDone { name, elapsed } => {
-                    if let Some(db) = denoise_bar.take() {
-                        db.finish_and_clear();
-                    }
-                    pb.suspend(|| {
-                        status!(
-                            "  {} {} {}",
-                            "✓".green(),
-                            name,
-                            format!("[{:.1}s]", elapsed.as_secs_f64()).dimmed(),
-                        );
-                    });
-                }
-                ProgressEvent::Info { message } => {
-                    pb.suspend(|| {
-                        status!("  {} {}", "·".dimmed(), message.dimmed());
-                    });
-                }
-                ProgressEvent::DenoiseStep {
-                    step,
-                    total,
-                    elapsed,
-                } => {
-                    let db = denoise_bar.get_or_insert_with(|| {
-                        // Hide the spinner while denoise bar is active
-                        pb.disable_steady_tick();
-                        pb.set_message("");
-
-                        let bar = ProgressBar::new(total as u64);
-                        if is_piped() {
-                            bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-                        }
-                        bar.set_style(
-                            ProgressStyle::default_bar()
-                                .template(
-                                    "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
-                                )
-                                .unwrap()
-                                .progress_chars("━╸─"),
-                        );
-                        bar.enable_steady_tick(Duration::from_millis(100));
-                        bar
-                    });
-                    let it_s = if elapsed.as_secs_f64() > 0.0 {
-                        1.0 / elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    db.set_message(format!("{:.2} it/s", it_s));
-                    db.set_position(step as u64);
-                }
-            }
-        }
-        if let Some(db) = denoise_bar.take() {
-            db.finish_and_clear();
-        }
-
-        pb.finish_and_clear();
-    });
+    // Render progress events using the shared renderer
+    let render = tokio::spawn(render_progress(rx));
 
     let result = handle.await?;
-    // Wait for all progress events to be rendered
     let _ = render.await;
     result
 }

@@ -60,6 +60,28 @@ impl ProgressReporter {
     }
 }
 
+impl From<ProgressEvent> for mold_core::SseProgressEvent {
+    fn from(event: ProgressEvent) -> Self {
+        match event {
+            ProgressEvent::StageStart { name } => mold_core::SseProgressEvent::StageStart { name },
+            ProgressEvent::StageDone { name, elapsed } => mold_core::SseProgressEvent::StageDone {
+                name,
+                elapsed_ms: elapsed.as_millis() as u64,
+            },
+            ProgressEvent::Info { message } => mold_core::SseProgressEvent::Info { message },
+            ProgressEvent::DenoiseStep {
+                step,
+                total,
+                elapsed,
+            } => mold_core::SseProgressEvent::DenoiseStep {
+                step,
+                total,
+                elapsed_ms: elapsed.as_millis() as u64,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
