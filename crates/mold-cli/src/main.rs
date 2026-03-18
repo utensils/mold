@@ -357,3 +357,209 @@ compdef _clap_dynamic_completer_mold mold
     completer.write_registration("COMPLETE", "mold", "mold", &bin, &mut std::io::stdout())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Parse CLI args from a vector (simulates command-line invocation).
+    fn parse(args: &[&str]) -> Cli {
+        Cli::parse_from(std::iter::once("mold").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn run_parses_model_and_prompt() {
+        let cli = parse(&["run", "flux-dev:q4", "a", "red", "apple"]);
+        match cli.command {
+            Commands::Run {
+                model_or_prompt,
+                prompt_rest,
+                ..
+            } => {
+                assert_eq!(model_or_prompt.as_deref(), Some("flux-dev:q4"));
+                assert_eq!(prompt_rest, vec!["a", "red", "apple"]);
+            }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    #[test]
+    fn run_seed_before_prompt() {
+        let cli = parse(&["run", "model", "--seed", "42", "a", "cat"]);
+        match cli.command {
+            Commands::Run { seed, .. } => assert_eq!(seed, Some(42)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_seed_after_prompt() {
+        let cli = parse(&["run", "model", "a", "cat", "--seed", "42"]);
+        match cli.command {
+            Commands::Run { seed, .. } => assert_eq!(seed, Some(42)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_steps_after_prompt() {
+        let cli = parse(&["run", "model", "a", "cat", "--steps", "20"]);
+        match cli.command {
+            Commands::Run { steps, .. } => assert_eq!(steps, Some(20)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_width_height() {
+        let cli = parse(&["run", "model", "--width", "512", "--height", "768", "test"]);
+        match cli.command {
+            Commands::Run { width, height, .. } => {
+                assert_eq!(width, Some(512));
+                assert_eq!(height, Some(768));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_guidance() {
+        let cli = parse(&["run", "model", "test", "--guidance", "7.5"]);
+        match cli.command {
+            Commands::Run { guidance, .. } => assert_eq!(guidance, Some(7.5)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_format_jpeg() {
+        let cli = parse(&["run", "model", "test", "--format", "jpeg"]);
+        match cli.command {
+            Commands::Run { format, .. } => assert_eq!(format, "jpeg"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_batch() {
+        let cli = parse(&["run", "model", "test", "--batch", "4"]);
+        match cli.command {
+            Commands::Run { batch, .. } => assert_eq!(batch, 4),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_output_flag() {
+        let cli = parse(&["run", "model", "test", "-o", "/tmp/out.png"]);
+        match cli.command {
+            Commands::Run { output, .. } => assert_eq!(output.as_deref(), Some("/tmp/out.png")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_local_flag() {
+        let cli = parse(&["run", "model", "test", "--local"]);
+        match cli.command {
+            Commands::Run { local, .. } => assert!(local),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_eager_flag() {
+        let cli = parse(&["run", "model", "test", "--eager"]);
+        match cli.command {
+            Commands::Run { eager, .. } => assert!(eager),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_all_flags_combined() {
+        let cli = parse(&[
+            "run",
+            "model",
+            "a complex prompt with many words",
+            "--seed",
+            "99",
+            "--steps",
+            "10",
+            "--width",
+            "512",
+            "--height",
+            "768",
+            "--guidance",
+            "4.0",
+            "--format",
+            "jpeg",
+            "--batch",
+            "2",
+            "-o",
+            "/tmp/test.jpg",
+            "--local",
+            "--eager",
+        ]);
+        match cli.command {
+            Commands::Run {
+                seed,
+                steps,
+                width,
+                height,
+                guidance,
+                format,
+                batch,
+                output,
+                local,
+                eager,
+                ..
+            } => {
+                assert_eq!(seed, Some(99));
+                assert_eq!(steps, Some(10));
+                assert_eq!(width, Some(512));
+                assert_eq!(height, Some(768));
+                assert_eq!(guidance, Some(4.0));
+                assert_eq!(format, "jpeg");
+                assert_eq!(batch, 2);
+                assert_eq!(output.as_deref(), Some("/tmp/test.jpg"));
+                assert!(local);
+                assert!(eager);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_defaults_when_no_flags() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run {
+                seed,
+                steps,
+                width,
+                height,
+                guidance,
+                format,
+                batch,
+                output,
+                local,
+                eager,
+                ..
+            } => {
+                assert_eq!(seed, None);
+                assert_eq!(steps, None);
+                assert_eq!(width, None);
+                assert_eq!(height, None);
+                assert_eq!(guidance, None);
+                assert_eq!(format, "png");
+                assert_eq!(batch, 1);
+                assert_eq!(output, None);
+                assert!(!local);
+                assert!(!eager);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+}

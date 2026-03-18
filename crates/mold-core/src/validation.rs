@@ -39,5 +39,147 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     if req.batch_size > 16 {
         return Err(format!("batch_size ({}) must be <= 16", req.batch_size));
     }
+    if req.guidance < 0.0 {
+        return Err(format!("guidance ({}) must be >= 0.0", req.guidance));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OutputFormat;
+
+    fn valid_req() -> GenerateRequest {
+        GenerateRequest {
+            prompt: "a red apple".to_string(),
+            model: "test-model".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 0.0,
+            seed: Some(42),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+        }
+    }
+
+    #[test]
+    fn valid_request_passes() {
+        assert!(validate_generate_request(&valid_req()).is_ok());
+    }
+
+    #[test]
+    fn empty_prompt_rejected() {
+        let mut req = valid_req();
+        req.prompt = "   ".to_string();
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("prompt"));
+    }
+
+    #[test]
+    fn zero_dimensions_rejected() {
+        let mut req = valid_req();
+        req.width = 0;
+        assert!(validate_generate_request(&req).is_err());
+        req.width = 1024;
+        req.height = 0;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn dimensions_must_be_multiple_of_16() {
+        let mut req = valid_req();
+        req.width = 513; // not multiple of 16
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("multiples of 16"));
+    }
+
+    #[test]
+    fn valid_non_square_dimensions() {
+        let mut req = valid_req();
+        req.width = 512;
+        req.height = 768;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn oversized_image_rejected() {
+        let mut req = valid_req();
+        req.width = 1280;
+        req.height = 1280; // 1.64MP > 1.1MP limit
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("megapixels"));
+    }
+
+    #[test]
+    fn zero_steps_rejected() {
+        let mut req = valid_req();
+        req.steps = 0;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn excessive_steps_rejected() {
+        let mut req = valid_req();
+        req.steps = 101;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn valid_step_counts() {
+        for steps in [1, 4, 20, 28, 50, 100] {
+            let mut req = valid_req();
+            req.steps = steps;
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "steps={steps} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_batch_rejected() {
+        let mut req = valid_req();
+        req.batch_size = 0;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn excessive_batch_rejected() {
+        let mut req = valid_req();
+        req.batch_size = 17;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn negative_guidance_rejected() {
+        let mut req = valid_req();
+        req.guidance = -1.0;
+        assert!(validate_generate_request(&req).is_err());
+    }
+
+    #[test]
+    fn zero_guidance_valid() {
+        let mut req = valid_req();
+        req.guidance = 0.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn high_guidance_valid() {
+        let mut req = valid_req();
+        req.guidance = 20.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn seed_is_optional() {
+        let mut req = valid_req();
+        req.seed = None;
+        assert!(validate_generate_request(&req).is_ok());
+    }
 }
