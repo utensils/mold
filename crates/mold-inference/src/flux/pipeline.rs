@@ -24,7 +24,8 @@ use super::transformer::FluxTransformer;
 /// When T5/CLIP are loaded on GPU, they are dropped after encoding to free VRAM
 /// for the denoising pass (their weights are only needed for prompt encoding).
 struct LoadedFlux {
-    flux_model: FluxTransformer,
+    /// None after being dropped for VAE decode VRAM; reloaded on next generate.
+    flux_model: Option<FluxTransformer>,
     t5: encoders::t5::T5Encoder,
     clip: encoders::clip::ClipEncoder,
     vae: flux::autoencoder::AutoEncoder,
@@ -340,11 +341,7 @@ impl FluxEngine {
 
         let cpu = Device::Cpu;
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
@@ -485,7 +482,7 @@ impl FluxEngine {
         tracing::info!(device = clip_device_label, "CLIP encoder loaded");
 
         self.loaded = Some(LoadedFlux {
-            flux_model,
+            flux_model: Some(flux_model),
             t5,
             clip,
             vae,
@@ -522,11 +519,7 @@ impl FluxEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -713,7 +706,7 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -817,6 +810,39 @@ impl InferenceEngine for FluxEngine {
             "starting generation"
         );
 
+        // If transformer was dropped after a previous generation (for VAE VRAM), reload it.
+        if loaded.flux_model.is_none() {
+            let xformer_label = if loaded.is_quantized {
+                "Reloading FLUX transformer (GPU, quantized)"
+            } else {
+                "Reloading FLUX transformer (GPU, BF16)"
+            };
+            progress.stage_start(xformer_label);
+            let reload_start = Instant::now();
+            let flux_cfg = if loaded.is_schnell {
+                flux::model::Config::schnell()
+            } else {
+                flux::model::Config::dev()
+            };
+            loaded.flux_model = Some(if loaded.is_quantized {
+                let vb = quantized_var_builder::VarBuilder::from_gguf(
+                    &self.paths.transformer,
+                    &loaded.device,
+                )?;
+                FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            } else {
+                let flux_vb = unsafe {
+                    VarBuilder::from_mmaped_safetensors(
+                        std::slice::from_ref(&self.paths.transformer),
+                        loaded.dtype,
+                        &loaded.device,
+                    )?
+                };
+                FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
+            });
+            progress.stage_done(xformer_label, reload_start.elapsed());
+        }
+
         // If T5/CLIP were dropped after a previous generation (GPU offload), reload them.
         if loaded.t5.model.is_none() {
             progress.stage_start("Reloading T5 encoder (GPU)");
@@ -897,7 +923,7 @@ impl InferenceEngine for FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
         tracing::info!(
@@ -907,28 +933,35 @@ impl InferenceEngine for FluxEngine {
         );
 
         // 6. Denoise — guidance from request (0.0 for schnell, 3.5+ for dev/finetuned)
-        let img = loaded.flux_model.denoise(
-            &state.img,
-            &state.img_ids,
-            &state.txt,
-            &state.txt_ids,
-            &state.vec,
-            &timesteps,
-            req.guidance,
-            progress,
-        )?;
+        let img = loaded
+            .flux_model
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?
+            .denoise(
+                &state.img,
+                &state.img_ids,
+                &state.txt,
+                &state.txt_ids,
+                &state.vec,
+                &timesteps,
+                req.guidance,
+                progress,
+            )?;
 
         // 7. Unpack latent to spatial
         let img = flux::sampling::unpack(&img, height, width)?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
 
-        // Free denoising intermediates (state, embeddings) before VAE decode.
-        // These GPU tensors can be several GB and the VAE needs that VRAM.
+        // Free denoising intermediates and transformer before VAE decode.
+        // On discrete GPUs (CUDA), the Q8 transformer alone is ~13GB — VAE decode
+        // needs that VRAM for conv2d intermediates. Transformer is reloaded next generate.
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
+        loaded.flux_model = None;
+        tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
         progress.stage_start("VAE decode");

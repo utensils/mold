@@ -255,7 +255,7 @@ impl QwenImageEngine {
 
         let text_tokenizer_path = self.validate_paths()?;
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -350,7 +350,7 @@ impl QwenImageEngine {
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
 
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
         let start = Instant::now();

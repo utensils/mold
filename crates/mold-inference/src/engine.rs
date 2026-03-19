@@ -29,6 +29,21 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
 }
 
+/// Select the optimal dtype for GPU inference.
+///
+/// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)
+/// - Metal/MPS: F32 (BF16 on Metal has precision issues that cause washed-out,
+///   blurry images — matmul accumulation errors compound through denoising loops.
+///   This matches InvokeAI/diffusers which also avoid BF16 on MPS.)
+/// - CPU: F32
+pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
+    if device.is_cuda() {
+        candle_core::DType::BF16
+    } else {
+        candle_core::DType::F32
+    }
+}
+
 /// Generate a random seed from the current system time.
 pub(crate) fn rand_seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,30 +56,36 @@ pub(crate) fn rand_seed() -> u64 {
 /// Generate deterministic noise on a device with a given seed.
 ///
 /// This is the ONLY correct way to generate initial noise for denoising.
-/// It sets the device seed immediately before calling `Tensor::randn`,
-/// guaranteeing that the same seed always produces the same noise regardless
-/// of what GPU operations (text encoding, model loading) happened before.
-///
 /// All pipelines MUST use this instead of calling `device.set_seed()` +
-/// `Tensor::randn()` separately, which is fragile because intervening GPU
-/// ops can consume RNG state.
+/// `Tensor::randn()` separately.
 ///
-/// On CPU, `set_seed` is skipped (candle's CPU backend doesn't support it).
-/// In practice all inference runs on GPU so this path is rarely hit.
+/// Noise is generated on CPU using a deterministic Rust RNG, then moved to
+/// the target device. This guarantees:
+/// 1. Same seed always produces identical noise (deterministic)
+/// 2. Same seed produces the same noise across CUDA, Metal, and CPU backends
+///    (cross-platform reproducibility)
+///
+/// GPU-native RNG (Metal's HybridTaus, CUDA's cuRAND) use different algorithms
+/// that produce different sequences from the same seed. CPU generation avoids this.
 pub(crate) fn seeded_randn(
     seed: u64,
     shape: &[usize],
     device: &candle_core::Device,
     dtype: candle_core::DType,
 ) -> anyhow::Result<candle_core::Tensor> {
-    // Generate noise on the target device.
-    // For GPU: set_seed ensures deterministic randn.
-    // For CPU: candle doesn't support set_seed, but we still get consistent
-    // noise if no other threads are generating random numbers (single-threaded CLI).
-    if !device.is_cpu() {
-        device.set_seed(seed)?;
-    }
-    Ok(candle_core::Tensor::randn(0f32, 1.0, shape, device)?.to_dtype(dtype)?)
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, StandardNormal};
+
+    // Generate noise on CPU with a deterministic RNG for cross-platform reproducibility.
+    let mut rng = StdRng::seed_from_u64(seed);
+    let elem_count: usize = shape.iter().product();
+    let noise: Vec<f32> = (0..elem_count)
+        .map(|_| StandardNormal.sample(&mut rng))
+        .collect();
+
+    let tensor = candle_core::Tensor::from_vec(noise, shape, &candle_core::Device::Cpu)?;
+    Ok(tensor.to_dtype(dtype)?.to_device(device)?)
 }
 
 #[cfg(test)]
@@ -83,5 +104,45 @@ mod tests {
         let dev = candle_core::Device::Cpu;
         let t = seeded_randn(42, &[2, 2], &dev, candle_core::DType::BF16).unwrap();
         assert_eq!(t.dtype(), candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn seeded_randn_deterministic_same_seed() {
+        let dev = candle_core::Device::Cpu;
+        let a = seeded_randn(1337, &[1, 16, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let b = seeded_randn(1337, &[1, 16, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let diff = (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0, "same seed must produce identical noise");
+    }
+
+    #[test]
+    fn seeded_randn_different_seeds_differ() {
+        let dev = candle_core::Device::Cpu;
+        let a = seeded_randn(42, &[1, 4, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let b = seeded_randn(43, &[1, 4, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let diff = (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(diff > 0.0, "different seeds must produce different noise");
+    }
+
+    #[test]
+    fn gpu_dtype_cpu_returns_f32() {
+        assert_eq!(
+            gpu_dtype(&candle_core::Device::Cpu),
+            candle_core::DType::F32
+        );
     }
 }
