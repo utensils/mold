@@ -1,211 +1,174 @@
-# mold 🧪
+# mold
 
 [![CI](https://github.com/utensils/mold/actions/workflows/ci.yml/badge.svg)](https://github.com/utensils/mold/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
-Local AI image generation CLI — run FLUX, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, and more diffusion models directly on your GPU, with a built-in inference server for remote rendering.
-
-## What it does
-
-- **Just works**: `mold run "a cat"` — auto-pulls model, runs locally on your GPU
-- **Seven model families**: FLUX.1, SD3.5, SD1.5, SDXL, Z-Image, Flux.2 Klein (beta), and Qwen-Image (beta)
-- **Model management**: `mold pull`, `mold list`, `mold rm`, `mold ps` — download, list, remove, and manage models
-- **Remote capable**: Point at a GPU server with `MOLD_HOST` or run `mold serve` for a REST API
-- **Pipe-friendly**: `mold run "a cat" | viu -` — composable with Unix tools
-- **Quantized models**: GGUF Q4/Q6/Q8 for FLUX, SD3.5, and Z-Image; FP16/BF16 safetensors for SD1.5, SDXL, and Flux.2
-- **Smart memory management**: Sequential loading, drop-and-reload, quantized encoder auto-fallback
-- **Deterministic seeds**: `--seed 42` produces identical output every run
-
-## Requirements
-
-- NVIDIA GPU with CUDA **or** Apple Silicon with Metal
-- Model files auto-downloaded on first use via `mold pull` or `mold run`
-
-## Quick start
-
-### Run directly from GitHub (Nix)
-
-No clone needed — run mold straight from the flake:
+Generate images from text on your own GPU. No cloud, no Python, no fuss.
 
 ```bash
-# Run on macOS (Metal) or Linux (CUDA)
-nix run github:utensils/mold -- run "a cat riding a motorcycle"
-
-# Enter a dev shell with all tools
-nix develop github:utensils/mold
-```
-
-### Build from source
-
-```bash
-# With Nix (recommended)
-nix build                # Builds with GPU support (CUDA on Linux, Metal on macOS)
-nix run -- run "a cat"   # Build and run in one step
-
-# With Cargo
-cargo build --release -p mold-cli --features cuda    # Linux
-cargo build --release -p mold-cli --features metal   # macOS
-```
-
-### Generate images
-
-```bash
-# Generate an image (auto-pulls model on first use)
 mold run "a cat riding a motorcycle through neon-lit streets"
-
-# Use a specific model
-mold run flux-dev:q4 "a turtle in the desert"
-mold run sd15 "a portrait in soft lighting"
-mold run dreamshaper-v8 "fantasy castle on a cliff"
-mold run sdxl-turbo "a sunset over mountains"
-
-# Pipe to an image viewer
-mold run "neon cityscape" | viu -
-mold run "a portrait" | img2sixel
-
-# Or start a server for remote rendering
-mold serve
-MOLD_HOST=http://gpu-host:7680 mold run "a sunset"
 ```
 
-## Available models
+That's it. Mold auto-downloads the model on first run and saves the image to your current directory.
 
-### FLUX (GGUF quantized)
+## Install
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `flux-schnell:q8` | 4 | 12GB | Fast 4-step, general purpose |
-| `flux-schnell:q4` | 4 | 7.5GB | Fast 4-step, smaller footprint |
-| `flux-dev:q8` | 25 | 12GB | Full quality, 20+ steps |
-| `flux-dev:q4` | 25 | 7GB | Smaller/faster, good quality |
-| `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography fine-tune |
+### Nix (recommended)
 
-### SD1.5 (FP16 safetensors)
+```bash
+# Run directly — no install needed
+nix run github:utensils/mold -- run "a cat"
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `sd15:fp16` | 25 | 1.7GB | Canonical base model, huge LoRA ecosystem |
-| `dreamshaper-v8:fp16` | 25 | 1.7GB | Best versatile SD1.5, photo + fantasy |
-| `realistic-vision-v5:fp16` | 25 | 1.7GB | Gold standard photorealistic SD1.5 |
+# Or add to your system
+nix profile install github:utensils/mold
+```
 
-### SDXL (FP16 safetensors)
+### From source
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `sdxl-base:fp16` | 25 | 5.1GB | Official Stability AI base |
-| `sdxl-turbo:fp16` | 4 | 5.1GB | Ultra-fast 1-4 step generation |
-| `dreamshaper-xl:fp16` | 8 | 5.1GB | Fantasy, concept art, stylized |
+```bash
+cargo build --release -p mold-cli --features cuda    # Linux (NVIDIA)
+cargo build --release -p mold-cli --features metal   # macOS (Apple Silicon)
+```
+
+## Usage
+
+```bash
+# Generate an image
+mold run "a sunset over mountains"
+
+# Pick a model
+mold run flux-dev:q4 "a turtle in the desert"
+mold run sdxl-turbo "espresso in a tiny cup"
+mold run dreamshaper-v8 "fantasy castle on a cliff"
+
+# Reproducible results
+mold run "a bird on a beachball" --seed 1337
+
+# Pipe to a viewer
+mold run "neon cityscape" | viu -
+
+# Custom size and steps
+mold run "a portrait" --width 768 --height 1024 --steps 30
+```
+
+### Manage models
+
+```bash
+mold pull flux-schnell:q8    # Download a model
+mold list                    # See what you have
+mold info flux-dev:q4        # Model details + disk usage
+mold rm dreamshaper-v8       # Remove a model
+```
+
+### Remote rendering
+
+Run mold on a beefy GPU server, generate from anywhere:
+
+```bash
+# On your GPU server
+mold serve
+
+# From your laptop
+MOLD_HOST=http://gpu-server:7680 mold run "a cat"
+```
+
+## Models
+
+### FLUX (best quality)
+
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `flux-schnell:q8` | 4 | 12GB | Fast, general purpose |
+| `flux-schnell:q4` | 4 | 7.5GB | Same but lighter |
+| `flux-dev:q8` | 25 | 12GB | Full quality |
+| `flux-dev:q4` | 25 | 7GB | Full quality, less VRAM |
+| `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography |
+
+### SDXL (fast + flexible)
+
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `sdxl-turbo:fp16` | 4 | 5.1GB | Ultra-fast, 1-4 steps |
+| `dreamshaper-xl:fp16` | 8 | 5.1GB | Fantasy, concept art |
 | `juggernaut-xl:fp16` | 30 | 5.1GB | Photorealism, cinematic |
 | `realvis-xl:fp16` | 25 | 5.1GB | Photorealism, versatile |
-| `playground-v2.5:fp16` | 25 | 5.1GB | Aesthetic quality, artistic |
+| `playground-v2.5:fp16` | 25 | 5.1GB | Artistic, aesthetic |
+| `sdxl-base:fp16` | 25 | 5.1GB | Official base model |
 
-### SD3.5 (GGUF quantized)
+### SD 1.5 (lightweight)
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `sd3.5-large:q8` | 28 | 8.5GB | 8.1B MMDiT, high quality |
-| `sd3.5-large:q4` | 28 | 5.0GB | 8.1B MMDiT, smaller footprint |
-| `sd3.5-large-turbo:q8` | 4 | 8.5GB | Fast 4-step generation |
-| `sd3.5-medium:q8` | 28 | 2.7GB | 2.5B MMDiT, Skip Layer Guidance |
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `sd15:fp16` | 25 | 1.7GB | Base model, huge ecosystem |
+| `dreamshaper-v8:fp16` | 25 | 1.7GB | Best all-around SD1.5 |
+| `realistic-vision-v5:fp16` | 25 | 1.7GB | Photorealistic |
 
-### Z-Image (GGUF quantized)
+### SD 3.5
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `z-image-turbo:q8` | 9 | 6.6GB | Fast 9-step, Qwen3 text encoder |
-| `z-image-turbo:q4` | 9 | 3.8GB | Smaller footprint, good quality |
-| `z-image-turbo:bf16` | 9 | 12.2GB | Full precision BF16 |
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `sd3.5-large:q8` | 28 | 8.5GB | 8.1B params, high quality |
+| `sd3.5-large:q4` | 28 | 5.0GB | Same, smaller footprint |
+| `sd3.5-large-turbo:q8` | 4 | 8.5GB | Fast 4-step |
+| `sd3.5-medium:q8` | 28 | 2.7GB | 2.5B params, efficient |
 
-### Flux.2 Klein (beta)
+### Z-Image
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `flux2-klein:bf16` | 4 | 13.5GB | 4B param distilled, Apache 2.0 |
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `z-image-turbo:q8` | 9 | 6.6GB | Fast 9-step generation |
+| `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
+| `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
-> **Beta:** Flux.2 Klein generates images but quality is not yet production-ready. Text conditioning and fine detail accuracy are still being improved. See [#4](https://github.com/utensils/mold/issues/4).
+> Bare names default to `:q8` for FLUX/Z-Image or `:fp16` for SD1.5/SDXL. So `mold run flux-schnell "a cat"` just works.
 
-### Qwen-Image (beta)
+## Server API
 
-| Name | Steps | Size | Description |
-|------|-------|------|-------------|
-| `qwen-image:q4` | 30 | 12.3GB | 20B transformer, Q4 quantized |
-| `qwen-image:q8` | 30 | 21.8GB | 20B transformer, Q8 quantized |
+When running `mold serve`, you get a REST API:
 
-> **Beta:** Qwen-Image pipeline runs end-to-end but output quality is poor — the denoiser does not produce coherent images yet. The VAE has been verified correct; the issue is in the transformer/scheduler path. See [#5](https://github.com/utensils/mold/issues/5).
+```bash
+# Generate an image
+curl -X POST http://localhost:7680/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "a glowing robot"}' \
+  -o robot.png
 
-Bare model names default to `:q8` (FLUX/Z-Image) or `:fp16` (SD1.5/SDXL).
+# Check status
+curl http://localhost:7680/api/status
 
-## API
+# List models
+curl http://localhost:7680/api/models
 
+# Interactive docs
+open http://localhost:7680/api/docs
 ```
-GET    /health              → 200 OK
-GET    /api/status          → ServerStatus JSON
-GET    /api/models          → ModelInfo[] JSON
-POST   /api/generate        → image/png bytes
-POST   /api/models/load     → 200 OK (hot-swap model)
-DELETE /api/models/unload   → 200 OK (free GPU memory)
-```
-
-### Generate request
-
-```json
-{
-  "prompt": "a glowing robot",
-  "model": "flux-schnell",
-  "width": 768,
-  "height": 768,
-  "steps": 4,
-  "guidance": 3.5,
-  "seed": null,
-  "batch_size": 1,
-  "output_format": "png"
-}
-```
-
-Constraints: width/height must be multiples of 16, max 1024, min 1. Steps 1–100.
-
-## Config
-
-`~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy):
-
-```toml
-default_model = "flux-schnell:q8"
-server_port = 7680
-default_width = 1024
-default_height = 1024
-
-[models."flux-schnell:q8"]
-transformer = "/path/to/flux1-schnell-Q8_0.gguf"
-vae = "/path/to/ae.safetensors"
-t5_encoder = "/path/to/t5xxl_fp16.safetensors"
-clip_encoder = "/path/to/clip_l.safetensors"
-t5_tokenizer = "/path/to/t5.tokenizer.json"
-clip_tokenizer = "/path/to/clip.tokenizer.json"
-```
-
-Config is auto-written by `mold pull` — manual editing is rarely needed.
 
 ## Shell completions
 
 ```bash
-# bash
-source <(mold completions bash)
-
-# zsh
-source <(mold completions zsh)
-
-# fish
-mold completions fish | source
+source <(mold completions bash)    # bash
+source <(mold completions zsh)     # zsh
+mold completions fish | source     # fish
 ```
 
-## Architecture
+## Requirements
+
+- **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal
+- Models auto-download on first use (~2-12GB depending on model)
+
+## How it works
+
+Mold is a single Rust binary built on [candle](https://github.com/huggingface/candle) — a pure Rust ML framework. No Python runtime, no libtorch, no ONNX. Just your GPU doing math.
 
 ```
-mold-cli       Single binary: CLI + serve (mold run / serve / pull / list / completions)
-mold-server    Axum REST server (library, used by mold-cli via `mold serve`)
-mold-inference FLUX + SD3.5 + SD1.5 + SDXL + Z-Image + Flux.2 + Qwen-Image engines (candle ML)
-mold-core      Shared types, config, model manifests, HuggingFace download client
+mold run "a cat"
+  │
+  ├─ Server running? → send request over HTTP
+  │
+  └─ No server? → load model locally on GPU
+       ├─ Encode prompt (T5/CLIP text encoders)
+       ├─ Denoise latent (transformer/UNet)
+       ├─ Decode pixels (VAE)
+       └─ Save PNG
 ```
-
-Built with [candle](https://github.com/huggingface/candle) — pure Rust ML framework with CUDA and Metal backends. No Python, no libtorch.
