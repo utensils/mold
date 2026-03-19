@@ -605,6 +605,7 @@ impl SD3Engine {
         drop(transformer);
         drop(context);
         drop(y);
+        device.synchronize()?;
         self.progress.info("Freed SD3 MMDiT transformer");
 
         // --- Phase 3: VAE decode ---

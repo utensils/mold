@@ -580,6 +580,7 @@ impl Flux2Engine {
         self.progress.info("Freed Flux.2 transformer");
         drop(state);
         drop(txt_emb);
+        device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
 
         // --- Phase 3: VAE decode ---

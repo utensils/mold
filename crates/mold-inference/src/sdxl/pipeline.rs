@@ -474,6 +474,7 @@ impl SDXLEngine {
         // Drop UNet to free memory for VAE decode
         drop(unet);
         drop(text_embeddings);
+        device.synchronize()?;
         self.progress.info("Freed UNet");
         tracing::info!("UNet dropped (sequential mode)");
 
