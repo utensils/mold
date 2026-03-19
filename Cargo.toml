@@ -29,7 +29,7 @@ strip = true
 # call, use standard Metal GEMM, then free the temporary copy. Peak extra memory
 # is ~200MB (one layer) instead of ~16GB (full model dequantization).
 [patch."https://github.com/huggingface/candle"]
-candle-core = { path = "../candle-patch/candle-core" }
-candle-nn = { path = "../candle-patch/candle-nn" }
-candle-transformers = { path = "../candle-patch/candle-transformers" }
+candle-core = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
+candle-nn = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
+candle-transformers = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
 
