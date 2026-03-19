@@ -29,6 +29,21 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
 }
 
+/// Select the optimal dtype for GPU inference.
+///
+/// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)
+/// - Metal/MPS: F32 (BF16 on Metal has precision issues that cause washed-out,
+///   blurry images — matmul accumulation errors compound through denoising loops.
+///   This matches InvokeAI/diffusers which also avoid BF16 on MPS.)
+/// - CPU: F32
+pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
+    if device.is_cuda() {
+        candle_core::DType::BF16
+    } else {
+        candle_core::DType::F32
+    }
+}
+
 /// Generate a random seed from the current system time.
 pub(crate) fn rand_seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,8 +64,9 @@ pub(crate) fn rand_seed() -> u64 {
 /// `Tensor::randn()` separately, which is fragile because intervening GPU
 /// ops can consume RNG state.
 ///
+/// Note: same seed produces different noise on different GPU backends (CUDA vs Metal
+/// use different RNG algorithms). Determinism is guaranteed within the same backend.
 /// On CPU, `set_seed` is skipped (candle's CPU backend doesn't support it).
-/// In practice all inference runs on GPU so this path is rarely hit.
 pub(crate) fn seeded_randn(
     seed: u64,
     shape: &[usize],
@@ -83,5 +99,13 @@ mod tests {
         let dev = candle_core::Device::Cpu;
         let t = seeded_randn(42, &[2, 2], &dev, candle_core::DType::BF16).unwrap();
         assert_eq!(t.dtype(), candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn gpu_dtype_cpu_returns_f32() {
+        assert_eq!(
+            gpu_dtype(&candle_core::Device::Cpu),
+            candle_core::DType::F32
+        );
     }
 }

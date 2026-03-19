@@ -5,6 +5,15 @@ use crate::progress::ProgressReporter;
 /// Reports device selection via the progress reporter.
 pub fn create_device(progress: &ProgressReporter) -> anyhow::Result<candle_core::Device> {
     use candle_core::Device;
+    // MOLD_DEVICE=cpu forces CPU inference (for debugging Metal issues)
+    let force_cpu = std::env::var("MOLD_DEVICE")
+        .map(|v| v.eq_ignore_ascii_case("cpu"))
+        .unwrap_or(false);
+    if force_cpu {
+        progress.info("CPU forced via MOLD_DEVICE=cpu");
+        tracing::info!("CPU forced via MOLD_DEVICE=cpu");
+        return Ok(Device::Cpu);
+    }
     if candle_core::utils::cuda_is_available() {
         progress.info("CUDA detected, using GPU");
         tracing::info!("CUDA detected, using GPU");

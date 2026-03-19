@@ -403,7 +403,7 @@ impl ZImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
 
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = Config::z_image_turbo();
 
         // Load transformer
@@ -551,7 +551,7 @@ impl ZImageEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = device.bf16_default_to_f32();
+        let dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);

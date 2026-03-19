@@ -340,11 +340,7 @@ impl FluxEngine {
 
         let cpu = Device::Cpu;
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
@@ -522,11 +518,7 @@ impl FluxEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
-            DType::BF16
-        } else {
-            DType::F32
-        };
+        let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
