@@ -53,7 +53,10 @@ pub async fn run() -> Result<()> {
 
     match client.list_models_extended().await {
         Ok(models) => {
-            // Compute column widths from data
+            let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
+            let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
+
+            // Compute column widths across all models
             let nw = col_width(
                 models
                     .iter()
@@ -67,48 +70,73 @@ pub async fn run() -> Result<()> {
                 2,
             );
 
-            println!(
-                "{:<nw$} {:<fw$} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
-                "NAME".bold(),
-                "FAMILY".bold(),
-                "SIZE".bold(),
-                "STEPS".bold(),
-                "GUIDANCE".bold(),
-                "WIDTH".bold(),
-                "HEIGHT".bold(),
-                "DESCRIPTION".bold(),
-                nw = nw,
-                fw = fw,
-            );
-            println!("{}", "─".repeat(nw + fw + 56).dimmed());
-
-            for model in &models {
-                let name = if model.is_loaded {
-                    format!("{} ●", model.name).green().to_string()
-                } else {
-                    model.name.clone()
-                };
-                let size = if model.size_gb > 0.0 {
-                    format!("{:.1}GB", model.size_gb)
-                } else {
-                    "—".to_string()
-                };
+            if downloaded.is_empty() {
+                println!("{} No models downloaded.", "●".dimmed());
+            } else {
                 println!(
-                    "{:<nw$} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
-                    name,
-                    format_family_padded(&model.family, fw),
-                    size,
-                    model.defaults.default_steps,
-                    format!("{:.1}", model.defaults.default_guidance),
-                    model.defaults.default_width,
-                    model.defaults.default_height,
-                    colorize_description(&model.defaults.description),
+                    "{:<nw$} {:<fw$} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "NAME".bold(),
+                    "FAMILY".bold(),
+                    "SIZE".bold(),
+                    "STEPS".bold(),
+                    "GUIDANCE".bold(),
+                    "WIDTH".bold(),
+                    "HEIGHT".bold(),
+                    "DESCRIPTION".bold(),
                     nw = nw,
+                    fw = fw,
                 );
+                println!("{}", "─".repeat(nw + fw + 56).dimmed());
+
+                for model in &downloaded {
+                    // Pad plain text first, then colorize — ANSI escapes break `{:<N}`.
+                    let name = if model.is_loaded {
+                        format!("{:<nw$}", format!("{} ●", model.name), nw = nw)
+                            .green()
+                            .to_string()
+                    } else {
+                        format!("{:<nw$}", model.name, nw = nw)
+                    };
+                    let size = if model.size_gb > 0.0 {
+                        format!("{:.1}GB", model.size_gb)
+                    } else {
+                        "—".to_string()
+                    };
+                    println!(
+                        "{} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        name,
+                        format_family_padded(&model.family, fw),
+                        size,
+                        model.defaults.default_steps,
+                        format!("{:.1}", model.defaults.default_guidance),
+                        model.defaults.default_width,
+                        model.defaults.default_height,
+                        colorize_description(&model.defaults.description),
+                    );
+                }
             }
 
-            if models.is_empty() {
-                println!("{}", "No models configured.".dimmed());
+            // Show available-to-pull models
+            if !available.is_empty() {
+                println!();
+                println!("Available to pull:");
+                for m in &available {
+                    let size = if m.size_gb > 0.0 {
+                        format!("{:.1}GB", m.size_gb)
+                    } else {
+                        "—".to_string()
+                    };
+                    println!(
+                        "  {:<nw$} {} {:>7}  {}",
+                        m.name.bold(),
+                        format_family_padded(&m.family, fw),
+                        size,
+                        colorize_description(&m.defaults.description),
+                        nw = nw,
+                    );
+                }
+                println!();
+                println!("{}", "Use mold pull <model> to download.".dimmed(),);
             }
         }
         Err(_) => {

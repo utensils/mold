@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use console::Term;
 use hf_hub::api::tokio::{Api, ApiBuilder, ApiError, Progress};
-use hf_hub::{Repo, RepoType};
+use hf_hub::{Cache, Repo, RepoType};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use thiserror::Error;
 
@@ -43,6 +44,15 @@ pub enum DownloadError {
 
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
+
+    #[error("IO error during file placement: {0}")]
+    FilePlacement(String),
+
+    #[error("Unknown model '{model}'. No manifest found.")]
+    UnknownModel { model: String },
+
+    #[error("Failed to save config: {0}")]
+    ConfigSave(String),
 }
 
 /// Resolve HuggingFace token: `HF_TOKEN` env var takes precedence over
@@ -54,7 +64,96 @@ fn resolve_hf_token() -> Option<String> {
             return Some(token);
         }
     }
-    hf_hub::Cache::from_env().token()
+    Cache::new(hf_cache_dir())
+        .token()
+        .or_else(|| Cache::from_env().token())
+}
+
+/// Resolve the mold models directory. Computed once from config on first access.
+/// Resolution order: `MOLD_MODELS_DIR` env var → config `models_dir` → `~/.mold/models`.
+///
+/// This is the clean model storage root. Actual model files live at clean paths like
+/// `models/flux-schnell-q8/transformer.gguf` and `models/shared/flux/ae.safetensors`.
+fn models_dir() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = crate::Config::load_or_default().resolved_models_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    })
+    .clone()
+}
+
+/// Internal hf-hub cache directory: `<models_dir>/.hf-cache/`.
+/// Hidden from users; files get hardlinked to clean paths after download.
+fn hf_cache_dir() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = models_dir().join(".hf-cache");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    })
+    .clone()
+}
+
+/// Hardlink `src` to `dst`, falling back to copy if hardlink fails (cross-filesystem).
+/// Idempotent: skips if `dst` already exists with the same size as `src`.
+///
+/// The source path is canonicalized to resolve hf-hub's symlink chain
+/// (`snapshots/<sha>/file → ../../blobs/<hash>`) before any filesystem ops.
+fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), DownloadError> {
+    // Resolve symlinks — hf-hub cache returns symlink paths that can cause
+    // ENOENT on some filesystems when passed directly to hard_link or copy.
+    let real_src = src.canonicalize().map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "source file not found after download: {} ({e})",
+            src.display()
+        ))
+    })?;
+
+    // Check if dst already has the correct content (idempotent skip).
+    // Use metadata() which follows symlinks — only skip if the real target matches.
+    if dst.exists() {
+        if let (Ok(src_meta), Ok(dst_meta)) = (real_src.metadata(), dst.metadata()) {
+            if src_meta.len() == dst_meta.len() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Remove stale destination before placement. A previous hard_link on an
+    // hf-hub symlink creates a relative symlink that dangles from the new
+    // location (e.g. shared/sd3/file → ../../blobs/hash, which doesn't exist
+    // relative to shared/sd3/). symlink_metadata() sees these even though
+    // exists() returns false for dangling symlinks.
+    if dst.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(dst);
+    }
+
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            DownloadError::FilePlacement(format!(
+                "failed to create directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    // Try hardlink first (zero extra disk space, instant)
+    match std::fs::hard_link(&real_src, dst) {
+        Ok(()) => return Ok(()),
+        Err(_e) => {
+            // Expected on cross-filesystem setups; fall through to copy
+        }
+    }
+    // Fall back to copy (cross-filesystem or hard_link unsupported)
+    std::fs::copy(&real_src, dst).map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "failed to copy {} → {}: {e}",
+            real_src.display(),
+            dst.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -106,8 +205,13 @@ impl Progress for DownloadProgress {
 }
 
 /// Download all files for a model manifest, returning resolved paths.
+///
+/// Downloads go to a hidden hf-hub cache (`.hf-cache/`) for resume/dedup support,
+/// then files are hardlinked to clean paths:
+/// - Transformers → `<model-name>/<filename>`
+/// - Shared components → `shared/<family>/<filename>`
 pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, DownloadError> {
-    let mut builder = ApiBuilder::from_env();
+    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
     }
@@ -121,6 +225,7 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
     .unwrap()
     .progress_chars("━╸─");
 
+    let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
     for file in &manifest.files {
@@ -128,14 +233,19 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
         bar.set_style(bar_style.clone());
         bar.set_message(truncate_filename(&file.hf_filename, msg_width));
 
-        let path = download_file(
+        let hf_path = download_file(
             &api,
             file,
             DownloadProgress::new(bar, msg_width),
             &manifest.name,
         )
         .await?;
-        downloads.push((file.component, path));
+
+        // Place at clean path via hardlink (or copy as fallback)
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        hardlink_or_copy(&hf_path, &clean_path)?;
+        downloads.push((file.component, clean_path));
     }
 
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
@@ -194,16 +304,21 @@ async fn download_file(
 
 // ── Synchronous single-file download (for use from spawn_blocking) ───────────
 
-/// Download a single file from HuggingFace, returning its cached path.
+/// Download a single file from HuggingFace, returning its path.
 /// Uses the sync hf-hub API — safe to call from `spawn_blocking`.
 /// Returns immediately if already cached.
+///
+/// If `target_subdir` is provided (e.g., `"shared/t5-gguf"`), the file is hardlinked
+/// from the hf-cache to `<models_dir>/<target_subdir>/<leaf_filename>` and that clean
+/// path is returned. If `None`, the raw hf-cache path is returned.
 pub fn download_single_file_sync(
     hf_repo: &str,
     hf_filename: &str,
+    target_subdir: Option<&str>,
 ) -> Result<PathBuf, DownloadError> {
     use hf_hub::api::sync::ApiBuilder;
 
-    let mut builder = ApiBuilder::from_env();
+    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
     }
@@ -211,7 +326,7 @@ pub fn download_single_file_sync(
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
     let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
-    repo.get(hf_filename).map_err(|e| {
+    let hf_path = repo.get(hf_filename).map_err(|e| {
         let err_str = e.to_string();
         if err_str.contains("401") || err_str.contains("Unauthorized") {
             DownloadError::Unauthorized {
@@ -234,16 +349,89 @@ pub fn download_single_file_sync(
                 message: err_str,
             }
         }
-    })
+    })?;
+
+    // Place at clean path if target_subdir specified
+    if let Some(subdir) = target_subdir {
+        let leaf = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
+        let clean_path = models_dir().join(subdir).join(leaf);
+        hardlink_or_copy(&hf_path, &clean_path)?;
+        Ok(clean_path)
+    } else {
+        Ok(hf_path)
+    }
 }
 
 /// Check if a file is already cached locally (no download).
-pub fn cached_file_path(hf_repo: &str, hf_filename: &str) -> Option<PathBuf> {
-    use hf_hub::Cache;
+///
+/// If `target_subdir` is provided, checks the clean path first
+/// (`<models_dir>/<target_subdir>/<leaf_filename>`). Then checks the hf-cache,
+/// old mold models dir (backward compat), and default HF cache.
+pub fn cached_file_path(
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+) -> Option<PathBuf> {
+    // 1. Check clean path (if target_subdir specified)
+    if let Some(subdir) = target_subdir {
+        let leaf = hf_filename.rsplit('/').next().unwrap_or(hf_filename);
+        let clean_path = models_dir().join(subdir).join(leaf);
+        if clean_path.exists() {
+            return Some(clean_path);
+        }
+    }
 
-    let cache = Cache::from_env();
-    let repo = cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
-    repo.get(hf_filename)
+    // 2. Check new hf-cache location (~/.mold/models/.hf-cache/)
+    let new_cache = Cache::new(hf_cache_dir());
+    let new_repo = new_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    if let Some(path) = new_repo.get(hf_filename) {
+        return Some(path);
+    }
+
+    // 3. Check old mold models dir (backward compat — HF cached here before .hf-cache/)
+    let old_cache = Cache::new(models_dir());
+    let old_repo = old_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    if let Some(path) = old_repo.get(hf_filename) {
+        return Some(path);
+    }
+
+    // 4. Check default HF cache (~/.cache/huggingface/hub/)
+    let default_cache = Cache::from_env();
+    let default_repo = default_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    default_repo.get(hf_filename)
+}
+
+// ── Pull and configure (shared between CLI and server) ───────────────────────
+
+/// Download a model and save its paths to config. Returns the updated config
+/// and resolved model paths. Used by both the CLI `pull` command and the
+/// server's auto-pull logic.
+pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPaths), DownloadError> {
+    use crate::config::Config;
+    use crate::manifest::{find_manifest, resolve_model_name};
+
+    let canonical = resolve_model_name(model);
+
+    let manifest = find_manifest(&canonical).ok_or_else(|| DownloadError::UnknownModel {
+        model: model.to_string(),
+    })?;
+
+    let paths = pull_model(&manifest).await?;
+
+    let mut config = Config::load_or_default();
+    let model_config = manifest.to_model_config(&paths);
+
+    // Auto-set default_model if no config existed before
+    if !Config::exists_on_disk() {
+        config.default_model = manifest.name.clone();
+    }
+
+    config.upsert_model(manifest.name.clone(), model_config);
+    config
+        .save()
+        .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
+
+    Ok((config, paths))
 }
 
 #[cfg(test)]

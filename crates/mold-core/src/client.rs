@@ -1,8 +1,12 @@
 use anyhow::Result;
+use base64::Engine as _;
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::types::{GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus};
+use crate::types::{
+    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus, SseCompleteEvent,
+    SseErrorEvent, SseProgressEvent,
+};
 
 /// Extended model info returned by /api/models, includes generation defaults.
 #[derive(Debug, Clone, Deserialize)]
@@ -11,6 +15,9 @@ pub struct ModelInfoExtended {
     pub info: ModelInfo,
     #[serde(flatten)]
     pub defaults: ModelDefaults,
+    /// Whether the model is downloaded on the server.
+    #[serde(default)]
+    pub downloaded: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,6 +125,129 @@ impl MoldClient {
         false
     }
 
+    /// Check whether an error is a 404 "model not found" from the server.
+    /// Useful for triggering a server-side pull when the model isn't downloaded.
+    pub fn is_model_not_found(err: &anyhow::Error) -> bool {
+        if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
+            return reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND);
+        }
+        // SSE streaming returns ModelNotFoundError instead of reqwest status errors
+        err.downcast_ref::<ModelNotFoundError>().is_some()
+    }
+
+    /// Generate an image via SSE streaming, receiving progress events.
+    ///
+    /// Returns:
+    /// - `Ok(Some(response))` — streaming succeeded
+    /// - `Ok(None)` — server doesn't support SSE (endpoint returned 404 with empty body)
+    /// - `Err(e)` — generation error, model not found, or connection error
+    pub async fn generate_stream(
+        &self,
+        req: &GenerateRequest,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<Option<GenerateResponse>> {
+        let mut resp = self
+            .client
+            .post(format!("{}/api/generate/stream", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                // Axum returns empty 404 for unmatched routes — server doesn't support SSE
+                return Ok(None);
+            }
+            // Non-empty 404 = model not found
+            return Err(ModelNotFoundError(body).into());
+        }
+
+        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("validation error: {body}");
+        }
+
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server error {status}: {body}");
+        }
+
+        // Parse SSE events from chunked response body
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete SSE events (delimited by double newline)
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                let mut event_type = String::new();
+                let mut data = String::new();
+                for line in event_text.lines() {
+                    if line.starts_with(':') {
+                        continue; // SSE comment (keep-alive ping)
+                    }
+                    if let Some(t) = line.strip_prefix("event:") {
+                        event_type = t.trim().to_string();
+                    } else if let Some(d) = line.strip_prefix("data:") {
+                        data = d.trim().to_string();
+                    }
+                }
+
+                match event_type.as_str() {
+                    "progress" => {
+                        if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
+                            let _ = progress_tx.send(p);
+                        }
+                    }
+                    "complete" => {
+                        let complete: SseCompleteEvent = serde_json::from_str(&data)?;
+                        let image_data =
+                            base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
+                        return Ok(Some(GenerateResponse {
+                            images: vec![ImageData {
+                                data: image_data,
+                                format: complete.format,
+                                width: complete.width,
+                                height: complete.height,
+                                index: 0,
+                            }],
+                            generation_time_ms: complete.generation_time_ms,
+                            model: req.model.clone(),
+                            seed_used: complete.seed_used,
+                        }));
+                    }
+                    "error" => {
+                        let error: SseErrorEvent = serde_json::from_str(&data)?;
+                        anyhow::bail!("server error: {}", error.message);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        anyhow::bail!("SSE stream ended without complete event")
+    }
+
+    /// Ask the server to pull (download) a model. Blocks until the download
+    /// completes on the server side. The server updates its in-memory config
+    /// so subsequent generate/load requests can find the model.
+    pub async fn pull_model(&self, model: &str) -> Result<String> {
+        let resp = self
+            .client
+            .post(format!("{}/api/models/pull", self.base_url))
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(resp)
+    }
+
     pub fn host(&self) -> &str {
         &self.base_url
     }
@@ -146,6 +276,19 @@ impl MoldClient {
         Ok(resp)
     }
 }
+
+/// Error indicating a model was not found on the server (404 with body).
+/// Detected by [`MoldClient::is_model_not_found`].
+#[derive(Debug)]
+pub struct ModelNotFoundError(pub String);
+
+impl std::fmt::Display for ModelNotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ModelNotFoundError {}
 
 #[cfg(test)]
 mod tests {
@@ -191,5 +334,18 @@ mod tests {
         // A generic anyhow error is not a connection error
         let err = anyhow::anyhow!("something went wrong");
         assert!(!MoldClient::is_connection_error(&err));
+    }
+
+    #[test]
+    fn test_is_model_not_found_via_custom_error() {
+        let err: anyhow::Error =
+            ModelNotFoundError("model 'test' is not downloaded".to_string()).into();
+        assert!(MoldClient::is_model_not_found(&err));
+    }
+
+    #[test]
+    fn test_is_model_not_found_generic_error() {
+        let err = anyhow::anyhow!("something else");
+        assert!(!MoldClient::is_model_not_found(&err));
     }
 }

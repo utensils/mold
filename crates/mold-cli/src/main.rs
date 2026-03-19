@@ -195,17 +195,23 @@ fn default_port() -> u16 {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // Parse CLI first so we can set the log level based on the subcommand.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    let cli = Cli::parse();
+
+    // `mold serve` defaults to info (server needs request visibility);
+    // all other commands default to warn (quiet CLI output).
+    let default_level = match &cli.command {
+        Commands::Serve { .. } => "info",
+        _ => "warn",
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level)),
         )
         .with_writer(std::io::stderr)
         .init();
-
-    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Run {

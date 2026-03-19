@@ -1,75 +1,200 @@
 use axum::{
     extract::State,
     http::{header, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{delete, get, post},
     Json, Router,
 };
-use mold_core::{GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus};
+use base64::Engine as _;
+use mold_core::{
+    GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent,
+};
 use mold_inference::model_registry;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use tokio_stream::StreamExt as _;
+use utoipa::OpenApi;
 
 use crate::state::AppState;
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(generate, generate_stream, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
+    components(schemas(
+        mold_core::GenerateRequest,
+        mold_core::GenerateResponse,
+        mold_core::ImageData,
+        mold_core::OutputFormat,
+        mold_core::ModelInfo,
+        mold_core::ServerStatus,
+        mold_core::GpuInfo,
+        mold_core::SseProgressEvent,
+        mold_core::SseCompleteEvent,
+        mold_core::SseErrorEvent,
+        ModelInfoExtended,
+        LoadModelBody,
+    )),
+    tags(
+        (name = "generation", description = "Image generation"),
+        (name = "models", description = "Model management"),
+        (name = "server", description = "Server status and health"),
+    ),
+    info(
+        title = "mold",
+        description = "Local AI image generation server — FLUX, SD3.5, SD1.5, SDXL, Z-Image, Flux.2, Qwen-Image",
+        version = env!("CARGO_PKG_VERSION"),
+    )
+)]
+pub struct ApiDoc;
+
 pub fn create_router(state: AppState) -> Router {
+    // Stateful routes (need AppState) are added first, then .with_state() converts
+    // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
         .route("/api/generate", post(generate))
+        .route("/api/generate/stream", post(generate_stream))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))
+        .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
+        .route("/api/openapi.json", get(openapi_json))
+        .route("/api/docs", get(scalar_docs))
 }
 
-// ── /api/generate ─────────────────────────────────────────────────────────────
+// ── Model readiness ──────────────────────────────────────────────────────────
 
-async fn generate(
-    State(state): State<AppState>,
-    Json(req): Json<mold_core::GenerateRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Validate request before touching the engine
-    if let Err(e) = validate_generate_request(&req) {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+/// Internal SSE message type for the streaming channel.
+enum SseMessage {
+    Progress(SseProgressEvent),
+    Complete(SseCompleteEvent),
+    Error(SseErrorEvent),
+}
+
+/// Convert an inference-crate progress event to an SSE wire event.
+fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
+    event.into()
+}
+
+/// Check model availability without loading. Returns:
+/// - `Ok(None)` — model is already loaded and ready
+/// - `Ok(Some(paths))` — model paths resolved, needs loading
+/// - `Err(...)` — model not found (404) or unknown model (400)
+async fn check_model_available(
+    state: &AppState,
+    model_name: &str,
+) -> Result<Option<ModelPaths>, (StatusCode, String)> {
+    // Fast path: engine exists, correct model, already loaded
+    {
+        let engine = state.engine.lock().await;
+        if let Some(ref e) = *engine {
+            if e.model_name() == model_name && e.is_loaded() {
+                return Ok(None);
+            }
+        }
     }
 
-    // If the requested model differs from the currently loaded one, hot-swap.
+    // Try to resolve paths from current config
+    let paths = {
+        let config = state.config.read().await;
+        ModelPaths::resolve(model_name, &config)
+    };
+    if let Some(paths) = paths {
+        return Ok(Some(paths));
+    }
+
+    // Config miss — re-read from disk in case config.toml was updated externally
     {
-        let mut engine = state.engine.lock().await;
-        let current = engine.model_name().to_string();
-        if current != req.model {
+        let fresh_config = mold_core::Config::load_or_default();
+        if let Some(paths) = ModelPaths::resolve(model_name, &fresh_config) {
+            let mut config = state.config.write().await;
+            *config = fresh_config;
+            return Ok(Some(paths));
+        }
+    }
+
+    // Model paths not found — tell the client to pull or report unknown model
+    if mold_core::manifest::find_manifest(model_name).is_some() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("model '{model_name}' is not downloaded. Run: mold pull {model_name}"),
+        ));
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        format!("unknown model '{model_name}'. Run 'mold list' to see available models."),
+    ))
+}
+
+/// Ensure the requested model is loaded and ready for inference.
+async fn ensure_model_ready(
+    state: &AppState,
+    model_name: &str,
+) -> Result<(), (StatusCode, String)> {
+    match check_model_available(state, model_name).await? {
+        Some(paths) => create_and_load_engine(state, model_name, paths, None).await,
+        None => Ok(()),
+    }
+}
+
+/// Create an inference engine and load it into AppState.
+/// When `progress_tx` is `Some`, a progress callback is installed before
+/// `engine.load()` so loading stages are streamed to the SSE client.
+async fn create_and_load_engine(
+    state: &AppState,
+    model_name: &str,
+    paths: ModelPaths,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<(), (StatusCode, String)> {
+    let config = state.config.read().await;
+    let mut new_engine = mold_inference::create_engine(
+        model_name.to_string(),
+        paths,
+        &config,
+        mold_inference::LoadStrategy::Eager,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create engine for '{model_name}': {e}"),
+        )
+    })?;
+    drop(config);
+
+    // Install progress callback for SSE streaming (captures load events)
+    if let Some(tx) = progress_tx {
+        let tx = tx.clone();
+        new_engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+        }));
+    }
+
+    let mut engine = state.engine.lock().await;
+
+    // Log hot-swap if replacing an existing engine
+    if let Some(ref old) = *engine {
+        if old.model_name() != model_name {
             tracing::info!(
-                from = %current,
-                to = %req.model,
+                from = %old.model_name(),
+                to = %model_name,
                 "hot-swapping model"
             );
-            let paths = ModelPaths::resolve(&req.model, &state.config).ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "no paths configured for model '{}'. Add [models.{}] to config.",
-                        req.model, req.model
-                    ),
-                )
-            })?;
-            *engine = mold_inference::create_engine(
-                req.model.clone(),
-                paths,
-                &state.config,
-                mold_inference::LoadStrategy::Eager,
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to create engine for {}: {e}", req.model),
-                )
-            })?;
         }
+    }
 
-        // Load on first request (or after hot-swap)
-        if !engine.is_loaded() {
-            tracing::info!(model = %req.model, "loading model...");
-            engine.load().map_err(|e| {
+    *engine = Some(new_engine);
+
+    // Load the model (weights into GPU)
+    if let Some(ref mut e) = *engine {
+        if !e.is_loaded() {
+            tracing::info!(model = %model_name, "loading model...");
+            e.load().map_err(|e| {
                 tracing::error!("model load failed: {e:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -79,12 +204,53 @@ async fn generate(
         }
     }
 
+    Ok(())
+}
+
+// ── /api/generate ─────────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/generate",
+    tag = "generation",
+    request_body = mold_core::GenerateRequest,
+    responses(
+        (status = 200, description = "Generated image bytes", content_type = "image/png"),
+        (status = 404, description = "Model not downloaded"),
+        (status = 422, description = "Invalid request parameters"),
+        (status = 500, description = "Inference error"),
+    )
+)]
+async fn generate(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::GenerateRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    tracing::info!(
+        model = %req.model,
+        prompt = %req.prompt,
+        width = req.width,
+        height = req.height,
+        steps = req.steps,
+        guidance = req.guidance,
+        seed = ?req.seed,
+        format = %req.output_format,
+        "generate request"
+    );
+
+    // Validate request before touching the engine
+    if let Err(e) = validate_generate_request(&req) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+    }
+
+    // Ensure model is ready (handles empty state, hot-swap, lazy load)
+    ensure_model_ready(&state, &req.model).await?;
+
     // Run inference in a blocking task — panics caught → 500 with body.
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = engine.blocking_lock();
-            guard.generate(&req)
+            guard.as_mut().unwrap().generate(&req)
         }))
     })
     .await
@@ -131,25 +297,172 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
     mold_core::validate_generate_request(req)
 }
 
+// ── /api/generate/stream (SSE) ───────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/generate/stream",
+    tag = "generation",
+    request_body = mold_core::GenerateRequest,
+    responses(
+        (status = 200, description = "SSE event stream with progress and result"),
+        (status = 404, description = "Model not downloaded"),
+        (status = 422, description = "Invalid request parameters"),
+        (status = 500, description = "Inference error"),
+    )
+)]
+async fn generate_stream(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::GenerateRequest>,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, (StatusCode, String)>
+{
+    tracing::info!(
+        model = %req.model,
+        prompt = %req.prompt,
+        "generate/stream request"
+    );
+
+    // Validate before starting the SSE stream (returns HTTP error, not SSE event)
+    if let Err(e) = validate_generate_request(&req) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+    }
+
+    // Check model availability (404/400 returned as HTTP errors before SSE starts)
+    let model_paths = check_model_available(&state, &req.model).await?;
+
+    // Create SSE channel
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+
+    // Spawn background task for model loading + inference
+    let bg_tx = tx;
+    tokio::spawn(async move {
+        // Load model if needed (with progress events)
+        if let Some(paths) = model_paths {
+            if let Err((_, msg)) =
+                create_and_load_engine(&state, &req.model, paths, Some(&bg_tx)).await
+            {
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent { message: msg }));
+                return;
+            }
+        }
+
+        // Run inference in blocking thread with progress callback
+        let engine = state.engine.clone();
+        let gen_tx = bg_tx.clone();
+        let gen_req = req.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut guard = engine.blocking_lock();
+                let e = guard.as_mut().unwrap();
+                // Install progress callback for the generate phase
+                let progress_tx = gen_tx.clone();
+                e.set_on_progress(Box::new(move |event| {
+                    let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
+                }));
+                e.generate(&gen_req)
+            }))
+        })
+        .await;
+
+        match result {
+            Ok(Ok(Ok(mut response))) => {
+                let img = response.images.remove(0);
+                let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
+                    image: base64::engine::general_purpose::STANDARD.encode(&img.data),
+                    format: img.format,
+                    width: img.width,
+                    height: img.height,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }));
+            }
+            Ok(Ok(Err(e))) => {
+                tracing::error!("generation error: {e:#}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: format!("generation error: {e}"),
+                }));
+            }
+            Ok(Err(panic_payload)) => {
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                tracing::error!("inference panicked: {msg}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: format!("inference panicked: {msg}"),
+                }));
+            }
+            Err(join_err) => {
+                tracing::error!("inference task join error: {join_err:?}");
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: "inference task failed".to_string(),
+                }));
+            }
+        }
+    });
+
+    // Build SSE stream from the channel receiver
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|msg| {
+        let event = match msg {
+            SseMessage::Progress(p) => SseEvent::default()
+                .event("progress")
+                .data(serde_json::to_string(&p).unwrap()),
+            SseMessage::Complete(c) => SseEvent::default()
+                .event("complete")
+                .data(serde_json::to_string(&c).unwrap()),
+            SseMessage::Error(e) => SseEvent::default()
+                .event("error")
+                .data(serde_json::to_string(&e).unwrap()),
+        };
+        Ok::<_, Infallible>(event)
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    ))
+}
+
 // ── /api/models ───────────────────────────────────────────────────────────────
 
 /// Extended model info including generation defaults.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ModelInfoExtended {
     #[serde(flatten)]
     pub info: ModelInfo,
+    /// Whether the model files are downloaded and available for inference.
+    pub downloaded: bool,
+    #[schema(example = 4)]
     pub default_steps: u32,
+    #[schema(example = 3.5)]
     pub default_guidance: f64,
+    #[schema(example = 1024)]
     pub default_width: u32,
+    #[schema(example = 1024)]
     pub default_height: u32,
+    #[schema(example = "FLUX Schnell Q8 — fast 4-step generation")]
     pub description: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/models",
+    tag = "models",
+    responses(
+        (status = 200, description = "List of available models", body = Vec<ModelInfoExtended>),
+    )
+)]
 async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtended>> {
     let engine = state.engine.lock().await;
-    let loaded_name = engine.model_name().to_string();
-    let is_loaded = engine.is_loaded();
+    let (loaded_name, is_loaded) = match engine.as_ref() {
+        Some(e) => (e.model_name().to_string(), e.is_loaded()),
+        None => (String::new(), false),
+    };
     drop(engine);
+
+    let config = state.config.read().await;
 
     // Start with known static models, merge with config-defined models.
     let mut known: std::collections::HashMap<String, ModelInfo> = model_registry::known_models()
@@ -158,7 +471,7 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
         .collect();
 
     // Add any models from config that aren't in the static registry.
-    for (name, mcfg) in &state.config.models {
+    for (name, mcfg) in &config.models {
         let size_gb = mcfg
             .transformer
             .as_deref()
@@ -179,7 +492,7 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
         .into_values()
         .map(|mut m| {
             m.is_loaded = is_loaded && m.name == loaded_name;
-            let mut mcfg = state.config.model_config(&m.name);
+            let mut mcfg = config.model_config(&m.name);
             // Fall back to manifest defaults when config has no model-specific values
             if mcfg.default_steps.is_none() {
                 if let Some(manifest) = mold_core::manifest::find_manifest(&m.name) {
@@ -192,11 +505,13 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
                     }
                 }
             }
+            let downloaded = config.models.contains_key(&m.name);
             ModelInfoExtended {
-                default_steps: mcfg.effective_steps(&state.config),
+                downloaded,
+                default_steps: mcfg.effective_steps(&config),
                 default_guidance: mcfg.effective_guidance(),
-                default_width: mcfg.effective_width(&state.config),
-                default_height: mcfg.effective_height(&state.config),
+                default_width: mcfg.effective_width(&config),
+                default_height: mcfg.effective_height(&config),
                 description: mcfg.description.clone().unwrap_or_else(|| m.name.clone()),
                 info: m,
             }
@@ -208,73 +523,122 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
 
 // ── /api/models/load ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoadModelBody {
+    #[schema(example = "flux-schnell:q8")]
     pub model: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/models/load",
+    tag = "models",
+    request_body = LoadModelBody,
+    responses(
+        (status = 200, description = "Model loaded successfully"),
+        (status = 404, description = "Model not downloaded"),
+        (status = 400, description = "Unknown model"),
+        (status = 500, description = "Failed to load model"),
+    )
+)]
 async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let paths = ModelPaths::resolve(&body.model, &state.config).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "no paths configured for model '{}'. Add [models.{}] to config.",
-                body.model, body.model
-            ),
-        )
-    })?;
-
-    let mut engine = state.engine.lock().await;
-    *engine = mold_inference::create_engine(
-        body.model.clone(),
-        paths,
-        &state.config,
-        mold_inference::LoadStrategy::Eager,
-    )
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to create engine for {}: {e}", body.model),
-        )
-    })?;
-    engine.load().map_err(|e| {
-        tracing::error!("model load failed: {e:#}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to load {}: {e}", body.model),
-        )
-    })?;
-
+    ensure_model_ready(&state, &body.model).await?;
     tracing::info!(model = %body.model, "model loaded via API");
     Ok(StatusCode::OK)
 }
 
+// ── /api/models/pull ──────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/models/pull",
+    tag = "models",
+    request_body = LoadModelBody,
+    responses(
+        (status = 200, description = "Model pulled successfully"),
+        (status = 400, description = "Unknown model"),
+        (status = 500, description = "Download failed"),
+    )
+)]
+async fn pull_model_endpoint(
+    State(state): State<AppState>,
+    Json(body): Json<LoadModelBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let _guard = state.pull_lock.lock().await;
+
+    // Re-check if already available while we waited for the lock
+    {
+        let config = state.config.read().await;
+        if ModelPaths::resolve(&body.model, &config).is_some() {
+            return Ok(format!("model '{}' already available", body.model));
+        }
+    }
+
+    tracing::info!(model = %body.model, "pulling model via API");
+
+    let (new_config, _paths) = mold_core::download::pull_and_configure(&body.model)
+        .await
+        .map_err(|e| {
+            tracing::error!("pull failed for {}: {e}", body.model);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to pull model '{}': {e}", body.model),
+            )
+        })?;
+
+    // Update shared config so subsequent load/generate can find the model
+    {
+        let mut config = state.config.write().await;
+        *config = new_config;
+    }
+
+    tracing::info!(model = %body.model, "pull complete");
+    Ok(format!("model '{}' pulled successfully", body.model))
+}
+
 // ── /api/models/unload ────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    delete,
+    path = "/api/models/unload",
+    tag = "models",
+    responses(
+        (status = 200, description = "Model unloaded or no model was loaded", body = String),
+    )
+)]
 async fn unload_model(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let mut engine = state.engine.lock().await;
-    if !engine.is_loaded() {
-        return Ok((StatusCode::OK, "no model loaded".to_string()));
+    match engine.as_mut() {
+        Some(e) if e.is_loaded() => {
+            let name = e.model_name().to_string();
+            e.unload();
+            tracing::info!(model = %name, "model unloaded via API");
+            Ok((StatusCode::OK, format!("unloaded {name}")))
+        }
+        _ => Ok((StatusCode::OK, "no model loaded".to_string())),
     }
-    let name = engine.model_name().to_string();
-    engine.unload();
-    tracing::info!(model = %name, "model unloaded via API");
-    Ok((StatusCode::OK, format!("unloaded {name}")))
 }
 
 // ── /api/status ───────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/status",
+    tag = "server",
+    responses(
+        (status = 200, description = "Server status", body = ServerStatus),
+    )
+)]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     let engine = state.engine.lock().await;
-    let models_loaded = if engine.is_loaded() {
-        vec![engine.model_name().to_string()]
-    } else {
-        vec![]
+    let models_loaded = match engine.as_ref() {
+        Some(e) if e.is_loaded() => vec![e.model_name().to_string()],
+        _ => vec![],
     };
     drop(engine);
 
@@ -288,8 +652,42 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 
 // ── /health ───────────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "server",
+    responses(
+        (status = 200, description = "Server is healthy"),
+    )
+)]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/openapi.json ─────────────────────────────────────────────────────────
+
+async fn openapi_json() -> impl IntoResponse {
+    Json(ApiDoc::openapi())
+}
+
+// ── /api/docs ─────────────────────────────────────────────────────────────────
+
+async fn scalar_docs() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html")],
+        r#"<!DOCTYPE html>
+<html>
+<head>
+  <title>mold API</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+  <script id="api-reference" data-url="/api/openapi.json"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>"#,
+    )
 }
 
 // ── GPU info ──────────────────────────────────────────────────────────────────

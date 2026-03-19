@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use mold_core::config::Config;
-use mold_core::download::{pull_model, DownloadError};
+use mold_core::download::DownloadError;
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
 
 use crate::output::status;
@@ -11,32 +11,11 @@ use crate::AlreadyReported;
 pub async fn pull_and_configure(model: &str) -> Result<Config> {
     let canonical = resolve_model_name(model);
 
+    // Pre-flight: print status and validate manifest exists (for CLI-specific error formatting)
     let manifest = match find_manifest(&canonical) {
         Some(m) => m,
         None => {
-            eprintln!("{} Unknown model: {}", "✗".red().bold(), model.bold());
-            eprintln!();
-            eprintln!("Available models:");
-            let all = known_manifests();
-            let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
-            for m in &all {
-                eprintln!(
-                    "  {:<nw$} {:>5.1}GB  {}",
-                    m.name.bold(),
-                    m.size_gb,
-                    crate::output::colorize_description(&m.description),
-                    nw = nw,
-                );
-            }
-            eprintln!();
-            eprintln!(
-                "{}",
-                format!(
-                    "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
-                    mold_core::manifest::SHARED_COMPONENTS_GB
-                ).dimmed(),
-            );
-            eprintln!("Usage: mold pull <model>");
+            print_unknown_model_error(model);
             return Err(AlreadyReported.into());
         }
     };
@@ -61,72 +40,91 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     );
     status!("");
 
-    let paths = match pull_model(&manifest).await {
-        Ok(paths) => paths,
-        Err(DownloadError::Unauthorized { repo, .. }) => {
-            eprintln!();
-            eprintln!("{} Authentication required for {repo}", "✗".red().bold());
-            eprintln!();
-            eprintln!("  1. Create a token at: https://huggingface.co/settings/tokens");
-            eprintln!("     (select at least \"Read\" access)");
-            eprintln!("  2. Set: export HF_TOKEN=hf_...");
-            eprintln!("     Or run: huggingface-cli login");
-            eprintln!("  3. Retry: mold pull {}", manifest.name);
-            if std::env::var("HF_TOKEN").is_ok() {
-                eprintln!();
-                eprintln!(
-                    "  {} HF_TOKEN is set but was rejected — it may be invalid or expired.",
-                    "!".yellow().bold()
-                );
+    // Delegate to core pull_and_configure
+    let (config, _paths) = mold_core::download::pull_and_configure(model)
+        .await
+        .map_err(|e| -> anyhow::Error {
+            match e {
+                DownloadError::UnknownModel { .. } => {
+                    print_unknown_model_error(model);
+                }
+                DownloadError::Unauthorized { repo, .. } => {
+                    eprintln!();
+                    eprintln!("{} Authentication required for {repo}", "✗".red().bold());
+                    eprintln!();
+                    eprintln!("  1. Create a token at: https://huggingface.co/settings/tokens");
+                    eprintln!("     (select at least \"Read\" access)");
+                    eprintln!("  2. Set: export HF_TOKEN=hf_...");
+                    eprintln!("     Or run: huggingface-cli login");
+                    eprintln!("  3. Retry: mold pull {}", canonical);
+                    if std::env::var("HF_TOKEN").is_ok() {
+                        eprintln!();
+                        eprintln!(
+                            "  {} HF_TOKEN is set but was rejected — it may be invalid or expired.",
+                            "!".yellow().bold()
+                        );
+                    }
+                }
+                DownloadError::GatedModel { .. } => {
+                    eprintln!();
+                    eprintln!(
+                        "{} This model requires access approval on HuggingFace.",
+                        "✗".red().bold()
+                    );
+                    eprintln!();
+
+                    let gated_repo = manifest
+                        .files
+                        .iter()
+                        .find(|f| f.gated)
+                        .map(|f| f.hf_repo.as_str())
+                        .unwrap_or("the model repository");
+
+                    eprintln!("  1. Visit: https://huggingface.co/{gated_repo}");
+                    eprintln!("  2. Accept the license agreement");
+                    eprintln!("  3. Create a token at: https://huggingface.co/settings/tokens");
+                    eprintln!("  4. Set: export HF_TOKEN=hf_...");
+                    eprintln!("  5. Retry: mold pull {}", canonical);
+                }
+                other => {
+                    eprintln!();
+                    eprintln!("{} Download failed: {other}", "✗".red().bold());
+                }
             }
-            return Err(AlreadyReported.into());
-        }
-        Err(DownloadError::GatedModel { .. }) => {
-            eprintln!();
-            eprintln!(
-                "{} This model requires access approval on HuggingFace.",
-                "✗".red().bold()
-            );
-            eprintln!();
-
-            // Find the gated repo for a helpful message
-            let gated_repo = manifest
-                .files
-                .iter()
-                .find(|f| f.gated)
-                .map(|f| f.hf_repo.as_str())
-                .unwrap_or("the model repository");
-
-            eprintln!("  1. Visit: https://huggingface.co/{gated_repo}");
-            eprintln!("  2. Accept the license agreement");
-            eprintln!("  3. Create a token at: https://huggingface.co/settings/tokens");
-            eprintln!("  4. Set: export HF_TOKEN=hf_...");
-            eprintln!("  5. Retry: mold pull {}", manifest.name);
-            return Err(AlreadyReported.into());
-        }
-        Err(e) => {
-            eprintln!();
-            eprintln!("{} Download failed: {e}", "✗".red().bold());
-            return Err(AlreadyReported.into());
-        }
-    };
-
-    // Save to config
-    let mut config = Config::load_or_default();
-    let model_config = manifest.to_model_config(&paths);
-
-    // Auto-set default_model if no config existed before
-    if !Config::exists_on_disk() {
-        config.default_model = manifest.name.clone();
-    }
-
-    config.upsert_model(manifest.name.clone(), model_config);
-    config.save()?;
+            AlreadyReported.into()
+        })?;
 
     status!("");
-    status!("{} {} is ready!", "✓".green().bold(), manifest.name.bold());
+    status!("{} {} is ready!", "✓".green().bold(), canonical.bold());
 
     Ok(config)
+}
+
+fn print_unknown_model_error(model: &str) {
+    eprintln!("{} Unknown model: {}", "✗".red().bold(), model.bold());
+    eprintln!();
+    eprintln!("Available models:");
+    let all = known_manifests();
+    let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
+    for m in &all {
+        eprintln!(
+            "  {:<nw$} {:>5.1}GB  {}",
+            m.name.bold(),
+            m.size_gb,
+            crate::output::colorize_description(&m.description),
+            nw = nw,
+        );
+    }
+    eprintln!();
+    eprintln!(
+        "{}",
+        format!(
+            "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
+            mold_core::manifest::SHARED_COMPONENTS_GB
+        )
+        .dimmed(),
+    );
+    eprintln!("Usage: mold pull <model>");
 }
 
 pub async fn run(model: &str) -> Result<()> {

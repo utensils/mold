@@ -243,8 +243,11 @@ impl ZImageEngine {
                         if fits_in_memory(is_cuda, is_metal, free_vram, threshold)
                             || (!is_cuda && !is_metal)
                         {
-                            let path = match cached_file_path(variant.hf_repo, variant.hf_filename)
-                            {
+                            let path = match cached_file_path(
+                                variant.hf_repo,
+                                variant.hf_filename,
+                                Some("shared/qwen3-gguf"),
+                            ) {
                                 Some(p) => p,
                                 None => {
                                     self.progress.info(&format!(
@@ -258,13 +261,17 @@ impl ZImageEngine {
                                         file = variant.hf_filename,
                                         "downloading quantized Qwen3 encoder"
                                     );
-                                    download_single_file_sync(variant.hf_repo, variant.hf_filename)
-                                        .map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "failed to download Qwen3 {}: {e}",
-                                                variant.tag
-                                            )
-                                        })?
+                                    download_single_file_sync(
+                                        variant.hf_repo,
+                                        variant.hf_filename,
+                                        Some("shared/qwen3-gguf"),
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "failed to download Qwen3 {}: {e}",
+                                            variant.tag
+                                        )
+                                    })?
                                 }
                             };
                             let on_gpu = is_cuda || is_metal;
@@ -292,7 +299,11 @@ impl ZImageEngine {
                 if is_metal {
                     let variants = known_qwen3_variants();
                     if let Some(smallest) = variants.last() {
-                        let path = match cached_file_path(smallest.hf_repo, smallest.hf_filename) {
+                        let path = match cached_file_path(
+                            smallest.hf_repo,
+                            smallest.hf_filename,
+                            Some("shared/qwen3-gguf"),
+                        ) {
                             Some(p) => p,
                             None => {
                                 self.progress.info(&format!(
@@ -300,13 +311,17 @@ impl ZImageEngine {
                                     smallest.tag,
                                     fmt_gb(smallest.size_bytes),
                                 ));
-                                download_single_file_sync(smallest.hf_repo, smallest.hf_filename)
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "failed to download Qwen3 {}: {e}",
-                                            smallest.tag
-                                        )
-                                    })?
+                                download_single_file_sync(
+                                    smallest.hf_repo,
+                                    smallest.hf_filename,
+                                    Some("shared/qwen3-gguf"),
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "failed to download Qwen3 {}: {e}",
+                                        smallest.tag
+                                    )
+                                })?
                             }
                         };
                         self.progress.info(&format!(
@@ -352,7 +367,11 @@ impl ZImageEngine {
     ) -> Result<std::path::PathBuf> {
         use mold_core::download::{cached_file_path, download_single_file_sync};
 
-        if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename) {
+        if let Some(path) = cached_file_path(
+            variant.hf_repo,
+            variant.hf_filename,
+            Some("shared/qwen3-gguf"),
+        ) {
             return Ok(path);
         }
         self.progress.info(&format!(
@@ -360,8 +379,12 @@ impl ZImageEngine {
             variant.tag,
             fmt_gb(variant.size_bytes),
         ));
-        download_single_file_sync(variant.hf_repo, variant.hf_filename)
-            .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
+        download_single_file_sync(
+            variant.hf_repo,
+            variant.hf_filename,
+            Some("shared/qwen3-gguf"),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
     }
 
     pub fn load(&mut self) -> Result<()> {
