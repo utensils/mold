@@ -141,6 +141,24 @@ pub enum SseProgressEvent {
         total: usize,
         elapsed_ms: u64,
     },
+    /// Download progress for a single file during model pull.
+    DownloadProgress {
+        filename: String,
+        file_index: usize,
+        total_files: usize,
+        bytes_downloaded: u64,
+        bytes_total: u64,
+    },
+    /// A single file download completed.
+    DownloadDone {
+        filename: String,
+        file_index: usize,
+        total_files: usize,
+    },
+    /// All downloads complete for a model pull.
+    PullComplete {
+        model: String,
+    },
 }
 
 /// Completion event sent when image generation finishes successfully.

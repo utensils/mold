@@ -4,6 +4,12 @@ mod output;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 
+#[derive(Clone, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
 /// Sentinel error: the command already printed diagnostics to stderr.
 /// The main handler should just exit(1) without printing anything extra.
 #[derive(Debug)]
@@ -109,6 +115,10 @@ enum Commands {
         /// Models directory
         #[arg(long)]
         models_dir: Option<String>,
+
+        /// Log output format
+        #[arg(long, default_value = "json")]
+        log_format: LogFormat,
     },
 
     /// Download model weights from HuggingFace
@@ -205,13 +215,27 @@ async fn run() -> anyhow::Result<()> {
         Commands::Serve { .. } => "info",
         _ => "warn",
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level)),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+
+    match &cli.command {
+        Commands::Serve {
+            log_format: LogFormat::Json,
+            ..
+        } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .json()
+                .with_writer(std::io::stderr)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
 
     match cli.command {
         Commands::Run {
@@ -254,6 +278,7 @@ async fn run() -> anyhow::Result<()> {
             port,
             bind,
             models_dir,
+            ..
         } => {
             commands::serve::run(port, &bind, models_dir).await?;
         }

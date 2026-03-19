@@ -580,6 +580,7 @@ impl Flux2Engine {
         self.progress.info("Freed Flux.2 transformer");
         drop(state);
         drop(txt_emb);
+        device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
 
         // --- Phase 3: VAE decode ---
@@ -691,7 +692,7 @@ impl InferenceEngine for Flux2Engine {
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
-        tracing::info!(steps = timesteps.len(), "running denoising loop...");
+        tracing::info!(steps = timesteps.len() - 1, "running denoising loop...");
 
         // 5. Denoise
         let img = loaded.transformer.denoise(

@@ -500,6 +500,7 @@ impl QwenImageEngine {
         drop(transformer);
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
+        device.synchronize()?;
         self.progress.info("Freed Qwen-Image transformer");
 
         // --- Phase 3: Load VAE and decode ---

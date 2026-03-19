@@ -732,6 +732,8 @@ impl FluxEngine {
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
+        // Synchronize to ensure CUDA frees dropped memory before VAE allocates
+        device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
 
         // --- Phase 4: VAE decode ---
@@ -927,7 +929,7 @@ impl InferenceEngine for FluxEngine {
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
         tracing::info!(
-            steps = timesteps.len(),
+            steps = timesteps.len().saturating_sub(1),
             quantized = loaded.is_quantized,
             "running denoising loop..."
         );
@@ -961,6 +963,11 @@ impl InferenceEngine for FluxEngine {
         drop(clip_emb_state);
         drop(img_state);
         loaded.flux_model = None;
+        // Force CUDA to complete pending operations and release freed memory.
+        // Without this, cuMemFree is asynchronous and the freed VRAM from the
+        // transformer (~13GB) may not be available when VAE decode allocates
+        // its conv2d intermediates, causing OOM on subsequent generations.
+        loaded.device.synchronize()?;
         tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32

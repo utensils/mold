@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Candle-based FLUX inference engine for mold"
 
+[lib]
+test = false
+
 [features]
 default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]

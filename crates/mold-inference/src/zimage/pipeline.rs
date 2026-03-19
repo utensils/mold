@@ -718,6 +718,7 @@ impl ZImageEngine {
         self.progress.info("Freed Z-Image transformer");
         drop(cap_feats);
         drop(cap_mask);
+        device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode)");
 
         // --- Phase 3: Load VAE and decode ---
