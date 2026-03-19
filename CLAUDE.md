@@ -30,6 +30,7 @@ nix flake check                                      # Validate formatting + fla
 | check | `check` | `cargo check` |
 | check | `clippy` | `cargo clippy` |
 | check | `run-tests` | `cargo test` |
+| check | `coverage` | Test coverage report (`--html` for browsable report) |
 | check | `fmt` | `cargo fmt` |
 | check | `fmt-check` | `cargo fmt --check` |
 | run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
@@ -132,11 +133,15 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/generate` | Generate images from prompt |
+| `POST` | `/api/generate/stream` | Generate with SSE progress streaming |
 | `GET` | `/api/models` | List available models |
 | `POST` | `/api/models/load` | Load/swap the active model |
+| `POST` | `/api/models/pull` | Pull/download a model |
 | `DELETE` | `/api/models/unload` | Unload model to free GPU memory |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
+| `GET` | `/api/openapi.json` | OpenAPI spec |
+| `GET` | `/api/docs` | Interactive API docs (Scalar) |
 
 State managed via `AppState` with `tokio::sync::Mutex` around the engine.
 
@@ -165,6 +170,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
+mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
 mold info <MODEL> [--verify]    Show model details (memory estimates, optional SHA-256 verify)
 mold unload                     Unload the current model from server to free GPU memory
