@@ -706,7 +706,7 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -923,7 +923,7 @@ impl InferenceEngine for FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
         tracing::info!(
