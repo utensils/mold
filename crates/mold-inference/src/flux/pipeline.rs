@@ -927,7 +927,7 @@ impl InferenceEngine for FluxEngine {
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
         tracing::info!(
-            steps = timesteps.len(),
+            steps = timesteps.len().saturating_sub(1),
             quantized = loaded.is_quantized,
             "running denoising loop..."
         );

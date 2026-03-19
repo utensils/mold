@@ -51,6 +51,7 @@ cargo test                                           # All tests
 cargo test -p mold-core                              # Single crate
 ./scripts/coverage.sh                                # Test coverage summary
 ./scripts/coverage.sh --html                         # HTML coverage report
+./scripts/fetch-tokenizers.sh                        # Pre-download tokenizer files
 cargo run -p mold-cli -- run "a cat"                 # Generate image
 cargo run -p mold-cli -- serve                       # Start server
 ```
@@ -106,11 +107,11 @@ pub trait InferenceEngine: Send + Sync {
 
 **Engine factory** — `create_engine()` in `factory.rs` auto-detects the model family and returns:
 - `"flux"` → `FluxEngine` — T5 + CLIP-L text encoding, flow-matching transformer, VAE decode
-- `"sd15"` → `SD15Engine` — CLIP-L text encoding, UNet with DDIM, classifier-free guidance (512x512 default)
+- `"sd15"` (also `"sd1.5"`, `"stable-diffusion-1.5"`) → `SD15Engine` — CLIP-L text encoding, UNet with DDIM, classifier-free guidance (512x512 default)
 - `"sdxl"` → `SDXLEngine` — Dual-CLIP (CLIP-L + CLIP-G), UNet with DDIM/Euler Ancestral, classifier-free guidance
-- `"sd3"` → `SD3Engine` — Triple encoder (CLIP-L + CLIP-G + T5-XXL), quantized MMDiT with NaN-safe inference
-- `"flux2"` → `Flux2Engine` — Qwen3 text encoder (GGUF, layers 9/18/27), shared modulation transformer, BN-VAE (beta)
-- `"qwen-image"` → `QwenImageEngine` — Qwen2.5-VL text encoder, 3D causal VAE (2D temporal-slice), flow-matching (beta)
+- `"sd3"` (also `"sd3.5"`, `"stable-diffusion-3"`) → `SD3Engine` — Triple encoder (CLIP-L + CLIP-G + T5-XXL), quantized MMDiT with NaN-safe inference
+- `"flux2"` (also `"flux.2"`, `"flux2-klein"`) → `Flux2Engine` — Qwen3 text encoder (GGUF, layers 9/18/27), shared modulation transformer, BN-VAE (beta)
+- `"qwen-image"` (also `"qwen_image"`) → `QwenImageEngine` — Qwen2.5-VL text encoder, 3D causal VAE (2D temporal-slice), flow-matching (beta)
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
 
 **Key architectural patterns:**
@@ -200,6 +201,9 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder variant: auto, bf16, q8, q6, iq4, q3 |
 | `MOLD_CLIP2_PATH` | — | Override CLIP-G encoder path (SDXL) |
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
+| `MOLD_DEVICE` | — | Override device placement for text encoders |
+
+Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 
 Env vars take precedence over config file values. `mold pull` auto-writes config entries pointing to hf-hub cache paths.
 

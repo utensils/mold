@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
@@ -558,45 +558,196 @@ async fn load_model(
     tag = "models",
     request_body = LoadModelBody,
     responses(
-        (status = 200, description = "Model pulled successfully"),
+        (status = 200, description = "Model pulled (SSE stream or plain text)"),
         (status = 400, description = "Unknown model"),
         (status = 500, description = "Download failed"),
     )
 )]
 async fn pull_model_endpoint(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let wants_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"));
+
+    if !wants_sse {
+        // Legacy: blocking pull with plain text response
+        return pull_model_blocking(state, body.model)
+            .await
+            .map(PullResponse::Text);
+    }
+
+    // SSE streaming pull
+    let model = body.model.clone();
+
+    // Validate model exists in manifest before starting SSE
+    if mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("unknown model '{model}'. Run 'mold list' to see available models."),
+        ));
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+
+    tokio::spawn(async move {
+        // Acquire pull lock inside the task so the SSE stream starts immediately
+        let _guard = state.pull_lock.lock().await;
+
+        // Re-check availability after acquiring lock
+        {
+            let config = state.config.read().await;
+            if ModelPaths::resolve(&model, &config).is_some() {
+                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+                    model: model.clone(),
+                }));
+                return;
+            }
+        }
+
+        tracing::info!(model = %model, "pulling model via API (SSE)");
+
+        let progress_tx = tx.clone();
+        let model_for_cb = model.clone();
+        let callback =
+            std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
+                let sse_event = match event {
+                    mold_core::download::DownloadProgressEvent::FileStart {
+                        filename,
+                        file_index,
+                        total_files,
+                        size_bytes,
+                    } => SseProgressEvent::DownloadProgress {
+                        filename,
+                        file_index,
+                        total_files,
+                        bytes_downloaded: 0,
+                        bytes_total: size_bytes,
+                    },
+                    mold_core::download::DownloadProgressEvent::FileProgress {
+                        filename,
+                        file_index,
+                        bytes_downloaded,
+                        bytes_total,
+                    } => SseProgressEvent::DownloadProgress {
+                        filename,
+                        file_index,
+                        total_files: 0, // not available here, client tracks from FileStart
+                        bytes_downloaded,
+                        bytes_total,
+                    },
+                    mold_core::download::DownloadProgressEvent::FileDone {
+                        filename,
+                        file_index,
+                        total_files,
+                    } => SseProgressEvent::DownloadDone {
+                        filename,
+                        file_index,
+                        total_files,
+                    },
+                };
+                let _ = progress_tx.send(SseMessage::Progress(sse_event));
+            });
+
+        match mold_core::download::pull_and_configure_with_callback(&model, callback).await {
+            Ok((new_config, _paths)) => {
+                {
+                    let mut config = state.config.write().await;
+                    *config = new_config;
+                }
+                tracing::info!(model = %model, "pull complete");
+                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+                    model: model_for_cb,
+                }));
+            }
+            Err(e) => {
+                tracing::error!("pull failed for {}: {e}", model);
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: format!("failed to pull model '{}': {e}", model),
+                }));
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|msg| {
+        let event = match msg {
+            SseMessage::Progress(p) => SseEvent::default()
+                .event("progress")
+                .data(serde_json::to_string(&p).unwrap()),
+            SseMessage::Complete(c) => SseEvent::default()
+                .event("complete")
+                .data(serde_json::to_string(&c).unwrap()),
+            SseMessage::Error(e) => SseEvent::default()
+                .event("error")
+                .data(serde_json::to_string(&e).unwrap()),
+        };
+        Ok::<_, Infallible>(event)
+    });
+
+    Ok(PullResponse::Sse(
+        Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response(),
+    ))
+}
+
+/// Legacy blocking pull — returns plain text.
+async fn pull_model_blocking(
+    state: AppState,
+    model: String,
+) -> Result<String, (StatusCode, String)> {
     let _guard = state.pull_lock.lock().await;
 
-    // Re-check if already available while we waited for the lock
     {
         let config = state.config.read().await;
-        if ModelPaths::resolve(&body.model, &config).is_some() {
-            return Ok(format!("model '{}' already available", body.model));
+        if ModelPaths::resolve(&model, &config).is_some() {
+            return Ok(format!("model '{}' already available", model));
         }
     }
 
-    tracing::info!(model = %body.model, "pulling model via API");
+    tracing::info!(model = %model, "pulling model via API");
 
-    let (new_config, _paths) = mold_core::download::pull_and_configure(&body.model)
+    let (new_config, _paths) = mold_core::download::pull_and_configure(&model)
         .await
         .map_err(|e| {
-            tracing::error!("pull failed for {}: {e}", body.model);
+            tracing::error!("pull failed for {}: {e}", model);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to pull model '{}': {e}", body.model),
+                format!("failed to pull model '{}': {e}", model),
             )
         })?;
 
-    // Update shared config so subsequent load/generate can find the model
     {
         let mut config = state.config.write().await;
         *config = new_config;
     }
 
-    tracing::info!(model = %body.model, "pull complete");
-    Ok(format!("model '{}' pulled successfully", body.model))
+    tracing::info!(model = %model, "pull complete");
+    Ok(format!("model '{}' pulled successfully", model))
+}
+
+/// Response type that can be either SSE stream or plain text.
+enum PullResponse {
+    Sse(axum::response::Response),
+    Text(String),
+}
+
+impl IntoResponse for PullResponse {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            PullResponse::Sse(resp) => resp,
+            PullResponse::Text(text) => text.into_response(),
+        }
+    }
 }
 
 // ── /api/models/unload ────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use console::Term;
 use hf_hub::api::tokio::{Api, ApiBuilder, ApiError, Progress};
@@ -9,6 +10,34 @@ use thiserror::Error;
 
 use crate::manifest::{paths_from_downloads, ModelComponent, ModelFile, ModelManifest};
 use crate::ModelPaths;
+
+/// Callback-based download progress event.
+#[derive(Debug, Clone)]
+pub enum DownloadProgressEvent {
+    /// A file download has started.
+    FileStart {
+        filename: String,
+        file_index: usize,
+        total_files: usize,
+        size_bytes: u64,
+    },
+    /// Bytes downloaded for the current file.
+    FileProgress {
+        filename: String,
+        file_index: usize,
+        bytes_downloaded: u64,
+        bytes_total: u64,
+    },
+    /// A file download completed.
+    FileDone {
+        filename: String,
+        file_index: usize,
+        total_files: usize,
+    },
+}
+
+/// Callback type for download progress reporting.
+pub type DownloadProgressCallback = Arc<dyn Fn(DownloadProgressEvent) + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -204,6 +233,70 @@ impl Progress for DownloadProgress {
     }
 }
 
+/// Progress adapter that dispatches to a callback instead of indicatif.
+/// Throttles `FileProgress` events to ~4/sec per file to avoid flooding SSE.
+#[derive(Clone)]
+struct CallbackProgress {
+    callback: DownloadProgressCallback,
+    file_index: usize,
+    total_files: usize,
+    accumulated: u64,
+    total: u64,
+    filename: String,
+    last_emit: Instant,
+}
+
+impl CallbackProgress {
+    fn new(callback: DownloadProgressCallback, file_index: usize, total_files: usize) -> Self {
+        Self {
+            callback,
+            file_index,
+            total_files,
+            accumulated: 0,
+            total: 0,
+            filename: String::new(),
+            last_emit: Instant::now(),
+        }
+    }
+}
+
+impl Progress for CallbackProgress {
+    async fn init(&mut self, size: usize, filename: &str) {
+        self.total = size as u64;
+        self.accumulated = 0;
+        self.filename = filename.to_string();
+        (self.callback)(DownloadProgressEvent::FileStart {
+            filename: self.filename.clone(),
+            file_index: self.file_index,
+            total_files: self.total_files,
+            size_bytes: self.total,
+        });
+    }
+
+    async fn update(&mut self, size: usize) {
+        self.accumulated += size as u64;
+        // Throttle to ~4 events/sec
+        let now = Instant::now();
+        if now.duration_since(self.last_emit).as_millis() >= 250 || self.accumulated >= self.total {
+            self.last_emit = now;
+            (self.callback)(DownloadProgressEvent::FileProgress {
+                filename: self.filename.clone(),
+                file_index: self.file_index,
+                bytes_downloaded: self.accumulated,
+                bytes_total: self.total,
+            });
+        }
+    }
+
+    async fn finish(&mut self) {
+        (self.callback)(DownloadProgressEvent::FileDone {
+            filename: self.filename.clone(),
+            file_index: self.file_index,
+            total_files: self.total_files,
+        });
+    }
+}
+
 /// Download all files for a model manifest, returning resolved paths.
 ///
 /// Downloads go to a hidden hf-hub cache (`.hf-cache/`) for resume/dedup support,
@@ -251,6 +344,38 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
 }
 
+/// Download all files for a model manifest, reporting progress via callback.
+///
+/// Same as `pull_model` but uses a callback instead of indicatif progress bars.
+/// Suitable for server-side downloads where terminal bars are not appropriate.
+pub async fn pull_model_with_callback(
+    manifest: &ModelManifest,
+    callback: DownloadProgressCallback,
+) -> Result<ModelPaths, DownloadError> {
+    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    if let Some(token) = resolve_hf_token() {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder.build()?;
+
+    let mdir = models_dir();
+    let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
+    let total_files = manifest.files.len();
+
+    for (idx, file) in manifest.files.iter().enumerate() {
+        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+
+        let hf_path = download_file(&api, file, progress, &manifest.name).await?;
+
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        hardlink_or_copy(&hf_path, &clean_path)?;
+        downloads.push((file.component, clean_path));
+    }
+
+    paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
+}
+
 /// Extract HTTP status code from an async `ApiError`, if available.
 fn extract_http_status(err: &ApiError) -> Option<u16> {
     if let ApiError::RequestError(reqwest_err) = err {
@@ -260,10 +385,10 @@ fn extract_http_status(err: &ApiError) -> Option<u16> {
     }
 }
 
-async fn download_file(
+async fn download_file<P: Progress + Clone + Send + Sync + 'static>(
     api: &Api,
     file: &ModelFile,
-    progress: DownloadProgress,
+    progress: P,
     model_name: &str,
 ) -> Result<PathBuf, DownloadError> {
     let repo = api.repo(Repo::new(file.hf_repo.clone(), RepoType::Model));
@@ -422,6 +547,38 @@ pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPath
     let model_config = manifest.to_model_config(&paths);
 
     // Auto-set default_model if no config existed before
+    if !Config::exists_on_disk() {
+        config.default_model = manifest.name.clone();
+    }
+
+    config.upsert_model(manifest.name.clone(), model_config);
+    config
+        .save()
+        .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
+
+    Ok((config, paths))
+}
+
+/// Download a model and save its paths to config, reporting progress via callback.
+/// Same as `pull_and_configure` but uses a callback instead of indicatif bars.
+pub async fn pull_and_configure_with_callback(
+    model: &str,
+    callback: DownloadProgressCallback,
+) -> Result<(crate::Config, ModelPaths), DownloadError> {
+    use crate::config::Config;
+    use crate::manifest::{find_manifest, resolve_model_name};
+
+    let canonical = resolve_model_name(model);
+
+    let manifest = find_manifest(&canonical).ok_or_else(|| DownloadError::UnknownModel {
+        model: model.to_string(),
+    })?;
+
+    let paths = pull_model_with_callback(&manifest, callback).await?;
+
+    let mut config = Config::load_or_default();
+    let model_config = manifest.to_model_config(&paths);
+
     if !Config::exists_on_disk() {
         config.default_model = manifest.name.clone();
     }

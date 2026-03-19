@@ -1,9 +1,10 @@
 use anyhow::Result;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::{
     Config, GenerateRequest, GenerateResponse, MoldClient, OutputFormat, SseProgressEvent,
 };
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
@@ -197,6 +198,8 @@ async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgres
     pb.tick();
 
     let mut denoise_bar: Option<ProgressBar> = None;
+    let mut download_multi: Option<MultiProgress> = None;
+    let mut download_bars: HashMap<usize, ProgressBar> = HashMap::new();
     while let Some(event) = rx.recv().await {
         match event {
             SseProgressEvent::StageStart { name } => {
@@ -236,7 +239,7 @@ async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgres
 
                     let bar = ProgressBar::new(total as u64);
                     if is_piped() {
-                        bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                        bar.set_draw_target(ProgressDrawTarget::stderr());
                     }
                     bar.set_style(
                         ProgressStyle::default_bar()
@@ -258,12 +261,77 @@ async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgres
                 db.set_message(format!("{:.2} it/s", it_s));
                 db.set_position(step as u64);
             }
+            SseProgressEvent::DownloadProgress {
+                filename,
+                file_index,
+                bytes_downloaded,
+                bytes_total,
+                total_files,
+            } => {
+                let multi = download_multi.get_or_insert_with(|| {
+                    pb.disable_steady_tick();
+                    pb.set_message("");
+                    MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
+                });
+                let bar = download_bars.entry(file_index).or_insert_with(|| {
+                    let b = multi.add(ProgressBar::new(bytes_total));
+                    let msg_width = 45usize;
+                    b.set_style(
+                        ProgressStyle::with_template(&format!(
+                            "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
+                        ))
+                        .unwrap()
+                        .progress_chars("━╸─"),
+                    );
+                    // Show total files on first file
+                    if total_files > 0 {
+                        b.set_message(format!("[{}/{}] {}", file_index + 1, total_files, truncate_name(&filename, msg_width - 8)));
+                    } else {
+                        b.set_message(truncate_name(&filename, msg_width));
+                    }
+                    b
+                });
+                bar.set_position(bytes_downloaded);
+            }
+            SseProgressEvent::DownloadDone { file_index, .. } => {
+                if let Some(bar) = download_bars.get(&file_index) {
+                    bar.finish_with_message("done");
+                }
+            }
+            SseProgressEvent::PullComplete { model } => {
+                // Clear download bars
+                for (_, bar) in download_bars.drain() {
+                    bar.finish_and_clear();
+                }
+                if let Some(multi) = download_multi.take() {
+                    multi.clear().ok();
+                }
+                pb.suspend(|| {
+                    status!("{} Pull complete: {}", "✓".green(), model.bold());
+                });
+            }
         }
     }
     if let Some(db) = denoise_bar.take() {
         db.finish_and_clear();
     }
+    for (_, bar) in download_bars.drain() {
+        bar.finish_and_clear();
+    }
+    if let Some(multi) = download_multi.take() {
+        multi.clear().ok();
+    }
     pb.finish_and_clear();
+}
+
+/// Truncate a filename for display, keeping the end (unique part).
+fn truncate_name(name: &str, max_len: usize) -> String {
+    if name.len() <= max_len || max_len < 8 {
+        return name.to_string();
+    }
+    let suffix_len = max_len - 3;
+    let start = name.len() - suffix_len;
+    format!("...{}", &name[start..])
 }
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.
@@ -319,24 +387,18 @@ async fn generate_remote(
         Err(e) if MoldClient::is_model_not_found(&e) => {
             let _ = render.await;
             status!(
-                "{} Model '{}' not on server — server is downloading...",
+                "{} Model '{}' not on server — pulling...",
                 "●".cyan(),
                 model.bold()
             );
-            let pb = ProgressBar::new_spinner();
-            if piped {
-                pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-            }
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg}")
-                    .unwrap(),
-            );
-            pb.set_message(format!("Server pulling {}...", model));
-            pb.enable_steady_tick(Duration::from_millis(100));
-            client.pull_model(model).await?;
-            pb.finish_and_clear();
-            status!("{} Pull complete, generating...", "✓".green());
+
+            // Stream download progress from server
+            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
+            let pull_render = tokio::spawn(render_progress(pull_rx));
+            client.pull_model_stream(model, pull_tx).await?;
+            let _ = pull_render.await;
+
+            status!("{} Generating...", "●".cyan());
 
             // Retry with SSE streaming after pull
             let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
@@ -418,24 +480,18 @@ async fn generate_remote_blocking(
         Err(e) if MoldClient::is_model_not_found(&e) => {
             pb.finish_and_clear();
             status!(
-                "{} Model '{}' not on server — server is downloading...",
+                "{} Model '{}' not on server — pulling...",
                 "●".cyan(),
                 model.bold()
             );
-            let pb2 = ProgressBar::new_spinner();
-            if piped {
-                pb2.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-            }
-            pb2.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg}")
-                    .unwrap(),
-            );
-            pb2.set_message(format!("Server pulling {}...", model));
-            pb2.enable_steady_tick(Duration::from_millis(100));
-            client.pull_model(model).await?;
-            pb2.finish_and_clear();
-            status!("{} Pull complete, generating...", "✓".green());
+
+            // Stream download progress from server
+            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
+            let pull_render = tokio::spawn(render_progress(pull_rx));
+            client.pull_model_stream(model, pull_tx).await?;
+            let _ = pull_render.await;
+
+            status!("{} Generating...", "●".cyan());
             Ok(client.generate(req.clone()).await?)
         }
         Err(e) if MoldClient::is_connection_error(&e) => {

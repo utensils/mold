@@ -23,18 +23,21 @@ enum Command {
         /// Models directory
         #[arg(long)]
         models_dir: Option<String>,
+
+        /// Log output format
+        #[arg(long, default_value = "json")]
+        log_format: LogFormat,
     },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
 
     match args.command {
@@ -42,7 +45,23 @@ async fn main() -> anyhow::Result<()> {
             port,
             bind,
             models_dir,
+            log_format,
         } => {
+            let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+            match log_format {
+                LogFormat::Json => {
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .json()
+                        .init();
+                }
+                LogFormat::Text => {
+                    tracing_subscriber::fmt().with_env_filter(filter).init();
+                }
+            }
+
             let models_path = models_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));

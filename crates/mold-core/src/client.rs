@@ -248,6 +248,87 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Pull a model via SSE streaming, receiving download progress events.
+    ///
+    /// Sends `Accept: text/event-stream` to request SSE from the server.
+    /// Falls back to blocking pull if the server doesn't support SSE.
+    pub async fn pull_model_stream(
+        &self,
+        model: &str,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<()> {
+        let mut resp = self
+            .client
+            .post(format!("{}/api/models/pull", self.base_url))
+            .header("Accept", "text/event-stream")
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await?;
+
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server error {status}: {body}");
+        }
+
+        // Check if server returned SSE or plain text
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !content_type.contains("text/event-stream") {
+            // Old server — blocking pull, no progress. Just consume the response.
+            let _ = resp.text().await?;
+            return Ok(());
+        }
+
+        // Parse SSE events (same pattern as generate_stream)
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                let mut event_type = String::new();
+                let mut data = String::new();
+                for line in event_text.lines() {
+                    if line.starts_with(':') {
+                        continue;
+                    }
+                    if let Some(t) = line.strip_prefix("event:") {
+                        event_type = t.trim().to_string();
+                    } else if let Some(d) = line.strip_prefix("data:") {
+                        data = d.trim().to_string();
+                    }
+                }
+
+                match event_type.as_str() {
+                    "progress" => {
+                        if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
+                            // PullComplete signals end of pull
+                            let is_done = matches!(p, SseProgressEvent::PullComplete { .. });
+                            let _ = progress_tx.send(p);
+                            if is_done {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    "error" => {
+                        let error: SseErrorEvent = serde_json::from_str(&data)?;
+                        anyhow::bail!("server error: {}", error.message);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn host(&self) -> &str {
         &self.base_url
     }
