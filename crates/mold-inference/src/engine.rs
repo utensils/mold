@@ -56,31 +56,36 @@ pub(crate) fn rand_seed() -> u64 {
 /// Generate deterministic noise on a device with a given seed.
 ///
 /// This is the ONLY correct way to generate initial noise for denoising.
-/// It sets the device seed immediately before calling `Tensor::randn`,
-/// guaranteeing that the same seed always produces the same noise regardless
-/// of what GPU operations (text encoding, model loading) happened before.
-///
 /// All pipelines MUST use this instead of calling `device.set_seed()` +
-/// `Tensor::randn()` separately, which is fragile because intervening GPU
-/// ops can consume RNG state.
+/// `Tensor::randn()` separately.
 ///
-/// Note: same seed produces different noise on different GPU backends (CUDA vs Metal
-/// use different RNG algorithms). Determinism is guaranteed within the same backend.
-/// On CPU, `set_seed` is skipped (candle's CPU backend doesn't support it).
+/// Noise is generated on CPU using a deterministic Rust RNG, then moved to
+/// the target device. This guarantees:
+/// 1. Same seed always produces identical noise (deterministic)
+/// 2. Same seed produces the same noise across CUDA, Metal, and CPU backends
+///    (cross-platform reproducibility)
+///
+/// GPU-native RNG (Metal's HybridTaus, CUDA's cuRAND) use different algorithms
+/// that produce different sequences from the same seed. CPU generation avoids this.
 pub(crate) fn seeded_randn(
     seed: u64,
     shape: &[usize],
     device: &candle_core::Device,
     dtype: candle_core::DType,
 ) -> anyhow::Result<candle_core::Tensor> {
-    // Generate noise on the target device.
-    // For GPU: set_seed ensures deterministic randn.
-    // For CPU: candle doesn't support set_seed, but we still get consistent
-    // noise if no other threads are generating random numbers (single-threaded CLI).
-    if !device.is_cpu() {
-        device.set_seed(seed)?;
-    }
-    Ok(candle_core::Tensor::randn(0f32, 1.0, shape, device)?.to_dtype(dtype)?)
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, StandardNormal};
+
+    // Generate noise on CPU with a deterministic RNG for cross-platform reproducibility.
+    let mut rng = StdRng::seed_from_u64(seed);
+    let elem_count: usize = shape.iter().product();
+    let noise: Vec<f32> = (0..elem_count)
+        .map(|_| StandardNormal.sample(&mut rng))
+        .collect();
+
+    let tensor = candle_core::Tensor::from_vec(noise, shape, &candle_core::Device::Cpu)?;
+    Ok(tensor.to_dtype(dtype)?.to_device(device)?)
 }
 
 #[cfg(test)]
