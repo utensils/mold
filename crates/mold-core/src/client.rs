@@ -280,6 +280,8 @@ impl MoldClient {
 
         if !content_type.contains("text/event-stream") {
             // Old server — blocking pull, no progress. Just consume the response.
+            // Drop the sender so the receiver's recv() returns None instead of blocking.
+            drop(progress_tx);
             let _ = resp.text().await?;
             return Ok(());
         }
