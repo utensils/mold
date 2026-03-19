@@ -45,7 +45,7 @@ pub struct MoldClient {
 impl MoldClient {
     pub fn new(base_url: &str) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: normalize_host(base_url),
             client: Client::new(),
         }
     }
@@ -277,6 +277,24 @@ impl MoldClient {
     }
 }
 
+/// Normalize a host string into a full URL.
+///
+/// Accepts:
+/// - Bare hostname: `hal9000` → `http://hal9000:7680`
+/// - Host with port: `hal9000:8080` → `http://hal9000:8080`
+/// - Full URL: `http://hal9000:7680` → unchanged
+/// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
+fn normalize_host(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.contains("://") {
+        trimmed.to_string()
+    } else if trimmed.contains(':') {
+        format!("http://{trimmed}")
+    } else {
+        format!("http://{trimmed}:7680")
+    }
+}
+
 /// Error indicating a model was not found on the server (404 with body).
 /// Detected by [`MoldClient::is_model_not_found`].
 #[derive(Debug)]
@@ -347,5 +365,59 @@ mod tests {
     fn test_is_model_not_found_generic_error() {
         let err = anyhow::anyhow!("something else");
         assert!(!MoldClient::is_model_not_found(&err));
+    }
+
+    #[test]
+    fn test_normalize_bare_hostname() {
+        let client = MoldClient::new("hal9000");
+        assert_eq!(client.host(), "http://hal9000:7680");
+    }
+
+    #[test]
+    fn test_normalize_hostname_with_port() {
+        let client = MoldClient::new("hal9000:8080");
+        assert_eq!(client.host(), "http://hal9000:8080");
+    }
+
+    #[test]
+    fn test_normalize_full_url_unchanged() {
+        let client = MoldClient::new("http://hal9000:7680");
+        assert_eq!(client.host(), "http://hal9000:7680");
+    }
+
+    #[test]
+    fn test_normalize_https_no_port() {
+        let client = MoldClient::new("https://hal9000");
+        assert_eq!(client.host(), "https://hal9000");
+    }
+
+    #[test]
+    fn test_normalize_http_no_port() {
+        let client = MoldClient::new("http://hal9000");
+        assert_eq!(client.host(), "http://hal9000");
+    }
+
+    #[test]
+    fn test_normalize_localhost() {
+        let client = MoldClient::new("localhost");
+        assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_trimmed() {
+        let client = MoldClient::new("  hal9000  ");
+        assert_eq!(client.host(), "http://hal9000:7680");
+    }
+
+    #[test]
+    fn test_normalize_ip_address() {
+        let client = MoldClient::new("192.168.1.100");
+        assert_eq!(client.host(), "http://192.168.1.100:7680");
+    }
+
+    #[test]
+    fn test_normalize_ip_with_port() {
+        let client = MoldClient::new("192.168.1.100:9090");
+        assert_eq!(client.host(), "http://192.168.1.100:9090");
     }
 }
