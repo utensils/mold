@@ -107,6 +107,38 @@ mod tests {
     }
 
     #[test]
+    fn seeded_randn_deterministic_same_seed() {
+        let dev = candle_core::Device::Cpu;
+        let a = seeded_randn(1337, &[1, 16, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let b = seeded_randn(1337, &[1, 16, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let diff = (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0, "same seed must produce identical noise");
+    }
+
+    #[test]
+    fn seeded_randn_different_seeds_differ() {
+        let dev = candle_core::Device::Cpu;
+        let a = seeded_randn(42, &[1, 4, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let b = seeded_randn(43, &[1, 4, 8, 8], &dev, candle_core::DType::F32).unwrap();
+        let diff = (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(diff > 0.0, "different seeds must produce different noise");
+    }
+
+    #[test]
     fn gpu_dtype_cpu_returns_f32() {
         assert_eq!(
             gpu_dtype(&candle_core::Device::Cpu),
