@@ -414,20 +414,17 @@ mod tests {
     }
 
     #[test]
-    fn test_from_env_uses_mold_host() {
-        // Use a unique value so parallel tests don't collide
+    fn test_from_env_mold_host() {
+        // Single test to avoid env var races between parallel tests
+        unsafe { std::env::remove_var("MOLD_HOST") };
+        let client = MoldClient::from_env();
+        assert_eq!(client.host(), "http://localhost:7680");
+
         let unique_url = "http://test-host-env:9999";
         unsafe { std::env::set_var("MOLD_HOST", unique_url) };
         let client = MoldClient::from_env();
         assert_eq!(client.host(), unique_url);
         unsafe { std::env::remove_var("MOLD_HOST") };
-    }
-
-    #[test]
-    fn test_from_env_default_when_unset() {
-        unsafe { std::env::remove_var("MOLD_HOST") };
-        let client = MoldClient::from_env();
-        assert_eq!(client.host(), "http://localhost:7680");
     }
 
     #[test]
