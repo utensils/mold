@@ -1,12 +1,16 @@
 [package]
-name = "mold-inference"
+name = "mold-ai-inference"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Candle-based FLUX inference engine for mold"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Candle-based inference engine for mold — FLUX, SDXL, SD3.5, Z-Image diffusion models"
 
 [lib]
+name = "mold_inference"
 test = false
 
 [features]
@@ -15,11 +19,11 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 [dependencies]
-mold-core = { path = "../mold-core" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.1.0" }
 anyhow = "1"
-candle-core = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
-candle-nn = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
-candle-transformers = { git = "https://github.com/huggingface/candle", rev = "38e7202" }
+candle-core = { version = "0.9.2", package = "candle-core-mold" }
+candle-nn = { version = "0.9.2", package = "candle-nn-mold" }
+candle-transformers = { version = "0.9.2", package = "candle-transformers-mold" }
 image = "0.25"
 rand = "0.8"
 rand_distr = "0.4"

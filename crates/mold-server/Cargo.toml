@@ -1,12 +1,16 @@
 [package]
-name = "mold-server"
+name = "mold-ai-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "HTTP inference server for mold"
 
 [lib]
+name = "mold_server"
 test = false
 
 [[bin]]
@@ -19,9 +23,10 @@ default = []
 cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
 
+
 [dependencies]
-mold-core = { path = "../mold-core" }
-mold-inference = { path = "../mold-inference" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.1.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.1.0" }
 anyhow = "1"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

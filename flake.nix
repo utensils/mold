@@ -121,7 +121,7 @@
             commonArgs
             // {
               inherit cargoArtifacts meta;
-              cargoExtraArgs = "-p mold-cli" + lib.optionalString (gpuFeature != "") " --features ${gpuFeature}";
+              cargoExtraArgs = "-p mold-ai" + lib.optionalString (gpuFeature != "") " --features ${gpuFeature}";
             }
           );
         in
@@ -234,8 +234,8 @@
               {
                 category = "build";
                 name = "build-server";
-                help = "cargo build -p mold-cli --features ${gpuFeature} (single binary with GPU)";
-                command = "cargo build -p mold-cli --features ${gpuFeature} \"$@\"";
+                help = "cargo build -p mold-ai --features ${gpuFeature} (single binary with GPU)";
+                command = "cargo build -p mold-ai --features ${gpuFeature} \"$@\"";
               }
               {
                 category = "check";
@@ -287,19 +287,19 @@
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "cargo run -p mold-cli --features ${gpuFeature} -- \"$@\"";
+                command = "cargo run -p mold-ai --features ${gpuFeature} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
                 help = "start the mold server";
-                command = "cargo run -p mold-cli --features ${gpuFeature} -- serve \"$@\"";
+                command = "cargo run -p mold-ai --features ${gpuFeature} -- serve \"$@\"";
               }
               {
                 category = "run";
                 name = "generate";
                 help = "generate an image from a prompt";
-                command = "cargo run -p mold-cli --features ${gpuFeature} -- run \"$@\"";
+                command = "cargo run -p mold-ai --features ${gpuFeature} -- run \"$@\"";
               }
             ];
           };

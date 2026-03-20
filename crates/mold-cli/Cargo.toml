@@ -1,10 +1,13 @@
 [package]
-name = "mold-cli"
+name = "mold-ai"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI for mold — AI image generation"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Local AI image generation CLI — FLUX, SDXL, SD3.5, Z-Image diffusion models on your GPU"
 
 [[bin]]
 name = "mold"
@@ -16,9 +19,9 @@ cuda = ["mold-server/cuda", "mold-inference/cuda"]
 metal = ["mold-server/metal", "mold-inference/metal"]
 
 [dependencies]
-mold-core = { path = "../mold-core" }
-mold-inference = { path = "../mold-inference" }
-mold-server = { path = "../mold-server" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.1.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.1.0" }
+mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.1.0" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }

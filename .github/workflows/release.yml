@@ -3,9 +3,10 @@ name: Release
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -22,7 +23,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build (Metal)
-        run: cargo build --release -p mold-cli --features metal
+        run: cargo build --release -p mold-ai --features metal
 
       - name: Ad-hoc code sign
         run: codesign -s - target/release/mold
@@ -56,7 +57,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-cli --features cuda
+        run: cargo build --release -p mold-ai --features cuda
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda.tar.gz -C target/release mold
@@ -66,7 +67,9 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda
           path: mold-x86_64-unknown-linux-gnu-cuda.tar.gz
 
-  release:
+  # Rolling pre-release on every push to main
+  release-latest:
+    if: github.ref == 'refs/heads/main'
     needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     permissions:
@@ -115,3 +118,92 @@ jobs:
             tar xzf mold-x86_64-unknown-linux-gnu-cuda.tar.gz
             ./mold version
             ```
+
+  # Versioned release + crates.io publish on v* tags
+  release-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          make_latest: true
+          files: |
+            artifacts/mold-aarch64-apple-darwin.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            artifacts/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```bash
+            # From crates.io (CPU-only, no GPU acceleration)
+            cargo install mold-ai
+
+            # From source with GPU support
+            cargo install --git https://github.com/utensils/mold --features metal  # macOS
+            cargo install --git https://github.com/utensils/mold --features cuda   # Linux
+
+            # Nix
+            nix run github:utensils/mold
+            ```
+
+            ## Download pre-built binaries
+
+            | Platform | File |
+            |----------|------|
+            | macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+
+  # Publish to crates.io on v* tags
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish mold-ai-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-core
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish mold-ai-inference
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-inference
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish mold-ai-server
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-server
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish mold-ai
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai

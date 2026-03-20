@@ -1,10 +1,16 @@
 [package]
-name = "mold-core"
+name = "mold-ai-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Shared types, API protocol, and HTTP client for mold"
+
+[lib]
+name = "mold_core"
 
 [dependencies]
 anyhow = "1"

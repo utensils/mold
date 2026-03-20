@@ -15,6 +15,9 @@ authors = ["James Brink <brink.james@gmail.com>"]
 description = "Local AI image generation CLI — FLUX & SDXL diffusion models on your GPU"
 homepage = "https://github.com/utensils/mold"
 repository = "https://github.com/utensils/mold"
+readme = "README.md"
+keywords = ["ai", "image-generation", "diffusion", "flux", "gpu"]
+categories = ["command-line-utilities", "multimedia::images", "science"]
 
 [workspace.metadata.crane]
 name = "mold"
@@ -23,13 +26,4 @@ name = "mold"
 lto = "fat"
 codegen-units = 1
 strip = true
-
-# Patch candle to fix Metal quantized matmul producing incorrect results.
-# Per-matmul dequantization on Metal: dequantize weight to F32 for each matmul
-# call, use standard Metal GEMM, then free the temporary copy. Peak extra memory
-# is ~200MB (one layer) instead of ~16GB (full model dequantization).
-[patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
-candle-nn = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
-candle-transformers = { git = "https://github.com/utensils/candle", branch = "mold-metal-fix" }
 
