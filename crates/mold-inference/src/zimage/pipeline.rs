@@ -46,6 +46,8 @@ struct LoadedZImage {
     dtype: DType,
     /// Whether the transformer is a GGUF quantized model (needed for reload).
     is_quantized: bool,
+    /// Path to the VAE safetensors file (needed for CPU fallback reload on OOM).
+    vae_path: std::path::PathBuf,
 }
 
 /// Z-Image inference engine backed by candle's z_image module.
@@ -518,6 +520,7 @@ impl ZImageEngine {
             vae_device,
             dtype,
             is_quantized: is_gguf,
+            vae_path: self.paths.vae.clone(),
         });
 
         tracing::info!(model = %self.model_name, "all Z-Image components loaded successfully");
@@ -960,23 +963,56 @@ impl InferenceEngine for ZImageEngine {
         // The transformer (~6.6GB for Q8) is only needed during denoising.
         // It will be reloaded from disk on the next generate() call.
         loaded.transformer = None;
+        // Synchronize to ensure CUDA's caching allocator reclaims the freed memory
+        // before VAE decode allocates large im2col workspace buffers (~6GB at 1024x1024).
+        loaded.device.synchronize()?;
         tracing::info!("Z-Image transformer dropped from GPU to free VRAM for VAE decode");
 
-        // 8. VAE decode (may be on CPU if VRAM is tight)
+        // 8. VAE decode — try GPU first, fall back to CPU on OOM
         progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
         // Remove frame dimension: (B, C, 1, H, W) → (B, C, H, W)
-        // Move latents to VAE device (may be CPU)
-        let latents = latents
-            .squeeze(2)?
-            .to_device(&loaded.vae_device)?
-            .to_dtype(if loaded.vae_device.is_cpu() {
-                DType::F32
-            } else {
-                loaded.dtype
-            })?;
-        let image = loaded.vae.decode(&latents)?;
+        let latents_4d = latents.squeeze(2)?;
+
+        // Try VAE decode on the pre-assigned device
+        let image = {
+            let decode_latents = latents_4d.to_device(&loaded.vae_device)?.to_dtype(
+                if loaded.vae_device.is_cpu() {
+                    DType::F32
+                } else {
+                    loaded.dtype
+                },
+            )?;
+            match loaded.vae.decode(&decode_latents) {
+                Ok(img) => img,
+                Err(e) if loaded.vae_device.is_cuda() => {
+                    // OOM on GPU — reload VAE on CPU and retry
+                    let err_msg = format!("{e}");
+                    if err_msg.contains("OUT_OF_MEMORY") || err_msg.contains("out of memory") {
+                        tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
+                        progress.info("VAE decode OOM on GPU — retrying on CPU");
+                        loaded.device.synchronize()?;
+                        // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
+                        let vae_cfg = VaeConfig::z_image();
+                        let vae_vb = unsafe {
+                            VarBuilder::from_mmaped_safetensors(
+                                &[loaded.vae_path.as_path()],
+                                DType::F32,
+                                &Device::Cpu,
+                            )?
+                        };
+                        let cpu_vae = AutoEncoderKL::new(&vae_cfg, vae_vb)?;
+                        let cpu_latents =
+                            latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                        cpu_vae.decode(&cpu_latents)?
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
 
         // Post-process: [-1, 1] → [0, 255] (candle z_image utility)
         let image = postprocess_image(&image)?;

@@ -21,6 +21,46 @@ use utoipa::OpenApi;
 
 use crate::state::AppState;
 
+/// Extract a clean, user-facing error message from an anyhow error.
+/// Strips backtrace frames and internal source locations that candle
+/// embeds into its Display output via `Error::bt()`.
+fn clean_error_message(e: &anyhow::Error) -> String {
+    let full = format!("{e}");
+    // Candle backtraces start with a frame number like "   0: candle_core::..."
+    // Take only lines before the first backtrace frame.
+    let mut lines: Vec<&str> = Vec::new();
+    for line in full.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("0:") || trimmed.starts_with("1:") {
+            // Check if this looks like a backtrace frame (digit + colon + space + path)
+            if trimmed.len() > 3
+                && trimmed
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit())
+            {
+                break;
+            }
+        }
+        // Also catch higher-numbered frames like "  10: ..."
+        if trimmed.len() > 2
+            && trimmed.as_bytes()[0].is_ascii_digit()
+            && trimmed.contains("::")
+            && trimmed.contains("at ")
+        {
+            break;
+        }
+        lines.push(line);
+    }
+    let msg = lines.join("\n").trim().to_string();
+    if msg.is_empty() {
+        // Fallback: just the root cause
+        format!("{}", e.root_cause())
+    } else {
+        msg
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(generate, generate_stream, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
@@ -268,7 +308,7 @@ async fn generate(
             tracing::error!("generation error: {e:#}");
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("generation error: {e}"),
+                format!("generation error: {}", clean_error_message(&e)),
             ));
         }
         Err(panic_payload) => {
@@ -379,7 +419,7 @@ async fn generate_stream(
             Ok(Ok(Err(e))) => {
                 tracing::error!("generation error: {e:#}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                    message: format!("generation error: {e}"),
+                    message: format!("generation error: {}", clean_error_message(&e)),
                 }));
             }
             Ok(Err(panic_payload)) => {
@@ -874,4 +914,59 @@ fn query_gpu_info() -> Option<GpuInfo> {
         vram_total_mb: parts[1].parse().ok()?,
         vram_used_mb: parts[2].parse().ok()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_error_message_strips_backtrace() {
+        let err = anyhow::anyhow!(
+            "DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")\n\
+             \x20  0: candle_core::error::Error::bt\n\
+             \x20           at /home/user/.cargo/git/candle/src/error.rs:264:25\n\
+             \x20  1: <core::result::Result<O,E> as candle_core::cuda_backend::error::WrapErr<O>>::w\n\
+             \x20           at /home/user/.cargo/git/candle/src/cuda_backend/error.rs:60:65"
+        );
+        let msg = clean_error_message(&err);
+        assert_eq!(
+            msg,
+            "DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")"
+        );
+    }
+
+    #[test]
+    fn clean_error_message_preserves_simple_error() {
+        let err = anyhow::anyhow!("model not found: flux-dev:q4");
+        let msg = clean_error_message(&err);
+        assert_eq!(msg, "model not found: flux-dev:q4");
+    }
+
+    #[test]
+    fn clean_error_message_preserves_multiline_without_backtrace() {
+        let err = anyhow::anyhow!("validation failed\nprompt is empty\nsteps must be > 0");
+        let msg = clean_error_message(&err);
+        assert_eq!(msg, "validation failed\nprompt is empty\nsteps must be > 0");
+    }
+
+    #[test]
+    fn clean_error_message_strips_high_numbered_frames() {
+        let err = anyhow::anyhow!(
+            "some error\n\
+             \x20 10: tokio::runtime::task::core::Core<T,S>::poll at /home/user/.cargo/tokio/src/core.rs:375\n\
+             \x20 11: std::panicking::catch_unwind at /nix/store/rust/src/panicking.rs:544"
+        );
+        let msg = clean_error_message(&err);
+        assert_eq!(msg, "some error");
+    }
+
+    #[test]
+    fn clean_error_message_empty_fallback() {
+        // An error whose Display starts immediately with a backtrace-like line
+        let err = anyhow::anyhow!("0: candle_core::error::Error::bt at /some/path.rs:10:5");
+        let msg = clean_error_message(&err);
+        // Should fall back to root_cause since all lines look like backtrace
+        assert!(!msg.is_empty());
+    }
 }
