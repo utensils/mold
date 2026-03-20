@@ -711,6 +711,9 @@ impl InferenceEngine for QwenImageEngine {
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
         loaded.transformer = None;
+        // Synchronize to ensure CUDA's caching allocator reclaims the freed memory
+        // before VAE decode allocates workspace buffers.
+        loaded.device.synchronize()?;
         tracing::info!("Qwen-Image transformer dropped to free VRAM for VAE decode");
 
         // 8. VAE decode
