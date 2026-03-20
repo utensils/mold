@@ -46,8 +46,8 @@ mold run flux-dev:q4 "a turtle in the desert"
 mold run sdxl-turbo "espresso in a tiny cup"
 mold run dreamshaper-v8 "fantasy castle on a cliff"
 
-# Reproducible results
-mold run "a bird on a beachball" --seed 1337
+# Reproducible results (the logo above was generated this way)
+mold run z-image-turbo:bf16 "A minimal modern logo for 'mold' on a solid black background. A stylized casting mold shape formed from smooth gradient lines transitioning from cyan to magenta. The negative space inside the mold reveals a glowing latent grid pattern suggesting AI diffusion. Bold lowercase 'mold' typography below in clean sans-serif. Flat vector style, no photorealism" --seed 1337
 
 # Custom size and steps
 mold run "a portrait" --width 768 --height 1024 --steps 30
