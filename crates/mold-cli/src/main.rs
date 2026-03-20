@@ -26,7 +26,13 @@ impl std::error::Error for AlreadyReported {}
 #[derive(Parser)]
 #[command(
     name = "mold",
-    about = "Local AI image generation — FLUX, SD1.5, SDXL & Z-Image diffusion models on your GPU"
+    about = "Local AI image generation — FLUX, SD1.5, SDXL & Z-Image diffusion models on your GPU",
+    after_long_help = "\
+Quick start:
+  mold pull flux-schnell:q8        Download a model
+  mold run \"a cat on a skateboard\"  Generate an image
+
+Run 'mold <command> --help' for more information on a command."
 )]
 #[command(version, propagate_version = true)]
 struct Cli {
@@ -40,6 +46,13 @@ enum Commands {
     ///
     /// First positional arg is treated as MODEL if it matches a known model name.
     /// Remaining args are the prompt.
+    #[command(after_long_help = "\
+Examples:
+  mold run \"a cat on a skateboard\"
+  mold run flux-dev:q4 \"a sunset over mountains\"
+  mold run \"a cat\" --seed 42 --steps 20 -o cat.png
+  mold run \"a cat\" | viu -
+  echo \"a dog\" | mold run flux-schnell")]
     Run {
         /// Model name (e.g. flux-dev:q4, flux-schnell)
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
@@ -49,63 +62,71 @@ enum Commands {
         prompt_rest: Vec<String>,
 
         /// Output file path
-        #[arg(short, long)]
+        #[arg(short, long, help_heading = "Output")]
         output: Option<String>,
 
+        /// Output format
+        #[arg(long, default_value = "png", help_heading = "Output")]
+        format: String,
+
         /// Image width — defaults to model config value
-        #[arg(long)]
+        #[arg(long, help_heading = "Image")]
         width: Option<u32>,
 
         /// Image height — defaults to model config value
-        #[arg(long)]
+        #[arg(long, help_heading = "Image")]
         height: Option<u32>,
 
         /// Number of inference steps — defaults to model config value
-        #[arg(long)]
+        #[arg(long, help_heading = "Image")]
         steps: Option<u32>,
 
         /// Guidance scale — defaults to model config value
-        #[arg(long)]
+        #[arg(long, help_heading = "Image")]
         guidance: Option<f64>,
 
         /// Random seed
-        #[arg(long)]
+        #[arg(long, help_heading = "Image")]
         seed: Option<u64>,
 
         /// Number of images to generate
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "1", help_heading = "Image")]
         batch: u32,
 
-        /// Override MOLD_HOST
-        #[arg(long)]
+        /// Server URL to connect to
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
         host: Option<String>,
 
-        /// Output format
-        #[arg(long, default_value = "png")]
-        format: String,
-
         /// Skip server and run inference locally (requires GPU features)
-        #[arg(long)]
+        #[arg(long, help_heading = "Server")]
         local: bool,
 
         /// T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3
-        #[arg(long)]
+        #[arg(long, help_heading = "Advanced")]
         t5_variant: Option<String>,
 
         /// Qwen3 text encoder variant (Z-Image): auto (default), bf16, q8, q6, iq4, q3
-        #[arg(long)]
+        #[arg(long, help_heading = "Advanced")]
         qwen3_variant: Option<String>,
 
         /// Keep all model components loaded simultaneously (faster but uses more memory).
         /// By default, components are loaded and unloaded sequentially to reduce peak memory.
-        #[arg(long)]
+        #[arg(long, help_heading = "Advanced")]
         eager: bool,
     },
 
     /// Start the inference server
+    #[command(after_long_help = "\
+Examples:
+  mold serve
+  mold serve --port 8080
+  mold serve --bind 127.0.0.1 --port 9000
+  MOLD_PORT=8080 mold serve
+
+Clients connect via MOLD_HOST=http://<addr>:<port>")]
     Serve {
-        /// Server port (default: 7680, or MOLD_PORT env var)
-        #[arg(long, default_value_t = default_port())]
+        /// Server port
+        #[arg(long, env = "MOLD_PORT", default_value_t = 7680)]
         port: u16,
 
         /// Bind address
@@ -113,7 +134,7 @@ enum Commands {
         bind: String,
 
         /// Models directory
-        #[arg(long)]
+        #[arg(long, env = "MOLD_MODELS_DIR")]
         models_dir: Option<String>,
 
         /// Log output format
@@ -122,6 +143,12 @@ enum Commands {
     },
 
     /// Download model weights from HuggingFace
+    #[command(after_long_help = "\
+Examples:
+  mold pull flux-schnell:q8
+  mold pull sdxl-turbo:fp16
+
+Run 'mold list' to see all available models.")]
     Pull {
         /// Model name to download
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
@@ -129,7 +156,15 @@ enum Commands {
     },
 
     /// Remove downloaded model(s) and their unique files
-    #[command(alias = "remove")]
+    #[command(
+        alias = "remove",
+        after_long_help = "\
+Examples:
+  mold rm flux-dev:q4
+  mold rm flux-dev:q4 sdxl-turbo:fp16 --force
+
+Files shared between models (e.g. VAE, CLIP) are kept until no model references them."
+    )]
     Rm {
         /// Model name(s) to remove
         #[arg(required = true, num_args = 1..)]
@@ -141,11 +176,15 @@ enum Commands {
         force: bool,
     },
 
-    /// List locally available models
+    /// List locally available models — shows installed models with disk usage, plus models available to pull
     #[command(alias = "ls")]
     List,
 
     /// Show detailed model information
+    #[command(after_long_help = "\
+Examples:
+  mold info flux-dev:q4
+  mold info sdxl-turbo:fp16 --verify")]
     Info {
         /// Model name (e.g. flux-dev:q4, sdxl-turbo:fp16)
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
@@ -157,15 +196,37 @@ enum Commands {
     },
 
     /// Unload the current model from the server to free GPU memory
+    #[command(
+        after_long_help = "Requires a running server (mold serve). Use 'mold ps' to check status."
+    )]
     Unload,
 
     /// Show server status and loaded models
+    #[command(after_long_help = "Use 'mold unload' to free GPU memory when idle.")]
     Ps,
 
     /// Show version information
     Version,
 
     /// Generate shell completions (sources dynamic model-name completion)
+    #[command(after_long_help = "\
+Setup instructions:
+
+  zsh (add to ~/.zshrc):
+    source <(mold completions zsh)
+
+  bash (add to ~/.bashrc):
+    source <(mold completions bash)
+
+  fish (persist to completions dir):
+    mold completions fish | source
+    mold completions fish > ~/.config/fish/completions/mold.fish
+
+  elvish:
+    eval (mold completions elvish | slurp)
+
+  powershell (add to $PROFILE):
+    mold completions powershell | Out-String | Invoke-Expression")]
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: String,
@@ -195,13 +256,6 @@ async fn main() {
         }
         std::process::exit(1);
     }
-}
-
-fn default_port() -> u16 {
-    std::env::var("MOLD_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(7680)
 }
 
 async fn run() -> anyhow::Result<()> {
