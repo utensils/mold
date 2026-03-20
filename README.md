@@ -45,11 +45,26 @@ mold run dreamshaper-v8 "fantasy castle on a cliff"
 # Reproducible results
 mold run "a bird on a beachball" --seed 1337
 
-# Pipe to a viewer
-mold run "neon cityscape" | viu -
-
 # Custom size and steps
 mold run "a portrait" --width 768 --height 1024 --steps 30
+```
+
+### Piping
+
+Mold is pipe-friendly in both directions. When stdout is not a terminal, raw image bytes go to stdout and status/progress goes to stderr.
+
+```bash
+# Pipe output to an image viewer
+mold run "neon cityscape" | viu -
+
+# Pipe prompt from stdin
+echo "a cat riding a motorcycle" | mold run flux-schnell
+
+# Chain with other tools
+cat prompt.txt | mold run z-image-turbo --seed 42 | convert - -resize 512x512 thumbnail.png
+
+# Pipe in and out
+echo "cyberpunk samurai" | mold run flux-dev:q4 | viu -
 ```
 
 ### Manage models

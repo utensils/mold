@@ -157,6 +157,7 @@ Main binary. Feature flags `cuda` and `metal` forward through `mold-server` → 
 ```
 mold run [MODEL] [PROMPT...] [OPTIONS]
     First positional arg is MODEL if it matches a known model name; otherwise it's prompt.
+    Prompt can also be piped via stdin: echo "a cat" | mold run flux-schnell
 
     -m, --model <MODEL>         Explicit model override
     -o, --output <PATH>         Output file [default: ./mold-{model}-{timestamp}.png]
@@ -182,7 +183,7 @@ mold version                    Show version
 mold completions <SHELL>        Generate shell completions
 ```
 
-**Piping**: When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. `mold run "a cat" | viu -` just works. `--output -` forces stdout even in interactive terminals.
+**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux-schnell | viu -` just works. `--output -` forces stdout even in interactive terminals.
 
 ## Environment Variables
 

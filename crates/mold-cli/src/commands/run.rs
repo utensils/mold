@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
 use mold_core::Config;
+use std::io::{IsTerminal, Read};
 
 use super::generate;
 
@@ -66,11 +67,28 @@ pub async fn run(
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
 
+    // If no prompt from args, try reading from stdin (supports piping)
+    let prompt = match prompt {
+        Some(p) => Some(p),
+        None if !std::io::stdin().is_terminal() => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            let trimmed = buf.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        None => None,
+    };
+
     let prompt = prompt.ok_or_else(|| {
         anyhow::anyhow!(
             "no prompt provided\n\n\
              Usage: mold run [MODEL] <PROMPT>\n\
-             Example: mold run flux-dev:q4 \"a turtle in the desert\""
+             Example: mold run flux-dev:q4 \"a turtle in the desert\"\n\
+             Stdin:   echo \"a turtle\" | mold run flux-dev:q4"
         )
     })?;
 
