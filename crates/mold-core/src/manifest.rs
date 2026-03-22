@@ -2536,4 +2536,57 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn total_download_size_equals_sum_of_file_sizes() {
+        for manifest in known_manifests() {
+            let total = total_download_size(&manifest);
+            let sum: u64 = manifest.files.iter().map(|f| f.size_bytes).sum();
+            assert_eq!(
+                total, sum,
+                "total_download_size mismatch for {}",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
+    fn compute_download_remaining_lte_total() {
+        // remaining_bytes must always be <= total_bytes
+        for manifest in known_manifests() {
+            let (total, remaining) = compute_download_size(&manifest);
+            assert!(
+                remaining <= total,
+                "remaining ({remaining}) > total ({total}) for {}",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
+    fn total_file_bytes_is_positive_for_all_manifests() {
+        // Every manifest must have files that sum to a positive total
+        for manifest in known_manifests() {
+            let total = total_download_size(&manifest);
+            assert!(total > 0, "total_download_size is 0 for {}", manifest.name);
+        }
+    }
+
+    #[test]
+    fn wuerstchen_no_storage_path_collisions() {
+        let manifest = find_manifest("wuerstchen-v2:fp16").unwrap();
+        let paths: Vec<_> = manifest
+            .files
+            .iter()
+            .map(|f| storage_path(&manifest, f))
+            .collect();
+        // No two files should resolve to the same local path
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(
+            paths.len(),
+            unique.len(),
+            "storage path collision in wuerstchen manifest: {:?}",
+            paths
+        );
+    }
 }
