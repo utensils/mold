@@ -3,6 +3,7 @@ use base64::Engine as _;
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::error::MoldError;
 use crate::types::{
     GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus, SseCompleteEvent,
     SseErrorEvent, SseProgressEvent,
@@ -136,6 +137,12 @@ impl MoldClient {
     /// Check whether an error is a connection error (e.g. "connection refused").
     /// Useful for deciding whether to fall back to local inference.
     pub fn is_connection_error(err: &anyhow::Error) -> bool {
+        // Check for MoldError::Client variant
+        if let Some(mold_err) = err.downcast_ref::<MoldError>() {
+            if matches!(mold_err, MoldError::Client(_)) {
+                return true;
+            }
+        }
         if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
             return reqwest_err.is_connect();
         }
@@ -145,6 +152,12 @@ impl MoldClient {
     /// Check whether an error is a 404 "model not found" from the server.
     /// Useful for triggering a server-side pull when the model isn't downloaded.
     pub fn is_model_not_found(err: &anyhow::Error) -> bool {
+        // Check for MoldError::ModelNotFound variant
+        if let Some(mold_err) = err.downcast_ref::<MoldError>() {
+            if matches!(mold_err, MoldError::ModelNotFound(_)) {
+                return true;
+            }
+        }
         if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
             return reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND);
         }
@@ -177,12 +190,12 @@ impl MoldClient {
                 return Ok(None);
             }
             // Non-empty 404 = model not found
-            return Err(ModelNotFoundError(body).into());
+            return Err(MoldError::ModelNotFound(body).into());
         }
 
         if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("validation error: {body}");
+            return Err(MoldError::Validation(format!("validation error: {body}")).into());
         }
 
         if resp.status().is_client_error() || resp.status().is_server_error() {
@@ -516,5 +529,18 @@ mod tests {
     fn test_normalize_ip_with_port() {
         let client = MoldClient::new("192.168.1.100:9090");
         assert_eq!(client.host(), "http://192.168.1.100:9090");
+    }
+
+    #[test]
+    fn test_is_model_not_found_via_mold_error() {
+        let err: anyhow::Error =
+            MoldError::ModelNotFound("model 'test' is not downloaded".to_string()).into();
+        assert!(MoldClient::is_model_not_found(&err));
+    }
+
+    #[test]
+    fn test_is_connection_error_via_mold_error() {
+        let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
+        assert!(MoldClient::is_connection_error(&err));
     }
 }
