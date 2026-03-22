@@ -21,6 +21,65 @@ use utoipa::OpenApi;
 
 use crate::state::AppState;
 
+// ── ApiError — structured JSON error response ────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ApiError {
+    pub error: String,
+    pub code: String,
+    #[serde(skip)]
+    status: StatusCode,
+}
+
+impl ApiError {
+    pub fn validation(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "VALIDATION_ERROR".to_string(),
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+        }
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "MODEL_NOT_FOUND".to_string(),
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    pub fn unknown_model(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "UNKNOWN_MODEL".to_string(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    pub fn inference(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "INFERENCE_ERROR".to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "INTERNAL_ERROR".to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let status = self.status;
+        (status, Json(self)).into_response()
+    }
+}
+
 /// Extract a clean, user-facing error message from an anyhow error.
 /// Strips backtrace frames and internal source locations that candle
 /// embeds into its Display output via `Error::bt()`.
@@ -129,7 +188,7 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
 async fn check_model_available(
     state: &AppState,
     model_name: &str,
-) -> Result<Option<ModelPaths>, (StatusCode, String)> {
+) -> Result<Option<ModelPaths>, ApiError> {
     // Fast path: engine exists, correct model, already loaded
     {
         let engine = state.engine.lock().await;
@@ -161,22 +220,17 @@ async fn check_model_available(
 
     // Model paths not found — tell the client to pull or report unknown model
     if mold_core::manifest::find_manifest(model_name).is_some() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("model '{model_name}' is not downloaded. Run: mold pull {model_name}"),
-        ));
+        return Err(ApiError::not_found(format!(
+            "model '{model_name}' is not downloaded. Run: mold pull {model_name}"
+        )));
     }
-    Err((
-        StatusCode::BAD_REQUEST,
-        format!("unknown model '{model_name}'. Run 'mold list' to see available models."),
-    ))
+    Err(ApiError::unknown_model(format!(
+        "unknown model '{model_name}'. Run 'mold list' to see available models."
+    )))
 }
 
 /// Ensure the requested model is loaded and ready for inference.
-async fn ensure_model_ready(
-    state: &AppState,
-    model_name: &str,
-) -> Result<(), (StatusCode, String)> {
+async fn ensure_model_ready(state: &AppState, model_name: &str) -> Result<(), ApiError> {
     match check_model_available(state, model_name).await? {
         Some(paths) => create_and_load_engine(state, model_name, paths, None).await,
         None => Ok(()),
@@ -191,7 +245,7 @@ async fn create_and_load_engine(
     model_name: &str,
     paths: ModelPaths,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let config = state.config.read().await;
     let mut new_engine = mold_inference::create_engine(
         model_name.to_string(),
@@ -199,12 +253,7 @@ async fn create_and_load_engine(
         &config,
         mold_inference::LoadStrategy::Eager,
     )
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to create engine for '{model_name}': {e}"),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(format!("failed to create engine for '{model_name}': {e}")))?;
     drop(config);
 
     // Install progress callback for SSE streaming (captures load events)
@@ -236,10 +285,7 @@ async fn create_and_load_engine(
             tracing::info!(model = %model_name, "loading model...");
             e.load().map_err(|e| {
                 tracing::error!("model load failed: {e:#}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("model load error: {e}"),
-                )
+                ApiError::internal(format!("model load error: {e}"))
             })?;
         }
     }
@@ -264,7 +310,7 @@ async fn create_and_load_engine(
 async fn generate(
     State(state): State<AppState>,
     Json(req): Json<mold_core::GenerateRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ApiError> {
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
@@ -279,7 +325,7 @@ async fn generate(
 
     // Validate request before touching the engine
     if let Err(e) = validate_generate_request(&req) {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+        return Err(ApiError::validation(e));
     }
 
     // Ensure model is ready (handles empty state, hot-swap, lazy load)
@@ -296,20 +342,17 @@ async fn generate(
     .await
     .map_err(|e| {
         tracing::error!("inference task join error: {e:?}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "inference task failed".to_string(),
-        )
+        ApiError::inference("inference task failed")
     })?;
 
     let mut response = match result {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
             tracing::error!("generation error: {e:#}");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("generation error: {}", clean_error_message(&e)),
-            ));
+            return Err(ApiError::inference(format!(
+                "generation error: {}",
+                clean_error_message(&e)
+            )));
         }
         Err(panic_payload) => {
             let msg = panic_payload
@@ -318,10 +361,7 @@ async fn generate(
                 .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
             tracing::error!("inference panicked: {msg}");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("inference panicked: {msg}"),
-            ));
+            return Err(ApiError::inference(format!("inference panicked: {msg}")));
         }
     };
 
@@ -360,8 +400,7 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
 async fn generate_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::GenerateRequest>,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, (StatusCode, String)>
-{
+) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
@@ -370,7 +409,7 @@ async fn generate_stream(
 
     // Validate before starting the SSE stream (returns HTTP error, not SSE event)
     if let Err(e) = validate_generate_request(&req) {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, e));
+        return Err(ApiError::validation(e));
     }
 
     // Check model availability (404/400 returned as HTTP errors before SSE starts)
@@ -384,10 +423,12 @@ async fn generate_stream(
     tokio::spawn(async move {
         // Load model if needed (with progress events)
         if let Some(paths) = model_paths {
-            if let Err((_, msg)) =
+            if let Err(api_err) =
                 create_and_load_engine(&state, &req.model, paths, Some(&bg_tx)).await
             {
-                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent { message: msg }));
+                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                    message: api_err.error,
+                }));
                 return;
             }
         }
@@ -590,7 +631,7 @@ pub struct LoadModelBody {
 async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ApiError> {
     ensure_model_ready(&state, &body.model).await?;
     tracing::info!(model = %body.model, "model loaded via API");
     Ok(StatusCode::OK)
@@ -613,7 +654,7 @@ async fn pull_model_endpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<LoadModelBody>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, ApiError> {
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -633,10 +674,9 @@ async fn pull_model_endpoint(
     if mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
         .is_none()
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("unknown model '{model}'. Run 'mold list' to see available models."),
-        ));
+        return Err(ApiError::unknown_model(format!(
+            "unknown model '{model}'. Run 'mold list' to see available models."
+        )));
     }
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
@@ -747,10 +787,7 @@ async fn pull_model_endpoint(
 }
 
 /// Legacy blocking pull — returns plain text.
-async fn pull_model_blocking(
-    state: AppState,
-    model: String,
-) -> Result<String, (StatusCode, String)> {
+async fn pull_model_blocking(state: AppState, model: String) -> Result<String, ApiError> {
     let _guard = state.pull_lock.lock().await;
 
     {
@@ -766,10 +803,7 @@ async fn pull_model_blocking(
         .await
         .map_err(|e| {
             tracing::error!("pull failed for {}: {e}", model);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to pull model '{}': {e}", model),
-            )
+            ApiError::internal(format!("failed to pull model '{}': {e}", model))
         })?;
 
     {
@@ -806,9 +840,7 @@ impl IntoResponse for PullResponse {
         (status = 200, description = "Model unloaded or no model was loaded", body = String),
     )
 )]
-async fn unload_model(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let mut engine = state.engine.lock().await;
     match engine.as_mut() {
         Some(e) if e.is_loaded() => {
