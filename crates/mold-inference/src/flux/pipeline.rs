@@ -569,11 +569,11 @@ impl FluxEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                crate::img_utils::NormalizeRange::ZeroToOne,
+                crate::img_utils::NormalizeRange::MinusOneToOne,
                 &device,
                 gpu_dtype,
             )?;
-            // FLUX VAE encode returns latents directly (shift/scale applied internally)
+            // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
             let encoded = vae.encode(&source_tensor)?;
             self.progress
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
@@ -860,7 +860,7 @@ impl InferenceEngine for FluxEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                crate::img_utils::NormalizeRange::ZeroToOne,
+                crate::img_utils::NormalizeRange::MinusOneToOne,
                 &loaded.device,
                 loaded.dtype,
             )?;
