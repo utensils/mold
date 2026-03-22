@@ -2,8 +2,10 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::{
-    Config, GenerateRequest, GenerateResponse, MoldClient, OutputFormat, SseProgressEvent,
+    Config, GenerateRequest, GenerateResponse, ImageData, MoldClient, OutputFormat,
+    SseProgressEvent,
 };
+use rand::Rng;
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
@@ -108,46 +110,86 @@ pub async fn run(
         }
     }
 
-    let response = if local {
-        // --local: skip server, go straight to local inference
-        status!("{} Using local GPU inference", "●".cyan());
-        generate_local(
-            &req,
-            &config,
-            t5_variant,
-            qwen3_variant,
-            eager,
-            width,
-            height,
-            steps,
-            guidance,
-        )
-        .await?
-    } else {
-        // Try remote server: SSE streaming first, then blocking API fallback
-        let client = match &host {
-            Some(h) => MoldClient::new(h),
-            None => MoldClient::from_env(),
+    // Batch loop: generate N images with incrementing seeds.
+    // The server/engine produces 1 image per request, so we loop client-side.
+    let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut total_time_ms: u64 = 0;
+    let mut last_seed_used: u64 = base_seed;
+    let mut last_model = String::new();
+
+    for i in 0..batch {
+        let mut iter_req = req.clone();
+        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+        iter_req.batch_size = 1;
+
+        if batch > 1 {
+            status!(
+                "{} Generating image {}/{} (seed: {})",
+                "●".cyan(),
+                i + 1,
+                batch,
+                iter_req.seed.unwrap(),
+            );
+        }
+
+        let response = if local {
+            if i == 0 {
+                status!("{} Using local GPU inference", "●".cyan());
+            }
+            generate_local(
+                &iter_req,
+                &config,
+                t5_variant.clone(),
+                qwen3_variant.clone(),
+                eager,
+                width,
+                height,
+                steps,
+                guidance,
+            )
+            .await?
+        } else {
+            let client = match &host {
+                Some(h) => MoldClient::new(h),
+                None => MoldClient::from_env(),
+            };
+
+            generate_remote(
+                &client,
+                &iter_req,
+                &config,
+                model,
+                piped,
+                effective_width,
+                effective_height,
+                effective_steps,
+                t5_variant.clone(),
+                qwen3_variant.clone(),
+                eager,
+                width,
+                height,
+                steps,
+                guidance,
+            )
+            .await?
         };
 
-        generate_remote(
-            &client,
-            &req,
-            &config,
-            model,
-            piped,
-            effective_width,
-            effective_height,
-            effective_steps,
-            t5_variant,
-            qwen3_variant,
-            eager,
-            width,
-            height,
-            steps,
-            guidance,
-        )
-        .await?
+        total_time_ms += response.generation_time_ms;
+        last_seed_used = response.seed_used;
+        last_model = response.model.clone();
+
+        for mut img in response.images {
+            img.index = i;
+            all_images.push(img);
+        }
+    }
+
+    let response = GenerateResponse {
+        images: all_images,
+        generation_time_ms: total_time_ms,
+        model: last_model,
+        seed_used: last_seed_used,
     };
 
     // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
@@ -197,12 +239,22 @@ pub async fn run(
     }
 
     let secs = response.generation_time_ms as f64 / 1000.0;
-    status!(
-        "{} Done in {:.1}s (seed: {})",
-        "✓".green(),
-        secs,
-        response.seed_used,
-    );
+    if batch > 1 {
+        status!(
+            "{} Done in {:.1}s ({} images, base seed: {})",
+            "✓".green(),
+            secs,
+            batch,
+            base_seed,
+        );
+    } else {
+        status!(
+            "{} Done in {:.1}s (seed: {})",
+            "✓".green(),
+            secs,
+            response.seed_used,
+        );
+    }
 
     Ok(())
 }
