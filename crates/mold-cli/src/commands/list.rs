@@ -14,6 +14,7 @@ fn family_label(family: &str) -> &str {
         "sdxl" => "SDXL",
         "z-image" => "Z-Image",
         "qwen-image" | "qwen_image" => "Qwen-Image",
+        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         other => other,
     }
 }
@@ -29,6 +30,7 @@ fn format_family_padded(family: &str, width: usize) -> String {
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
         "qwen-image" | "qwen_image" => padded.bright_cyan().to_string(),
+        "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         _ => padded,
     }
 }
