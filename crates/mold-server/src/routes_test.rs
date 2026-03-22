@@ -307,6 +307,10 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(ct, "image/png");
+        assert!(
+            resp.headers().contains_key("x-mold-seed-used"),
+            "response should include x-mold-seed-used header"
+        );
     }
 
     // ── /api/generate — engine error ─────────────────────────────────────────

@@ -103,6 +103,11 @@ fn resolve_hf_token() -> Option<String> {
 ///
 /// This is the clean model storage root. Actual model files live at clean paths like
 /// `models/flux-schnell-q8/transformer.gguf` and `models/shared/flux/ae.safetensors`.
+///
+/// **OnceLock caching**: The directory is resolved once on the first call and cached
+/// for the entire process lifetime. Changing `MOLD_MODELS_DIR` or the config file
+/// after the first call has no effect. This is by design — model paths recorded in
+/// config must remain stable within a single process run.
 fn models_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -183,6 +188,20 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
         ))
     })?;
     Ok(())
+}
+
+/// Verify the SHA-256 digest of a file against an expected hex string.
+///
+/// Returns `Ok(true)` when the digest matches, `Ok(false)` on mismatch.
+/// Errors only on I/O failures (e.g. file not found).
+pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<bool> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(digest == expected)
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -338,6 +357,26 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
+
+        // Verify SHA-256 when expected digest is known
+        if let Some(expected) = file.sha256 {
+            match verify_sha256(&clean_path, expected) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "warning: SHA-256 mismatch for {} (file may have been updated on HuggingFace)",
+                        file.hf_filename
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to verify SHA-256 for {}: {e}",
+                        file.hf_filename
+                    );
+                }
+            }
+        }
+
         downloads.push((file.component, clean_path));
     }
 
@@ -370,6 +409,26 @@ pub async fn pull_model_with_callback(
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
+
+        // Verify SHA-256 when expected digest is known
+        if let Some(expected) = file.sha256 {
+            match verify_sha256(&clean_path, expected) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "warning: SHA-256 mismatch for {} (file may have been updated on HuggingFace)",
+                        file.hf_filename
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to verify SHA-256 for {}: {e}",
+                        file.hf_filename
+                    );
+                }
+            }
+        }
+
         downloads.push((file.component, clean_path));
     }
 
@@ -541,7 +600,7 @@ pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPath
         model: model.to_string(),
     })?;
 
-    let paths = pull_model(&manifest).await?;
+    let paths = pull_model(manifest).await?;
 
     let mut config = Config::load_or_default();
     let model_config = manifest.to_model_config(&paths);
@@ -574,7 +633,7 @@ pub async fn pull_and_configure_with_callback(
         model: model.to_string(),
     })?;
 
-    let paths = pull_model_with_callback(&manifest, callback).await?;
+    let paths = pull_model_with_callback(manifest, callback).await?;
 
     let mut config = Config::load_or_default();
     let model_config = manifest.to_model_config(&paths);
@@ -678,5 +737,28 @@ mod tests {
         }
         // Should fall through to file-based token (which may or may not exist)
         assert_ne!(token, Some("  ".to_string()));
+    }
+
+    #[test]
+    fn verify_sha256_matches() {
+        let dir = std::env::temp_dir().join("mold_test_sha256_match");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        // SHA-256 of "hello world"
+        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        assert!(verify_sha256(&path, expected).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_sha256_mismatch() {
+        let dir = std::env::temp_dir().join("mold_test_sha256_mismatch");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
+        assert!(!verify_sha256(&path, wrong).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,9 +12,13 @@ use std::time::Instant;
 use super::quantized_transformer::QuantizedZImageTransformer2DModel;
 use super::transformer::ZImageTransformer;
 use crate::device::{
-    check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, qwen3_vram_threshold, should_use_gpu, QWEN3_FP16_VRAM_THRESHOLD,
+    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    should_use_gpu,
 };
+// Re-exported for tests (test harness is disabled via `test = false` in Cargo.toml,
+// but tests reference this constant via `super::*`).
+#[cfg(test)]
+use crate::device::QWEN3_FP16_VRAM_THRESHOLD;
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
@@ -158,237 +162,11 @@ impl ZImageEngine {
         Ok(AutoEncoderKL::new(&vae_cfg, vae_vb)?)
     }
 
-    /// Resolve which Qwen3 encoder to use and where to place it.
-    /// Returns (encoder_paths, is_gguf, on_gpu, device_label).
+    /// Load all model components (Eager mode).
     ///
-    /// With drop-and-reload, the text encoder is temporary — loaded for encoding,
-    /// then dropped. This lowers the VRAM threshold from 22GB to ~10GB.
-    fn resolve_qwen3_variant(
-        &self,
-        preference: Option<&str>,
-        gpu_device: &Device,
-        free_vram: u64,
-    ) -> Result<(Vec<std::path::PathBuf>, bool, bool, String)> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-        use mold_core::manifest::{find_qwen3_variant, known_qwen3_variants};
-
-        let is_cuda = gpu_device.is_cuda();
-        let is_metal = gpu_device.is_metal();
-        let bf16_paths: Vec<std::path::PathBuf> = self.paths.text_encoder_files.clone();
-        let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
-
-        match preference {
-            // Explicit quantized variant requested
-            Some(tag) if tag != "bf16" && tag != "auto" => {
-                let variant = find_qwen3_variant(tag).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown Qwen3 variant '{}'. Valid: bf16, auto, q8, q6, iq4, q3",
-                        tag,
-                    )
-                })?;
-                let path = self.resolve_qwen3_gguf_path(variant)?;
-                let threshold = qwen3_vram_threshold(variant.size_bytes);
-                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
-                let label = if on_gpu {
-                    "GPU, quantized"
-                } else {
-                    "CPU, quantized"
-                };
-                self.progress.info(&format!(
-                    "Using Qwen3 {} ({}) on {} (explicit)",
-                    variant.tag,
-                    fmt_gb(variant.size_bytes),
-                    if on_gpu { "GPU" } else { "CPU" },
-                ));
-                Ok((vec![path], true, on_gpu, label.to_string()))
-            }
-
-            // Explicit BF16 requested
-            Some("bf16") => {
-                if !have_bf16 {
-                    bail!(
-                        "BF16 Qwen3 encoder requested but shard files are missing or not configured. \
-                         Either run `mold pull` for a Z-Image model or use --qwen3-variant q8/q6/iq4/q3."
-                    );
-                }
-                let on_gpu =
-                    should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD);
-                let label = if on_gpu { "GPU" } else { "CPU" };
-                self.progress
-                    .info(&format!("Using BF16 Qwen3 on {} (explicit)", label));
-                Ok((bf16_paths, false, on_gpu, label.to_string()))
-            }
-
-            // Auto mode (default): try BF16 on GPU → quantized on GPU → BF16 on CPU
-            _ => {
-                // Can BF16 Qwen3 fit on GPU (with drop-and-reload)?
-                if have_bf16
-                    && fits_in_memory(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD)
-                {
-                    if is_metal {
-                        self.progress
-                            .info("Loading BF16 Qwen3 on GPU (unified memory)");
-                    } else {
-                        self.progress.info(&format!(
-                            "Loading BF16 Qwen3 on GPU ({} free > {} threshold, drop-and-reload)",
-                            fmt_gb(free_vram),
-                            fmt_gb(QWEN3_FP16_VRAM_THRESHOLD),
-                        ));
-                    }
-                    return Ok((bf16_paths, false, true, "GPU".to_string()));
-                }
-
-                // BF16 won't fit (or shards missing) — try quantized variants (largest first)
-                if is_cuda || is_metal || !have_bf16 {
-                    for variant in known_qwen3_variants() {
-                        let threshold = qwen3_vram_threshold(variant.size_bytes);
-                        if fits_in_memory(is_cuda, is_metal, free_vram, threshold)
-                            || (!is_cuda && !is_metal)
-                        {
-                            let path = match cached_file_path(
-                                variant.hf_repo,
-                                variant.hf_filename,
-                                Some("shared/qwen3-gguf"),
-                            ) {
-                                Some(p) => p,
-                                None => {
-                                    self.progress.info(&format!(
-                                        "Downloading Qwen3 {} ({})...",
-                                        variant.tag,
-                                        fmt_gb(variant.size_bytes),
-                                    ));
-                                    tracing::info!(
-                                        variant = variant.tag,
-                                        repo = variant.hf_repo,
-                                        file = variant.hf_filename,
-                                        "downloading quantized Qwen3 encoder"
-                                    );
-                                    download_single_file_sync(
-                                        variant.hf_repo,
-                                        variant.hf_filename,
-                                        Some("shared/qwen3-gguf"),
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "failed to download Qwen3 {}: {e}",
-                                            variant.tag
-                                        )
-                                    })?
-                                }
-                            };
-                            let on_gpu = is_cuda || is_metal;
-                            self.progress.info(&format!(
-                                "Using Qwen3 {} ({}) on {}",
-                                variant.tag,
-                                fmt_gb(variant.size_bytes),
-                                if on_gpu { "GPU" } else { "CPU" },
-                            ));
-                            return Ok((
-                                vec![path],
-                                true,
-                                on_gpu,
-                                format!(
-                                    "{}, quantized {}",
-                                    if on_gpu { "GPU" } else { "CPU" },
-                                    variant.tag
-                                ),
-                            ));
-                        }
-                    }
-                }
-
-                // On Metal, never fall back to CPU (same memory pool). Use smallest quantized variant on GPU.
-                if is_metal {
-                    let variants = known_qwen3_variants();
-                    if let Some(smallest) = variants.last() {
-                        let path = match cached_file_path(
-                            smallest.hf_repo,
-                            smallest.hf_filename,
-                            Some("shared/qwen3-gguf"),
-                        ) {
-                            Some(p) => p,
-                            None => {
-                                self.progress.info(&format!(
-                                    "Downloading Qwen3 {} ({})...",
-                                    smallest.tag,
-                                    fmt_gb(smallest.size_bytes),
-                                ));
-                                download_single_file_sync(
-                                    smallest.hf_repo,
-                                    smallest.hf_filename,
-                                    Some("shared/qwen3-gguf"),
-                                )
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "failed to download Qwen3 {}: {e}",
-                                        smallest.tag
-                                    )
-                                })?
-                            }
-                        };
-                        self.progress.info(&format!(
-                            "Memory tight — using smallest Qwen3 {} ({}) on GPU to reduce page pressure",
-                            smallest.tag,
-                            fmt_gb(smallest.size_bytes),
-                        ));
-                        return Ok((
-                            vec![path],
-                            true,
-                            true,
-                            format!("GPU, quantized {}", smallest.tag),
-                        ));
-                    }
-                }
-
-                // Fall back to BF16 on CPU (only if shards are available)
-                if have_bf16 {
-                    if is_cuda || is_metal {
-                        self.progress.info(&format!(
-                            "Loading BF16 Qwen3 on CPU ({} free, no variant fits on GPU)",
-                            fmt_gb(free_vram),
-                        ));
-                    } else {
-                        self.progress.info("No GPU detected, loading Qwen3 on CPU");
-                    }
-                    return Ok((bf16_paths, false, false, "CPU".to_string()));
-                }
-
-                bail!(
-                    "no Qwen3 text encoder available: BF16 shards not configured and no \
-                     quantized variant could be resolved. Run `mold pull` for a Z-Image model \
-                     or use --qwen3-variant q8/q6/iq4/q3."
-                );
-            }
-        }
-    }
-
-    /// Resolve the path for a quantized Qwen3 GGUF file: check cache, download if needed.
-    fn resolve_qwen3_gguf_path(
-        &self,
-        variant: &mold_core::manifest::Qwen3Variant,
-    ) -> Result<std::path::PathBuf> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-
-        if let Some(path) = cached_file_path(
-            variant.hf_repo,
-            variant.hf_filename,
-            Some("shared/qwen3-gguf"),
-        ) {
-            return Ok(path);
-        }
-        self.progress.info(&format!(
-            "Downloading Qwen3 {} ({})...",
-            variant.tag,
-            fmt_gb(variant.size_bytes),
-        ));
-        download_single_file_sync(
-            variant.hf_repo,
-            variant.hf_filename,
-            Some("shared/qwen3-gguf"),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
-    }
-
+    /// On error, `self.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.loaded.is_some() {
             return Ok(());
@@ -468,8 +246,19 @@ impl ZImageEngine {
         self.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
         let qwen3_preference = self.qwen3_variant.as_deref();
-        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) =
-            self.resolve_qwen3_variant(qwen3_preference, &device, free)?;
+        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) = {
+            let bf16_paths = self.paths.text_encoder_files.clone();
+            let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+            crate::encoders::variant_resolution::resolve_qwen3_variant(
+                &self.progress,
+                qwen3_preference,
+                &device,
+                free,
+                &bf16_paths,
+                have_bf16,
+                false,
+            )?
+        };
         self.progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
@@ -577,8 +366,19 @@ impl ZImageEngine {
         self.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
         let qwen3_preference = self.qwen3_variant.as_deref();
-        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) =
-            self.resolve_qwen3_variant(qwen3_preference, &device, free)?;
+        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) = {
+            let bf16_paths = self.paths.text_encoder_files.clone();
+            let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+            crate::encoders::variant_resolution::resolve_qwen3_variant(
+                &self.progress,
+                qwen3_preference,
+                &device,
+                free,
+                &bf16_paths,
+                have_bf16,
+                false,
+            )?
+        };
         self.progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 

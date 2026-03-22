@@ -22,8 +22,7 @@ use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
 use super::vae::{Flux2AutoEncoder, Flux2VaeConfig};
 use crate::device::{
-    check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, qwen3_vram_threshold, should_use_gpu, QWEN3_FP16_VRAM_THRESHOLD,
+    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -129,150 +128,6 @@ impl Flux2Engine {
         }
     }
 
-    /// Resolve which Qwen3 encoder to use and where to place it.
-    /// Returns (encoder_paths, is_gguf, on_gpu, device_label).
-    fn resolve_qwen3_variant(
-        &self,
-        preference: Option<&str>,
-        gpu_device: &Device,
-        free_vram: u64,
-    ) -> Result<(Vec<std::path::PathBuf>, bool, bool, String)> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-        use mold_core::manifest::{find_qwen3_variant, known_qwen3_variants};
-
-        let is_cuda = gpu_device.is_cuda();
-        let is_metal = gpu_device.is_metal();
-        let bf16_paths = self.text_encoder_paths();
-        let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
-
-        match preference {
-            // Explicit quantized variant requested
-            Some(tag) if tag != "bf16" && tag != "auto" => {
-                let variant = find_qwen3_variant(tag).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown Qwen3 variant '{}'. Valid: bf16, auto, q8, q6, iq4, q3",
-                        tag,
-                    )
-                })?;
-                let path = self.resolve_qwen3_gguf_path(variant)?;
-                let threshold = qwen3_vram_threshold(variant.size_bytes);
-                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
-                let label = if on_gpu {
-                    "GPU, quantized"
-                } else {
-                    "CPU, quantized"
-                };
-                self.progress.info(&format!(
-                    "Using Qwen3 {} ({}) on {} (explicit)",
-                    variant.tag,
-                    fmt_gb(variant.size_bytes),
-                    if on_gpu { "GPU" } else { "CPU" },
-                ));
-                Ok((vec![path], true, on_gpu, label.to_string()))
-            }
-
-            // Explicit BF16 requested
-            Some("bf16") => {
-                if !have_bf16 {
-                    bail!("BF16 Qwen3 encoder requested but files not found");
-                }
-                let on_gpu =
-                    should_use_gpu(is_cuda, is_metal, free_vram, QWEN3_FP16_VRAM_THRESHOLD);
-                let label = if on_gpu { "GPU" } else { "CPU" };
-                self.progress
-                    .info(&format!("Using BF16 Qwen3 on {} (explicit)", label));
-                Ok((bf16_paths, false, on_gpu, label.to_string()))
-            }
-
-            // Auto mode: prefer GGUF for Flux.2 because multi-layer extraction
-            // (layers 9, 18, 27) only works with the GGUF encoder. The BF16
-            // ZImageTextEncoder only returns the final layer and falls back to
-            // repeating it 3x, which severely degrades text conditioning.
-            _ => {
-                // Try quantized variants (largest first) — preferred for Flux.2
-                if is_cuda || is_metal {
-                    for variant in known_qwen3_variants() {
-                        let threshold = qwen3_vram_threshold(variant.size_bytes);
-                        if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
-                            let path = match cached_file_path(
-                                variant.hf_repo,
-                                variant.hf_filename,
-                                Some("shared/qwen3-gguf"),
-                            ) {
-                                Some(p) => p,
-                                None => {
-                                    self.progress.info(&format!(
-                                        "Downloading Qwen3 {} ({})...",
-                                        variant.tag,
-                                        fmt_gb(variant.size_bytes),
-                                    ));
-                                    download_single_file_sync(
-                                        variant.hf_repo,
-                                        variant.hf_filename,
-                                        Some("shared/qwen3-gguf"),
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "failed to download Qwen3 {}: {e}",
-                                            variant.tag
-                                        )
-                                    })?
-                                }
-                            };
-                            self.progress.info(&format!(
-                                "Using quantized Qwen3 {} ({}) on GPU",
-                                variant.tag,
-                                fmt_gb(variant.size_bytes),
-                            ));
-                            return Ok((
-                                vec![path],
-                                true,
-                                true,
-                                format!("GPU, quantized {}", variant.tag),
-                            ));
-                        }
-                    }
-                }
-
-                // Fall back to BF16 on CPU
-                if have_bf16 {
-                    self.progress
-                        .info("Loading BF16 Qwen3 on CPU (no variant fits on GPU)");
-                    Ok((bf16_paths, false, false, "CPU".to_string()))
-                } else {
-                    bail!("No Qwen3 encoder available (no BF16 files and no GGUF cached)")
-                }
-            }
-        }
-    }
-
-    /// Resolve the path for a quantized Qwen3 GGUF file.
-    fn resolve_qwen3_gguf_path(
-        &self,
-        variant: &mold_core::manifest::Qwen3Variant,
-    ) -> Result<std::path::PathBuf> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-
-        if let Some(path) = cached_file_path(
-            variant.hf_repo,
-            variant.hf_filename,
-            Some("shared/qwen3-gguf"),
-        ) {
-            return Ok(path);
-        }
-        self.progress.info(&format!(
-            "Downloading Qwen3 {} ({})...",
-            variant.tag,
-            fmt_gb(variant.size_bytes),
-        ));
-        download_single_file_sync(
-            variant.hf_repo,
-            variant.hf_filename,
-            Some("shared/qwen3-gguf"),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
-    }
-
     /// Encode a prompt with the Qwen3 text encoder, extracting hidden states from
     /// layers 9, 18, 27 and stacking them to produce joint_attention_dim=7680.
     ///
@@ -300,6 +155,10 @@ impl Flux2Engine {
     }
 
     /// Load all model components (Eager mode).
+    ///
+    /// On error, `self.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.loaded.is_some() {
             return Ok(());
@@ -374,8 +233,19 @@ impl Flux2Engine {
 
         self.progress.stage_start("Selecting Qwen3 encoder");
         let resolve_start = Instant::now();
-        let (encoder_paths, is_gguf, on_gpu, device_label) =
-            self.resolve_qwen3_variant(self.qwen3_variant.as_deref(), &device, free)?;
+        let (encoder_paths, is_gguf, on_gpu, device_label) = {
+            let bf16_paths = self.text_encoder_paths();
+            let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+            crate::encoders::variant_resolution::resolve_qwen3_variant(
+                &self.progress,
+                self.qwen3_variant.as_deref(),
+                &device,
+                free,
+                &bf16_paths,
+                have_bf16,
+                true,
+            )?
+        };
         self.progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
@@ -447,8 +317,19 @@ impl Flux2Engine {
         let free = free_vram_bytes().unwrap_or(0);
         self.progress.stage_start("Selecting Qwen3 encoder");
         let resolve_start = Instant::now();
-        let (encoder_paths, is_gguf, on_gpu, device_label) =
-            self.resolve_qwen3_variant(self.qwen3_variant.as_deref(), &device, free)?;
+        let (encoder_paths, is_gguf, on_gpu, device_label) = {
+            let bf16_paths = self.text_encoder_paths();
+            let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+            crate::encoders::variant_resolution::resolve_qwen3_variant(
+                &self.progress,
+                self.qwen3_variant.as_deref(),
+                &device,
+                free,
+                &bf16_paths,
+                have_bf16,
+                true,
+            )?
+        };
         self.progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 

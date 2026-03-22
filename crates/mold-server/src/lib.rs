@@ -62,9 +62,28 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         }
     };
 
+    let cors = match std::env::var("MOLD_CORS_ORIGIN") {
+        Ok(origin) if !origin.is_empty() => CorsLayer::new()
+            .allow_origin(
+                origin
+                    .parse::<axum::http::HeaderValue>()
+                    .expect("invalid MOLD_CORS_ORIGIN value"),
+            )
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers(tower_http::cors::Any)
+            .expose_headers(["x-mold-seed-used"
+                .parse::<axum::http::HeaderName>()
+                .unwrap()]),
+        _ => CorsLayer::permissive(),
+    };
+
     let app = routes::create_router(state)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
     info!(%addr, "starting mold server");

@@ -19,7 +19,7 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
     }
     // Check manifest
     if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
-        return manifest.family;
+        return manifest.family.clone();
     }
     // Default to flux for backward compatibility
     "flux".to_string()
@@ -66,7 +66,9 @@ pub fn create_engine(
         }
         "sdxl" => {
             let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
-            let is_turbo = scheduler_name == "euler_ancestral" || model_name.contains("turbo");
+            let is_turbo = model_cfg.is_turbo.unwrap_or_else(|| {
+                scheduler_name == "euler_ancestral" || model_name.contains("turbo")
+            });
             Ok(Box::new(SDXLEngine::new(
                 model_name,
                 paths,
@@ -76,7 +78,9 @@ pub fn create_engine(
             )))
         }
         "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => {
-            let is_turbo = model_name.contains("turbo");
+            let is_turbo = model_cfg
+                .is_turbo
+                .unwrap_or_else(|| model_name.contains("turbo"));
             let is_medium = model_name.contains("medium");
             let t5_variant = std::env::var("MOLD_T5_VARIANT")
                 .ok()
