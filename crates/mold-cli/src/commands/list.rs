@@ -137,23 +137,26 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let size_str = if m.size_gb > 0.0 {
-                        format!("{:.1}GB", m.size_gb)
-                    } else {
-                        "—".to_string()
-                    };
-                    let fetch_col = if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
-                        let (_total_bytes, remaining_bytes) =
-                            mold_core::manifest::compute_download_size(mf);
-                        let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
-                        if remaining_bytes == 0 {
-                            "cached".dimmed().to_string()
+                    let (size_str, fetch_col) =
+                        if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
+                            let (total_bytes, remaining_bytes) =
+                                mold_core::manifest::compute_download_size(mf);
+                            let total_gb = total_bytes as f64 / 1_073_741_824.0;
+                            let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+                            let fetch = if remaining_bytes == 0 {
+                                format!("{:>7}", "cached").dimmed().to_string()
+                            } else {
+                                format!("{:.1}GB", remaining_gb)
+                            };
+                            (format!("{:.1}GB", total_gb), fetch)
                         } else {
-                            format!("{:.1}GB", remaining_gb)
-                        }
-                    } else {
-                        size_str.clone()
-                    };
+                            let s = if m.size_gb > 0.0 {
+                                format!("{:.1}GB", m.size_gb)
+                            } else {
+                                "—".to_string()
+                            };
+                            (s.clone(), s)
+                        };
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),
@@ -278,10 +281,11 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let (_total_bytes, remaining_bytes) =
+                    let (total_bytes, remaining_bytes) =
                         mold_core::manifest::compute_download_size(m);
+                    let total_gb = total_bytes as f64 / 1_073_741_824.0;
                     let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
-                    let size_str = format!("{:.1}GB", m.size_gb);
+                    let size_str = format!("{:.1}GB", total_gb);
                     let fetch_col = if remaining_bytes == 0 {
                         format!("{:>7}", "cached").dimmed().to_string()
                     } else {
