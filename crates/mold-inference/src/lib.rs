@@ -6,6 +6,7 @@ mod factory;
 pub mod flux;
 pub mod flux2;
 mod image;
+pub mod img_utils;
 pub mod model_registry;
 pub mod progress;
 pub mod qwen_image;

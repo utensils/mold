@@ -596,6 +596,9 @@ impl InferenceEngine for ZImageEngine {
                 "scheduler selection not supported for Z-Image (flow-matching), ignoring"
             );
         }
+        if req.source_image.is_some() {
+            tracing::warn!("img2img not yet supported for Z-Image — generating from text only");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

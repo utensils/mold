@@ -506,6 +506,9 @@ impl InferenceEngine for Flux2Engine {
                 "scheduler selection not supported for Flux.2 (flow-matching), ignoring"
             );
         }
+        if req.source_image.is_some() {
+            tracing::warn!("img2img not yet supported for Flux.2 — generating from text only");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

@@ -26,6 +26,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 colored = "3"
+image = "0.25"
 libc = "0.2"
 dirs = "6"
 indicatif = "0.17"

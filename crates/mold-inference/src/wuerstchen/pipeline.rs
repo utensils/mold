@@ -564,6 +564,9 @@ impl InferenceEngine for WuerstchenEngine {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for Wuerstchen, ignoring");
         }
+        if req.source_image.is_some() {
+            tracing::warn!("img2img not yet supported for Wuerstchen — generating from text only");
+        }
 
         if self.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);

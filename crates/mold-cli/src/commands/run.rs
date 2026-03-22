@@ -64,14 +64,33 @@ pub async fn run(
     qwen3_variant: Option<String>,
     scheduler: Option<Scheduler>,
     eager: bool,
+    image: Option<String>,
+    strength: f64,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
 
+    // Read source image if --image specified
+    let source_image = if let Some(ref img_path) = image {
+        let bytes = if img_path == "-" {
+            // Read binary image from stdin
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            buf
+        } else {
+            std::fs::read(img_path)
+                .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))?
+        };
+        Some(bytes)
+    } else {
+        None
+    };
+
     // If no prompt from args, try reading from stdin (supports piping)
+    // When --image - is used, stdin is consumed for the image, so prompt must come from args.
     let prompt = match prompt {
         Some(p) => Some(p),
-        None if !std::io::stdin().is_terminal() => {
+        None if image.as_deref() != Some("-") && !std::io::stdin().is_terminal() => {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf)?;
             let trimmed = buf.trim().to_string();
@@ -110,6 +129,8 @@ pub async fn run(
         qwen3_variant,
         scheduler,
         eager,
+        source_image,
+        strength,
     )
     .await
 }
