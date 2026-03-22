@@ -2273,6 +2273,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-inference",
  "mold-ai-server",
+ "rand 0.8.5",
  "sha2",
  "tokio",
  "toml",

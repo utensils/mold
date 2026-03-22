@@ -261,6 +261,8 @@ async fn create_and_load_engine(
         (status = 500, description = "Inference error"),
     )
 )]
+// The server always produces 1 image per request; batch looping (--batch N)
+// is handled client-side by the CLI, which sends N requests with incrementing seeds.
 async fn generate(
     State(state): State<AppState>,
     Json(req): Json<mold_core::GenerateRequest>,

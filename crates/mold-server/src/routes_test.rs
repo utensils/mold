@@ -10,6 +10,14 @@ mod tests {
 
     use crate::{routes::create_router, state::AppState};
 
+    /// Parse response body as JSON and return the value.
+    async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     /// Minimal mock engine for testing routes without loading models.
     struct MockEngine {
         loaded: bool,
@@ -217,6 +225,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("prompt"));
     }
 
     #[tokio::test]
@@ -233,6 +244,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
     #[tokio::test]
@@ -249,6 +262,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
     #[tokio::test]
@@ -266,6 +281,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
     #[tokio::test]
@@ -282,6 +299,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
     // ── /api/generate — success path ─────────────────────────────────────────
@@ -329,6 +348,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "INFERENCE_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("mock engine error"));
     }
 
     // ── /api/generate — unknown model ────────────────────────────────────────
