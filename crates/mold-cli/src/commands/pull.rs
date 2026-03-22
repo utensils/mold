@@ -20,20 +20,26 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
         }
     };
 
-    let shared_gb = match manifest.family.as_str() {
-        "sd15" => mold_core::manifest::SHARED_SD15_COMPONENTS_GB,
-        "sdxl" => mold_core::manifest::SHARED_SDXL_COMPONENTS_GB,
-        "z-image" => mold_core::manifest::SHARED_ZIMAGE_COMPONENTS_GB,
-        _ => mold_core::manifest::SHARED_COMPONENTS_GB,
-    };
-    let total_gb = manifest.size_gb + shared_gb;
-    status!(
-        "{} Pulling {} ({:.1}GB transformer, {:.1}GB total with shared components)",
-        "●".cyan(),
-        manifest.name.bold(),
-        manifest.size_gb,
-        total_gb,
-    );
+    let (total_bytes, remaining_bytes) = mold_core::manifest::compute_download_size(manifest);
+    let total_gb = total_bytes as f64 / 1_073_741_824.0;
+    let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+    let cached_gb = total_gb - remaining_gb;
+    if cached_gb > 0.1 {
+        status!(
+            "{} Pulling {} ({:.1}GB to download, {:.1}GB already cached)",
+            "●".cyan(),
+            manifest.name.bold(),
+            remaining_gb,
+            cached_gb,
+        );
+    } else {
+        status!(
+            "{} Pulling {} ({:.1}GB to download)",
+            "●".cyan(),
+            manifest.name.bold(),
+            total_gb,
+        );
+    }
     status!(
         "  {}",
         crate::output::colorize_description(&manifest.description)
@@ -107,23 +113,17 @@ fn print_unknown_model_error(model: &str) {
     let all = known_manifests();
     let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
     for m in all {
+        let total_bytes = mold_core::manifest::total_download_size(m);
+        let total_gb = total_bytes as f64 / 1_073_741_824.0;
         eprintln!(
             "  {:<nw$} {:>5.1}GB  {}",
             m.name.bold(),
-            m.size_gb,
+            total_gb,
             crate::output::colorize_description(&m.description),
             nw = nw,
         );
     }
     eprintln!();
-    eprintln!(
-        "{}",
-        format!(
-            "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
-            mold_core::manifest::SHARED_COMPONENTS_GB
-        )
-        .dimmed(),
-    );
     eprintln!("Usage: mold pull <model>");
 }
 

@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::wuerstchen::ddpm::{DDPMWScheduler, DDPMWSchedulerConfig};
 use candle_transformers::models::wuerstchen::diffnext::WDiffNeXt;
@@ -25,24 +25,26 @@ const PRIOR_NHEAD: usize = 24;
 const DECODER_C_IN: usize = 4;
 const DECODER_C_OUT: usize = 4;
 const DECODER_C_R: usize = 64;
-const DECODER_C_COND: usize = 1280;
-const DECODER_CLIP_EMBD: usize = 1280;
+const DECODER_C_COND: usize = 1024;
+const DECODER_CLIP_EMBD: usize = 1024;
 const DECODER_PATCH_SIZE: usize = 2;
 
 /// Latent compression ratio for Stage C (prior).
 /// Wuerstchen operates in a 42x compressed latent space.
 const LATENT_DIM_SCALE: f64 = 42.67;
 
-/// Latent compression ratio for Stage B (decoder → VQ-GAN input).
-const STAGE_B_SCALE: usize = 4;
+/// Scale factor from Prior output spatial dims to Decoder latent dims.
+const LATENT_DIM_SCALE_DECODER: f64 = 10.67;
 
 /// Loaded Wuerstchen model components, ready for inference.
 struct LoadedWuerstchen {
     prior: WPrior,
     decoder: WDiffNeXt,
     vqgan: PaellaVQ,
-    clip_g: stable_diffusion::clip::ClipTextTransformer,
-    tokenizer: tokenizers::Tokenizer,
+    prior_clip: stable_diffusion::clip::ClipTextTransformer,
+    decoder_clip: stable_diffusion::clip::ClipTextTransformer,
+    prior_tokenizer: tokenizers::Tokenizer,
+    decoder_tokenizer: tokenizers::Tokenizer,
     device: Device,
     dtype: DType,
 }
@@ -70,41 +72,70 @@ impl WuerstchenEngine {
     }
 
     /// Validate and return required Wuerstchen paths.
+    /// Returns (decoder_path, prior_clip_encoder, prior_clip_tokenizer, decoder_clip_encoder, decoder_clip_tokenizer)
     fn validate_paths(
         &self,
-    ) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    ) -> Result<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> {
         let decoder = self
             .paths
             .decoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Decoder (Stage B) path required for Wuerstchen"))?
             .clone();
-        let clip_encoder = self
+        // Prior CLIP-G (1280-dim) — stored in clip_encoder_2
+        let prior_clip_encoder = self
             .paths
             .clip_encoder_2
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G encoder path required for Wuerstchen"))?
+            .ok_or_else(|| anyhow::anyhow!("Prior CLIP-G encoder path required for Wuerstchen"))?
             .clone();
-        let clip_tokenizer = self
+        let prior_clip_tokenizer = self
             .paths
             .clip_tokenizer_2
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("CLIP-G tokenizer path required for Wuerstchen"))?
+            .ok_or_else(|| anyhow::anyhow!("Prior CLIP-G tokenizer path required for Wuerstchen"))?
+            .clone();
+        // Decoder CLIP (1024-dim) — stored in clip_encoder
+        let decoder_clip_encoder = self
+            .paths
+            .clip_encoder
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Decoder CLIP encoder path required for Wuerstchen"))?
+            .clone();
+        let decoder_clip_tokenizer = self
+            .paths
+            .clip_tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Decoder CLIP tokenizer path required for Wuerstchen"))?
             .clone();
 
         for (label, path) in [
             ("prior (Stage C)", &self.paths.transformer),
             ("decoder (Stage B)", &decoder),
             ("vqgan (Stage A)", &self.paths.vae),
-            ("clip_encoder (CLIP-G)", &clip_encoder),
-            ("clip_tokenizer (CLIP-G)", &clip_tokenizer),
+            ("prior clip_encoder", &prior_clip_encoder),
+            ("prior clip_tokenizer", &prior_clip_tokenizer),
+            ("decoder clip_encoder", &decoder_clip_encoder),
+            ("decoder clip_tokenizer", &decoder_clip_tokenizer),
         ] {
             if !path.exists() {
                 bail!("{label} file not found: {}", path.display());
             }
         }
 
-        Ok((decoder, clip_encoder, clip_tokenizer))
+        Ok((
+            decoder,
+            prior_clip_encoder,
+            prior_clip_tokenizer,
+            decoder_clip_encoder,
+            decoder_clip_tokenizer,
+        ))
     }
 
     /// Load all Wuerstchen model components (Eager mode).
@@ -117,16 +148,16 @@ impl WuerstchenEngine {
             return Ok(());
         }
 
-        let (decoder_path, clip_encoder_path, clip_tokenizer_path) = self.validate_paths()?;
+        let (decoder_path, prior_clip_path, prior_clip_tok_path, dec_clip_path, dec_clip_tok_path) =
+            self.validate_paths()?;
 
         tracing::info!(model = %self.model_name, "loading Wuerstchen model components...");
 
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = if device.is_cuda() || device.is_metal() {
-            DType::F16
-        } else {
-            DType::F32
-        };
+        // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
+        // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
+        // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
+        let dtype = DType::F32;
 
         // Load Prior (Stage C)
         self.progress.stage_start("Loading Prior (Stage C)");
@@ -180,29 +211,52 @@ impl WuerstchenEngine {
         self.progress
             .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
 
-        // Load CLIP-G encoder
-        self.progress.stage_start("Loading CLIP-G encoder");
-        let clip_start = Instant::now();
-        let clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let clip_g = stable_diffusion::build_clip_transformer(
-            &clip_config,
-            &clip_encoder_path,
+        // Load Prior CLIP-G encoder (1280-dim, 32 layers)
+        self.progress
+            .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
+        let prior_clip_start = Instant::now();
+        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+        let prior_clip = stable_diffusion::build_clip_transformer(
+            &prior_clip_config,
+            &prior_clip_path,
             &device,
             DType::F32,
         )?;
-        self.progress
-            .stage_done("Loading CLIP-G encoder", clip_start.elapsed());
+        self.progress.stage_done(
+            "Loading Prior CLIP-G encoder (1280-dim)",
+            prior_clip_start.elapsed(),
+        );
 
-        // Load tokenizer
-        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+        // Load Decoder CLIP encoder (1024-dim, 24 layers)
+        self.progress
+            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
+        let dec_clip_start = Instant::now();
+        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let decoder_clip = stable_diffusion::build_clip_transformer(
+            &dec_clip_config,
+            &dec_clip_path,
+            &device,
+            DType::F32,
+        )?;
+        self.progress.stage_done(
+            "Loading Decoder CLIP encoder (1024-dim)",
+            dec_clip_start.elapsed(),
+        );
+
+        // Load tokenizers
+        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
+        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
         self.loaded = Some(LoadedWuerstchen {
             prior,
             decoder,
             vqgan,
-            clip_g,
-            tokenizer,
+            prior_clip,
+            decoder_clip,
+            prior_tokenizer,
+            decoder_tokenizer,
             device,
             dtype,
         });
@@ -211,23 +265,26 @@ impl WuerstchenEngine {
         Ok(())
     }
 
-    /// Tokenize a prompt for the CLIP-G encoder.
+    /// Tokenize a prompt for a CLIP text encoder.
+    /// Returns (tokens_tensor, tokens_len) where tokens_len is the number of
+    /// real tokens before padding (used for forward_with_mask).
     fn tokenize(
         tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
         max_len: usize,
         device: &Device,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, usize)> {
         let encoding = tokenizer
             .encode(prompt, true)
             .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
         let mut ids = encoding.get_ids().to_vec();
         ids.truncate(max_len);
+        let tokens_len = ids.len();
         while ids.len() < max_len {
             ids.push(49407); // CLIP EOS/PAD token
         }
         let ids = ids.into_iter().map(|i| i as i64).collect::<Vec<_>>();
-        Ok(Tensor::new(ids, device)?.unsqueeze(0)?)
+        Ok((Tensor::new(ids, device)?.unsqueeze(0)?, tokens_len))
     }
 
     /// Run the Stage C (Prior) denoising loop.
@@ -254,19 +311,19 @@ impl WuerstchenEngine {
             }
             let step_start = Instant::now();
 
-            let r = Tensor::new(&[t], device)?.to_dtype(latents.dtype())?;
-
             let noise_pred = if use_cfg {
+                // CFG: batch [latents, latents] with [text_embeddings, uncond]
+                // text first (index 0), uncond second (index 1)
                 let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
-                let r_input = Tensor::cat(&[&r, &r], 0)?;
+                let r = (Tensor::ones(2, DType::F32, device)? * t)?;
                 let uncond = Tensor::zeros_like(text_embeddings)?;
-                let c_input = Tensor::cat(&[&uncond, text_embeddings], 0)?;
-                let pred = prior.forward(&latent_input, &r_input, &c_input)?;
+                let c_input = Tensor::cat(&[text_embeddings, &uncond], 0)?;
+                let pred = prior.forward(&latent_input, &r, &c_input)?;
                 let chunks = pred.chunk(2, 0)?;
-                let pred_uncond = &chunks[0];
-                let pred_cond = &chunks[1];
-                (pred_uncond + ((pred_cond - pred_uncond)? * guidance)?)?
+                let (pred_text, pred_uncond) = (&chunks[0], &chunks[1]);
+                (pred_uncond + ((pred_text - pred_uncond)? * guidance)?)?
             } else {
+                let r = (Tensor::ones(1, DType::F32, device)? * t)?;
                 prior.forward(&*latents, &r, text_embeddings)?
             };
 
@@ -284,25 +341,21 @@ impl WuerstchenEngine {
     }
 
     /// Run the Stage B (Decoder) denoising loop.
+    ///
+    /// `image_embeddings` is the scaled Prior output (effnet slot in WDiffNeXt).
+    /// `text_embeddings` is the 1024-dim Decoder CLIP output (clip slot in WDiffNeXt).
+    /// No CFG is applied at the decoder stage, matching the upstream candle example.
     fn denoise_decoder(
         &self,
         decoder: &WDiffNeXt,
+        image_embeddings: &Tensor,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
         steps: usize,
-        guidance: f64,
         device: &Device,
     ) -> Result<()> {
-        let use_cfg = guidance > 1.0;
         let scheduler = DDPMWScheduler::new(steps, DDPMWSchedulerConfig::default())?;
         let timesteps = scheduler.timesteps().to_vec();
-
-        // EfficientNet features: pass zeros (matching candle example approach)
-        let effnet = Tensor::zeros(
-            (1, 16, latents.dim(2)?, latents.dim(3)?),
-            latents.dtype(),
-            device,
-        )?;
 
         let label = format!("Stage B Decoder ({} steps)", timesteps.len() - 1);
         self.progress.stage_start(&label);
@@ -314,23 +367,9 @@ impl WuerstchenEngine {
             }
             let step_start = Instant::now();
 
-            let r = Tensor::new(&[t], device)?.to_dtype(latents.dtype())?;
-
-            let noise_pred = if use_cfg {
-                let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
-                let r_input = Tensor::cat(&[&r, &r], 0)?;
-                let effnet_input = Tensor::cat(&[&effnet, &effnet], 0)?;
-                let uncond = Tensor::zeros_like(text_embeddings)?;
-                let c_input = Tensor::cat(&[&uncond, text_embeddings], 0)?;
-                let pred =
-                    decoder.forward(&latent_input, &r_input, &effnet_input, Some(&c_input))?;
-                let chunks = pred.chunk(2, 0)?;
-                let pred_uncond = &chunks[0];
-                let pred_cond = &chunks[1];
-                (pred_uncond + ((pred_cond - pred_uncond)? * guidance)?)?
-            } else {
-                decoder.forward(&*latents, &r, &effnet, Some(text_embeddings))?
-            };
+            let r = (Tensor::ones(1, DType::F32, device)? * t)?;
+            let noise_pred =
+                decoder.forward(&*latents, &r, image_embeddings, Some(text_embeddings))?;
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
 
@@ -347,18 +386,18 @@ impl WuerstchenEngine {
 
     /// Generate an image using sequential loading strategy.
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
-        let (decoder_path, clip_encoder_path, clip_tokenizer_path) = self.validate_paths()?;
+        let (decoder_path, prior_clip_path, prior_clip_tok_path, dec_clip_path, dec_clip_tok_path) =
+            self.validate_paths()?;
 
         if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
             self.progress.info(&warning);
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let dtype = if device.is_cuda() || device.is_metal() {
-            DType::F16
-        } else {
-            DType::F32
-        };
+        // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
+        // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
+        // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
+        let dtype = DType::F32;
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -380,41 +419,50 @@ impl WuerstchenEngine {
         self.progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: CLIP-G encode ---
+        // --- Phase 1: Prior CLIP-G encode (1280-dim) ---
         if let Some(status) = memory_status_string() {
             self.progress.info(&status);
         }
 
-        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
 
-        self.progress.stage_start("Loading CLIP-G encoder");
+        self.progress
+            .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
         let clip_start = Instant::now();
-        let clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let clip_g = stable_diffusion::build_clip_transformer(
-            &clip_config,
-            &clip_encoder_path,
+        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+        let prior_clip = stable_diffusion::build_clip_transformer(
+            &prior_clip_config,
+            &prior_clip_path,
             &device,
             DType::F32,
         )?;
-        self.progress
-            .stage_done("Loading CLIP-G encoder", clip_start.elapsed());
+        self.progress.stage_done(
+            "Loading Prior CLIP-G encoder (1280-dim)",
+            clip_start.elapsed(),
+        );
 
-        self.progress.stage_start("Encoding prompt (CLIP-G)");
+        self.progress
+            .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
         let encode_start = Instant::now();
-        let tokens = Self::tokenize(
-            &tokenizer,
+        let (prior_tokens, prior_tokens_len) = Self::tokenize(
+            &prior_tokenizer,
             &req.prompt,
-            clip_config.max_position_embeddings,
+            prior_clip_config.max_position_embeddings,
             &device,
         )?;
-        let text_embeddings = clip_g.forward(&tokens)?.to_dtype(dtype)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-G)", encode_start.elapsed());
+        let prior_text_embeddings = prior_clip
+            .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
+            .to_dtype(dtype)?;
+        self.progress.stage_done(
+            "Encoding prompt (Prior CLIP-G, 1280-dim)",
+            encode_start.elapsed(),
+        );
 
-        drop(clip_g);
-        self.progress.info("Freed CLIP-G encoder");
-        tracing::info!("CLIP-G encoder dropped (sequential mode)");
+        drop(prior_clip);
+        drop(prior_tokenizer);
+        self.progress.info("Freed Prior CLIP-G encoder");
+        tracing::info!("Prior CLIP-G encoder dropped (sequential mode)");
 
         // --- Phase 2: Prior (Stage C) ---
         let prior_size = std::fs::metadata(&self.paths.transformer)
@@ -459,18 +507,64 @@ impl WuerstchenEngine {
 
         self.denoise_prior(
             &prior,
-            &text_embeddings,
+            &prior_text_embeddings,
             &mut prior_latents,
             prior_steps,
             guidance,
             &device,
         )?;
 
+        // Scale prior output: convert from Prior latent space to Decoder conditioning space
+        prior_latents = ((prior_latents * 42.)? - 1.)?;
+
         drop(prior);
+        drop(prior_text_embeddings);
         device.synchronize()?;
         self.progress.info("Freed Prior (Stage C)");
 
         // --- Phase 3: Decoder (Stage B) ---
+        // 3a. Load Decoder CLIP (1024-dim) and encode prompt
+        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+
+        self.progress
+            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
+        let dec_clip_start = Instant::now();
+        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let decoder_clip = stable_diffusion::build_clip_transformer(
+            &dec_clip_config,
+            &dec_clip_path,
+            &device,
+            DType::F32,
+        )?;
+        self.progress.stage_done(
+            "Loading Decoder CLIP encoder (1024-dim)",
+            dec_clip_start.elapsed(),
+        );
+
+        self.progress
+            .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
+        let dec_encode_start = Instant::now();
+        let (dec_tokens, dec_tokens_len) = Self::tokenize(
+            &decoder_tokenizer,
+            &req.prompt,
+            dec_clip_config.max_position_embeddings,
+            &device,
+        )?;
+        let decoder_text_embeddings = decoder_clip
+            .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
+            .to_dtype(dtype)?;
+        self.progress.stage_done(
+            "Encoding prompt (Decoder CLIP, 1024-dim)",
+            dec_encode_start.elapsed(),
+        );
+
+        drop(decoder_clip);
+        drop(decoder_tokenizer);
+        self.progress.info("Freed Decoder CLIP encoder");
+        tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
+
+        // 3b. Load Decoder (Stage B) model and denoise
         let decoder_size = std::fs::metadata(&decoder_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -497,22 +591,24 @@ impl WuerstchenEngine {
         self.progress
             .stage_done("Loading Decoder (Stage B)", dec_start.elapsed());
 
-        let stage_b_h = latent_h * STAGE_B_SCALE;
-        let stage_b_w = latent_w * STAGE_B_SCALE;
+        // Decoder latent dims derived from prior output spatial dims
+        let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+        let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let mut decoder_latents =
             crate::engine::seeded_randn(seed + 1, &[1, 4, stage_b_h, stage_b_w], &device, dtype)?;
 
         self.denoise_decoder(
             &decoder,
-            &text_embeddings,
+            &prior_latents,
+            &decoder_text_embeddings,
             &mut decoder_latents,
             decoder_steps,
-            guidance,
             &device,
         )?;
 
         drop(decoder);
-        drop(text_embeddings);
+        drop(prior_latents);
+        drop(decoder_text_embeddings);
         device.synchronize()?;
         self.progress.info("Freed Decoder (Stage B)");
 
@@ -528,14 +624,17 @@ impl WuerstchenEngine {
 
         self.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
-        let img = vqgan.decode(&decoder_latents)?;
+        let img = vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         let img = img.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
         self.progress
             .stage_done("VQ-GAN decode", decode_start.elapsed());
 
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        // Use actual tensor dims — VQ-GAN output may differ from requested dims
+        // due to the 42x compression rounding in the cascade.
+        let (_, actual_h, actual_w) = img.dims3()?;
+        let image_bytes = encode_image(&img, req.output_format, actual_w as u32, actual_h as u32)?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
@@ -597,18 +696,51 @@ impl InferenceEngine for WuerstchenEngine {
             "starting Wuerstchen generation"
         );
 
-        // 1. Encode prompt with CLIP-G
-        let clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let max_len = clip_config.max_position_embeddings;
+        // 1. Encode prompt with Prior CLIP-G (1280-dim)
+        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+        let prior_max_len = prior_clip_config.max_position_embeddings;
 
-        self.progress.stage_start("Encoding prompt (CLIP-G)");
-        let encode_start = Instant::now();
-        let tokens = Self::tokenize(&loaded.tokenizer, &req.prompt, max_len, &loaded.device)?;
-        let text_embeddings = loaded.clip_g.forward(&tokens)?.to_dtype(loaded.dtype)?;
         self.progress
-            .stage_done("Encoding prompt (CLIP-G)", encode_start.elapsed());
+            .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
+        let encode_start = Instant::now();
+        let (prior_tokens, prior_tokens_len) = Self::tokenize(
+            &loaded.prior_tokenizer,
+            &req.prompt,
+            prior_max_len,
+            &loaded.device,
+        )?;
+        let prior_text_embeddings = loaded
+            .prior_clip
+            .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
+            .to_dtype(loaded.dtype)?;
+        self.progress.stage_done(
+            "Encoding prompt (Prior CLIP-G, 1280-dim)",
+            encode_start.elapsed(),
+        );
 
-        // 2. Stage C (Prior): denoise in highly compressed latent space
+        // 2. Encode prompt with Decoder CLIP (1024-dim)
+        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let dec_max_len = dec_clip_config.max_position_embeddings;
+
+        self.progress
+            .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
+        let dec_encode_start = Instant::now();
+        let (dec_tokens, dec_tokens_len) = Self::tokenize(
+            &loaded.decoder_tokenizer,
+            &req.prompt,
+            dec_max_len,
+            &loaded.device,
+        )?;
+        let decoder_text_embeddings = loaded
+            .decoder_clip
+            .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
+            .to_dtype(loaded.dtype)?;
+        self.progress.stage_done(
+            "Encoding prompt (Decoder CLIP, 1024-dim)",
+            dec_encode_start.elapsed(),
+        );
+
+        // 3. Stage C (Prior): denoise in highly compressed latent space
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let mut prior_latents = crate::engine::seeded_randn(
@@ -620,16 +752,20 @@ impl InferenceEngine for WuerstchenEngine {
 
         self.denoise_prior(
             &loaded.prior,
-            &text_embeddings,
+            &prior_text_embeddings,
             &mut prior_latents,
             prior_steps,
             guidance,
             &loaded.device,
         )?;
 
-        // 3. Stage B (Decoder): decode prior latents to VQ-GAN latent space
-        let stage_b_h = latent_h * STAGE_B_SCALE;
-        let stage_b_w = latent_w * STAGE_B_SCALE;
+        // Scale prior output: convert from Prior latent space to Decoder conditioning space
+        prior_latents = ((prior_latents * 42.)? - 1.)?;
+
+        // 4. Stage B (Decoder): decode prior latents to VQ-GAN latent space
+        // Decoder latent dims derived from prior output spatial dims
+        let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+        let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let mut decoder_latents = crate::engine::seeded_randn(
             seed + 1,
             &[1, 4, stage_b_h, stage_b_w],
@@ -639,25 +775,28 @@ impl InferenceEngine for WuerstchenEngine {
 
         self.denoise_decoder(
             &loaded.decoder,
-            &text_embeddings,
+            &prior_latents,
+            &decoder_text_embeddings,
             &mut decoder_latents,
             decoder_steps,
-            guidance,
             &loaded.device,
         )?;
 
-        // 4. Stage A (VQ-GAN): decode to pixel space
+        // 5. Stage A (VQ-GAN): decode to pixel space
         self.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
-        let img = loaded.vqgan.decode(&decoder_latents)?;
+        let img = loaded.vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         let img = img.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
         self.progress
             .stage_done("VQ-GAN decode", decode_start.elapsed());
 
-        // 5. Encode to image format
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        // 6. Encode to image format
+        // Use actual tensor dims — VQ-GAN output may differ from requested dims
+        // due to the 42x compression rounding in the cascade.
+        let (_, actual_h, actual_w) = img.dims3()?;
+        let image_bytes = encode_image(&img, req.output_format, actual_w as u32, actual_h as u32)?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(generation_time_ms, seed, "Wuerstchen generation complete");

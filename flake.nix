@@ -177,6 +177,7 @@
                 value = lib.makeLibraryPath [
                   pkgs.libiconv
                   pkgs.openssl
+                  pkgs.llvmPackages.libcxx
                 ];
               }
             ]

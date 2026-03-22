@@ -141,9 +141,25 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
         ModelComponent::Transformer | ModelComponent::TransformerShard => {
             PathBuf::from(&sanitized_name).join(&file.hf_filename)
         }
-        _ => PathBuf::from("shared")
-            .join(&manifest.family)
-            .join(&file.hf_filename),
+        _ => {
+            // Check if this filename collides with another file in the same
+            // manifest from a different HF repo. If so, use the repo name
+            // as a subfolder to disambiguate (e.g. Wuerstchen has two
+            // text_encoder/model.safetensors from different repos).
+            let has_collision = manifest.files.iter().any(|other| {
+                other.hf_filename == file.hf_filename && other.hf_repo != file.hf_repo
+            });
+            if has_collision {
+                let repo_leaf = file.hf_repo.rsplit('/').next().unwrap_or(&manifest.family);
+                PathBuf::from("shared")
+                    .join(repo_leaf)
+                    .join(&file.hf_filename)
+            } else {
+                PathBuf::from("shared")
+                    .join(&manifest.family)
+                    .join(&file.hf_filename)
+            }
+        }
     }
 }
 
@@ -1269,7 +1285,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             name: "flux2-klein:bf16".to_string(),
             family: "flux2".to_string(),
             description:
-                "[beta] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                "[broken] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
                     .to_string(),
             size_gb: 13.5,
             files: {
@@ -1370,7 +1386,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
-            description: "[beta] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
+            description: "[broken] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
                 .to_string(),
             size_gb: 30.0,
             files: {
@@ -1401,7 +1417,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: "[beta] Qwen-Image-2512 Q8 — quantized transformer, best quality"
+            description: "[broken] Qwen-Image-2512 Q8 — quantized transformer, best quality"
                 .to_string(),
             size_gb: 21.8,
             files: {
@@ -1421,7 +1437,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q6".to_string(),
             family: "qwen-image".to_string(),
-            description: "[beta] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
+            description: "[broken] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
                 .to_string(),
             size_gb: 16.8,
             files: {
@@ -1441,7 +1457,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q4".to_string(),
             family: "qwen-image".to_string(),
-            description: "[beta] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
+            description: "[broken] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
                 .to_string(),
             size_gb: 12.3,
             files: {
@@ -1463,7 +1479,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
 
 fn wuerstchen_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
-        steps: 60,
+        steps: 30,
         guidance: 4.0,
         width: 1024,
         height: 1024,
@@ -1473,7 +1489,8 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
         family: "wuerstchen".to_string(),
-        description: "Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression".to_string(),
+        description: "[broken] Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression"
+            .to_string(),
         size_gb: 5.6,
         files: vec![
             ModelFile {
@@ -1500,6 +1517,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: None,
             },
+            // Prior CLIP-G encoder (1280-dim, for Stage C)
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
                 hf_filename: "text_encoder/model.safetensors".to_string(),
@@ -1512,6 +1530,24 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
                 hf_filename: "tokenizer/tokenizer.json".to_string(),
                 component: ModelComponent::ClipTokenizer2,
+                size_bytes: 2_000_000,
+                gated: false,
+                sha256: None,
+            },
+            // Decoder CLIP encoder (1024-dim, for Stage B)
+            // Uses separate TextEncoder component to get model-specific path
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen".to_string(),
+                hf_filename: "text_encoder/model.safetensors".to_string(),
+                component: ModelComponent::ClipEncoder,
+                size_bytes: 600_000_000,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen".to_string(),
+                hf_filename: "tokenizer/tokenizer.json".to_string(),
+                component: ModelComponent::ClipTokenizer,
                 size_bytes: 2_000_000,
                 gated: false,
                 sha256: None,
@@ -1704,6 +1740,39 @@ pub const SHARED_COMPONENTS_GB: f32 = 9.8;
 /// Total size of all files in the manifest in bytes.
 pub fn total_download_size(manifest: &ModelManifest) -> u64 {
     manifest.files.iter().map(|f| f.size_bytes).sum()
+}
+
+/// Compute how many bytes still need to be downloaded for a model.
+///
+/// Checks each manifest file against the hf-hub cache and local storage paths.
+/// Returns `(total_bytes, remaining_bytes)` where `remaining_bytes` is the
+/// amount that actually needs to be fetched.
+pub fn compute_download_size(manifest: &ModelManifest) -> (u64, u64) {
+    let mut total = 0u64;
+    let mut remaining = 0u64;
+    for file in &manifest.files {
+        total += file.size_bytes;
+        let subdir = storage_path(manifest, file);
+        let subdir_str = subdir.parent().map(|p| p.to_string_lossy().to_string());
+        if crate::download::cached_file_path(
+            &file.hf_repo,
+            &file.hf_filename,
+            subdir_str.as_deref(),
+        )
+        .is_none()
+        {
+            remaining += file.size_bytes;
+        }
+    }
+    (total, remaining)
+}
+
+/// Check whether a single manifest file is already cached locally.
+pub fn is_file_cached(manifest: &ModelManifest, file: &ModelFile) -> bool {
+    let subdir = storage_path(manifest, file);
+    let subdir_str = subdir.parent().map(|p| p.to_string_lossy().to_string());
+    crate::download::cached_file_path(&file.hf_repo, &file.hf_filename, subdir_str.as_deref())
+        .is_some()
 }
 
 /// Convert a `ModelManifest` to a `ModelPaths` from resolved download paths.

@@ -24,12 +24,14 @@ macro_rules! status {
 
 pub(crate) use status;
 
-/// Colorize a model description: render `[beta]` prefix in bright red bold,
-/// rest dimmed. Non-beta descriptions are fully dimmed.
+/// Colorize a model description: render `[broken]` or `[beta]` prefix in
+/// bright red bold, rest dimmed. Normal descriptions are fully dimmed.
 pub fn colorize_description(desc: &str) -> String {
     use colored::Colorize;
-    if let Some(rest) = desc.strip_prefix("[beta] ") {
-        format!("{} {}", "[beta]".bright_red().bold(), rest.dimmed())
+    if let Some(rest) = desc.strip_prefix("[broken] ") {
+        format!("{} {}", "[broken]".bright_red().bold(), rest.dimmed())
+    } else if let Some(rest) = desc.strip_prefix("[beta] ") {
+        format!("{} {}", "[beta]".bright_yellow().bold(), rest.dimmed())
     } else {
         format!("{}", desc.dimmed())
     }

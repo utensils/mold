@@ -189,18 +189,15 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
-### Wuerstchen v2 (efficient cascade)
+### Wuerstchen v2 / Flux.2 / Qwen-Image (broken on MPS)
 
-| Model | Steps | Size | Good for |
-|-------|-------|------|----------|
-| `wuerstchen-v2:fp16` | 60 | 5.6GB | 3-stage cascade, 42x compression |
+> **Warning**: These model families produce poor quality output on Apple Silicon (MPS/Metal). They are work-in-progress and may work better on CUDA. Use FLUX, SDXL, SD1.5, SD3.5, or Z-Image for production use.
 
-### Flux.2 / Qwen-Image (beta)
-
-| Model | Steps | Size | Good for |
-|-------|-------|------|----------|
-| `flux2-klein:bf16` | 28 | 13.5GB | Flux.2 Klein 4B distilled |
-| `qwen-image:q8` | 28 | 21.8GB | Qwen-Image-2512 60-block |
+| Model | Steps | Size | Notes |
+|-------|-------|------|-------|
+| `wuerstchen-v2:fp16` | 30 | 5.6GB | 3-stage cascade, rendering artifacts on MPS |
+| `flux2-klein:bf16` | 28 | 13.5GB | Flux.2 Klein 4B, poor quality on MPS |
+| `qwen-image:q8` | 28 | 21.8GB | Qwen-Image-2512, poor quality on MPS |
 | `qwen-image:q4` | 28 | 12.3GB | Qwen-Image, smallest footprint |
 
 > Bare names default to `:q8` for FLUX/Z-Image or `:fp16` for SD1.5/SDXL. So `mold run flux-schnell "a cat"` just works.
