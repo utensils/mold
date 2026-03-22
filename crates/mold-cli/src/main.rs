@@ -119,6 +119,14 @@ Examples:
         /// By default, components are loaded and unloaded sequentially to reduce peak memory.
         #[arg(long, help_heading = "Advanced")]
         eager: bool,
+
+        /// Source image for img2img (file path or - for stdin)
+        #[arg(short = 'i', long, help_heading = "img2img")]
+        image: Option<String>,
+
+        /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
+        #[arg(long, default_value = "0.75", help_heading = "img2img")]
+        strength: f64,
     },
 
     /// Start the inference server
@@ -315,6 +323,8 @@ async fn run() -> anyhow::Result<()> {
             qwen3_variant,
             scheduler,
             eager,
+            image,
+            strength,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -333,6 +343,8 @@ async fn run() -> anyhow::Result<()> {
                 qwen3_variant,
                 scheduler,
                 eager,
+                image,
+                strength,
             )
             .await?;
         }
@@ -684,6 +696,60 @@ mod tests {
         let cli = parse(&["run", "model", "test", "--format", "jpg"]);
         match cli.command {
             Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_image_flag() {
+        let cli = parse(&["run", "model", "test", "--image", "photo.png"]);
+        match cli.command {
+            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("photo.png")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_image_stdin() {
+        let cli = parse(&["run", "model", "test", "--image", "-"]);
+        match cli.command {
+            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("-")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_image_short_flag() {
+        let cli = parse(&["run", "model", "test", "-i", "input.jpg"]);
+        match cli.command {
+            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("input.jpg")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_strength_flag() {
+        let cli = parse(&["run", "model", "test", "--strength", "0.5"]);
+        match cli.command {
+            Commands::Run { strength, .. } => assert_eq!(strength, 0.5),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_strength_default() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run { strength, .. } => assert_eq!(strength, 0.75),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_image_defaults_none() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run { image, .. } => assert!(image.is_none()),
             _ => panic!("expected Run"),
         }
     }

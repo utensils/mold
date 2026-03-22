@@ -30,6 +30,8 @@ pub async fn run(
     qwen3_variant: Option<String>,
     scheduler: Option<Scheduler>,
     eager: bool,
+    source_image: Option<Vec<u8>>,
+    strength: f64,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -65,8 +67,35 @@ pub async fn run(
         model_cfg
     };
 
-    let effective_width = width.unwrap_or_else(|| model_cfg.effective_width(&config));
-    let effective_height = height.unwrap_or_else(|| model_cfg.effective_height(&config));
+    // When source_image is provided and width/height not specified, derive from image dimensions
+    let (effective_width, effective_height) =
+        if source_image.is_some() && width.is_none() && height.is_none() {
+            if let Some(ref img_bytes) = source_image {
+                let reader = image::ImageReader::new(std::io::Cursor::new(img_bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|r| r.into_dimensions().ok());
+                match reader {
+                    Some((w, h)) => {
+                        // Round to nearest multiple of 16
+                        let w = ((w + 8) / 16) * 16;
+                        let h = ((h + 8) / 16) * 16;
+                        (w, h)
+                    }
+                    None => (
+                        width.unwrap_or_else(|| model_cfg.effective_width(&config)),
+                        height.unwrap_or_else(|| model_cfg.effective_height(&config)),
+                    ),
+                }
+            } else {
+                unreachable!()
+            }
+        } else {
+            (
+                width.unwrap_or_else(|| model_cfg.effective_width(&config)),
+                height.unwrap_or_else(|| model_cfg.effective_height(&config)),
+            )
+        };
     let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
     let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
 
@@ -81,6 +110,8 @@ pub async fn run(
         batch_size: batch,
         output_format,
         scheduler,
+        source_image: source_image.clone(),
+        strength,
     };
 
     if let Some(desc) = &model_cfg.description {
@@ -90,6 +121,9 @@ pub async fn run(
             model.bold(),
             crate::output::colorize_description(desc)
         );
+    }
+    if source_image.is_some() {
+        status!("{} img2img mode (strength: {:.2})", "●".magenta(), strength,);
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",

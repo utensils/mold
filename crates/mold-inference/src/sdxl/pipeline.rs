@@ -243,6 +243,9 @@ impl SDXLEngine {
     }
 
     /// Run the denoising loop (shared between eager and sequential).
+    ///
+    /// `start_step` allows starting from a later timestep for img2img (0 = full txt2img).
+    #[allow(clippy::too_many_arguments)]
     fn denoise_loop(
         &self,
         unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
@@ -251,6 +254,7 @@ impl SDXLEngine {
         latents: &mut Tensor,
         guidance: f64,
         steps: u32,
+        start_step: usize,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let mut scheduler = crate::scheduler::build_scheduler(
@@ -260,12 +264,13 @@ impl SDXLEngine {
             self.is_turbo,
         )?;
         let timesteps = scheduler.timesteps().to_vec();
+        let active_timesteps = &timesteps[start_step..];
 
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len());
+        let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
         self.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
-        for (step_idx, &t) in timesteps.iter().enumerate() {
+        for (step_idx, &t) in active_timesteps.iter().enumerate() {
             let step_start = std::time::Instant::now();
             let latent_input = if use_cfg {
                 Tensor::cat(&[&*latents, &*latents], 0)?
@@ -288,7 +293,7 @@ impl SDXLEngine {
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
             self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
-                total: timesteps.len(),
+                total: active_timesteps.len(),
                 elapsed: step_start.elapsed(),
             });
         }
@@ -296,6 +301,81 @@ impl SDXLEngine {
         self.progress
             .stage_done(&denoise_label, denoise_start.elapsed());
         Ok(())
+    }
+
+    /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
+    /// Returns (noised_latents, start_step).
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_img2img_latents(
+        &self,
+        vae: &stable_diffusion::vae::AutoEncoderKL,
+        source_bytes: &[u8],
+        width: u32,
+        height: u32,
+        strength: f64,
+        steps: u32,
+        sched: Scheduler,
+        seed: u64,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<(Tensor, usize)> {
+        use crate::img_utils::{decode_source_image, NormalizeRange};
+
+        self.progress.stage_start("Encoding source image (VAE)");
+        let encode_start = Instant::now();
+
+        let source_tensor = decode_source_image(
+            source_bytes,
+            width,
+            height,
+            NormalizeRange::MinusOneToOne,
+            device,
+            dtype,
+        )?;
+
+        let vae_scale = if self.is_turbo {
+            VAE_SCALE_TURBO
+        } else {
+            VAE_SCALE_STANDARD
+        };
+
+        let encoded = vae.encode(&source_tensor)?;
+        let encoded = (encoded.sample()? * vae_scale)?;
+
+        self.progress
+            .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+        let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
+        let start_step = start_step.min(steps as usize);
+
+        let scheduler = crate::scheduler::build_scheduler(
+            sched,
+            steps as usize,
+            PredictionType::Epsilon,
+            self.is_turbo,
+        )?;
+        let timesteps = scheduler.timesteps().to_vec();
+
+        let latent_h = height as usize / 8;
+        let latent_w = width as usize / 8;
+        let noise =
+            crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], device, DType::F32)?;
+        let noise = noise.to_dtype(dtype)?;
+
+        let noised = if start_step < timesteps.len() {
+            scheduler.add_noise(&encoded, noise, timesteps[start_step])?
+        } else {
+            encoded
+        };
+
+        tracing::info!(
+            start_step,
+            total_steps = steps,
+            strength,
+            "img2img: starting from step {start_step}"
+        );
+
+        Ok((noised, start_step))
     }
 
     /// Encode prompt with both CLIP encoders.
@@ -464,20 +544,55 @@ impl SDXLEngine {
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
         let sched = req.scheduler.unwrap_or(self.scheduler);
-        let latent_h = height / 8;
-        let latent_w = width / 8;
-        let init_scheduler = crate::scheduler::build_scheduler(
-            sched,
-            req.steps as usize,
-            PredictionType::Epsilon,
-            self.is_turbo,
-        )?;
-        let init_noise_sigma = init_scheduler.init_noise_sigma();
-        drop(init_scheduler);
-        let mut latents =
-            (crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], &device, DType::F32)?
-                * init_noise_sigma)?;
-        latents = latents.to_dtype(dtype)?;
+        let is_img2img = req.source_image.is_some();
+
+        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
+            self.progress
+                .info("img2img mode: encoding source image before denoising");
+
+            self.progress.stage_start("Loading VAE (GPU)");
+            let vae_start_t = Instant::now();
+            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+            self.progress
+                .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
+
+            let (latents, start_step) = self.prepare_img2img_latents(
+                &vae,
+                source_bytes,
+                req.width,
+                req.height,
+                req.strength,
+                req.steps,
+                sched,
+                seed,
+                &device,
+                dtype,
+            )?;
+
+            drop(vae);
+            self.progress.info("Freed VAE (will reload for decode)");
+            device.synchronize()?;
+
+            (latents, start_step)
+        } else {
+            let latent_h = height / 8;
+            let latent_w = width / 8;
+            let init_scheduler = crate::scheduler::build_scheduler(
+                sched,
+                req.steps as usize,
+                PredictionType::Epsilon,
+                self.is_turbo,
+            )?;
+            let init_noise_sigma = init_scheduler.init_noise_sigma();
+            drop(init_scheduler);
+            let latents = (crate::engine::seeded_randn(
+                seed,
+                &[1, 4, latent_h, latent_w],
+                &device,
+                DType::F32,
+            )? * init_noise_sigma)?;
+            (latents.to_dtype(dtype)?, 0)
+        };
 
         self.denoise_loop(
             &unet,
@@ -486,6 +601,7 @@ impl SDXLEngine {
             &mut latents,
             guidance,
             req.steps,
+            start_step,
         )?;
 
         // Drop UNet to free memory for VAE decode
@@ -496,11 +612,16 @@ impl SDXLEngine {
         tracing::info!("UNet dropped (sequential mode)");
 
         // --- Phase 3: Load VAE and decode ---
-        self.progress.stage_start("Loading VAE (GPU)");
+        let vae_load_label = if is_img2img {
+            "Reloading VAE (GPU)"
+        } else {
+            "Loading VAE (GPU)"
+        };
+        self.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
         let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
         self.progress
-            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
+            .stage_done(vae_load_label, vae_start.elapsed());
 
         self.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
@@ -588,25 +709,41 @@ impl InferenceEngine for SDXLEngine {
             guidance,
         )?;
 
-        // 3. Build scheduler
+        // 3. Build scheduler and create initial latents
         let sched = req.scheduler.unwrap_or(self.scheduler);
-        let latent_h = height / 8;
-        let latent_w = width / 8;
-        let init_scheduler = crate::scheduler::build_scheduler(
-            sched,
-            req.steps as usize,
-            PredictionType::Epsilon,
-            self.is_turbo,
-        )?;
-        let init_noise_sigma = init_scheduler.init_noise_sigma();
-        drop(init_scheduler);
-        let mut latents = (crate::engine::seeded_randn(
-            seed,
-            &[1, 4, latent_h, latent_w],
-            &loaded.device,
-            DType::F32,
-        )? * init_noise_sigma)?;
-        latents = latents.to_dtype(loaded.dtype)?;
+
+        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
+            self.prepare_img2img_latents(
+                &loaded.vae,
+                source_bytes,
+                req.width,
+                req.height,
+                req.strength,
+                req.steps,
+                sched,
+                seed,
+                &loaded.device,
+                loaded.dtype,
+            )?
+        } else {
+            let latent_h = height / 8;
+            let latent_w = width / 8;
+            let init_scheduler = crate::scheduler::build_scheduler(
+                sched,
+                req.steps as usize,
+                PredictionType::Epsilon,
+                self.is_turbo,
+            )?;
+            let init_noise_sigma = init_scheduler.init_noise_sigma();
+            drop(init_scheduler);
+            let latents = (crate::engine::seeded_randn(
+                seed,
+                &[1, 4, latent_h, latent_w],
+                &loaded.device,
+                DType::F32,
+            )? * init_noise_sigma)?;
+            (latents.to_dtype(loaded.dtype)?, 0)
+        };
 
         // 5. Denoising loop
         self.denoise_loop(
@@ -616,6 +753,7 @@ impl InferenceEngine for SDXLEngine {
             &mut latents,
             guidance,
             req.steps,
+            start_step,
         )?;
 
         // 6. VAE decode

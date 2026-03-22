@@ -579,6 +579,9 @@ impl InferenceEngine for QwenImageEngine {
                 "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
             );
         }
+        if req.source_image.is_some() {
+            tracing::warn!("img2img not yet supported for Qwen-Image — generating from text only");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

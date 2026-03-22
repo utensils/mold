@@ -533,8 +533,36 @@ impl FluxEngine {
         let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
-        let img =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, noise_dtype)?;
+        let img = if let Some(ref source_bytes) = req.source_image {
+            self.progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = crate::img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                crate::img_utils::NormalizeRange::ZeroToOne,
+                &device,
+                gpu_dtype,
+            )?;
+            // FLUX VAE encode returns latents directly (shift/scale applied internally)
+            let encoded = vae.encode(&source_tensor)?;
+            self.progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Flow-matching img2img: interpolate between encoded latents and noise
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &device,
+                noise_dtype,
+            )?;
+            let encoded = encoded.to_dtype(noise_dtype)?;
+            let strength = req.strength;
+            // latent = (1 - strength) * encoded + strength * noise
+            ((&encoded * (1.0 - strength))? + (&noise * strength)?)?
+        } else {
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, noise_dtype)?
+        };
 
         let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
             (
@@ -548,11 +576,25 @@ impl FluxEngine {
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
 
-        let timesteps = if is_schnell {
+        let mut timesteps = if is_schnell {
             flux::sampling::get_schedule(req.steps as usize, None)
         } else {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
+
+        // For img2img, slice timestep schedule to start from strength
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            // Keep only timesteps >= (1 - strength), since flow-matching goes from 1.0 -> 0.0
+            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
+            timesteps = timesteps[start_idx..].to_vec();
+            tracing::info!(
+                strength,
+                start_idx,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: trimmed timestep schedule"
+            );
+        }
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.progress.stage_start(&denoise_label);
@@ -749,12 +791,37 @@ impl InferenceEngine for FluxEngine {
         };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
-        let img = crate::engine::seeded_randn(
-            seed,
-            &[1, 16, latent_h, latent_w],
-            &loaded.device,
-            noise_dtype,
-        )?;
+        let img = if let Some(ref source_bytes) = req.source_image {
+            progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = crate::img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                crate::img_utils::NormalizeRange::ZeroToOne,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            let encoded = loaded.vae.encode(&source_tensor)?;
+            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                noise_dtype,
+            )?;
+            let encoded = encoded.to_dtype(noise_dtype)?;
+            let strength = req.strength;
+            ((&encoded * (1.0 - strength))? + (&noise * strength)?)?
+        } else {
+            crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                noise_dtype,
+            )?
+        };
 
         // For quantized model, state tensors must be F32
         let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
@@ -771,11 +838,24 @@ impl InferenceEngine for FluxEngine {
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
 
         // 5. Get timestep schedule
-        let timesteps = if loaded.is_schnell {
+        let mut timesteps = if loaded.is_schnell {
             flux::sampling::get_schedule(req.steps as usize, None)
         } else {
             flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
         };
+
+        // For img2img, trim timestep schedule
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
+            timesteps = timesteps[start_idx..].to_vec();
+            tracing::info!(
+                strength,
+                start_idx,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: trimmed timestep schedule"
+            );
+        }
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);

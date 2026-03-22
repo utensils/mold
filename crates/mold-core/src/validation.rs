@@ -51,6 +51,21 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             req.prompt.len()
         ));
     }
+    // img2img validation
+    if let Some(ref img) = req.source_image {
+        if req.strength <= 0.0 || req.strength > 1.0 {
+            return Err(format!(
+                "strength ({}) must be in range (0.0, 1.0] when source_image is provided",
+                req.strength
+            ));
+        }
+        // Quick format check: PNG magic or JPEG magic
+        let is_png = img.len() >= 4 && img[..4] == [0x89, 0x50, 0x4E, 0x47];
+        let is_jpeg = img.len() >= 2 && img[..2] == [0xFF, 0xD8];
+        if !is_png && !is_jpeg {
+            return Err("source_image must be a PNG or JPEG image".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -71,7 +86,19 @@ mod tests {
             batch_size: 1,
             output_format: OutputFormat::Png,
             scheduler: None,
+            source_image: None,
+            strength: 0.75,
         }
+    }
+
+    /// Minimal valid PNG header bytes for testing.
+    fn png_bytes() -> Vec<u8> {
+        vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    /// Minimal valid JPEG header bytes for testing.
+    fn jpeg_bytes() -> Vec<u8> {
+        vec![0xFF, 0xD8, 0xFF, 0xE0]
     }
 
     #[test]
@@ -222,6 +249,60 @@ mod tests {
     fn seed_is_optional() {
         let mut req = valid_req();
         req.seed = None;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    // ── img2img validation tests ────────────────────────────────────────────
+
+    #[test]
+    fn img2img_strength_zero_rejected() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.strength = 0.0;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("strength"));
+    }
+
+    #[test]
+    fn img2img_strength_one_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.strength = 1.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn img2img_strength_half_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.strength = 0.5;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn img2img_invalid_magic_bytes_rejected() {
+        let mut req = valid_req();
+        req.source_image = Some(vec![0x00, 0x01, 0x02, 0x03]);
+        req.strength = 0.75;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("PNG or JPEG"));
+    }
+
+    #[test]
+    fn img2img_jpeg_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(jpeg_bytes());
+        req.strength = 0.75;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn img2img_no_source_image_skips_strength_check() {
+        let mut req = valid_req();
+        req.source_image = None;
+        req.strength = 0.0; // Would fail if source_image present, but should pass without
         assert!(validate_generate_request(&req).is_ok());
     }
 }

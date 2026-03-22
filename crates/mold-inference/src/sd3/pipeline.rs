@@ -543,6 +543,9 @@ impl InferenceEngine for SD3Engine {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for SD3 (flow-matching), ignoring");
         }
+        if req.source_image.is_some() {
+            tracing::warn!("img2img not yet supported for SD3 — generating from text only");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

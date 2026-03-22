@@ -2268,6 +2268,7 @@ dependencies = [
  "clap_complete",
  "colored",
  "dirs",
+ "image",
  "indicatif 0.17.11",
  "libc",
  "mold-ai-core",
