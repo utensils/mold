@@ -2,8 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::{
-    Config, GenerateRequest, GenerateResponse, ImageData, MoldClient, OutputFormat, Scheduler,
-    SseProgressEvent,
+    clamp_to_megapixel_limit, Config, GenerateRequest, GenerateResponse, ImageData, MoldClient,
+    OutputFormat, Scheduler, SseProgressEvent,
 };
 use rand::Rng;
 use std::collections::HashMap;
@@ -80,11 +80,22 @@ pub async fn run(
                     .ok()
                     .and_then(|r| r.into_dimensions().ok());
                 match reader {
-                    Some((w, h)) => {
-                        // Round to nearest multiple of 16
-                        let w = ((w + 8) / 16) * 16;
-                        let h = ((h + 8) / 16) * 16;
-                        (w, h)
+                    Some((orig_w, orig_h)) => {
+                        // Round to nearest multiple of 16, then clamp to megapixel limit
+                        let w = ((orig_w + 8) / 16) * 16;
+                        let h = ((orig_h + 8) / 16) * 16;
+                        let (cw, ch) = clamp_to_megapixel_limit(w, h);
+                        if cw != w || ch != h {
+                            status!(
+                                "{} Source image {}x{} exceeds megapixel limit, resizing to {}x{}",
+                                "●".yellow(),
+                                orig_w,
+                                orig_h,
+                                cw,
+                                ch
+                            );
+                        }
+                        (cw, ch)
                     }
                     None => (
                         width.unwrap_or_else(|| model_cfg.effective_width(&config)),

@@ -15,4 +15,4 @@ pub use error::{MoldError, Result as MoldResult};
 pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
-pub use validation::validate_generate_request;
+pub use validation::{clamp_to_megapixel_limit, validate_generate_request};
