@@ -599,6 +599,9 @@ impl InferenceEngine for ZImageEngine {
         if req.source_image.is_some() {
             tracing::warn!("img2img not yet supported for Z-Image — generating from text only");
         }
+        if req.mask_image.is_some() {
+            tracing::warn!("inpainting not yet supported for Z-Image -- ignoring mask");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

@@ -66,6 +66,37 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("source_image must be a PNG or JPEG image".to_string());
         }
     }
+    // ControlNet validation
+    if let Some(ref ctrl) = req.control_image {
+        if req.control_model.is_none() {
+            return Err("control_image requires control_model to also be provided".to_string());
+        }
+        let is_png = ctrl.len() >= 4 && ctrl[..4] == [0x89, 0x50, 0x4E, 0x47];
+        let is_jpeg = ctrl.len() >= 2 && ctrl[..2] == [0xFF, 0xD8];
+        if !is_png && !is_jpeg {
+            return Err("control_image must be a PNG or JPEG image".to_string());
+        }
+        if req.control_scale < 0.0 {
+            return Err(format!(
+                "control_scale ({}) must be >= 0.0",
+                req.control_scale
+            ));
+        }
+    }
+    if req.control_model.is_some() && req.control_image.is_none() {
+        return Err("control_model requires control_image to also be provided".to_string());
+    }
+    // Inpainting validation
+    if let Some(ref mask) = req.mask_image {
+        if req.source_image.is_none() {
+            return Err("mask_image requires source_image to also be provided".to_string());
+        }
+        let is_png = mask.len() >= 4 && mask[..4] == [0x89, 0x50, 0x4E, 0x47];
+        let is_jpeg = mask.len() >= 2 && mask[..2] == [0xFF, 0xD8];
+        if !is_png && !is_jpeg {
+            return Err("mask_image must be a PNG or JPEG image".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -88,6 +119,10 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
         }
     }
 
@@ -303,6 +338,126 @@ mod tests {
         let mut req = valid_req();
         req.source_image = None;
         req.strength = 0.0; // Would fail if source_image present, but should pass without
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    // ── ControlNet validation tests ────────────────────────────────────────
+
+    #[test]
+    fn controlnet_valid_request() {
+        let mut req = valid_req();
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = 0.8;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn controlnet_image_without_model_rejected() {
+        let mut req = valid_req();
+        req.control_image = Some(png_bytes());
+        req.control_model = None;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("control_model"));
+    }
+
+    #[test]
+    fn controlnet_model_without_image_rejected() {
+        let mut req = valid_req();
+        req.control_image = None;
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("control_image"));
+    }
+
+    #[test]
+    fn controlnet_invalid_image_rejected() {
+        let mut req = valid_req();
+        req.control_image = Some(vec![0x00, 0x01, 0x02, 0x03]);
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("PNG or JPEG"));
+    }
+
+    #[test]
+    fn controlnet_negative_scale_rejected() {
+        let mut req = valid_req();
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = -0.1;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("control_scale"));
+    }
+
+    #[test]
+    fn controlnet_zero_scale_accepted() {
+        let mut req = valid_req();
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = 0.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn controlnet_high_scale_accepted() {
+        let mut req = valid_req();
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        req.control_scale = 2.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn controlnet_jpeg_accepted() {
+        let mut req = valid_req();
+        req.control_image = Some(jpeg_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+    // ── Inpainting validation tests ───────────────────────────────────────
+
+    #[test]
+    fn mask_without_source_image_rejected() {
+        let mut req = valid_req();
+        req.mask_image = Some(png_bytes());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("mask_image requires source_image"));
+    }
+
+    #[test]
+    fn mask_with_source_image_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(png_bytes());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn mask_jpeg_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(jpeg_bytes());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn mask_invalid_bytes_rejected() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(vec![0x00, 0x01, 0x02, 0x03]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("mask_image must be a PNG or JPEG"));
+    }
+
+    #[test]
+    fn no_mask_no_source_passes() {
+        let req = valid_req();
         assert!(validate_generate_request(&req).is_ok());
     }
 }

@@ -255,6 +255,7 @@ impl SDXLEngine {
         guidance: f64,
         steps: u32,
         start_step: usize,
+        inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let mut scheduler = crate::scheduler::build_scheduler(
@@ -291,6 +292,13 @@ impl SDXLEngine {
             };
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
+
+            if let Some(ctx) = inpaint_ctx {
+                let noised_original =
+                    scheduler.add_noise(&ctx.original_latents, ctx.noise.clone(), t)?;
+                *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            }
+
             self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: active_timesteps.len(),
@@ -304,7 +312,7 @@ impl SDXLEngine {
     }
 
     /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
-    /// Returns (noised_latents, start_step).
+    /// Returns (noised_latents, start_step, encoded, noise).
     #[allow(clippy::too_many_arguments)]
     fn prepare_img2img_latents(
         &self,
@@ -318,7 +326,7 @@ impl SDXLEngine {
         seed: u64,
         device: &Device,
         dtype: DType,
-    ) -> Result<(Tensor, usize)> {
+    ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
 
         self.progress.stage_start("Encoding source image (VAE)");
@@ -363,9 +371,9 @@ impl SDXLEngine {
         let noise = noise.to_dtype(dtype)?;
 
         let noised = if start_step < timesteps.len() {
-            scheduler.add_noise(&encoded, noise, timesteps[start_step])?
+            scheduler.add_noise(&encoded, noise.clone(), timesteps[start_step])?
         } else {
-            encoded
+            encoded.clone()
         };
 
         tracing::info!(
@@ -375,7 +383,7 @@ impl SDXLEngine {
             "img2img: starting from step {start_step}"
         );
 
-        Ok((noised, start_step))
+        Ok((noised, start_step, encoded, noise))
     }
 
     /// Encode prompt with both CLIP encoders.
@@ -546,53 +554,71 @@ impl SDXLEngine {
         let sched = req.scheduler.unwrap_or(self.scheduler);
         let is_img2img = req.source_image.is_some();
 
-        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
-            self.progress
-                .info("img2img mode: encoding source image before denoising");
+        let (mut latents, start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                self.progress
+                    .info("img2img mode: encoding source image before denoising");
 
-            self.progress.stage_start("Loading VAE (GPU)");
-            let vae_start_t = Instant::now();
-            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-            self.progress
-                .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
+                self.progress.stage_start("Loading VAE (GPU)");
+                let vae_start_t = Instant::now();
+                let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+                self.progress
+                    .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
 
-            let (latents, start_step) = self.prepare_img2img_latents(
-                &vae,
-                source_bytes,
-                req.width,
-                req.height,
-                req.strength,
-                req.steps,
-                sched,
-                seed,
-                &device,
-                dtype,
-            )?;
+                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &vae,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    req.steps,
+                    sched,
+                    seed,
+                    &device,
+                    dtype,
+                )?;
 
-            drop(vae);
-            self.progress.info("Freed VAE (will reload for decode)");
-            device.synchronize()?;
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let mask = crate::img_utils::decode_mask_image(
+                        mask_bytes,
+                        height / 8,
+                        width / 8,
+                        &device,
+                        dtype,
+                    )?;
+                    Some(crate::img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
 
-            (latents, start_step)
-        } else {
-            let latent_h = height / 8;
-            let latent_w = width / 8;
-            let init_scheduler = crate::scheduler::build_scheduler(
-                sched,
-                req.steps as usize,
-                PredictionType::Epsilon,
-                self.is_turbo,
-            )?;
-            let init_noise_sigma = init_scheduler.init_noise_sigma();
-            drop(init_scheduler);
-            let latents = (crate::engine::seeded_randn(
-                seed,
-                &[1, 4, latent_h, latent_w],
-                &device,
-                DType::F32,
-            )? * init_noise_sigma)?;
-            (latents.to_dtype(dtype)?, 0)
-        };
+                drop(vae);
+                self.progress.info("Freed VAE (will reload for decode)");
+                device.synchronize()?;
+
+                (latents, start_step, inpaint_ctx)
+            } else {
+                let latent_h = height / 8;
+                let latent_w = width / 8;
+                let init_scheduler = crate::scheduler::build_scheduler(
+                    sched,
+                    req.steps as usize,
+                    PredictionType::Epsilon,
+                    self.is_turbo,
+                )?;
+                let init_noise_sigma = init_scheduler.init_noise_sigma();
+                drop(init_scheduler);
+                let latents = (crate::engine::seeded_randn(
+                    seed,
+                    &[1, 4, latent_h, latent_w],
+                    &device,
+                    DType::F32,
+                )? * init_noise_sigma)?;
+                (latents.to_dtype(dtype)?, 0, None)
+            };
 
         self.denoise_loop(
             &unet,
@@ -602,9 +628,10 @@ impl SDXLEngine {
             guidance,
             req.steps,
             start_step,
+            inpaint_ctx.as_ref(),
         )?;
 
-        // Drop UNet to free memory for VAE decode
+        drop(inpaint_ctx);
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
@@ -712,38 +739,56 @@ impl InferenceEngine for SDXLEngine {
         // 3. Build scheduler and create initial latents
         let sched = req.scheduler.unwrap_or(self.scheduler);
 
-        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
-            self.prepare_img2img_latents(
-                &loaded.vae,
-                source_bytes,
-                req.width,
-                req.height,
-                req.strength,
-                req.steps,
-                sched,
-                seed,
-                &loaded.device,
-                loaded.dtype,
-            )?
-        } else {
-            let latent_h = height / 8;
-            let latent_w = width / 8;
-            let init_scheduler = crate::scheduler::build_scheduler(
-                sched,
-                req.steps as usize,
-                PredictionType::Epsilon,
-                self.is_turbo,
-            )?;
-            let init_noise_sigma = init_scheduler.init_noise_sigma();
-            drop(init_scheduler);
-            let latents = (crate::engine::seeded_randn(
-                seed,
-                &[1, 4, latent_h, latent_w],
-                &loaded.device,
-                DType::F32,
-            )? * init_noise_sigma)?;
-            (latents.to_dtype(loaded.dtype)?, 0)
-        };
+        let (mut latents, start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &loaded.vae,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    req.steps,
+                    sched,
+                    seed,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let mask = crate::img_utils::decode_mask_image(
+                        mask_bytes,
+                        height / 8,
+                        width / 8,
+                        &loaded.device,
+                        loaded.dtype,
+                    )?;
+                    Some(crate::img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
+                (latents, start_step, inpaint_ctx)
+            } else {
+                let latent_h = height / 8;
+                let latent_w = width / 8;
+                let init_scheduler = crate::scheduler::build_scheduler(
+                    sched,
+                    req.steps as usize,
+                    PredictionType::Epsilon,
+                    self.is_turbo,
+                )?;
+                let init_noise_sigma = init_scheduler.init_noise_sigma();
+                drop(init_scheduler);
+                let latents = (crate::engine::seeded_randn(
+                    seed,
+                    &[1, 4, latent_h, latent_w],
+                    &loaded.device,
+                    DType::F32,
+                )? * init_noise_sigma)?;
+                (latents.to_dtype(loaded.dtype)?, 0, None)
+            };
 
         // 5. Denoising loop
         self.denoise_loop(
@@ -754,6 +799,7 @@ impl InferenceEngine for SDXLEngine {
             guidance,
             req.steps,
             start_step,
+            inpaint_ctx.as_ref(),
         )?;
 
         // 6. VAE decode

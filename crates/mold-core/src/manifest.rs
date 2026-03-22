@@ -474,6 +474,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(flux2_manifests());
     manifests.extend(qwen_image_manifests());
     manifests.extend(wuerstchen_manifests());
+    manifests.extend(controlnet_manifests());
     manifests
 }
 
@@ -1746,6 +1747,64 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
     })
 }
 
+fn controlnet_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 25,
+        guidance: 7.5,
+        width: 512,
+        height: 512,
+        is_schnell: false,
+        scheduler: Some(Scheduler::Ddim),
+    };
+    vec![
+        ModelManifest {
+            name: "controlnet-canny-sd15:fp16".to_string(),
+            family: "controlnet".to_string(),
+            description: "ControlNet Canny edge detection for SD1.5".to_string(),
+            size_gb: 1.4,
+            files: vec![ModelFile {
+                hf_repo: "lllyasviel/control_v11p_sd15_canny".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1_450_000_000,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "controlnet-depth-sd15:fp16".to_string(),
+            family: "controlnet".to_string(),
+            description: "ControlNet depth estimation for SD1.5".to_string(),
+            size_gb: 1.4,
+            files: vec![ModelFile {
+                hf_repo: "lllyasviel/control_v11f1p_sd15_depth".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1_450_000_000,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "controlnet-openpose-sd15:fp16".to_string(),
+            family: "controlnet".to_string(),
+            description: "ControlNet OpenPose body detection for SD1.5".to_string(),
+            size_gb: 1.4,
+            files: vec![ModelFile {
+                hf_repo: "lllyasviel/control_v11p_sd15_openpose".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1_450_000_000,
+                gated: false,
+                sha256: None,
+            }],
+            defaults,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1943,20 +2002,22 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen = 32
-        assert_eq!(known_manifests().len(), 32);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 35
+        assert_eq!(known_manifests().len(), 35);
     }
 
     #[test]
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All models need VAE
-            assert!(
-                components.contains(&ModelComponent::Vae),
-                "{} missing Vae",
-                manifest.name
-            );
+            // All models need VAE (except ControlNet, which uses the base model's VAE)
+            if manifest.family != "controlnet" {
+                assert!(
+                    components.contains(&ModelComponent::Vae),
+                    "{} missing Vae",
+                    manifest.name
+                );
+            }
 
             match manifest.family.as_str() {
                 "flux" => {
@@ -2149,6 +2210,14 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::ClipEncoder),
                         "{} (qwen-image) should not have ClipEncoder",
+                        manifest.name
+                    );
+                }
+                "controlnet" => {
+                    // ControlNet only needs the transformer weights (no VAE, CLIP, etc.)
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (controlnet) missing Transformer",
                         manifest.name
                     );
                 }

@@ -546,6 +546,9 @@ impl InferenceEngine for SD3Engine {
         if req.source_image.is_some() {
             tracing::warn!("img2img not yet supported for SD3 — generating from text only");
         }
+        if req.mask_image.is_some() {
+            tracing::warn!("inpainting not yet supported for SD3 -- ignoring mask");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {
