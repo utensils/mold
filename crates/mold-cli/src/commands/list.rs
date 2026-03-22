@@ -115,7 +115,11 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", model.defaults.default_guidance),
                         model.defaults.default_width,
                         model.defaults.default_height,
-                        colorize_description(&model.defaults.description),
+                        colorize_description(
+                            mold_core::manifest::find_manifest(&model.name)
+                                .map(|m| m.description.as_str())
+                                .unwrap_or(&model.defaults.description),
+                        ),
                     );
                 }
             }
@@ -237,7 +241,13 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", mcfg.effective_guidance()),
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
-                        colorize_description(mcfg.description.as_deref().unwrap_or("")),
+                        colorize_description(
+                            // Prefer manifest description (has [broken]/[beta] tags)
+                            // over config description (may be stale from older pull)
+                            mold_core::manifest::find_manifest(name)
+                                .map(|m| m.description.as_str())
+                                .unwrap_or(mcfg.description.as_deref().unwrap_or("")),
+                        ),
                         nw = nw,
                     );
                 }
