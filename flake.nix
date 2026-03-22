@@ -100,7 +100,7 @@
             ];
           }
           // lib.optionalAttrs isLinux {
-            CUDA_PATH = "${pkgs.cudaPackages.cuda_nvcc}";
+            CUDA_PATH = "${cudaToolkit}";
             CUDA_COMPUTE_CAP = cudaComputeCap;
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
@@ -114,6 +114,15 @@
               "metal"
             else
               "";
+
+          # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
+          cudaToolkit = pkgs.symlinkJoin {
+            name = "cuda-toolkit-merged";
+            paths = [
+              pkgs.cudaPackages.cuda_nvcc
+              pkgs.cudaPackages.cuda_cudart
+            ];
+          };
 
           meta = with lib; {
             description = "Local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
@@ -196,7 +205,7 @@
             ++ lib.optionals isLinux [
               {
                 name = "CUDA_PATH";
-                value = "${pkgs.cudaPackages.cuda_nvcc}";
+                value = "${cudaToolkit}";
               }
               {
                 name = "CUDA_COMPUTE_CAP";
