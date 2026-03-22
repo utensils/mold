@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
+use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::time::Instant;
 
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
@@ -30,7 +31,7 @@ pub struct SD15Engine {
     loaded: Option<LoadedSD15>,
     model_name: String,
     paths: ModelPaths,
-    scheduler_name: String,
+    scheduler: Scheduler,
     progress: ProgressReporter,
     load_strategy: LoadStrategy,
 }
@@ -39,14 +40,14 @@ impl SD15Engine {
     pub fn new(
         model_name: String,
         paths: ModelPaths,
-        scheduler_name: String,
+        scheduler: Scheduler,
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
             loaded: None,
             model_name,
             paths,
-            scheduler_name,
+            scheduler,
             progress: ProgressReporter::default(),
             load_strategy,
         }
@@ -189,13 +190,18 @@ impl SD15Engine {
         &self,
         unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
         text_embeddings: &Tensor,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        sched: Scheduler,
         latents: &mut Tensor,
         guidance: f64,
         steps: u32,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
-        let mut scheduler = sd_config.build_scheduler(steps as usize)?;
+        let mut scheduler = crate::scheduler::build_scheduler(
+            sched,
+            steps as usize,
+            PredictionType::Epsilon,
+            false,
+        )?;
         let timesteps = scheduler.timesteps().to_vec();
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len());
@@ -361,10 +367,17 @@ impl SD15Engine {
         self.progress
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
+        let sched = req.scheduler.unwrap_or(self.scheduler);
         let latent_h = height / 8;
         let latent_w = width / 8;
-        let scheduler = sd_config.build_scheduler(req.steps as usize)?;
-        let init_noise_sigma = scheduler.init_noise_sigma();
+        let init_scheduler = crate::scheduler::build_scheduler(
+            sched,
+            req.steps as usize,
+            PredictionType::Epsilon,
+            false,
+        )?;
+        let init_noise_sigma = init_scheduler.init_noise_sigma();
+        drop(init_scheduler);
         let mut latents =
             (crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], &device, DType::F32)?
                 * init_noise_sigma)?;
@@ -373,7 +386,7 @@ impl SD15Engine {
         self.denoise_loop(
             &unet,
             &text_embeddings,
-            &sd_config,
+            sched,
             &mut latents,
             guidance,
             req.steps,
@@ -455,7 +468,7 @@ impl InferenceEngine for SD15Engine {
             seed, width, height,
             steps = req.steps,
             guidance,
-            scheduler = %self.scheduler_name,
+            scheduler = %self.scheduler,
             "starting SD1.5 generation"
         );
 
@@ -472,10 +485,17 @@ impl InferenceEngine for SD15Engine {
         )?;
 
         // 2. Build scheduler and create initial latents
+        let sched = req.scheduler.unwrap_or(self.scheduler);
         let latent_h = height / 8;
         let latent_w = width / 8;
-        let scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
-        let init_noise_sigma = scheduler.init_noise_sigma();
+        let init_scheduler = crate::scheduler::build_scheduler(
+            sched,
+            req.steps as usize,
+            PredictionType::Epsilon,
+            false,
+        )?;
+        let init_noise_sigma = init_scheduler.init_noise_sigma();
+        drop(init_scheduler);
         let mut latents = (crate::engine::seeded_randn(
             seed,
             &[1, 4, latent_h, latent_w],
@@ -488,7 +508,7 @@ impl InferenceEngine for SD15Engine {
         self.denoise_loop(
             &loaded.unet,
             &text_embeddings,
-            &loaded.sd_config,
+            sched,
             &mut latents,
             guidance,
             req.steps,

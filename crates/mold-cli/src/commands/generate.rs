@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::{
-    Config, GenerateRequest, GenerateResponse, ImageData, MoldClient, OutputFormat,
+    Config, GenerateRequest, GenerateResponse, ImageData, MoldClient, OutputFormat, Scheduler,
     SseProgressEvent,
 };
 use rand::Rng;
@@ -28,6 +28,7 @@ pub async fn run(
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    scheduler: Option<Scheduler>,
     eager: bool,
 ) -> Result<()> {
     let output_format = format;
@@ -79,6 +80,7 @@ pub async fn run(
         seed,
         batch_size: batch,
         output_format,
+        scheduler,
     };
 
     if let Some(desc) = &model_cfg.description {

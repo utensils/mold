@@ -1,5 +1,42 @@
 use serde::{Deserialize, Serialize};
 
+/// Scheduler algorithm for UNet-based diffusion models (SD1.5, SDXL).
+///
+/// Flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image) ignore this setting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scheduler {
+    #[default]
+    Ddim,
+    EulerAncestral,
+    UniPc,
+}
+
+impl std::fmt::Display for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Scheduler::Ddim => write!(f, "ddim"),
+            Scheduler::EulerAncestral => write!(f, "euler-ancestral"),
+            Scheduler::UniPc => write!(f, "uni-pc"),
+        }
+    }
+}
+
+impl std::str::FromStr for Scheduler {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "ddim" => Ok(Scheduler::Ddim),
+            "euler-ancestral" | "euler_ancestral" => Ok(Scheduler::EulerAncestral),
+            "uni-pc" | "unipc" | "uni_pc" => Ok(Scheduler::UniPc),
+            other => Err(format!(
+                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
@@ -23,6 +60,10 @@ pub struct GenerateRequest {
     pub batch_size: u32,
     #[serde(default)]
     pub output_format: OutputFormat,
+    /// Scheduler override for UNet-based models (SD1.5, SDXL).
+    /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<Scheduler>,
 }
 
 fn default_guidance() -> f64 {
@@ -234,12 +275,14 @@ mod tests {
             seed: Some(42),
             batch_size: 1,
             output_format: OutputFormat::Png,
+            scheduler: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.prompt, req.prompt);
         assert_eq!(back.width, req.width);
         assert_eq!(back.seed, req.seed);
+        assert_eq!(back.scheduler, None);
     }
 
     #[test]
@@ -288,6 +331,57 @@ mod tests {
     #[test]
     fn output_format_default_is_png() {
         assert_eq!(OutputFormat::default(), OutputFormat::Png);
+    }
+
+    #[test]
+    fn scheduler_serde_roundtrip() {
+        let sched = Scheduler::EulerAncestral;
+        let json = serde_json::to_string(&sched).unwrap();
+        assert_eq!(json, r#""euler-ancestral""#);
+        let back: Scheduler = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sched);
+    }
+
+    #[test]
+    fn scheduler_from_str_aliases() {
+        assert_eq!("ddim".parse::<Scheduler>().unwrap(), Scheduler::Ddim);
+        assert_eq!(
+            "euler-ancestral".parse::<Scheduler>().unwrap(),
+            Scheduler::EulerAncestral
+        );
+        assert_eq!(
+            "euler_ancestral".parse::<Scheduler>().unwrap(),
+            Scheduler::EulerAncestral
+        );
+        assert_eq!("uni-pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
+        assert_eq!("unipc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
+        assert_eq!("uni_pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
+    }
+
+    #[test]
+    fn scheduler_from_str_invalid() {
+        assert!("unknown".parse::<Scheduler>().is_err());
+    }
+
+    #[test]
+    fn scheduler_display() {
+        assert_eq!(Scheduler::Ddim.to_string(), "ddim");
+        assert_eq!(Scheduler::EulerAncestral.to_string(), "euler-ancestral");
+        assert_eq!(Scheduler::UniPc.to_string(), "uni-pc");
+    }
+
+    #[test]
+    fn scheduler_default_is_ddim() {
+        assert_eq!(Scheduler::default(), Scheduler::Ddim);
+    }
+
+    #[test]
+    fn generate_request_backward_compat_no_scheduler() {
+        // Existing JSON without scheduler field should deserialize fine
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.scheduler, None);
     }
 
     // ── SSE type tests ──────────────────────────────────────────────────────
