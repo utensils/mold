@@ -543,31 +543,25 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
-        // For img2img, trim schedule BEFORE mixing so noise level matches first timestep
-        let img2img_start_t = if req.source_image.is_some() {
+        // For img2img, build a schedule starting at exactly `strength`.
+        // Insert strength as the first timestep, then keep all original schedule
+        // points below it. This ensures noise level matches the denoising start
+        // and the user gets the exact strength they requested.
+        if req.source_image.is_some() {
             let strength = req.strength;
-            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
-            timesteps = timesteps[start_idx..].to_vec();
-            // Ensure at least one denoising step
-            if timesteps.len() < 2 {
-                // Insert strength as first timestep so we get at least one step
-                timesteps.insert(0, strength);
-            }
-            let t = timesteps[0];
+            // Keep only schedule points strictly below strength
+            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
+            timesteps = std::iter::once(strength).chain(tail).collect();
             tracing::info!(
                 strength,
-                start_t = t,
-                start_idx,
+                schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: trimmed timestep schedule"
+                "img2img: built schedule from strength"
             );
-            Some(t)
-        } else {
-            None
-        };
+        }
 
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = img2img_start_t.unwrap();
+            let start_t = req.strength;
 
             self.progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
@@ -844,29 +838,21 @@ impl InferenceEngine for FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
-        // For img2img, trim schedule BEFORE mixing so noise level matches first timestep
-        let img2img_start_t = if req.source_image.is_some() {
+        // For img2img, build a schedule starting at exactly `strength`.
+        if req.source_image.is_some() {
             let strength = req.strength;
-            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
-            timesteps = timesteps[start_idx..].to_vec();
-            if timesteps.len() < 2 {
-                timesteps.insert(0, strength);
-            }
-            let t = timesteps[0];
+            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
+            timesteps = std::iter::once(strength).chain(tail).collect();
             tracing::info!(
                 strength,
-                start_t = t,
-                start_idx,
+                schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: trimmed timestep schedule"
+                "img2img: built schedule from strength"
             );
-            Some(t)
-        } else {
-            None
-        };
+        }
 
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = img2img_start_t.unwrap();
+            let start_t = req.strength;
 
             progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
