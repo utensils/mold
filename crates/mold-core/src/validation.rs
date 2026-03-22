@@ -1,5 +1,23 @@
 use crate::GenerateRequest;
 
+/// Maximum total pixels allowed (~1.1 megapixels, VAE VRAM constraint).
+pub const MAX_PIXELS: u64 = 1_100_000;
+
+/// Clamp dimensions to fit within the megapixel limit, preserving aspect ratio.
+/// Both dimensions are rounded down to multiples of 16.
+/// Returns the original dimensions unchanged if already within limits.
+pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
+    let pixels = w as u64 * h as u64;
+    if pixels <= MAX_PIXELS {
+        return (w, h);
+    }
+    let scale = (MAX_PIXELS as f64 / pixels as f64).sqrt();
+    let new_w = ((w as f64 * scale) as u32 / 16) * 16;
+    let new_h = ((h as f64 * scale) as u32 / 16) * 16;
+    // Ensure we don't produce zero dimensions
+    (new_w.max(16), new_h.max(16))
+}
+
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
 /// Shared between the HTTP server and local CLI inference paths.
 pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
@@ -19,7 +37,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     // 896x1152 = 1.03M, 1024x1024 = 1.05M, 1280x768 = 0.98M — all fine.
     // 1280x1280 = 1.64M — too large, OOMs on VAE decode.
     let pixels = req.width as u64 * req.height as u64;
-    if pixels > 1_100_000 {
+    if pixels > MAX_PIXELS {
         return Err(format!(
             "{}x{} = {} megapixels exceeds the ~1.1MP limit (VAE VRAM constraint)",
             req.width,
@@ -135,6 +153,48 @@ mod tests {
     fn jpeg_bytes() -> Vec<u8> {
         vec![0xFF, 0xD8, 0xFF, 0xE0]
     }
+
+    // ── clamp_to_megapixel_limit tests ──────────────────────────────────────
+
+    #[test]
+    fn clamp_noop_within_limit() {
+        assert_eq!(super::clamp_to_megapixel_limit(1024, 1024), (1024, 1024));
+    }
+
+    #[test]
+    fn clamp_downscales_oversized() {
+        let (w, h) = super::clamp_to_megapixel_limit(1888, 1168);
+        assert!(w % 16 == 0 && h % 16 == 0, "must be multiples of 16");
+        let pixels = w as u64 * h as u64;
+        assert!(
+            pixels <= super::MAX_PIXELS,
+            "must be within limit: {pixels}"
+        );
+        // Aspect ratio roughly preserved
+        let orig_ratio = 1888.0 / 1168.0;
+        let new_ratio = w as f64 / h as f64;
+        assert!(
+            (orig_ratio - new_ratio).abs() < 0.05,
+            "aspect ratio drift too large"
+        );
+    }
+
+    #[test]
+    fn clamp_large_square() {
+        let (w, h) = super::clamp_to_megapixel_limit(2048, 2048);
+        assert!(w % 16 == 0 && h % 16 == 0);
+        assert!(w as u64 * h as u64 <= super::MAX_PIXELS);
+    }
+
+    #[test]
+    fn clamp_extreme_aspect_ratio() {
+        let (w, h) = super::clamp_to_megapixel_limit(4096, 256);
+        assert!(w % 16 == 0 && h % 16 == 0);
+        assert!(w as u64 * h as u64 <= super::MAX_PIXELS);
+        assert!(w > h, "should remain landscape");
+    }
+
+    // ── validate_generate_request tests ──────────────────────────────────────
 
     #[test]
     fn valid_request_passes() {

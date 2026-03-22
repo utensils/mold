@@ -5,9 +5,9 @@ use candle_core::{DType, Device, Tensor};
 
 /// Normalization range for source images before VAE encoding.
 pub enum NormalizeRange {
-    /// [-1, 1] for SD1.5 and SDXL (UNet-based models).
+    /// [-1, 1] for SD1.5, SDXL, and FLUX (VAE expects this range).
     MinusOneToOne,
-    /// [0, 1] for FLUX, SD3, Z-Image, Flux.2, Qwen-Image (flow-matching models).
+    /// [0, 1] for SD3, Z-Image, Flux.2, Qwen-Image.
     ZeroToOne,
 }
 
