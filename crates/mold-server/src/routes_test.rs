@@ -350,7 +350,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = json_body(resp).await;
         assert_eq!(body["code"], "INFERENCE_ERROR");
-        assert!(body["error"].as_str().unwrap().contains("mock engine error"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("mock engine error"));
     }
 
     // ── /api/generate — unknown model ────────────────────────────────────────
