@@ -1,9 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::manifest::{
-    find_manifest, resolve_model_name, ModelComponent, SHARED_COMPONENTS_GB,
-    SHARED_SD15_COMPONENTS_GB, SHARED_SDXL_COMPONENTS_GB, SHARED_ZIMAGE_COMPONENTS_GB,
-};
+use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{Config, ModelPaths};
 use sha2::{Digest, Sha256};
 
@@ -74,14 +71,15 @@ fn resolve_verify_path(
 
 fn format_family(family: &str) -> String {
     match family {
-        "flux" => "FLUX.1".magenta().to_string(),
-        "flux2" => "FLUX.2".bright_magenta().to_string(),
+        "flux" => "FLUX.1".truecolor(200, 120, 255).to_string(),
+        "flux2" => "FLUX.2".truecolor(255, 150, 255).to_string(),
         "sd15" => "SD 1.5".green().to_string(),
-        "sd3" | "sd3.5" => "SD 3.5".bright_green().to_string(),
+        "sd3" | "sd3.5" => "SD 3.5".truecolor(100, 220, 160).to_string(),
         "sdxl" => "SDXL".yellow().to_string(),
         "z-image" => "Z-Image".cyan().to_string(),
-        "qwen-image" | "qwen_image" => "Qwen-Image".bright_cyan().to_string(),
-        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen".bright_yellow().to_string(),
+        "qwen-image" | "qwen_image" => "Qwen-Image".truecolor(100, 200, 255).to_string(),
+        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen".truecolor(255, 180, 80).to_string(),
+        "controlnet" => "ControlNet".bright_red().to_string(),
         other => other.to_uppercase(),
     }
 }
@@ -131,20 +129,26 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!("  {:<16} {}", "Family:".dimmed(), format_family(&m.family));
         println!("  {:<16} {}", "Description:".dimmed(), m.description);
 
-        // Size info
-        let shared_gb = match m.family.as_str() {
-            "sd15" => SHARED_SD15_COMPONENTS_GB,
-            "sdxl" => SHARED_SDXL_COMPONENTS_GB,
-            "z-image" => SHARED_ZIMAGE_COMPONENTS_GB,
-            _ => SHARED_COMPONENTS_GB,
-        };
-        println!(
-            "  {:<16} {:.1}GB (transformer) + {:.1}GB (shared) = {:.1}GB total",
-            "Size:".dimmed(),
-            m.size_gb,
-            shared_gb,
-            m.size_gb + shared_gb
-        );
+        // Size info — compute from manifest files, accounting for cache
+        let (total_bytes, remaining_bytes) = mold_core::manifest::compute_download_size(m);
+        let total_gb = total_bytes as f64 / 1_073_741_824.0;
+        let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+        if remaining_bytes == 0 {
+            println!(
+                "  {:<16} {:.1}GB total (fully cached)",
+                "Size:".dimmed(),
+                total_gb,
+            );
+        } else if remaining_gb < total_gb - 0.1 {
+            println!(
+                "  {:<16} {:.1}GB total ({:.1}GB to download)",
+                "Size:".dimmed(),
+                total_gb,
+                remaining_gb,
+            );
+        } else {
+            println!("  {:<16} {:.1}GB total", "Size:".dimmed(), total_gb,);
+        }
 
         // Generation defaults
         println!();
@@ -175,11 +179,18 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             } else {
                 format!("{:.0}MB", size_mb)
             };
+            let cached = mold_core::manifest::is_file_cached(m, file);
+            let status_marker = if cached {
+                "cached".green().to_string()
+            } else {
+                "not downloaded".dimmed().to_string()
+            };
             println!(
-                "  {:<16} {} ({})",
+                "  {:<16} {} ({}, {})",
                 format!("{}:", component_label(&file.component)).dimmed(),
                 url,
                 size_str,
+                status_marker,
             );
         }
     } else if let Some(mcfg) = model_config {

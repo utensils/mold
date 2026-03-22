@@ -274,6 +274,15 @@ async fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Handle Ctrl+C gracefully — exit immediately without letting background
+    // threads (e.g. indicatif's ctrl-c cleanup thread) panic on RecvError.
+    ctrlc::set_handler(move || {
+        // Clear the line to remove any progress bar artifacts
+        eprint!("\r\x1b[2K");
+        std::process::exit(130); // 128 + SIGINT(2), standard Unix convention
+    })
+    .ok();
+
     if let Err(e) = run().await {
         // If the command already printed its own diagnostics, just exit.
         if e.downcast_ref::<AlreadyReported>().is_some() {

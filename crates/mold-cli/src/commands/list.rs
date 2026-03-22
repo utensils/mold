@@ -15,6 +15,7 @@ fn family_label(family: &str) -> &str {
         "z-image" => "Z-Image",
         "qwen-image" | "qwen_image" => "Qwen-Image",
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
+        "controlnet" => "ControlNet",
         other => other,
     }
 }
@@ -23,14 +24,15 @@ fn family_label(family: &str) -> &str {
 fn format_family_padded(family: &str, width: usize) -> String {
     let padded = format!("{:<width$}", family_label(family), width = width);
     match family {
-        "flux" => padded.magenta().to_string(),
-        "flux2" => padded.bright_magenta().to_string(),
-        "sd15" => padded.green().to_string(),
-        "sd3" | "sd3.5" => padded.bright_green().to_string(),
-        "sdxl" => padded.yellow().to_string(),
-        "z-image" => padded.cyan().to_string(),
-        "qwen-image" | "qwen_image" => padded.bright_cyan().to_string(),
-        "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
+        "flux" => padded.truecolor(200, 120, 255).to_string(), // purple
+        "flux2" => padded.truecolor(255, 150, 255).to_string(), // pink-magenta
+        "sd15" => padded.green().to_string(),                  // green
+        "sd3" | "sd3.5" => padded.truecolor(100, 220, 160).to_string(), // sea green
+        "sdxl" => padded.yellow().to_string(),                 // yellow
+        "z-image" => padded.cyan().to_string(),                // cyan
+        "qwen-image" | "qwen_image" => padded.truecolor(100, 200, 255).to_string(), // sky blue
+        "wuerstchen" | "wuerstchen-v2" => padded.truecolor(255, 180, 80).to_string(), // orange
+        "controlnet" => padded.bright_red().to_string(),       // bright red
         _ => padded,
     }
 }
@@ -113,7 +115,11 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", model.defaults.default_guidance),
                         model.defaults.default_width,
                         model.defaults.default_height,
-                        colorize_description(&model.defaults.description),
+                        colorize_description(
+                            mold_core::manifest::find_manifest(&model.name)
+                                .map(|m| m.description.as_str())
+                                .unwrap_or(&model.defaults.description),
+                        ),
                     );
                 }
             }
@@ -121,24 +127,45 @@ pub async fn run() -> Result<()> {
             // Show available-to-pull models
             if !available.is_empty() {
                 println!();
-                println!("Available to pull:");
+                println!(
+                    "  {:<nw$} {:<fw$} {:>7}  {:>7}",
+                    "Available to pull:".bold(),
+                    "",
+                    "SIZE".dimmed(),
+                    "FETCH".dimmed(),
+                    nw = nw,
+                    fw = fw,
+                );
                 for m in &available {
-                    let size = if m.size_gb > 0.0 {
+                    let size_str = if m.size_gb > 0.0 {
                         format!("{:.1}GB", m.size_gb)
                     } else {
                         "—".to_string()
                     };
+                    let fetch_col = if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
+                        let (_total_bytes, remaining_bytes) =
+                            mold_core::manifest::compute_download_size(mf);
+                        let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+                        if remaining_bytes == 0 {
+                            "cached".dimmed().to_string()
+                        } else {
+                            format!("{:.1}GB", remaining_gb)
+                        }
+                    } else {
+                        size_str.clone()
+                    };
                     println!(
-                        "  {:<nw$} {} {:>7}  {}",
+                        "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),
                         format_family_padded(&m.family, fw),
-                        size,
+                        size_str,
+                        fetch_col,
                         colorize_description(&m.defaults.description),
                         nw = nw,
                     );
                 }
                 println!();
-                println!("{}", "Use mold pull <model> to download.".dimmed(),);
+                println!("{}", "Use mold pull <model> to download.".dimmed());
             }
         }
         Err(_) => {
@@ -214,7 +241,13 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", mcfg.effective_guidance()),
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
-                        colorize_description(mcfg.description.as_deref().unwrap_or("")),
+                        colorize_description(
+                            // Prefer manifest description (has [broken]/[beta] tags)
+                            // over config description (may be stale from older pull)
+                            mold_core::manifest::find_manifest(name)
+                                .map(|m| m.description.as_str())
+                                .unwrap_or(mcfg.description.as_deref().unwrap_or("")),
+                        ),
                         nw = nw,
                     );
                 }
@@ -235,26 +268,37 @@ pub async fn run() -> Result<()> {
             // Show available-to-pull models
             if !available.is_empty() {
                 println!();
-                println!("Available to pull:");
+                println!(
+                    "  {:<nw$} {:<fw$} {:>7}  {:>7}",
+                    "Available to pull:".bold(),
+                    "",
+                    "SIZE".dimmed(),
+                    "FETCH".dimmed(),
+                    nw = nw,
+                    fw = fw,
+                );
                 for m in &available {
+                    let (_total_bytes, remaining_bytes) =
+                        mold_core::manifest::compute_download_size(m);
+                    let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+                    let size_str = format!("{:.1}GB", m.size_gb);
+                    let fetch_col = if remaining_bytes == 0 {
+                        format!("{:>7}", "cached").dimmed().to_string()
+                    } else {
+                        format!("{:.1}GB", remaining_gb)
+                    };
                     println!(
-                        "  {:<nw$} {} {:>5.1}GB  {}",
+                        "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),
                         format_family_padded(&m.family, fw),
-                        m.size_gb,
+                        size_str,
+                        fetch_col,
                         colorize_description(&m.description),
                         nw = nw,
                     );
                 }
                 println!();
-                println!(
-                    "{}",
-                    format!(
-                        "Sizes are transformer only. First pull also downloads {:.1}GB of shared components (T5, CLIP, VAE).",
-                        mold_core::manifest::SHARED_COMPONENTS_GB
-                    ).dimmed(),
-                );
-                println!("Use {} to download.", "mold pull <model>".bold(),);
+                println!("Use {} to download.", "mold pull <model>".bold());
             }
         }
     }

@@ -1,7 +1,7 @@
 # mold
 
 [![CI](https://github.com/utensils/mold/actions/workflows/ci.yml/badge.svg)](https://github.com/utensils/mold/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
 <p align="center">
@@ -69,6 +69,55 @@ cat prompt.txt | mold run z-image-turbo --seed 42 | convert - -resize 512x512 th
 
 # Pipe in and out
 echo "cyberpunk samurai" | mold run flux-dev:q4 | viu -
+```
+
+### Image-to-image
+
+Transform existing images with a text prompt:
+
+```bash
+# Stylize a photo
+mold run "oil painting style" --image photo.png
+
+# Control how much changes (0.0 = no change, 1.0 = full denoise)
+mold run "watercolor" --image photo.png --strength 0.5
+
+# Pipe an image through
+cat photo.png | mold run "sketch style" --image - | viu -
+```
+
+### Inpainting
+
+Selectively edit parts of an image with a mask (white = repaint, black = keep):
+
+```bash
+mold run "a red sports car" --image photo.png --mask mask.png
+```
+
+### ControlNet (SD1.5)
+
+Guide generation with a control image (edge map, depth map, etc.):
+
+```bash
+mold pull controlnet-canny-sd15
+mold run sd15:fp16 "a futuristic city" --control edges.png --control-model controlnet-canny-sd15
+```
+
+### Scheduler selection
+
+Choose the noise scheduler for SD1.5/SDXL models:
+
+```bash
+mold run sd15:fp16 "a cat" --scheduler uni-pc        # Fast convergence
+mold run sd15:fp16 "a cat" --scheduler euler-ancestral # Stochastic
+```
+
+### Batch generation
+
+Generate multiple images with incrementing seeds:
+
+```bash
+mold run "a sunset" --batch 4    # Generates 4 images: seed, seed+1, seed+2, seed+3
 ```
 
 ### Manage models
@@ -140,6 +189,17 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
+### Wuerstchen v2 / Flux.2 / Qwen-Image (broken on MPS)
+
+> **Warning**: These model families produce poor quality output on Apple Silicon (MPS/Metal). They are work-in-progress and may work better on CUDA. Use FLUX, SDXL, SD1.5, SD3.5, or Z-Image for production use.
+
+| Model | Steps | Size | Notes |
+|-------|-------|------|-------|
+| `wuerstchen-v2:fp16` | 30 | 5.6GB | 3-stage cascade, rendering artifacts on MPS |
+| `flux2-klein:bf16` | 28 | 13.5GB | Flux.2 Klein 4B, poor quality on MPS |
+| `qwen-image:q8` | 28 | 21.8GB | Qwen-Image-2512, poor quality on MPS |
+| `qwen-image:q4` | 28 | 12.3GB | Qwen-Image, smallest footprint |
+
 > Bare names default to `:q8` for FLUX/Z-Image or `:fp16` for SD1.5/SDXL. So `mold run flux-schnell "a cat"` just works.
 
 ## Server API
@@ -174,7 +234,7 @@ mold completions fish | source     # fish
 ## Requirements
 
 - **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal
-- Models auto-download on first use (~2-12GB depending on model)
+- Models auto-download on first use (~2-30GB depending on model)
 
 ## How it works
 
