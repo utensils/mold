@@ -101,19 +101,21 @@ impl WuerstchenEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Prior CLIP-G tokenizer path required for Wuerstchen"))?
             .clone();
-        // Decoder CLIP (1024-dim) — stored in clip_encoder
-        let decoder_clip_encoder = self
-            .paths
-            .clip_encoder
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Decoder CLIP encoder path required for Wuerstchen"))?
-            .clone();
+        // Decoder CLIP (1024-dim) — stored in clip_encoder.
+        // Fall back to Prior CLIP if decoder CLIP not available (old configs from
+        // before the dual-CLIP change). Quality will be degraded but won't crash.
+        let decoder_clip_encoder = self.paths.clip_encoder.clone().unwrap_or_else(|| {
+            tracing::warn!(
+                "Decoder CLIP encoder path not configured — falling back to Prior CLIP. \
+                     Run `mold rm wuerstchen-v2:fp16 && mold pull wuerstchen-v2:fp16` to fix."
+            );
+            prior_clip_encoder.clone()
+        });
         let decoder_clip_tokenizer = self
             .paths
             .clip_tokenizer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Decoder CLIP tokenizer path required for Wuerstchen"))?
-            .clone();
+            .clone()
+            .unwrap_or_else(|| prior_clip_tokenizer.clone());
 
         for (label, path) in [
             ("prior (Stage C)", &self.paths.transformer),
