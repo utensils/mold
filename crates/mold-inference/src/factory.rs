@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use mold_core::{Config, ModelPaths};
+use mold_core::{Config, ModelPaths, Scheduler};
 
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
@@ -8,6 +8,7 @@ use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
+use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
 /// Determine the model family from config or manifest, defaulting to "flux".
@@ -56,23 +57,27 @@ pub fn create_engine(
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
-            let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
+            let scheduler = model_cfg.scheduler.unwrap_or(Scheduler::Ddim);
             Ok(Box::new(SD15Engine::new(
                 model_name,
                 paths,
-                scheduler_name,
+                scheduler,
                 load_strategy,
             )))
         }
         "sdxl" => {
-            let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
-            let is_turbo = model_cfg.is_turbo.unwrap_or_else(|| {
-                scheduler_name == "euler_ancestral" || model_name.contains("turbo")
+            let is_turbo = model_cfg
+                .is_turbo
+                .unwrap_or_else(|| model_name.contains("turbo"));
+            let scheduler = model_cfg.scheduler.unwrap_or(if is_turbo {
+                Scheduler::EulerAncestral
+            } else {
+                Scheduler::Ddim
             });
             Ok(Box::new(SDXLEngine::new(
                 model_name,
                 paths,
-                scheduler_name,
+                scheduler,
                 is_turbo,
                 load_strategy,
             )))
@@ -121,8 +126,13 @@ pub fn create_engine(
             paths,
             load_strategy,
         ))),
+        "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
+            model_name,
+            paths,
+            load_strategy,
+        ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image, wuerstchen",
             other,
             model_name
         ),
@@ -147,6 +157,7 @@ mod tests {
             clip_tokenizer_2: None,
             text_encoder_files: vec![],
             text_tokenizer: None,
+            decoder: None,
         }
     }
 
@@ -310,5 +321,51 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
         assert!(err.contains("nosuchfamily"));
+    }
+
+    #[test]
+    fn resolve_family_from_manifest_wuerstchen() {
+        let config = Config::default();
+        assert_eq!(resolve_family("wuerstchen-v2:fp16", &config), "wuerstchen");
+    }
+
+    #[test]
+    fn create_engine_wuerstchen() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-wuerstchen".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("wuerstchen".to_string()),
+                ..Default::default()
+            },
+        );
+        let engine = create_engine(
+            "my-wuerstchen".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+        )
+        .unwrap();
+        assert_eq!(engine.model_name(), "my-wuerstchen");
+    }
+
+    #[test]
+    fn create_engine_wuerstchen_family_alias() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-wurst".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("wuerstchen-v2".to_string()),
+                ..Default::default()
+            },
+        );
+        let engine = create_engine(
+            "my-wurst".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+        )
+        .unwrap();
+        assert_eq!(engine.model_name(), "my-wurst");
     }
 }

@@ -591,6 +591,12 @@ impl ZImageEngine {
 
 impl InferenceEngine for ZImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        if req.scheduler.is_some() {
+            tracing::warn!(
+                "scheduler selection not supported for Z-Image (flow-matching), ignoring"
+            );
+        }
+
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);

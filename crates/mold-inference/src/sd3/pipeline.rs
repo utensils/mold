@@ -540,6 +540,10 @@ impl SD3Engine {
 
 impl InferenceEngine for SD3Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        if req.scheduler.is_some() {
+            tracing::warn!("scheduler selection not supported for SD3 (flow-matching), ignoring");
+        }
+
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);

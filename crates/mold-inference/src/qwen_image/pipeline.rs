@@ -574,6 +574,12 @@ impl QwenImageEngine {
 
 impl InferenceEngine for QwenImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        if req.scheduler.is_some() {
+            tracing::warn!(
+                "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
+            );
+        }
+
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -804,6 +810,7 @@ mod tests {
                 clip_tokenizer_2: None,
                 text_encoder_files: vec![],
                 text_tokenizer: Some(PathBuf::from("/tmp/tokenizer.json")),
+                decoder: None,
             },
             LoadStrategy::Sequential,
         );

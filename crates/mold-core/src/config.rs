@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::manifest::resolve_model_name;
+use crate::types::Scheduler;
 
 /// Per-model file path + default settings configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -24,6 +25,8 @@ pub struct ModelConfig {
     pub text_encoder_files: Option<Vec<String>>,
     /// Generic text encoder tokenizer path (Qwen3 for Z-Image)
     pub text_tokenizer: Option<String>,
+    /// Stage B decoder weights path (Wuerstchen only)
+    pub decoder: Option<String>,
 
     // --- generation defaults ---
     /// Default inference steps (e.g. 4 for schnell, 25 for dev)
@@ -40,8 +43,8 @@ pub struct ModelConfig {
     /// Whether this model uses a turbo (few-step distilled) schedule.
     /// If None, auto-detected from the model name.
     pub is_turbo: Option<bool>,
-    /// Scheduler type: "ddim", "euler_ancestral" (SDXL only; FLUX uses flow-matching)
-    pub scheduler: Option<String>,
+    /// Scheduler algorithm for UNet-based models (SD1.5, SDXL). Ignored by flow-matching models.
+    pub scheduler: Option<Scheduler>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -63,6 +66,7 @@ impl ModelConfig {
             &self.clip_encoder_2,
             &self.clip_tokenizer_2,
             &self.text_tokenizer,
+            &self.decoder,
         ];
         for p in singles.into_iter().flatten() {
             paths.push(p.clone());
@@ -118,6 +122,8 @@ pub struct ModelPaths {
     pub text_encoder_files: Vec<PathBuf>,
     /// Generic text encoder tokenizer (Qwen3 for Z-Image)
     pub text_tokenizer: Option<PathBuf>,
+    /// Stage B decoder weights (Wuerstchen only)
+    pub decoder: Option<PathBuf>,
 }
 
 impl ModelPaths {
@@ -168,6 +174,10 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.text_tokenizer.as_deref()),
             "MOLD_TEXT_TOKENIZER_PATH",
         );
+        let decoder = Self::resolve_path(
+            model_cfg.and_then(|m| m.decoder.as_deref()),
+            "MOLD_DECODER_PATH",
+        );
 
         Some(Self {
             transformer,
@@ -181,6 +191,7 @@ impl ModelPaths {
             clip_tokenizer_2,
             text_encoder_files,
             text_tokenizer,
+            decoder,
         })
     }
 

@@ -9,9 +9,11 @@ mod image;
 pub mod model_registry;
 pub mod progress;
 pub mod qwen_image;
+pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
 pub mod sdxl;
+pub mod wuerstchen;
 pub mod zimage;
 
 pub use engine::{InferenceEngine, LoadStrategy};
@@ -25,4 +27,5 @@ pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;
 pub use sdxl::SDXLEngine;
+pub use wuerstchen::WuerstchenEngine;
 pub use zimage::ZImageEngine;

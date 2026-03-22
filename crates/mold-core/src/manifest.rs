@@ -1,4 +1,5 @@
 use crate::config::ModelConfig;
+use crate::types::Scheduler;
 use crate::ModelPaths;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub enum ModelComponent {
     ClipTokenizer2, // CLIP-G tokenizer (SDXL)
     TextEncoder,    // Generic text encoder shard (Qwen3 for Z-Image)
     TextTokenizer,  // Generic text encoder tokenizer
+    Decoder,        // Stage B decoder weights (Wuerstchen)
 }
 
 #[derive(Debug, Clone)]
@@ -37,8 +39,8 @@ pub struct ManifestDefaults {
     pub width: u32,
     pub height: u32,
     pub is_schnell: bool,
-    /// Scheduler type: None for FLUX (uses flow-matching), "ddim" or "euler_ancestral" for SDXL.
-    pub scheduler: Option<&'static str>,
+    /// Scheduler algorithm: None for flow-matching models, Some for UNet-based models.
+    pub scheduler: Option<Scheduler>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,13 +109,17 @@ impl ModelManifest {
                 .text_tokenizer
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
+            decoder: paths
+                .decoder
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             default_steps: Some(self.defaults.steps),
             default_guidance: Some(self.defaults.guidance),
             default_width: Some(self.defaults.width),
             default_height: Some(self.defaults.height),
             is_schnell: Some(self.defaults.is_schnell),
             is_turbo: None,
-            scheduler: self.defaults.scheduler.map(|s| s.to_string()),
+            scheduler: self.defaults.scheduler,
             description: Some(self.description.clone()),
             family: Some(self.family.clone()),
         }
@@ -467,6 +473,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(zimage_manifests());
     manifests.extend(flux2_manifests());
     manifests.extend(qwen_image_manifests());
+    manifests.extend(wuerstchen_manifests());
     manifests
 }
 
@@ -724,7 +731,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 width: 512,
                 height: 512,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         ModelManifest {
@@ -753,7 +760,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 width: 512,
                 height: 512,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         ModelManifest {
@@ -781,7 +788,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 width: 512,
                 height: 512,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
     ]
@@ -865,7 +872,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         ModelManifest {
@@ -893,7 +900,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("euler_ancestral"),
+                scheduler: Some(Scheduler::EulerAncestral),
             },
         },
         ModelManifest {
@@ -921,7 +928,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         ModelManifest {
@@ -949,7 +956,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         ModelManifest {
@@ -977,7 +984,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("ddim"),
+                scheduler: Some(Scheduler::Ddim),
             },
         },
         // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
@@ -1006,7 +1013,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 width: 512,
                 height: 512,
                 is_schnell: false,
-                scheduler: Some("euler_ancestral"),
+                scheduler: Some(Scheduler::EulerAncestral),
             },
         },
     ]
@@ -1117,7 +1124,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("flow_match_euler"),
+                scheduler: None,
             },
         },
         // GGUF quantized variants (transformer only; shared components are always BF16)
@@ -1146,7 +1153,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("flow_match_euler"),
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -1174,7 +1181,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("flow_match_euler"),
+                scheduler: None,
             },
         },
         ModelManifest {
@@ -1202,7 +1209,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some("flow_match_euler"),
+                scheduler: None,
             },
         },
     ]
@@ -1354,7 +1361,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         width: 1024,
         height: 1024,
         is_schnell: false,
-        scheduler: Some("flow_match_euler"),
+        scheduler: None,
     };
 
     vec![
@@ -1451,6 +1458,66 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults,
         },
     ]
+}
+
+fn wuerstchen_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 60,
+        guidance: 4.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: None,
+    };
+    vec![ModelManifest {
+        name: "wuerstchen-v2:fp16".to_string(),
+        family: "wuerstchen".to_string(),
+        description: "Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression".to_string(),
+        size_gb: 5.6,
+        files: vec![
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen".to_string(),
+                hf_filename: "model_v2_stage_b.safetensors".to_string(),
+                component: ModelComponent::Decoder,
+                size_bytes: 1_500_000_000,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen".to_string(),
+                hf_filename: "vqgan_f4_v1_500k.safetensors".to_string(),
+                component: ModelComponent::Vae,
+                size_bytes: 100_000_000,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen-prior".to_string(),
+                hf_filename: "model_v2.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 3_000_000_000,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen-prior".to_string(),
+                hf_filename: "model_text_encoder.safetensors".to_string(),
+                component: ModelComponent::ClipEncoder2,
+                size_bytes: 800_000_000,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "warp-ai/wuerstchen-prior".to_string(),
+                hf_filename: "tokenizer.json".to_string(),
+                component: ModelComponent::ClipTokenizer2,
+                size_bytes: 2_000_000,
+                gated: false,
+                sha256: None,
+            },
+        ],
+        defaults,
+    }]
 }
 
 /// Resolve a user-provided model name to its canonical `name:tag` form.
@@ -1675,6 +1742,7 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
         clip_tokenizer_2: find(ModelComponent::ClipTokenizer2),
         text_encoder_files: collect(ModelComponent::TextEncoder),
         text_tokenizer: find(ModelComponent::TextTokenizer),
+        decoder: find(ModelComponent::Decoder),
     })
 }
 
@@ -1875,8 +1943,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image = 31
-        assert_eq!(known_manifests().len(), 31);
+        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen = 32
+        assert_eq!(known_manifests().len(), 32);
     }
 
     #[test]
@@ -2156,7 +2224,7 @@ mod tests {
     #[test]
     fn sdxl_turbo_uses_euler_ancestral() {
         let manifest = find_manifest("sdxl-turbo").unwrap();
-        assert_eq!(manifest.defaults.scheduler, Some("euler_ancestral"));
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::EulerAncestral));
         assert_eq!(manifest.defaults.steps, 4);
         assert_eq!(manifest.defaults.guidance, 0.0);
     }
@@ -2164,7 +2232,7 @@ mod tests {
     #[test]
     fn sdxl_base_uses_ddim() {
         let manifest = find_manifest("sdxl-base").unwrap();
-        assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::Ddim));
         assert_eq!(manifest.defaults.steps, 25);
     }
 
@@ -2214,7 +2282,7 @@ mod tests {
     fn sd15_defaults() {
         for manifest in known_manifests() {
             if manifest.family == "sd15" {
-                assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+                assert_eq!(manifest.defaults.scheduler, Some(Scheduler::Ddim));
                 assert_eq!(manifest.defaults.width, 512);
                 assert_eq!(manifest.defaults.height, 512);
             }
@@ -2229,7 +2297,7 @@ mod tests {
         assert_eq!(manifest.defaults.steps, 25);
         assert_eq!(manifest.defaults.width, 512);
         assert_eq!(manifest.defaults.guidance, 7.5);
-        assert_eq!(manifest.defaults.scheduler, Some("ddim"));
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::Ddim));
     }
 
     #[test]
@@ -2269,7 +2337,7 @@ mod tests {
         assert_eq!(manifest.family, "z-image");
         assert_eq!(manifest.defaults.steps, 9);
         assert_eq!(manifest.defaults.guidance, 0.0);
-        assert_eq!(manifest.defaults.scheduler, Some("flow_match_euler"));
+        assert_eq!(manifest.defaults.scheduler, None);
     }
 
     // --- Qwen3 variant registry tests ---
@@ -2326,7 +2394,7 @@ mod tests {
             if manifest.family == "z-image" {
                 assert_eq!(manifest.defaults.steps, 9);
                 assert_eq!(manifest.defaults.guidance, 0.0);
-                assert_eq!(manifest.defaults.scheduler, Some("flow_match_euler"));
+                assert_eq!(manifest.defaults.scheduler, None);
             }
         }
     }

@@ -37,6 +37,7 @@ fn resolve_file_path(
         ModelComponent::ClipEncoder2 => mcfg.clip_encoder_2.clone(),
         ModelComponent::ClipTokenizer2 => mcfg.clip_tokenizer_2.clone(),
         ModelComponent::TextTokenizer => mcfg.text_tokenizer.clone(),
+        ModelComponent::Decoder => mcfg.decoder.clone(),
         ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
     }
 }
@@ -59,6 +60,7 @@ fn resolve_verify_path(
             ModelComponent::ClipEncoder2 => paths.clip_encoder_2.as_ref(),
             ModelComponent::ClipTokenizer2 => paths.clip_tokenizer_2.as_ref(),
             ModelComponent::TextTokenizer => paths.text_tokenizer.as_ref(),
+            ModelComponent::Decoder => paths.decoder.as_ref(),
             // Shards and text encoder files are multi-valued; fall through to config
             ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
         };
@@ -96,6 +98,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::ClipTokenizer2 => "CLIP-G Tokenizer",
         ModelComponent::TextEncoder => "Text Encoder",
         ModelComponent::TextTokenizer => "Text Tokenizer",
+        ModelComponent::Decoder => "Decoder",
     }
 }
 
