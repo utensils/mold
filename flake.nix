@@ -32,6 +32,11 @@
         "aarch64-darwin"
       ];
 
+      flake.nixosModules = {
+        default = ./nix/module.nix;
+        mold = ./nix/module.nix;
+      };
+
       perSystem =
         {
           system,
@@ -122,6 +127,13 @@
             // {
               inherit cargoArtifacts meta;
               cargoExtraArgs = "-p mold-ai" + lib.optionalString (gpuFeature != "") " --features ${gpuFeature}";
+              postInstall = ''
+                installShellCompletion --cmd mold \
+                  --bash <($out/bin/mold completions bash) \
+                  --zsh <($out/bin/mold completions zsh) \
+                  --fish <($out/bin/mold completions fish)
+              '';
+              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.installShellFiles ];
             }
           );
         in
