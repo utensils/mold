@@ -88,7 +88,7 @@ in
 
       serviceConfig = {
         Type = "simple";
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${cfg.modelsDir}";
+        ExecStartPre = "+${pkgs.coreutils}/bin/mkdir -p ${cfg.modelsDir}";
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 5;
