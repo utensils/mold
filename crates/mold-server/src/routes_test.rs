@@ -90,7 +90,7 @@ mod tests {
         )
     }
 
-    /// Returns a valid 1×1 PNG (8-byte signature + IHDR + IDAT + IEND).
+    /// Returns a valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND).
     fn minimal_png() -> Vec<u8> {
         vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
@@ -372,6 +372,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNKNOWN_MODEL");
     }
 
     // ── /api/generate — known but not downloaded model returns 404 ───────────
@@ -391,6 +393,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "MODEL_NOT_FOUND");
     }
 
     // ── /api/openapi.json ────────────────────────────────────────────────────
@@ -504,6 +508,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
     #[tokio::test]
@@ -520,6 +526,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNKNOWN_MODEL");
     }
 
     #[tokio::test]
@@ -536,6 +544,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "MODEL_NOT_FOUND");
     }
 
     #[tokio::test]
