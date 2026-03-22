@@ -567,6 +567,9 @@ impl InferenceEngine for WuerstchenEngine {
         if req.source_image.is_some() {
             tracing::warn!("img2img not yet supported for Wuerstchen — generating from text only");
         }
+        if req.mask_image.is_some() {
+            tracing::warn!("inpainting not yet supported for Wuerstchen — ignoring mask");
+        }
 
         if self.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);

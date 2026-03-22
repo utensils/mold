@@ -32,6 +32,7 @@ pub async fn run(
     eager: bool,
     source_image: Option<Vec<u8>>,
     strength: f64,
+    mask_image: Option<Vec<u8>>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -112,6 +113,7 @@ pub async fn run(
         scheduler,
         source_image: source_image.clone(),
         strength,
+        mask_image: mask_image.clone(),
     };
 
     if let Some(desc) = &model_cfg.description {
@@ -123,7 +125,15 @@ pub async fn run(
         );
     }
     if source_image.is_some() {
-        status!("{} img2img mode (strength: {:.2})", "●".magenta(), strength,);
+        if mask_image.is_some() {
+            status!(
+                "{} inpainting mode (strength: {:.2})",
+                "●".magenta(),
+                strength,
+            );
+        } else {
+            status!("{} img2img mode (strength: {:.2})", "●".magenta(), strength,);
+        }
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",

@@ -509,6 +509,9 @@ impl InferenceEngine for Flux2Engine {
         if req.source_image.is_some() {
             tracing::warn!("img2img not yet supported for Flux.2 — generating from text only");
         }
+        if req.mask_image.is_some() {
+            tracing::warn!("inpainting not yet supported for Flux.2 — ignoring mask");
+        }
 
         // Sequential mode: load-use-drop each component
         if self.load_strategy == LoadStrategy::Sequential {

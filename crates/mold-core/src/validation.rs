@@ -66,6 +66,17 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("source_image must be a PNG or JPEG image".to_string());
         }
     }
+    // Inpainting validation
+    if let Some(ref mask) = req.mask_image {
+        if req.source_image.is_none() {
+            return Err("mask_image requires source_image to also be provided".to_string());
+        }
+        let is_png = mask.len() >= 4 && mask[..4] == [0x89, 0x50, 0x4E, 0x47];
+        let is_jpeg = mask.len() >= 2 && mask[..2] == [0xFF, 0xD8];
+        if !is_png && !is_jpeg {
+            return Err("mask_image must be a PNG or JPEG image".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -88,6 +99,7 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
         }
     }
 
@@ -303,6 +315,49 @@ mod tests {
         let mut req = valid_req();
         req.source_image = None;
         req.strength = 0.0; // Would fail if source_image present, but should pass without
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    // ── Inpainting validation tests ───────────────────────────────────────
+
+    #[test]
+    fn mask_without_source_image_rejected() {
+        let mut req = valid_req();
+        req.mask_image = Some(png_bytes());
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("mask_image requires source_image"));
+    }
+
+    #[test]
+    fn mask_with_source_image_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(png_bytes());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn mask_jpeg_accepted() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(jpeg_bytes());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn mask_invalid_bytes_rejected() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.mask_image = Some(vec![0x00, 0x01, 0x02, 0x03]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("mask_image must be a PNG or JPEG"));
+    }
+
+    #[test]
+    fn no_mask_no_source_passes() {
+        let req = valid_req();
         assert!(validate_generate_request(&req).is_ok());
     }
 }

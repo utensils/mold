@@ -533,7 +533,7 @@ impl FluxEngine {
         let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
-        let img = if let Some(ref source_bytes) = req.source_image {
+        let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
             self.progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
             let source_tensor = crate::img_utils::decode_source_image(
@@ -559,9 +559,36 @@ impl FluxEngine {
             let encoded = encoded.to_dtype(noise_dtype)?;
             let strength = req.strength;
             // latent = (1 - strength) * encoded + strength * noise
-            ((&encoded * (1.0 - strength))? + (&noise * strength)?)?
+            let img = ((&encoded * (1.0 - strength))? + (&noise * strength)?)?;
+
+            // Build inpaint context if mask provided
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = crate::img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &device,
+                    noise_dtype,
+                )?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded,
+                    mask,
+                    noise,
+                })
+            } else {
+                None
+            };
+            (img, inpaint_ctx)
         } else {
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, noise_dtype)?
+            (
+                crate::engine::seeded_randn(
+                    seed,
+                    &[1, 16, latent_h, latent_w],
+                    &device,
+                    noise_dtype,
+                )?,
+                None,
+            )
         };
 
         let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
@@ -609,6 +636,7 @@ impl FluxEngine {
             &timesteps,
             req.guidance,
             &self.progress,
+            inpaint_ctx.as_ref(),
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
@@ -618,6 +646,7 @@ impl FluxEngine {
         // Drop transformer + state to free memory for VAE decode
         drop(flux_model);
         self.progress.info("Freed FLUX transformer");
+        drop(inpaint_ctx);
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
@@ -791,7 +820,7 @@ impl InferenceEngine for FluxEngine {
         };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
-        let img = if let Some(ref source_bytes) = req.source_image {
+        let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
             progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
             let source_tensor = crate::img_utils::decode_source_image(
@@ -813,14 +842,35 @@ impl InferenceEngine for FluxEngine {
             )?;
             let encoded = encoded.to_dtype(noise_dtype)?;
             let strength = req.strength;
-            ((&encoded * (1.0 - strength))? + (&noise * strength)?)?
+            let img = ((&encoded * (1.0 - strength))? + (&noise * strength)?)?;
+
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = crate::img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &loaded.device,
+                    noise_dtype,
+                )?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded,
+                    mask,
+                    noise,
+                })
+            } else {
+                None
+            };
+            (img, inpaint_ctx)
         } else {
-            crate::engine::seeded_randn(
-                seed,
-                &[1, 16, latent_h, latent_w],
-                &loaded.device,
-                noise_dtype,
-            )?
+            (
+                crate::engine::seeded_randn(
+                    seed,
+                    &[1, 16, latent_h, latent_w],
+                    &loaded.device,
+                    noise_dtype,
+                )?,
+                None,
+            )
         };
 
         // For quantized model, state tensors must be F32
@@ -880,6 +930,7 @@ impl InferenceEngine for FluxEngine {
                 &timesteps,
                 req.guidance,
                 progress,
+                inpaint_ctx.as_ref(),
             )?;
 
         // 7. Unpack latent to spatial
@@ -890,6 +941,7 @@ impl InferenceEngine for FluxEngine {
         // Free denoising intermediates and transformer before VAE decode.
         // On discrete GPUs (CUDA), the Q8 transformer alone is ~13GB — VAE decode
         // needs that VRAM for conv2d intermediates. Transformer is reloaded next generate.
+        drop(inpaint_ctx);
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);

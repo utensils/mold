@@ -66,6 +66,7 @@ pub async fn run(
     eager: bool,
     image: Option<String>,
     strength: f64,
+    mask: Option<String>,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
@@ -81,6 +82,15 @@ pub async fn run(
             std::fs::read(img_path)
                 .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))?
         };
+        Some(bytes)
+    } else {
+        None
+    };
+
+    // Read mask image if --mask specified
+    let mask_image = if let Some(ref mask_path) = mask {
+        let bytes = std::fs::read(mask_path)
+            .map_err(|e| anyhow::anyhow!("failed to read mask '{}': {e}", mask_path))?;
         Some(bytes)
     } else {
         None
@@ -131,6 +141,7 @@ pub async fn run(
         eager,
         source_image,
         strength,
+        mask_image,
     )
     .await
 }

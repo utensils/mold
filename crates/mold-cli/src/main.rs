@@ -42,6 +42,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
     ///
@@ -127,6 +128,10 @@ Examples:
         /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
         #[arg(long, default_value = "0.75", help_heading = "img2img")]
         strength: f64,
+
+        /// Mask image for inpainting (white = repaint, black = preserve)
+        #[arg(long, requires = "image", help_heading = "img2img")]
+        mask: Option<String>,
     },
 
     /// Start the inference server
@@ -325,6 +330,7 @@ async fn run() -> anyhow::Result<()> {
             eager,
             image,
             strength,
+            mask,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -345,6 +351,7 @@ async fn run() -> anyhow::Result<()> {
                 eager,
                 image,
                 strength,
+                mask,
             )
             .await?;
         }
@@ -750,6 +757,42 @@ mod tests {
         let cli = parse(&["run", "model", "test"]);
         match cli.command {
             Commands::Run { image, .. } => assert!(image.is_none()),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_mask_flag() {
+        let cli = parse(&[
+            "run",
+            "model",
+            "test",
+            "--image",
+            "photo.png",
+            "--mask",
+            "mask.png",
+        ]);
+        match cli.command {
+            Commands::Run { mask, image, .. } => {
+                assert_eq!(image.as_deref(), Some("photo.png"));
+                assert_eq!(mask.as_deref(), Some("mask.png"));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_mask_requires_image() {
+        // --mask without --image should fail
+        let result = try_parse(&["run", "model", "test", "--mask", "mask.png"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_mask_defaults_none() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run { mask, .. } => assert!(mask.is_none()),
             _ => panic!("expected Run"),
         }
     }

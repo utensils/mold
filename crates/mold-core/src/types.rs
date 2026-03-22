@@ -105,6 +105,10 @@ pub struct GenerateRequest {
     /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise / txt2img).
     #[serde(default = "default_strength")]
     pub strength: f64,
+    /// Mask image for inpainting (raw PNG/JPEG bytes, base64-encoded in JSON).
+    /// White (255) = repaint, black (0) = preserve. Requires source_image.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub mask_image: Option<Vec<u8>>,
 }
 
 fn default_guidance() -> f64 {
@@ -323,6 +327,7 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -511,6 +516,7 @@ mod tests {
             scheduler: None,
             source_image: Some(image_bytes.clone()),
             strength: 0.5,
+            mask_image: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -552,8 +558,42 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
+        assert!(!json.contains("mask_image"));
+    }
+
+    #[test]
+    fn generate_request_mask_image_base64_roundtrip() {
+        let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "test".to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            scheduler: None,
+            source_image: Some(vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            strength: 0.75,
+            mask_image: Some(mask_bytes.clone()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("mask_image"));
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mask_image, Some(mask_bytes));
+    }
+
+    #[test]
+    fn generate_request_backward_compat_no_mask_image() {
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.mask_image.is_none());
     }
 }
