@@ -7,8 +7,7 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::time::Instant;
 
 use crate::device::{
-    check_memory_budget, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_use_gpu, t5_vram_threshold, T5_VRAM_THRESHOLD,
+    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -162,145 +161,11 @@ impl SD3Engine {
         ))
     }
 
-    /// Resolve which T5 encoder to use (reuses FluxEngine's T5 variant logic).
-    fn resolve_t5_variant(
-        &self,
-        preference: Option<&str>,
-        gpu_device: &Device,
-        free_vram: u64,
-        default_t5_path: &std::path::Path,
-    ) -> Result<(std::path::PathBuf, bool, String)> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-        use mold_core::manifest::{find_t5_variant, known_t5_variants, T5_FP16_SIZE};
-
-        let is_cuda = gpu_device.is_cuda();
-        let is_metal = gpu_device.is_metal();
-
-        match preference {
-            Some(tag) if tag != "fp16" && tag != "auto" => {
-                let variant = find_t5_variant(tag).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown T5 variant '{}'. Valid: fp16, auto, q8, q6, q5, q4, q3",
-                        tag,
-                    )
-                })?;
-                let path = self.resolve_t5_gguf_path(variant)?;
-                let threshold = t5_vram_threshold(variant.size_bytes);
-                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
-                let label = if on_gpu {
-                    "GPU, quantized"
-                } else {
-                    "CPU, quantized"
-                };
-                self.progress.info(&format!(
-                    "Using T5 {} ({}) on {} (explicit)",
-                    variant.tag,
-                    fmt_gb(variant.size_bytes),
-                    if on_gpu { "GPU" } else { "CPU" },
-                ));
-                Ok((path, on_gpu, label.to_string()))
-            }
-            Some("fp16") => {
-                let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, T5_VRAM_THRESHOLD);
-                let label = if on_gpu { "GPU" } else { "CPU" };
-                self.progress
-                    .info(&format!("Using FP16 T5 on {} (explicit)", label));
-                Ok((default_t5_path.to_path_buf(), on_gpu, label.to_string()))
-            }
-            _ => {
-                // Auto mode: try FP16 on GPU, then quantized, then FP16 on CPU
-                if fits_in_memory(is_cuda, is_metal, free_vram, T5_VRAM_THRESHOLD) {
-                    return Ok((default_t5_path.to_path_buf(), true, "GPU".to_string()));
-                }
-
-                if is_cuda || is_metal {
-                    for variant in known_t5_variants() {
-                        let threshold = t5_vram_threshold(variant.size_bytes);
-                        if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
-                            let path = match cached_file_path(
-                                variant.hf_repo,
-                                variant.hf_filename,
-                                Some("shared/t5-gguf"),
-                            ) {
-                                Some(p) => p,
-                                None => {
-                                    self.progress.info(&format!(
-                                        "Downloading T5 {} ({})...",
-                                        variant.tag,
-                                        fmt_gb(variant.size_bytes),
-                                    ));
-                                    download_single_file_sync(
-                                        variant.hf_repo,
-                                        variant.hf_filename,
-                                        Some("shared/t5-gguf"),
-                                    )
-                                    .map_err(|e| {
-                                        anyhow::anyhow!(
-                                            "failed to download T5 {}: {e}",
-                                            variant.tag
-                                        )
-                                    })?
-                                }
-                            };
-                            self.progress.info(&format!(
-                                "FP16 T5 ({}) exceeds remaining VRAM ({}). Using quantized T5 {} ({}) on GPU instead.",
-                                fmt_gb(T5_FP16_SIZE),
-                                fmt_gb(free_vram),
-                                variant.tag,
-                                fmt_gb(variant.size_bytes),
-                            ));
-                            return Ok((path, true, format!("GPU, quantized {}", variant.tag)));
-                        }
-                    }
-
-                    if is_metal {
-                        let variants = known_t5_variants();
-                        if let Some(smallest) = variants.last() {
-                            let path = self.resolve_t5_gguf_path(smallest)?;
-                            self.progress.info(&format!(
-                                "Memory tight -- using smallest T5 {} ({}) on GPU to reduce page pressure",
-                                smallest.tag,
-                                fmt_gb(smallest.size_bytes),
-                            ));
-                            return Ok((path, true, format!("GPU, quantized {}", smallest.tag)));
-                        }
-                    }
-                }
-
-                if is_cuda || is_metal {
-                    self.progress.info(&format!(
-                        "Loading FP16 T5 on CPU ({} free, no variant fits on GPU)",
-                        fmt_gb(free_vram),
-                    ));
-                } else {
-                    self.progress.info("No GPU detected, loading T5 on CPU");
-                }
-                Ok((default_t5_path.to_path_buf(), false, "CPU".to_string()))
-            }
-        }
-    }
-
-    fn resolve_t5_gguf_path(
-        &self,
-        variant: &mold_core::manifest::T5Variant,
-    ) -> Result<std::path::PathBuf> {
-        use mold_core::download::{cached_file_path, download_single_file_sync};
-
-        if let Some(path) =
-            cached_file_path(variant.hf_repo, variant.hf_filename, Some("shared/t5-gguf"))
-        {
-            return Ok(path);
-        }
-        self.progress.info(&format!(
-            "Downloading T5 {} ({})...",
-            variant.tag,
-            fmt_gb(variant.size_bytes),
-        ));
-        download_single_file_sync(variant.hf_repo, variant.hf_filename, Some("shared/t5-gguf"))
-            .map_err(|e| anyhow::anyhow!("failed to download T5 {}: {e}", variant.tag))
-    }
-
     /// Load all model components into GPU memory (Eager mode).
+    ///
+    /// On error, `self.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.loaded.is_some() {
             return Ok(());
@@ -377,7 +242,13 @@ impl SD3Engine {
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (resolved_t5_path, t5_on_gpu, t5_device_label) =
-            self.resolve_t5_variant(t5_preference, &device, free, &t5_encoder_path)?;
+            crate::encoders::variant_resolution::resolve_t5_variant(
+                &self.progress,
+                t5_preference,
+                &device,
+                free,
+                &t5_encoder_path,
+            )?;
         self.progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
@@ -477,7 +348,13 @@ impl SD3Engine {
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (resolved_t5_path, t5_on_gpu, t5_device_label) =
-            self.resolve_t5_variant(t5_preference, &device, free, &t5_encoder_path)?;
+            crate::encoders::variant_resolution::resolve_t5_variant(
+                &self.progress,
+                t5_preference,
+                &device,
+                free,
+                &t5_encoder_path,
+            )?;
         self.progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 

@@ -42,6 +42,15 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     if req.guidance < 0.0 {
         return Err(format!("guidance ({}) must be >= 0.0", req.guidance));
     }
+    if req.guidance > 100.0 {
+        return Err(format!("guidance ({}) must be <= 100.0", req.guidance));
+    }
+    if req.prompt.len() > 77_000 {
+        return Err(format!(
+            "prompt length ({} bytes) exceeds the 77,000-byte limit",
+            req.prompt.len()
+        ));
+    }
     Ok(())
 }
 
@@ -173,6 +182,38 @@ mod tests {
     fn high_guidance_valid() {
         let mut req = valid_req();
         req.guidance = 20.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn guidance_over_100_rejected() {
+        let mut req = valid_req();
+        req.guidance = 100.1;
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("guidance"));
+    }
+
+    #[test]
+    fn guidance_at_100_valid() {
+        let mut req = valid_req();
+        req.guidance = 100.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn prompt_too_long_rejected() {
+        let mut req = valid_req();
+        req.prompt = "x".repeat(77_001);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("77,000"));
+    }
+
+    #[test]
+    fn prompt_at_limit_valid() {
+        let mut req = valid_req();
+        req.prompt = "x".repeat(77_000);
         assert!(validate_generate_request(&req).is_ok());
     }
 

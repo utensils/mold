@@ -330,7 +330,13 @@ async fn generate(
         OutputFormat::Png => "image/png",
         OutputFormat::Jpeg => "image/jpeg",
     };
-    Ok(([(header::CONTENT_TYPE, content_type)], img.data))
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(
+        "x-mold-seed-used",
+        response.seed_used.to_string().parse().unwrap(),
+    );
+    Ok((headers, img.data))
 }
 
 fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
@@ -541,7 +547,7 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
                     mcfg.default_width = Some(manifest.defaults.width);
                     mcfg.default_height = Some(manifest.defaults.height);
                     if mcfg.description.is_none() {
-                        mcfg.description = Some(manifest.description);
+                        mcfg.description = Some(manifest.description.clone());
                     }
                 }
             }

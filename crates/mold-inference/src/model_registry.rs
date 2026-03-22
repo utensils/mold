@@ -5,7 +5,7 @@ use mold_core::ModelInfo;
 /// Delegates to the canonical manifest in `mold_core::manifest`.
 pub fn known_models() -> Vec<ModelInfo> {
     known_manifests()
-        .into_iter()
+        .iter()
         .map(|m| {
             let hf_repo = m
                 .files
@@ -15,8 +15,8 @@ pub fn known_models() -> Vec<ModelInfo> {
                 .unwrap_or_default();
 
             ModelInfo {
-                name: m.name,
-                family: m.family,
+                name: m.name.clone(),
+                family: m.family.clone(),
                 size_gb: m.size_gb,
                 is_loaded: false,
                 last_used: None,

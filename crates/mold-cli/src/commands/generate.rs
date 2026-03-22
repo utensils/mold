@@ -22,14 +22,25 @@ pub async fn run(
     seed: Option<u64>,
     batch: u32,
     host: Option<String>,
-    format: &str,
+    format: OutputFormat,
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
     eager: bool,
 ) -> Result<()> {
-    let output_format: OutputFormat = format.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    let output_format = format;
     let piped = is_piped();
+
+    // Reject batch > 1 when output goes to stdout (piped with no --output, or --output -)
+    if batch > 1 {
+        let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
+        if stdout_output {
+            anyhow::bail!(
+                "--batch with more than 1 image is not supported with stdout output. \
+                 Use --output <path> to save batch images to files."
+            );
+        }
+    }
 
     // Load config and pull model-specific defaults.
     let config = Config::load_or_default();
@@ -84,6 +95,18 @@ pub async fn run(
         effective_steps,
         effective_guidance,
     );
+
+    // Validate output directory exists
+    if let Some(ref path) = output {
+        if path != "-" {
+            let out_path = std::path::Path::new(path);
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    anyhow::bail!("output directory does not exist: {}", parent.display());
+                }
+            }
+        }
+    }
 
     let response = if local {
         // --local: skip server, go straight to local inference
@@ -165,6 +188,9 @@ pub async fn run(
                 }
             };
 
+            if std::path::Path::new(&filename).exists() {
+                status!("{} Overwriting: {}", "!".yellow(), filename);
+            }
             std::fs::write(&filename, &img.data)?;
             status!("{} Saved: {}", "✓".green(), filename.bold());
         }

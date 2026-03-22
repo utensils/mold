@@ -123,7 +123,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
     println!("{}", canonical.bold());
     println!("{}", "─".repeat(60).dimmed());
 
-    if let Some(ref m) = manifest {
+    if let Some(m) = manifest {
         println!("  {:<16} {}", "Family:".dimmed(), format_family(&m.family));
         println!("  {:<16} {}", "Description:".dimmed(), m.description);
 
@@ -213,8 +213,9 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             "Status:".dimmed(),
             "Installed".green().bold()
         );
-        let config_path = Config::config_path();
-        println!("  {:<16} {}", "Config:".dimmed(), config_path.display());
+        if let Some(config_path) = Config::config_path() {
+            println!("  {:<16} {}", "Config:".dimmed(), config_path.display());
+        }
 
         // Show local file paths
         println!();
@@ -298,7 +299,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         }
         // SHA-256 verification
         if verify {
-            if let Some(ref m) = manifest {
+            if let Some(m) = manifest {
                 println!();
                 println!("  {}", "Integrity Check".bold());
                 let resolved_paths = ModelPaths::resolve(&canonical, &config);

@@ -75,14 +75,31 @@ impl MoldClient {
 
     /// Generate an image and return a minimal response wrapping the raw bytes.
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
-        let seed = req.seed.unwrap_or(0);
+        let fallback_seed = req.seed.unwrap_or(0);
         let width = req.width;
         let height = req.height;
         let model = req.model.clone();
         let format = req.output_format;
 
         let start = std::time::Instant::now();
-        let data = self.generate_raw(&req).await?;
+        let resp = self
+            .client
+            .post(format!("{}/api/generate", self.base_url))
+            .json(&req)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        // Read the seed the server actually used from the response header.
+        // Fall back to the request seed for backward compat with older servers.
+        let seed_used = resp
+            .headers()
+            .get("x-mold-seed-used")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(fallback_seed);
+
+        let data = resp.bytes().await?.to_vec();
         let generation_time_ms = start.elapsed().as_millis() as u64;
 
         Ok(GenerateResponse {
@@ -95,7 +112,7 @@ impl MoldClient {
             }],
             generation_time_ms,
             model,
-            seed_used: seed,
+            seed_used,
         })
     }
 

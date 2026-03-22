@@ -106,7 +106,7 @@ fn print_unknown_model_error(model: &str) {
     eprintln!("Available models:");
     let all = known_manifests();
     let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
-    for m in &all {
+    for m in all {
         eprintln!(
             "  {:<nw$} {:>5.1}GB  {}",
             m.name.bold(),

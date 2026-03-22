@@ -3,6 +3,7 @@ mod output;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
+use mold_core::OutputFormat;
 
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
@@ -66,8 +67,8 @@ Examples:
         output: Option<String>,
 
         /// Output format
-        #[arg(long, default_value = "png", help_heading = "Output")]
-        format: String,
+        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output")]
+        format: OutputFormat,
 
         /// Image width — defaults to model config value
         #[arg(long, help_heading = "Image")]
@@ -90,7 +91,7 @@ Examples:
         seed: Option<u64>,
 
         /// Number of images to generate
-        #[arg(long, default_value = "1", help_heading = "Image")]
+        #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..=16))]
         batch: u32,
 
         /// Server URL to connect to
@@ -453,6 +454,11 @@ mod tests {
         Cli::parse_from(std::iter::once("mold").chain(args.iter().copied()))
     }
 
+    /// Try to parse CLI args, returning the clap error on failure.
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("mold").chain(args.iter().copied()))
+    }
+
     #[test]
     fn run_parses_model_and_prompt() {
         let cli = parse(&["run", "flux-dev:q4", "a", "red", "apple"]);
@@ -521,7 +527,7 @@ mod tests {
     fn run_format_jpeg() {
         let cli = parse(&["run", "model", "test", "--format", "jpeg"]);
         match cli.command {
-            Commands::Run { format, .. } => assert_eq!(format, "jpeg"),
+            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
             _ => panic!("expected Run"),
         }
     }
@@ -606,7 +612,7 @@ mod tests {
                 assert_eq!(width, Some(512));
                 assert_eq!(height, Some(768));
                 assert_eq!(guidance, Some(4.0));
-                assert_eq!(format, "jpeg");
+                assert_eq!(format, OutputFormat::Jpeg);
                 assert_eq!(batch, 2);
                 assert_eq!(output.as_deref(), Some("/tmp/test.jpg"));
                 assert!(local);
@@ -638,12 +644,39 @@ mod tests {
                 assert_eq!(width, None);
                 assert_eq!(height, None);
                 assert_eq!(guidance, None);
-                assert_eq!(format, "png");
+                assert_eq!(format, OutputFormat::Png);
                 assert_eq!(batch, 1);
                 assert_eq!(output, None);
                 assert!(!local);
                 assert!(!eager);
             }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_batch_zero_rejected() {
+        let result = try_parse(&["run", "model", "test", "--batch", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_batch_17_rejected() {
+        let result = try_parse(&["run", "model", "test", "--batch", "17"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_format_invalid_rejected() {
+        let result = try_parse(&["run", "model", "test", "--format", "webp"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_format_jpg_alias() {
+        let cli = parse(&["run", "model", "test", "--format", "jpg"]);
+        match cli.command {
+            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
             _ => panic!("expected Run"),
         }
     }

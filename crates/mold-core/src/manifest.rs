@@ -1,6 +1,8 @@
 use crate::config::ModelConfig;
 use crate::ModelPaths;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
@@ -110,6 +112,7 @@ impl ModelManifest {
             default_width: Some(self.defaults.width),
             default_height: Some(self.defaults.height),
             is_schnell: Some(self.defaults.is_schnell),
+            is_turbo: None,
             scheduler: self.defaults.scheduler.map(|s| s.to_string()),
             description: Some(self.description.clone()),
             family: Some(self.family.clone()),
@@ -184,8 +187,24 @@ fn shared_flux_files() -> Vec<ModelFile> {
     ]
 }
 
-/// All known downloadable model manifests (FLUX + SDXL).
-pub fn known_manifests() -> Vec<ModelManifest> {
+/// All known downloadable model manifests, computed once and cached.
+static KNOWN_MANIFESTS: LazyLock<Vec<ModelManifest>> = LazyLock::new(build_known_manifests);
+
+/// Index mapping canonical model names to their index in `KNOWN_MANIFESTS`.
+static MANIFEST_INDEX: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
+    KNOWN_MANIFESTS
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.name.clone(), i))
+        .collect()
+});
+
+/// All known downloadable model manifests (FLUX, SDXL, SD3, SD1.5, Z-Image, Flux.2, Qwen-Image).
+pub fn known_manifests() -> &'static [ModelManifest] {
+    &KNOWN_MANIFESTS
+}
+
+fn build_known_manifests() -> Vec<ModelManifest> {
     let mut manifests = vec![
         ModelManifest {
             name: "flux-schnell:q8".to_string(),
@@ -1473,14 +1492,14 @@ pub fn resolve_model_name(input: &str) -> String {
 
 /// Find a manifest by exact name (no resolution). Used internally to avoid
 /// circular dependency in `resolve_model_name`.
-fn find_manifest_exact(name: &str) -> Option<ModelManifest> {
-    known_manifests().into_iter().find(|m| m.name == name)
+fn find_manifest_exact(name: &str) -> Option<&'static ModelManifest> {
+    MANIFEST_INDEX.get(name).map(|&i| &KNOWN_MANIFESTS[i])
 }
 
 /// Find a manifest by name, handling tag resolution and legacy names.
-pub fn find_manifest(name: &str) -> Option<ModelManifest> {
+pub fn find_manifest(name: &str) -> Option<&'static ModelManifest> {
     let canonical = resolve_model_name(name);
-    known_manifests().into_iter().find(|m| m.name == canonical)
+    MANIFEST_INDEX.get(&canonical).map(|&i| &KNOWN_MANIFESTS[i])
 }
 
 /// Check if a name resolves to a known model (manifest or config).
@@ -1799,6 +1818,18 @@ mod tests {
         // Flux.2 models
         assert!(find_manifest("flux2-klein:bf16").is_some());
         assert!(find_manifest("nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_manifest_returns_correct_result() {
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        assert_eq!(manifest.name, "flux-schnell:q8");
+        assert_eq!(manifest.family, "flux");
+    }
+
+    #[test]
+    fn find_manifest_exact_unknown_returns_none() {
+        assert!(find_manifest_exact("totally-unknown-model:q99").is_none());
     }
 
     #[test]

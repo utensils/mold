@@ -241,6 +241,11 @@ impl QwenImageEngine {
         (on_gpu, label.to_string())
     }
 
+    /// Load all model components (Eager mode).
+    ///
+    /// On error, `self.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.loaded.is_some() {
             return Ok(());

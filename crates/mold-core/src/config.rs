@@ -37,6 +37,9 @@ pub struct ModelConfig {
     /// Whether this model uses the schnell (distilled) timestep schedule.
     /// If None, auto-detected from the transformer filename.
     pub is_schnell: Option<bool>,
+    /// Whether this model uses a turbo (few-step distilled) schedule.
+    /// If None, auto-detected from the model name.
+    pub is_turbo: Option<bool>,
     /// Scheduler type: "ddim", "euler_ancestral" (SDXL only; FLUX uses flow-matching)
     pub scheduler: Option<String>,
 
@@ -266,7 +269,10 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_default() -> Self {
-        let config_path = Self::config_path();
+        let Some(config_path) = Self::config_path() else {
+            eprintln!("warning: could not determine home directory — using default config");
+            return Config::default();
+        };
         if config_path.exists() {
             match std::fs::read_to_string(&config_path) {
                 Ok(contents) => match toml::from_str(&contents) {
@@ -293,17 +299,22 @@ impl Config {
     }
 
     /// The root mold directory: `~/.mold/` on all platforms.
-    pub fn mold_dir() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".mold")
+    /// Falls back to `./.mold` (relative to CWD) if the home directory cannot
+    /// be determined (e.g. containers, CI). This preserves write-ability for
+    /// `mold pull` and server-side auto-pull even when `HOME` is unset.
+    pub fn mold_dir() -> Option<PathBuf> {
+        Some(
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".mold"),
+        )
     }
 
-    pub fn config_path() -> PathBuf {
-        Self::mold_dir().join("config.toml")
+    pub fn config_path() -> Option<PathBuf> {
+        Self::mold_dir().map(|d| d.join("config.toml"))
     }
 
-    pub fn data_dir() -> PathBuf {
+    pub fn data_dir() -> Option<PathBuf> {
         Self::mold_dir()
     }
 
@@ -311,12 +322,8 @@ impl Config {
         if let Ok(env_dir) = std::env::var("MOLD_MODELS_DIR") {
             PathBuf::from(env_dir)
         } else {
-            let expanded = self.models_dir.replace(
-                "~",
-                &dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .to_string_lossy(),
-            );
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            let expanded = self.models_dir.replace("~", &home.to_string_lossy());
             PathBuf::from(expanded)
         }
     }
@@ -349,7 +356,8 @@ impl Config {
 
     /// Write the config to disk at `config_path()`.
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::config_path();
+        let path = Self::config_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for config path"))?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -360,6 +368,6 @@ impl Config {
 
     /// Whether a config file exists on disk.
     pub fn exists_on_disk() -> bool {
-        Self::config_path().exists()
+        Self::config_path().is_some_and(|p| p.exists())
     }
 }
