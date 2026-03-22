@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use mold_core::{Config, ModelPaths};
+use mold_core::{Config, ModelPaths, Scheduler};
 
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
@@ -56,23 +56,27 @@ pub fn create_engine(
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
-            let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
+            let scheduler = model_cfg.scheduler.unwrap_or(Scheduler::Ddim);
             Ok(Box::new(SD15Engine::new(
                 model_name,
                 paths,
-                scheduler_name,
+                scheduler,
                 load_strategy,
             )))
         }
         "sdxl" => {
-            let scheduler_name = model_cfg.scheduler.unwrap_or_else(|| "ddim".to_string());
-            let is_turbo = model_cfg.is_turbo.unwrap_or_else(|| {
-                scheduler_name == "euler_ancestral" || model_name.contains("turbo")
+            let is_turbo = model_cfg
+                .is_turbo
+                .unwrap_or_else(|| model_name.contains("turbo"));
+            let scheduler = model_cfg.scheduler.unwrap_or(if is_turbo {
+                Scheduler::EulerAncestral
+            } else {
+                Scheduler::Ddim
             });
             Ok(Box::new(SDXLEngine::new(
                 model_name,
                 paths,
-                scheduler_name,
+                scheduler,
                 is_turbo,
                 load_strategy,
             )))

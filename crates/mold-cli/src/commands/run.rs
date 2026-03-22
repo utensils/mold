@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
-use mold_core::{Config, OutputFormat};
+use mold_core::{Config, OutputFormat, Scheduler};
 use std::io::{IsTerminal, Read};
 
 use super::generate;
@@ -62,6 +62,7 @@ pub async fn run(
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    scheduler: Option<Scheduler>,
     eager: bool,
 ) -> Result<()> {
     let config = Config::load_or_default();
@@ -107,6 +108,7 @@ pub async fn run(
         local,
         t5_variant,
         qwen3_variant,
+        scheduler,
         eager,
     )
     .await

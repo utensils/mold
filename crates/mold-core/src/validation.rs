@@ -70,6 +70,7 @@ mod tests {
             seed: Some(42),
             batch_size: 1,
             output_format: OutputFormat::Png,
+            scheduler: None,
         }
     }
 

@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Module, Tensor, D};
 use candle_transformers::models::stable_diffusion;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
+use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::time::Instant;
 
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
@@ -27,7 +28,7 @@ pub struct SDXLEngine {
     loaded: Option<LoadedSDXL>,
     model_name: String,
     paths: ModelPaths,
-    scheduler_name: String,
+    scheduler: Scheduler,
     is_turbo: bool,
     progress: ProgressReporter,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
@@ -43,7 +44,7 @@ impl SDXLEngine {
     pub fn new(
         model_name: String,
         paths: ModelPaths,
-        scheduler_name: String,
+        scheduler: Scheduler,
         is_turbo: bool,
         load_strategy: LoadStrategy,
     ) -> Self {
@@ -51,7 +52,7 @@ impl SDXLEngine {
             loaded: None,
             model_name,
             paths,
-            scheduler_name,
+            scheduler,
             is_turbo,
             progress: ProgressReporter::default(),
             load_strategy,
@@ -246,13 +247,18 @@ impl SDXLEngine {
         &self,
         unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
         text_embeddings: &Tensor,
-        sd_config: &stable_diffusion::StableDiffusionConfig,
+        sched: Scheduler,
         latents: &mut Tensor,
         guidance: f64,
         steps: u32,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
-        let mut scheduler = sd_config.build_scheduler(steps as usize)?;
+        let mut scheduler = crate::scheduler::build_scheduler(
+            sched,
+            steps as usize,
+            PredictionType::Epsilon,
+            self.is_turbo,
+        )?;
         let timesteps = scheduler.timesteps().to_vec();
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len());
@@ -457,10 +463,17 @@ impl SDXLEngine {
         self.progress
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
+        let sched = req.scheduler.unwrap_or(self.scheduler);
         let latent_h = height / 8;
         let latent_w = width / 8;
-        let scheduler = sd_config.build_scheduler(req.steps as usize)?;
-        let init_noise_sigma = scheduler.init_noise_sigma();
+        let init_scheduler = crate::scheduler::build_scheduler(
+            sched,
+            req.steps as usize,
+            PredictionType::Epsilon,
+            self.is_turbo,
+        )?;
+        let init_noise_sigma = init_scheduler.init_noise_sigma();
+        drop(init_scheduler);
         let mut latents =
             (crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], &device, DType::F32)?
                 * init_noise_sigma)?;
@@ -469,7 +482,7 @@ impl SDXLEngine {
         self.denoise_loop(
             &unet,
             &text_embeddings,
-            &sd_config,
+            sched,
             &mut latents,
             guidance,
             req.steps,
@@ -557,7 +570,7 @@ impl InferenceEngine for SDXLEngine {
             seed, width, height,
             steps = req.steps,
             guidance,
-            scheduler = %self.scheduler_name,
+            scheduler = %self.scheduler,
             "starting SDXL generation"
         );
 
@@ -576,10 +589,17 @@ impl InferenceEngine for SDXLEngine {
         )?;
 
         // 3. Build scheduler
+        let sched = req.scheduler.unwrap_or(self.scheduler);
         let latent_h = height / 8;
         let latent_w = width / 8;
-        let scheduler = loaded.sd_config.build_scheduler(req.steps as usize)?;
-        let init_noise_sigma = scheduler.init_noise_sigma();
+        let init_scheduler = crate::scheduler::build_scheduler(
+            sched,
+            req.steps as usize,
+            PredictionType::Epsilon,
+            self.is_turbo,
+        )?;
+        let init_noise_sigma = init_scheduler.init_noise_sigma();
+        drop(init_scheduler);
         let mut latents = (crate::engine::seeded_randn(
             seed,
             &[1, 4, latent_h, latent_w],
@@ -592,7 +612,7 @@ impl InferenceEngine for SDXLEngine {
         self.denoise_loop(
             &loaded.unet,
             &text_embeddings,
-            &loaded.sd_config,
+            sched,
             &mut latents,
             guidance,
             req.steps,

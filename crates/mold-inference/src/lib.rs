@@ -9,6 +9,7 @@ mod image;
 pub mod model_registry;
 pub mod progress;
 pub mod qwen_image;
+pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
 pub mod sdxl;

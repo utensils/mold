@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::manifest::resolve_model_name;
+use crate::types::Scheduler;
 
 /// Per-model file path + default settings configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -40,8 +41,8 @@ pub struct ModelConfig {
     /// Whether this model uses a turbo (few-step distilled) schedule.
     /// If None, auto-detected from the model name.
     pub is_turbo: Option<bool>,
-    /// Scheduler type: "ddim", "euler_ancestral" (SDXL only; FLUX uses flow-matching)
-    pub scheduler: Option<String>,
+    /// Scheduler algorithm for UNet-based models (SD1.5, SDXL). Ignored by flow-matching models.
+    pub scheduler: Option<Scheduler>,
 
     // --- metadata ---
     pub description: Option<String>,

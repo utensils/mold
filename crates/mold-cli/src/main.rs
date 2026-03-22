@@ -3,7 +3,7 @@ mod output;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
-use mold_core::OutputFormat;
+use mold_core::{OutputFormat, Scheduler};
 
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
@@ -109,6 +109,11 @@ Examples:
         /// Qwen3 text encoder variant (Z-Image): auto (default), bf16, q8, q6, iq4, q3
         #[arg(long, help_heading = "Advanced")]
         qwen3_variant: Option<String>,
+
+        /// Scheduler algorithm for UNet models: ddim, euler-ancestral, uni-pc
+        /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
+        #[arg(long, env = "MOLD_SCHEDULER", help_heading = "Advanced")]
+        scheduler: Option<Scheduler>,
 
         /// Keep all model components loaded simultaneously (faster but uses more memory).
         /// By default, components are loaded and unloaded sequentially to reduce peak memory.
@@ -308,6 +313,7 @@ async fn run() -> anyhow::Result<()> {
             local,
             t5_variant,
             qwen3_variant,
+            scheduler,
             eager,
         } => {
             commands::run::run(
@@ -325,6 +331,7 @@ async fn run() -> anyhow::Result<()> {
                 local,
                 t5_variant,
                 qwen3_variant,
+                scheduler,
                 eager,
             )
             .await?;
