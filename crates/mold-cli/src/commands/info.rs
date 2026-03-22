@@ -81,6 +81,7 @@ fn format_family(family: &str) -> String {
         "sdxl" => "SDXL".yellow().to_string(),
         "z-image" => "Z-Image".cyan().to_string(),
         "qwen-image" | "qwen_image" => "Qwen-Image".bright_cyan().to_string(),
+        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen".bright_yellow().to_string(),
         other => other.to_uppercase(),
     }
 }
