@@ -533,7 +533,42 @@ impl FluxEngine {
         let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
+        // Pre-compute timestep schedule (needed before mixing for img2img).
+        // For non-schnell models the schedule depends on image_seq_len which
+        // we can derive from latent dimensions without the actual tensor.
+        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        let mut timesteps = if is_schnell {
+            flux::sampling::get_schedule(req.steps as usize, None)
+        } else {
+            flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
+        };
+
+        // For img2img, trim schedule BEFORE mixing so noise level matches first timestep
+        let img2img_start_t = if req.source_image.is_some() {
+            let strength = req.strength;
+            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
+            timesteps = timesteps[start_idx..].to_vec();
+            // Ensure at least one denoising step
+            if timesteps.len() < 2 {
+                // Insert strength as first timestep so we get at least one step
+                timesteps.insert(0, strength);
+            }
+            let t = timesteps[0];
+            tracing::info!(
+                strength,
+                start_t = t,
+                start_idx,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: trimmed timestep schedule"
+            );
+            Some(t)
+        } else {
+            None
+        };
+
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = img2img_start_t.unwrap();
+
             self.progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
             let source_tensor = crate::img_utils::decode_source_image(
@@ -550,6 +585,7 @@ impl FluxEngine {
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
             // Flow-matching img2img: interpolate between encoded latents and noise
+            // at the exact noise level matching the first timestep in the schedule
             let noise = crate::engine::seeded_randn(
                 seed,
                 &[1, 16, latent_h, latent_w],
@@ -557,7 +593,6 @@ impl FluxEngine {
                 noise_dtype,
             )?;
             let encoded = encoded.to_dtype(noise_dtype)?;
-            let strength = req.strength;
 
             // Build inpaint context if mask provided
             let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
@@ -577,8 +612,9 @@ impl FluxEngine {
                 None
             };
 
-            // latent = (1 - strength) * encoded + strength * noise
-            let img = ((&encoded * (1.0 - strength))? + (&noise * strength)?)?;
+            // latent = (1 - t) * encoded + t * noise
+            // t matches the first schedule timestep, so denoising starts at the correct level
+            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
             (img, inpaint_ctx)
         } else {
             let img = crate::engine::seeded_randn(
@@ -601,26 +637,6 @@ impl FluxEngine {
         };
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
-
-        let mut timesteps = if is_schnell {
-            flux::sampling::get_schedule(req.steps as usize, None)
-        } else {
-            flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
-        };
-
-        // For img2img, slice timestep schedule to start from strength
-        if req.source_image.is_some() {
-            let strength = req.strength;
-            // Keep only timesteps >= (1 - strength), since flow-matching goes from 1.0 -> 0.0
-            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
-            timesteps = timesteps[start_idx..].to_vec();
-            tracing::info!(
-                strength,
-                start_idx,
-                remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: trimmed timestep schedule"
-            );
-        }
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.progress.stage_start(&denoise_label);
@@ -819,7 +835,39 @@ impl InferenceEngine for FluxEngine {
         };
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
+
+        // Pre-compute timestep schedule (needed before mixing for img2img).
+        let image_seq_len = (latent_h / 2) * (latent_w / 2);
+        let mut timesteps = if loaded.is_schnell {
+            flux::sampling::get_schedule(req.steps as usize, None)
+        } else {
+            flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
+        };
+
+        // For img2img, trim schedule BEFORE mixing so noise level matches first timestep
+        let img2img_start_t = if req.source_image.is_some() {
+            let strength = req.strength;
+            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
+            timesteps = timesteps[start_idx..].to_vec();
+            if timesteps.len() < 2 {
+                timesteps.insert(0, strength);
+            }
+            let t = timesteps[0];
+            tracing::info!(
+                strength,
+                start_t = t,
+                start_idx,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: trimmed timestep schedule"
+            );
+            Some(t)
+        } else {
+            None
+        };
+
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = img2img_start_t.unwrap();
+
             progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
             let source_tensor = crate::img_utils::decode_source_image(
@@ -840,7 +888,6 @@ impl InferenceEngine for FluxEngine {
                 noise_dtype,
             )?;
             let encoded = encoded.to_dtype(noise_dtype)?;
-            let strength = req.strength;
 
             let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
                 let mask = crate::img_utils::decode_mask_image(
@@ -859,7 +906,8 @@ impl InferenceEngine for FluxEngine {
                 None
             };
 
-            let img = ((&encoded * (1.0 - strength))? + (&noise * strength)?)?;
+            // latent = (1 - t) * encoded + t * noise
+            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
             (img, inpaint_ctx)
         } else {
             let img = crate::engine::seeded_randn(
@@ -882,28 +930,8 @@ impl InferenceEngine for FluxEngine {
             (t5_emb, clip_emb, img)
         };
 
-        // 4. Build sampling state
+        // Build sampling state
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
-
-        // 5. Get timestep schedule
-        let mut timesteps = if loaded.is_schnell {
-            flux::sampling::get_schedule(req.steps as usize, None)
-        } else {
-            flux::sampling::get_schedule(req.steps as usize, Some((state.img.dim(1)?, 0.5, 1.15)))
-        };
-
-        // For img2img, trim timestep schedule
-        if req.source_image.is_some() {
-            let strength = req.strength;
-            let start_idx = timesteps.iter().position(|&t| t <= strength).unwrap_or(0);
-            timesteps = timesteps[start_idx..].to_vec();
-            tracing::info!(
-                strength,
-                start_idx,
-                remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: trimmed timestep schedule"
-            );
-        }
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);
@@ -914,7 +942,7 @@ impl InferenceEngine for FluxEngine {
             "running denoising loop..."
         );
 
-        // 6. Denoise — guidance from request (0.0 for schnell, 3.5+ for dev/finetuned)
+        // Denoise — guidance from request (0.0 for schnell, 3.5+ for dev/finetuned)
         let img = loaded
             .flux_model
             .as_ref()
