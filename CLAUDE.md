@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # mold — Architecture & Development Guide
 
-> Local AI image generation CLI — FLUX, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2, & Qwen-Image diffusion models on your GPU.
+> Local AI image generation CLI — FLUX, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2, Qwen-Image, & Wuerstchen diffusion models on your GPU.
 
-mold is a CLI tool for AI image generation using FLUX.1, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2 Klein, and Qwen-Image models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server.
+mold is a CLI tool for AI image generation using FLUX.1, SD3.5, Stable Diffusion 1.5, SDXL, Z-Image, Flux.2 Klein, Qwen-Image, and Wuerstchen v2 models via the [candle](https://github.com/huggingface/candle) ML framework. It provides a local inference server that runs on GPU hosts and a client CLI that can generate images locally or by connecting to a remote server. Supports txt2img, img2img, inpainting, and ControlNet conditioning.
 
 ## Build & Development Commands
 
@@ -76,7 +76,7 @@ CI runs on every push and PR (`.github/workflows/ci.yml`): `cargo check`, `cargo
 ```
 crates/
 ├── mold-core/                # Shared types, API protocol, HTTP client, config, model manifests
-├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, Z-Image)
+├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
 ├── mold-server/              # Axum HTTP inference server (lib + binary)
 └── mold-cli/                 # Main binary — CLI (clap)
 ```
@@ -95,7 +95,7 @@ Shared library used by all other crates:
 
 ### mold-inference
 
-Seven model families, each with its own pipeline implementing the `InferenceEngine` trait:
+Eight model families, each with its own pipeline implementing the `InferenceEngine` trait:
 
 ```rust
 pub trait InferenceEngine: Send + Sync {
@@ -115,6 +115,13 @@ pub trait InferenceEngine: Send + Sync {
 - `"flux2"` (also `"flux.2"`, `"flux2-klein"`) → `Flux2Engine` — Qwen3 text encoder (GGUF, layers 9/18/27), shared modulation transformer, BN-VAE (beta)
 - `"qwen-image"` (also `"qwen_image"`) → `QwenImageEngine` — Qwen2.5-VL text encoder, 3D causal VAE (2D temporal-slice), flow-matching (beta)
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
+- `"wuerstchen"` (also `"wuerstchen-v2"`) → `WuerstchenEngine` — CLIP-G text encoder, 3-stage cascade (Prior → Decoder → VQ-GAN), 42x latent compression
+
+**Additional modules:**
+- `encoders/variant_resolution.rs` — Shared T5/Qwen3 encoder variant resolution (auto-fallback quantization)
+- `scheduler.rs` — Configurable scheduler builder (DDIM, Euler Ancestral, UniPC) for SD1.5/SDXL
+- `img_utils.rs` — Source image decoding, resizing, mask processing for img2img/inpainting
+- `controlnet/` — ControlNet model (UNet encoder copy with zero convolutions) for SD1.5
 
 **Key architectural patterns:**
 
@@ -164,13 +171,20 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --width/--height <N>    Image dimensions [default: from model config]
         --steps <N>             Inference steps [default: from model config]
         --seed <N>              Random seed
-        --batch <N>             Number of images [default: 1]
+        --batch <N>             Number of images (1-16) [default: 1]
         --host <URL>            Override MOLD_HOST
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
         --eager                 Keep all model components loaded simultaneously (faster, more memory)
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
+        --scheduler <SCHED>     Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc
+    -i, --image <PATH|->        Source image for img2img (file path or - for stdin)
+        --strength <FLOAT>      Denoising strength for img2img (0.0-1.0) [default: 0.75]
+        --mask <PATH>           Mask for inpainting (white=repaint, black=preserve; requires --image)
+        --control <PATH>        Control image for ControlNet conditioning
+        --control-model <NAME>  ControlNet model (e.g. controlnet-canny-sd15; requires --control)
+        --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
@@ -183,7 +197,7 @@ mold version                    Show version
 mold completions <SHELL>        Generate shell completions
 ```
 
-**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux-schnell | viu -` just works. `--output -` forces stdout even in interactive terminals.
+**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux-schnell | viu -` just works. `--output -` forces stdout even in interactive terminals. `--image -` reads source image from stdin for img2img: `cat photo.png | mold run "oil painting" --image - | viu -`.
 
 ## Environment Variables
 
@@ -205,6 +219,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP2_PATH` | — | Override CLIP-G encoder path (SDXL) |
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
+| `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
+| `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 
@@ -257,7 +273,7 @@ is_schnell = true
 ## Key Design Decisions
 
 1. **Workspace crate separation** — core/inference/server/cli have clean dependency boundaries. CLI doesn't need candle, server doesn't need clap.
-2. **candle over tch/ort** — Pure Rust, first-class FLUX support, no libtorch dependency. CUDA, Metal, and CPU backends. Uses a patched fork (`utensils/candle`, branch `mold-metal-fix`) via `[patch]` in `Cargo.toml` to fix Metal quantized matmul precision and seed buffer size bugs.
+2. **candle over tch/ort** — Pure Rust, first-class FLUX support, no libtorch dependency. CUDA, Metal, and CPU backends. Uses a published fork (`candle-*-mold` on crates.io) to fix Metal quantized matmul precision and seed buffer size bugs.
 3. **Single binary** — `mold` includes `serve` via `mold-server` library. GPU feature flags (`cuda`/`metal`) forward through `mold-cli` → `mold-server` → `mold-inference`.
 4. **`tokio::sync::Mutex` for engine state** — Async-aware mutex; single-model-at-a-time is appropriate for GPU workloads. Inference runs in `spawn_blocking`.
 5. **Smart VRAM management** — Dynamic device placement + drop-and-reload + quantized encoder auto-fallback. See `device.rs` for thresholds.

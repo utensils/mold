@@ -1478,7 +1478,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
         files: vec![
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
-                hf_filename: "model_v2_stage_b.safetensors".to_string(),
+                hf_filename: "decoder/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Decoder,
                 size_bytes: 1_500_000_000,
                 gated: false,
@@ -1486,7 +1486,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
             },
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
-                hf_filename: "vqgan_f4_v1_500k.safetensors".to_string(),
+                hf_filename: "vqgan/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Vae,
                 size_bytes: 100_000_000,
                 gated: false,
@@ -1494,7 +1494,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
             },
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
-                hf_filename: "model_v2.safetensors".to_string(),
+                hf_filename: "prior/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Transformer,
                 size_bytes: 3_000_000_000,
                 gated: false,
@@ -1502,7 +1502,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
             },
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
-                hf_filename: "model_text_encoder.safetensors".to_string(),
+                hf_filename: "text_encoder/model.safetensors".to_string(),
                 component: ModelComponent::ClipEncoder2,
                 size_bytes: 800_000_000,
                 gated: false,
@@ -1510,7 +1510,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
             },
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
-                hf_filename: "tokenizer.json".to_string(),
+                hf_filename: "tokenizer/tokenizer.json".to_string(),
                 component: ModelComponent::ClipTokenizer2,
                 size_bytes: 2_000_000,
                 gated: false,

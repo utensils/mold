@@ -82,6 +82,7 @@ fn format_family(family: &str) -> String {
         "z-image" => "Z-Image".cyan().to_string(),
         "qwen-image" | "qwen_image" => "Qwen-Image".bright_cyan().to_string(),
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen".bright_yellow().to_string(),
+        "controlnet" => "ControlNet".bright_red().to_string(),
         other => other.to_uppercase(),
     }
 }
