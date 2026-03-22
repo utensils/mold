@@ -42,6 +42,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
     ///
@@ -127,6 +128,22 @@ Examples:
         /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
         #[arg(long, default_value = "0.75", help_heading = "img2img")]
         strength: f64,
+
+        /// Mask image for inpainting (file path; white = repaint, black = preserve)
+        #[arg(long, requires = "image", help_heading = "img2img")]
+        mask: Option<String>,
+
+        /// Control image for ControlNet conditioning (file path, e.g. edges.png)
+        #[arg(long, help_heading = "ControlNet")]
+        control: Option<String>,
+
+        /// ControlNet model name (e.g. controlnet-canny-sd15)
+        #[arg(long, requires = "control", help_heading = "ControlNet")]
+        control_model: Option<String>,
+
+        /// ControlNet conditioning scale (0.0 = no effect, 1.0 = full, up to 2.0)
+        #[arg(long, default_value = "1.0", help_heading = "ControlNet")]
+        control_scale: f64,
     },
 
     /// Start the inference server
@@ -325,6 +342,10 @@ async fn run() -> anyhow::Result<()> {
             eager,
             image,
             strength,
+            mask,
+            control,
+            control_model,
+            control_scale,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -345,6 +366,10 @@ async fn run() -> anyhow::Result<()> {
                 eager,
                 image,
                 strength,
+                mask,
+                control,
+                control_model,
+                control_scale,
             )
             .await?;
         }

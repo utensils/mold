@@ -32,6 +32,10 @@ pub async fn run(
     eager: bool,
     source_image: Option<Vec<u8>>,
     strength: f64,
+    mask_image: Option<Vec<u8>>,
+    control_image: Option<Vec<u8>>,
+    control_model: Option<String>,
+    control_scale: f64,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -112,6 +116,10 @@ pub async fn run(
         scheduler,
         source_image: source_image.clone(),
         strength,
+        mask_image: mask_image.clone(),
+        control_image: control_image.clone(),
+        control_model: control_model.clone(),
+        control_scale,
     };
 
     if let Some(desc) = &model_cfg.description {
@@ -122,8 +130,22 @@ pub async fn run(
             crate::output::colorize_description(desc)
         );
     }
-    if source_image.is_some() {
+    if mask_image.is_some() {
+        status!(
+            "{} inpainting mode (strength: {:.2})",
+            "●".magenta(),
+            strength,
+        );
+    } else if source_image.is_some() {
         status!("{} img2img mode (strength: {:.2})", "●".magenta(), strength,);
+    }
+    if let Some(ref cm) = control_model {
+        status!(
+            "{} ControlNet: {} (scale: {:.2})",
+            "●".magenta(),
+            cm.bold(),
+            control_scale
+        );
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",

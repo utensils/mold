@@ -1,3 +1,4 @@
+pub mod controlnet;
 pub mod device;
 mod encoders;
 pub mod engine;

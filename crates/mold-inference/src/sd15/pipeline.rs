@@ -5,6 +5,7 @@ use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::time::Instant;
 
+use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
@@ -12,6 +13,13 @@ use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// VAE scaling factor for SD1.5 models.
 const VAE_SCALE: f64 = 0.18215;
+
+/// ControlNet context: loaded model, preprocessed control tensor, and scale.
+struct ControlNetContext {
+    model: ControlNetModel,
+    control_tensor: Tensor,
+    scale: f64,
+}
 
 /// Loaded SD1.5 model components, ready for inference.
 struct LoadedSD15 {
@@ -198,6 +206,8 @@ impl SD15Engine {
         guidance: f64,
         steps: u32,
         start_step: usize,
+        inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
+        controlnet_ctx: Option<&ControlNetContext>,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let mut scheduler = crate::scheduler::build_scheduler(
@@ -222,7 +232,25 @@ impl SD15Engine {
             };
 
             let latent_input = scheduler.scale_model_input(latent_input, t)?;
-            let noise_pred = unet.forward(&latent_input, t as f64, text_embeddings)?;
+
+            let noise_pred = if let Some(cn_ctx) = controlnet_ctx {
+                let (down_residuals, mid_residual) = cn_ctx.model.forward(
+                    &latent_input,
+                    t as f64,
+                    text_embeddings,
+                    &cn_ctx.control_tensor,
+                    cn_ctx.scale,
+                )?;
+                unet.forward_with_additional_residuals(
+                    &latent_input,
+                    t as f64,
+                    text_embeddings,
+                    Some(&down_residuals),
+                    Some(&mid_residual),
+                )?
+            } else {
+                unet.forward(&latent_input, t as f64, text_embeddings)?
+            };
 
             let noise_pred = if use_cfg {
                 let chunks = noise_pred.chunk(2, 0)?;
@@ -234,6 +262,14 @@ impl SD15Engine {
             };
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
+
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ctx) = inpaint_ctx {
+                let noised_original =
+                    scheduler.add_noise(&ctx.original_latents, ctx.noise.clone(), t)?;
+                *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            }
+
             self.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: active_timesteps.len(),
@@ -247,7 +283,7 @@ impl SD15Engine {
     }
 
     /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
-    /// Returns (noised_latents, start_step).
+    /// Returns (noised_latents, start_step, encoded_latents, noise) -- extra fields for inpainting.
     #[allow(clippy::too_many_arguments)]
     fn prepare_img2img_latents(
         &self,
@@ -261,7 +297,7 @@ impl SD15Engine {
         seed: u64,
         device: &Device,
         dtype: DType,
-    ) -> Result<(Tensor, usize)> {
+    ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
 
         self.progress.stage_start("Encoding source image (VAE)");
@@ -305,9 +341,9 @@ impl SD15Engine {
 
         // Add noise at the start timestep
         let noised = if start_step < timesteps.len() {
-            scheduler.add_noise(&encoded, noise, timesteps[start_step])?
+            scheduler.add_noise(&encoded, noise.clone(), timesteps[start_step])?
         } else {
-            encoded
+            encoded.clone()
         };
 
         tracing::info!(
@@ -317,7 +353,7 @@ impl SD15Engine {
             "img2img: starting from step {start_step}"
         );
 
-        Ok((noised, start_step))
+        Ok((noised, start_step, encoded, noise))
     }
 
     /// Encode prompt with the single CLIP-L encoder.
@@ -350,6 +386,70 @@ impl SD15Engine {
         };
 
         Ok(text_embeddings.to_dtype(dtype)?)
+    }
+
+    /// Load ControlNet model and prepare control tensor from the request.
+    fn load_controlnet(
+        &self,
+        req: &GenerateRequest,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Option<ControlNetContext>> {
+        let (control_bytes, control_model_name, scale) =
+            match (req.control_image.as_ref(), req.control_model.as_ref()) {
+                (Some(bytes), Some(name)) => (bytes, name, req.control_scale),
+                _ => return Ok(None),
+            };
+
+        self.progress.stage_start("Loading ControlNet");
+        let cn_start = Instant::now();
+
+        // Resolve ControlNet model weights path
+        let config = mold_core::Config::load_or_default();
+        let cn_paths =
+            mold_core::ModelPaths::resolve(control_model_name, &config).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ControlNet model '{}' not found. Pull it with: mold pull {}",
+                    control_model_name,
+                    control_model_name,
+                )
+            })?;
+
+        // Use default SD1.5 UNet config for ControlNet architecture
+        let unet_config =
+            candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModelConfig::default();
+        let model = ControlNetModel::load(&cn_paths.transformer, device, dtype, unet_config)?;
+
+        self.progress
+            .stage_done("Loading ControlNet", cn_start.elapsed());
+
+        // Decode and preprocess control image
+        self.progress.stage_start("Preprocessing control image");
+        let preprocess_start = Instant::now();
+
+        let control_tensor = crate::img_utils::decode_source_image(
+            control_bytes,
+            req.width,
+            req.height,
+            crate::img_utils::NormalizeRange::ZeroToOne,
+            device,
+            dtype,
+        )?;
+
+        self.progress
+            .stage_done("Preprocessing control image", preprocess_start.elapsed());
+
+        tracing::info!(
+            control_model = %control_model_name,
+            scale,
+            "ControlNet loaded and control image preprocessed"
+        );
+
+        Ok(Some(ControlNetContext {
+            model,
+            control_tensor,
+            scale,
+        }))
     }
 
     /// Generate an image using sequential loading strategy.
@@ -450,55 +550,76 @@ impl SD15Engine {
         let is_img2img = req.source_image.is_some();
 
         // For img2img in sequential mode, we need the VAE for encoding before the UNet
-        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
-            self.progress
-                .info("img2img mode: encoding source image before denoising");
+        let (mut latents, start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                self.progress
+                    .info("img2img mode: encoding source image before denoising");
 
-            // Load VAE first for encoding
-            self.progress.stage_start("Loading VAE (GPU)");
-            let vae_start = Instant::now();
-            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-            self.progress
-                .stage_done("Loading VAE (GPU)", vae_start.elapsed());
+                // Load VAE first for encoding
+                self.progress.stage_start("Loading VAE (GPU)");
+                let vae_start = Instant::now();
+                let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+                self.progress
+                    .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
-            let (latents, start_step) = self.prepare_img2img_latents(
-                &vae,
-                source_bytes,
-                req.width,
-                req.height,
-                req.strength,
-                req.steps,
-                sched,
-                seed,
-                &device,
-                dtype,
-            )?;
+                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &vae,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    req.steps,
+                    sched,
+                    seed,
+                    &device,
+                    dtype,
+                )?;
 
-            // Drop VAE to free memory for UNet
-            drop(vae);
-            self.progress.info("Freed VAE (will reload for decode)");
-            device.synchronize()?;
+                // Drop VAE to free memory for UNet
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let mask = crate::img_utils::decode_mask_image(
+                        mask_bytes,
+                        height / 8,
+                        width / 8,
+                        &device,
+                        dtype,
+                    )?;
+                    Some(crate::img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
 
-            (latents, start_step)
-        } else {
-            let latent_h = height / 8;
-            let latent_w = width / 8;
-            let init_scheduler = crate::scheduler::build_scheduler(
-                sched,
-                req.steps as usize,
-                PredictionType::Epsilon,
-                false,
-            )?;
-            let init_noise_sigma = init_scheduler.init_noise_sigma();
-            drop(init_scheduler);
-            let latents = (crate::engine::seeded_randn(
-                seed,
-                &[1, 4, latent_h, latent_w],
-                &device,
-                DType::F32,
-            )? * init_noise_sigma)?;
-            (latents.to_dtype(dtype)?, 0)
-        };
+                drop(vae);
+                self.progress.info("Freed VAE (will reload for decode)");
+                device.synchronize()?;
+
+                (latents, start_step, inpaint_ctx)
+            } else {
+                let latent_h = height / 8;
+                let latent_w = width / 8;
+                let init_scheduler = crate::scheduler::build_scheduler(
+                    sched,
+                    req.steps as usize,
+                    PredictionType::Epsilon,
+                    false,
+                )?;
+                let init_noise_sigma = init_scheduler.init_noise_sigma();
+                drop(init_scheduler);
+                let latents = (crate::engine::seeded_randn(
+                    seed,
+                    &[1, 4, latent_h, latent_w],
+                    &device,
+                    DType::F32,
+                )? * init_noise_sigma)?;
+                (latents.to_dtype(dtype)?, 0, None)
+            };
+
+        // Load ControlNet if requested
+        let controlnet_ctx = self.load_controlnet(req, &device, dtype)?;
 
         self.denoise_loop(
             &unet,
@@ -508,9 +629,13 @@ impl SD15Engine {
             guidance,
             req.steps,
             start_step,
+            inpaint_ctx.as_ref(),
+            controlnet_ctx.as_ref(),
         )?;
 
         // Drop UNet to free memory for VAE decode
+        drop(controlnet_ctx);
+        drop(inpaint_ctx);
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
@@ -611,40 +736,61 @@ impl InferenceEngine for SD15Engine {
         // 2. Build scheduler and create initial latents
         let sched = req.scheduler.unwrap_or(self.scheduler);
 
-        let (mut latents, start_step) = if let Some(ref source_bytes) = req.source_image {
-            self.prepare_img2img_latents(
-                &loaded.vae,
-                source_bytes,
-                req.width,
-                req.height,
-                req.strength,
-                req.steps,
-                sched,
-                seed,
-                &loaded.device,
-                loaded.dtype,
-            )?
-        } else {
-            let latent_h = height / 8;
-            let latent_w = width / 8;
-            let init_scheduler = crate::scheduler::build_scheduler(
-                sched,
-                req.steps as usize,
-                PredictionType::Epsilon,
-                false,
-            )?;
-            let init_noise_sigma = init_scheduler.init_noise_sigma();
-            drop(init_scheduler);
-            let latents = (crate::engine::seeded_randn(
-                seed,
-                &[1, 4, latent_h, latent_w],
-                &loaded.device,
-                DType::F32,
-            )? * init_noise_sigma)?;
-            (latents.to_dtype(loaded.dtype)?, 0)
-        };
+        let (mut latents, start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &loaded.vae,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    req.steps,
+                    sched,
+                    seed,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let mask = crate::img_utils::decode_mask_image(
+                        mask_bytes,
+                        height / 8,
+                        width / 8,
+                        &loaded.device,
+                        loaded.dtype,
+                    )?;
+                    Some(crate::img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
+                (latents, start_step, inpaint_ctx)
+            } else {
+                let latent_h = height / 8;
+                let latent_w = width / 8;
+                let init_scheduler = crate::scheduler::build_scheduler(
+                    sched,
+                    req.steps as usize,
+                    PredictionType::Epsilon,
+                    false,
+                )?;
+                let init_noise_sigma = init_scheduler.init_noise_sigma();
+                drop(init_scheduler);
+                let latents = (crate::engine::seeded_randn(
+                    seed,
+                    &[1, 4, latent_h, latent_w],
+                    &loaded.device,
+                    DType::F32,
+                )? * init_noise_sigma)?;
+                (latents.to_dtype(loaded.dtype)?, 0, None)
+            };
 
-        // 3. Denoising loop
+        // 3. Load ControlNet if requested
+        let controlnet_ctx = self.load_controlnet(req, &loaded.device, loaded.dtype)?;
+
+        // 4. Denoising loop
         self.denoise_loop(
             &loaded.unet,
             &text_embeddings,
@@ -653,9 +799,11 @@ impl InferenceEngine for SD15Engine {
             guidance,
             req.steps,
             start_step,
+            inpaint_ctx.as_ref(),
+            controlnet_ctx.as_ref(),
         )?;
 
-        // 4. VAE decode
+        // 5. VAE decode
         self.progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 

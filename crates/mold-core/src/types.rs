@@ -105,6 +105,19 @@ pub struct GenerateRequest {
     /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise / txt2img).
     #[serde(default = "default_strength")]
     pub strength: f64,
+    /// Mask image for inpainting (raw PNG/JPEG bytes, base64-encoded in JSON).
+    /// White (255) = repaint, black (0) = preserve. Requires source_image.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub mask_image: Option<Vec<u8>>,
+    /// Control image for ControlNet conditioning (raw PNG/JPEG bytes, base64-encoded in JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub control_image: Option<Vec<u8>>,
+    /// ControlNet model name (e.g. "controlnet-canny-sd15").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_model: Option<String>,
+    /// ControlNet conditioning scale (0.0 = no effect, 1.0 = full conditioning).
+    #[serde(default = "default_control_scale")]
+    pub control_scale: f64,
 }
 
 fn default_guidance() -> f64 {
@@ -117,6 +130,10 @@ fn default_batch_size() -> u32 {
 
 fn default_strength() -> f64 {
     0.75
+}
+
+fn default_control_scale() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -323,6 +340,10 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -511,6 +532,10 @@ mod tests {
             scheduler: None,
             source_image: Some(image_bytes.clone()),
             strength: 0.5,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -552,8 +577,99 @@ mod tests {
             scheduler: None,
             source_image: None,
             strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
+        assert!(!json.contains("control_image"));
+    }
+
+    // ── ControlNet field tests ─────────────────────────────────────────────
+
+    #[test]
+    fn generate_request_control_image_base64_roundtrip() {
+        let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "test".to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            scheduler: None,
+            source_image: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: Some(control_bytes.clone()),
+            control_model: Some("controlnet-canny-sd15".to_string()),
+            control_scale: 0.8,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("control_image"));
+        assert!(json.contains("controlnet-canny-sd15"));
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.control_image, Some(control_bytes));
+        assert_eq!(back.control_model.as_deref(), Some("controlnet-canny-sd15"));
+        assert_eq!(back.control_scale, 0.8);
+    }
+
+    #[test]
+    fn generate_request_backward_compat_no_control_fields() {
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.control_image.is_none());
+        assert!(req.control_model.is_none());
+        assert!((req.control_scale - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn generate_request_control_scale_defaults_to_1() {
+        let json = r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!((req.control_scale - 1.0).abs() < 0.001);
+    }
+    // ── Inpainting field tests ────────────────────────────────────────────
+
+    #[test]
+    fn generate_request_mask_image_base64_roundtrip() {
+        let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "test".to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            scheduler: None,
+            source_image: Some(source_bytes),
+            strength: 0.75,
+            mask_image: Some(mask_bytes.clone()),
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("mask_image"));
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mask_image, Some(mask_bytes));
+    }
+
+    #[test]
+    fn generate_request_backward_compat_no_mask_image() {
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.mask_image.is_none());
     }
 }
