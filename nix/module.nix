@@ -62,6 +62,12 @@ in
       };
     };
 
+    hfTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Path to a file containing the HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile.";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -101,12 +107,25 @@ in
         Type = "simple";
         User = "mold";
         Group = "mold";
+        ExecStartPre = lib.optionals (cfg.hfTokenFile != null) [
+          "+${pkgs.writeShellScript "mold-env" ''
+            echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" > /run/mold/env
+            chown mold:mold /run/mold/env
+            chmod 600 /run/mold/env
+          ''}"
+        ];
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 5;
 
+        RuntimeDirectory = "mold";
         StateDirectory = "mold";
         CacheDirectory = "mold";
+      }
+      // lib.optionalAttrs (cfg.hfTokenFile != null) {
+        EnvironmentFile = "/run/mold/env";
+      }
+      // {
 
         # Hardening
         NoNewPrivileges = true;
