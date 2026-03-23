@@ -152,6 +152,14 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | `flux-dev:q8` | 25 | 12GB | Full quality |
 | `flux-dev:q4` | 25 | 7GB | Full quality, less VRAM |
 | `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography |
+| `flux-krea:fp8` | 25 | 11.9GB | Aesthetic photography, FP8 |
+| `jibmix-flux:q4` | 25 | 6.9GB | Photorealistic fine-tune |
+| `jibmix-flux:q5` | 25 | 8.4GB | Photorealistic fine-tune |
+| `ultrareal-v4:q8` | 25 | 12.6GB | Photorealistic (latest) |
+| `ultrareal-v4:q4` | 25 | 6.7GB | Photorealistic, lighter |
+| `ultrareal-v3:q8` | 25 | 12.7GB | Photorealistic |
+| `ultrareal-v2:bf16` | 25 | 23.8GB | Photorealistic, full precision |
+| `iniverse-mix:fp8` | 25 | 11.9GB | Realistic SFW/NSFW mix |
 
 ### SDXL (fast + flexible)
 
@@ -163,6 +171,8 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | `realvis-xl:fp16` | 25 | 5.1GB | Photorealism, versatile |
 | `playground-v2.5:fp16` | 25 | 5.1GB | Artistic, aesthetic |
 | `sdxl-base:fp16` | 25 | 5.1GB | Official base model |
+| `pony-v6:fp16` | 25 | 5.1GB | Anime, art, stylized |
+| `cyberrealistic-pony:fp16` | 25 | 5.1GB | Photorealistic Pony fine-tune |
 
 ### SD 1.5 (lightweight)
 
@@ -196,11 +206,13 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | Model | Steps | Size | Notes |
 |-------|-------|------|-------|
 | `wuerstchen-v2:fp16` | 30 | 5.6GB | 3-stage cascade, rendering artifacts on MPS |
-| `flux2-klein:bf16` | 28 | 13.5GB | Flux.2 Klein 4B, poor quality on MPS |
+| `flux2-klein:q8` | 4 | 4.3GB | Flux.2 Klein 4B Q8, poor quality on MPS |
+| `flux2-klein:q4` | 4 | 2.6GB | Flux.2 Klein 4B Q4, poor quality on MPS |
+| `flux2-klein:bf16` | 4 | 7.8GB | Flux.2 Klein 4B BF16, poor quality on MPS |
 | `qwen-image:q8` | 28 | 21.8GB | Qwen-Image-2512, poor quality on MPS |
 | `qwen-image:q4` | 28 | 12.3GB | Qwen-Image, smallest footprint |
 
-> Bare names default to `:q8` for FLUX/Z-Image or `:fp16` for SD1.5/SDXL. So `mold run flux-schnell "a cat"` just works.
+> Bare names resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8` in order. So `mold run flux-schnell "a cat"` just works.
 
 ## Server API
 

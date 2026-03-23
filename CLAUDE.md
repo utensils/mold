@@ -253,7 +253,7 @@ is_schnell = true
 
 ## Model System
 
-**Name resolution**: `model:tag` format (e.g. `flux-dev:q4`). Bare names default to `:q8` (FLUX/Z-Image) or `:fp16` (SDXL). Legacy dash format (`flux-dev-q4`) resolves to colon format. See `manifest.rs` for all available models and HF sources.
+**Name resolution**: `model:tag` format (e.g. `flux-dev:q4`). Bare names resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8` in order, picking the first match. Legacy dash format (`flux-dev-q4`) resolves to colon format. See `manifest.rs` for all available models and HF sources.
 
 **`mold run` inference modes:**
 1. **Remote (default)**: Connects to `mold serve` via HTTP
