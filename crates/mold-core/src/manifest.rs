@@ -203,7 +203,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             hf_repo: "lmz/mt5-tokenizers".to_string(),
             hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
             component: ModelComponent::T5Tokenizer,
-            size_bytes: 2_400_000, // ~2.4MB
+            size_bytes: 2_424_257,
             gated: false,
             sha256: None, // non-LFS file, no SHA-256 from HF API
         },
@@ -211,7 +211,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None, // non-LFS file, no SHA-256 from HF API
         },
@@ -274,7 +274,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-dev-gguf".to_string(),
                     hf_filename: "flux1-dev-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 12_000_000_000, // ~12GB
+                    size_bytes: 12_708_281_504,
                     gated: false,
                     sha256: Some(
                         "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d",
@@ -301,7 +301,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-dev-gguf".to_string(),
                     hf_filename: "flux1-dev-Q4_1.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 7_000_000_000, // ~7GB
+                    size_bytes: 7_530_806_432,
                     gated: false,
                     sha256: Some(
                         "da04c47a9b717bf9a4dd545e46d89e4a62fb44b9497bf9a5d13d622d592fbcda",
@@ -328,7 +328,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-dev-gguf".to_string(),
                     hf_filename: "flux1-dev-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 9_860_000_000, // ~9.86GB
+                    size_bytes: 9_857_000_736,
                     gated: false,
                     sha256: Some(
                         "9566d56031d7f8de184bb5a0393073956ec4e28b32db3f860bd2b87edca04d13",
@@ -355,7 +355,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-schnell-gguf".to_string(),
                     hf_filename: "flux1-schnell-Q4_1.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 7_510_000_000, // ~7.51GB
+                    size_bytes: 7_510_346_656,
                     gated: false,
                     sha256: Some(
                         "a798b7196d2fe614cf9bae9a617dbd9f2c14673e454c7f2f6a500347274630b5",
@@ -382,7 +382,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-schnell-gguf".to_string(),
                     hf_filename: "flux1-schnell-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 9_830_000_000, // ~9.83GB
+                    size_bytes: 9_834_955_808,
                     gated: false,
                     sha256: Some(
                         "a42fd143cec4d7194da281dc8d23a8fe54b16875a13423c042cb545d1da6fa50",
@@ -409,7 +409,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
                     hf_filename: "flux1-krea-dev-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 12_700_000_000, // ~12.7GB
+                    size_bytes: 12_714_452_256,
                     gated: false,
                     sha256: Some(
                         "0d085b1e3ae0b90e5dbf74da049a80a565617de622a147d28ee37a07761fbd90",
@@ -437,7 +437,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
                     hf_filename: "flux1-krea-dev-Q4_1.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 7_530_000_000, // ~7.53GB
+                    size_bytes: 7_536_977_184,
                     gated: false,
                     sha256: Some(
                         "be4c46e5492761f00c0d9ca15e78936fbe54c4ee65b16da8e0dbf5f2115ae6b2",
@@ -465,7 +465,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "QuantStack/FLUX.1-Krea-dev-GGUF".to_string(),
                     hf_filename: "flux1-krea-dev-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 9_860_000_000, // ~9.86GB
+                    size_bytes: 9_848_349_984,
                     gated: false,
                     sha256: Some(
                         "c50c13ebe1207b2c87b251ccf3a55b9eb54c84f73cee62503d17acd8a460953e",
@@ -544,7 +544,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None,
         },
@@ -553,7 +553,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer2,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None,
         },
@@ -562,7 +562,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "lmz/mt5-tokenizers".to_string(),
             hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
             component: ModelComponent::T5Tokenizer,
-            size_bytes: 2_400_000, // ~2.4MB
+            size_bytes: 2_424_257,
             gated: false,
             sha256: None,
         },
@@ -701,7 +701,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None, // non-LFS file, no SHA-256 from HF API
         },
@@ -750,7 +750,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     hf_repo: "Lykon/dreamshaper-8".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 1_720_000_000, // ~1.72GB
+                    size_bytes: 3_438_167_536,
                     gated: false,
                     sha256: Some(
                         "89b54dc332757e6fff8caef7399e8061833d7d668d42fdbcc02b3e366921c5a6",
@@ -777,7 +777,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     hf_repo: "SG161222/Realistic_Vision_V5.1_noVAE".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 1_720_000_000, // ~1.72GB
+                    size_bytes: 3_438_167_536,
                     gated: false,
                     sha256: Some(
                         "4e0868e8fcae7d4ea8f8cdd3051704b3b47d741dc8e8629552d1a07f6efb8e32",
@@ -804,7 +804,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             hf_repo: "madebyollin/sdxl-vae-fp16-fix".to_string(),
             hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 335_000_000, // ~335MB
+            size_bytes: 334_643_268,
             gated: false,
             sha256: Some("1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"),
         },
@@ -812,7 +812,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
             hf_filename: "text_encoder/model.safetensors".to_string(),
             component: ModelComponent::ClipEncoder,
-            size_bytes: 492_000_000, // ~492MB (CLIP-L)
+            size_bytes: 492_265_168,
             gated: false,
             sha256: Some("5c3d6454dd2d23414b56aa1b5858a72487a656937847b6fea8d0606d7a42cdbc"),
         },
@@ -820,7 +820,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
             hf_filename: "text_encoder_2/model.safetensors".to_string(),
             component: ModelComponent::ClipEncoder2,
-            size_bytes: 1_390_000_000, // ~1.39GB (CLIP-G / OpenCLIP)
+            size_bytes: 2_778_702_264,
             gated: false,
             sha256: Some("3a6032f63d37ae02bbc74ccd6a27440578cd71701f96532229d0154f55a8d3ff"),
         },
@@ -828,7 +828,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             hf_repo: "openai/clip-vit-large-patch14".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None, // non-LFS file, no SHA-256 from HF API
         },
@@ -836,7 +836,7 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
             hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::ClipTokenizer2,
-            size_bytes: 600_000, // ~600KB
+            size_bytes: 2_224_003,
             gated: false,
             sha256: None, // non-LFS file, no SHA-256 from HF API
         },
@@ -857,7 +857,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "83e012a805b84c7ca28e5646747c90a243c65c8ba4f070e2d7ddc9d74661e139",
@@ -884,7 +884,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "Lykon/dreamshaper-xl-v2-turbo".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "c1217e273e6fd7570c2ae9d38172323ff0b6f8ac7f2000b3ba99d4851906ee1e",
@@ -911,7 +911,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "RunDiffusion/Juggernaut-XL-v9".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "cf1ee18eb36712683f50c1e674634875e2adf7413d7492d5f9aa7e69e1a8c17a",
@@ -938,7 +938,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "SG161222/RealVisXL_V5.0".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "ea10386073d39ffdde9fda426745b3f5e9dcd2af204c128ece0f4ea84570ffee",
@@ -965,7 +965,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "playgroundai/playground-v2.5-1024px-aesthetic".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "933778ce76c1fc0ca918b37e1488411b8a99bbd3279c12f527a3ac995a340864",
@@ -993,7 +993,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                     hf_repo: "stabilityai/sdxl-turbo".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.fp16.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_140_000_000,
+                    size_bytes: 5_135_149_760,
                     gated: false,
                     sha256: Some(
                         "48fa46161a745f48d4054df3fe13804ee255486bca893403b60373c188fd1bdb",
@@ -1055,7 +1055,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
             hf_filename: "tokenizer/tokenizer.json".to_string(),
             component: ModelComponent::TextTokenizer,
-            size_bytes: 11_400_000, // ~11.4MB
+            size_bytes: 11_422_654,
             gated: false,
             sha256: Some("aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"),
         },
@@ -1155,7 +1155,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
                     hf_filename: "z_image_turbo-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_260_000_000, // ~5.26GB
+                    size_bytes: 5_263_239_104,
                     gated: false,
                     sha256: Some(
                         "319f627beac8059b7546f36a7b4d5097b7f4ee6a1fc37585d0f75ca1d12d01af",
@@ -1182,7 +1182,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
                     hf_filename: "z_image_turbo-Q4_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 3_860_000_000, // ~3.86GB
+                    size_bytes: 3_683_370_944,
                     gated: false,
                     sha256: Some(
                         "14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd",
@@ -1240,7 +1240,7 @@ fn shared_flux2_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
             hf_filename: "tokenizer/tokenizer.json".to_string(),
             component: ModelComponent::TextTokenizer,
-            size_bytes: 11_400_000, // ~11.4MB
+            size_bytes: 11_422_654,
             gated: false,
             sha256: None,
         },
