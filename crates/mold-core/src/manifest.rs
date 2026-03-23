@@ -508,7 +508,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
             hf_filename: "sd3.5_large.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 16_460_000_000, // ~16.46GB monolithic (VAE portion ~300MB via mmap)
+            size_bytes: 16_460_379_262, // monolithic (VAE portion ~300MB via mmap)
             gated: true,
             sha256: None,
         },
@@ -526,7 +526,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
             hf_filename: "text_encoders/clip_g.safetensors".to_string(),
             component: ModelComponent::ClipEncoder2,
-            size_bytes: 1_390_000_000, // ~1.39GB
+            size_bytes: 1_389_382_176,
             gated: true,
             sha256: None,
         },
@@ -535,7 +535,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
             hf_filename: "text_encoders/t5xxl_fp16.safetensors".to_string(),
             component: ModelComponent::T5Encoder,
-            size_bytes: 9_200_000_000, // ~9.2GB
+            size_bytes: 9_787_841_024,
             gated: true,
             sha256: None,
         },
@@ -583,7 +583,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
                     hf_filename: "sd3.5_large-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 8_500_000_000, // ~8.5GB
+                    size_bytes: 8_779_212_512,
                     gated: false,
                     sha256: None,
                 });
@@ -608,7 +608,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/stable-diffusion-3.5-large-gguf".to_string(),
                     hf_filename: "sd3.5_large-Q4_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 5_000_000_000, // ~5GB
+                    size_bytes: 4_772_054_752,
                     gated: false,
                     sha256: None,
                 });
@@ -634,7 +634,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/stable-diffusion-3.5-large-turbo-gguf".to_string(),
                     hf_filename: "sd3.5_large_turbo-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 8_500_000_000, // ~8.5GB
+                    size_bytes: 8_779_212_512,
                     gated: false,
                     sha256: None,
                 });
@@ -660,7 +660,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/stable-diffusion-3.5-medium-gguf".to_string(),
                     hf_filename: "sd3.5_medium-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 2_700_000_000, // ~2.7GB
+                    size_bytes: 2_855_825_856,
                     gated: false,
                     sha256: None,
                 });
@@ -1078,7 +1078,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     hf_filename: "transformer/diffusion_pytorch_model-00001-of-00003.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 9_970_000_000, // ~9.97GB
+                    size_bytes: 9_973_693_184,
                     gated: false,
                     sha256: Some(
                         "95facd593e2549e8252acb571c653d57f7ddb7f1060d4e81712f152555a88804",
@@ -1089,7 +1089,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     hf_filename: "transformer/diffusion_pytorch_model-00002-of-00003.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 9_970_000_000, // ~9.97GB
+                    size_bytes: 9_973_693_184,
                     gated: false,
                     sha256: Some(
                         "a4bbe43ee184a1fb5af4b412d27555f532893bdc3165b1149e304ed82b5d7015",
@@ -1213,7 +1213,7 @@ fn shared_flux2_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
             hf_filename: "text_encoder/model-00001-of-00002.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 4_970_000_000, // ~4.97GB
+            size_bytes: 4_967_215_360,
             gated: false,
             sha256: None,
         },
@@ -1222,7 +1222,7 @@ fn shared_flux2_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
             hf_filename: "text_encoder/model-00002-of-00002.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 3_080_000_000, // ~3.08GB
+            size_bytes: 3_077_766_632,
             gated: false,
             sha256: None,
         },
@@ -1231,7 +1231,7 @@ fn shared_flux2_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
             hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 160_000_000, // ~160MB
+            size_bytes: 168_120_878,
             gated: false,
             sha256: None,
         },
@@ -1289,7 +1289,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 300_000_000, // ~300MB estimated
+            size_bytes: 253_806_966,
             gated: false,
             sha256: None,
         },
@@ -1298,7 +1298,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 4_900_000_000, // ~4.9GB
+            size_bytes: 4_968_243_304,
             gated: false,
             sha256: None,
         },
@@ -1306,7 +1306,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 4_700_000_000, // ~4.7GB
+            size_bytes: 4_991_495_816,
             gated: false,
             sha256: None,
         },
@@ -1314,7 +1314,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 4_700_000_000, // ~4.7GB
+            size_bytes: 4_932_751_040,
             gated: false,
             sha256: None,
         },
@@ -1322,7 +1322,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 1_200_000_000, // ~1.2GB
+            size_bytes: 1_691_924_384,
             gated: false,
             sha256: None,
         },
@@ -1332,7 +1332,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             hf_repo: "Qwen/Qwen2.5-7B".to_string(),
             hf_filename: "tokenizer.json".to_string(),
             component: ModelComponent::TextTokenizer,
-            size_bytes: 7_000_000, // ~7MB
+            size_bytes: 7_031_645,
             gated: false,
             sha256: None,
         },
@@ -1364,7 +1364,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 9_900_000_000,
+                    size_bytes: 9_936_487_568,
                     gated: false,
                     sha256: None,
                 });
@@ -1373,7 +1373,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
                         .to_string(),
                     component: ModelComponent::TransformerShard,
-                    size_bytes: 4_700_000_000,
+                    size_bytes: 4_660_555_432,
                     gated: false,
                     sha256: None,
                 });
@@ -1393,7 +1393,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/Qwen-Image-gguf".to_string(),
                     hf_filename: "qwen-image-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 21_800_000_000,
+                    size_bytes: 21_761_817_120,
                     gated: false,
                     sha256: None,
                 });
@@ -1412,7 +1412,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/Qwen-Image-gguf".to_string(),
                     hf_filename: "qwen-image-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 16_800_000_000,
+                    size_bytes: 16_824_990_240,
                     gated: false,
                     sha256: None,
                 });
@@ -1431,7 +1431,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/Qwen-Image-gguf".to_string(),
                     hf_filename: "qwen-image-Q4_K_S.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 12_300_000_000,
+                    size_bytes: 12_140_608_032,
                     gated: false,
                     sha256: None,
                 });
@@ -1461,7 +1461,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
                 hf_filename: "decoder/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Decoder,
-                size_bytes: 1_500_000_000,
+                size_bytes: 4_221_568_336,
                 gated: false,
                 sha256: None,
             },
@@ -1469,7 +1469,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
                 hf_filename: "vqgan/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Vae,
-                size_bytes: 100_000_000,
+                size_bytes: 73_639_568,
                 gated: false,
                 sha256: None,
             },
@@ -1477,7 +1477,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
                 hf_filename: "prior/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Transformer,
-                size_bytes: 3_000_000_000,
+                size_bytes: 3_974_614_642,
                 gated: false,
                 sha256: None,
             },
@@ -1486,7 +1486,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
                 hf_filename: "text_encoder/model.safetensors".to_string(),
                 component: ModelComponent::ClipEncoder2,
-                size_bytes: 800_000_000,
+                size_bytes: 2_772_149_276,
                 gated: false,
                 sha256: None,
             },
@@ -1494,7 +1494,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen-prior".to_string(),
                 hf_filename: "tokenizer/tokenizer.json".to_string(),
                 component: ModelComponent::ClipTokenizer2,
-                size_bytes: 2_000_000,
+                size_bytes: 2_224_091,
                 gated: false,
                 sha256: None,
             },
@@ -1504,7 +1504,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
                 hf_filename: "text_encoder/model.safetensors".to_string(),
                 component: ModelComponent::ClipEncoder,
-                size_bytes: 600_000_000,
+                size_bytes: 1_411_983_168,
                 gated: false,
                 sha256: None,
             },
@@ -1512,7 +1512,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
                 hf_filename: "tokenizer/tokenizer.json".to_string(),
                 component: ModelComponent::ClipTokenizer,
-                size_bytes: 2_000_000,
+                size_bytes: 2_224_119,
                 gated: false,
                 sha256: None,
             },
@@ -1592,11 +1592,11 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
     names
 }
 
-/// FP16 T5-XXL model size in bytes (~9.2GB).
-pub const T5_FP16_SIZE: u64 = 9_200_000_000;
+/// FP16 T5-XXL model size in bytes.
+pub const T5_FP16_SIZE: u64 = 9_787_841_024;
 
-/// BF16 Qwen3-4B text encoder size in bytes (~8.2GB, 3 safetensors shards).
-pub const QWEN3_FP16_SIZE: u64 = 8_200_000_000;
+/// BF16 Qwen3-4B text encoder size in bytes (3 safetensors shards).
+pub const QWEN3_FP16_SIZE: u64 = 8_044_982_000;
 
 // ── Quantized T5 variant registry ────────────────────────────────────────────
 
@@ -1616,31 +1616,31 @@ pub fn known_t5_variants() -> &'static [T5Variant] {
             tag: "q8",
             hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
             hf_filename: "t5-v1_1-xxl-encoder-Q8_0.gguf",
-            size_bytes: 5_060_000_000, // ~5.06GB
+            size_bytes: 5_061_584_064,
         },
         T5Variant {
             tag: "q6",
             hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
             hf_filename: "t5-v1_1-xxl-encoder-Q6_K.gguf",
-            size_bytes: 3_910_000_000, // ~3.91GB
+            size_bytes: 3_908_261_056,
         },
         T5Variant {
             tag: "q5",
             hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
             hf_filename: "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
-            size_bytes: 3_390_000_000, // ~3.39GB
+            size_bytes: 3_386_856_640,
         },
         T5Variant {
             tag: "q4",
             hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
             hf_filename: "t5-v1_1-xxl-encoder-Q4_K_M.gguf",
-            size_bytes: 2_900_000_000, // ~2.9GB
+            size_bytes: 2_896_123_072,
         },
         T5Variant {
             tag: "q3",
             hf_repo: "city96/t5-v1_1-xxl-encoder-gguf",
             hf_filename: "t5-v1_1-xxl-encoder-Q3_K_S.gguf",
-            size_bytes: 2_100_000_000, // ~2.1GB
+            size_bytes: 2_099_467_456,
         },
     ];
     VARIANTS
@@ -1669,25 +1669,25 @@ pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
             tag: "q8",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-Q8_0.gguf",
-            size_bytes: 4_280_000_000, // ~4.28GB
+            size_bytes: 4_280_404_704,
         },
         Qwen3Variant {
             tag: "q6",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-Q6_K.gguf",
-            size_bytes: 3_310_000_000, // ~3.31GB
+            size_bytes: 3_306_260_704,
         },
         Qwen3Variant {
             tag: "iq4",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-imatrix-IQ4_XS.gguf",
-            size_bytes: 2_270_000_000, // ~2.27GB
+            size_bytes: 2_270_751_136,
         },
         Qwen3Variant {
             tag: "q3",
             hf_repo: "worstplayer/Z-Image_Qwen_3_4b_text_encoder_GGUF",
             hf_filename: "Qwen_3_4b-imatrix-Q3_K_M.gguf",
-            size_bytes: 2_080_000_000, // ~2.08GB
+            size_bytes: 2_075_617_696,
         },
     ];
     VARIANTS
@@ -1795,7 +1795,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 hf_repo: "lllyasviel/control_v11p_sd15_canny".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Transformer,
-                size_bytes: 1_450_000_000,
+                size_bytes: 722_598_642,
                 gated: false,
                 sha256: None,
             }],
@@ -1809,7 +1809,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 hf_repo: "lllyasviel/control_v11f1p_sd15_depth".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Transformer,
-                size_bytes: 1_450_000_000,
+                size_bytes: 722_598_642,
                 gated: false,
                 sha256: None,
             }],
@@ -1823,7 +1823,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 hf_repo: "lllyasviel/control_v11p_sd15_openpose".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Transformer,
-                size_bytes: 1_450_000_000,
+                size_bytes: 722_598_642,
                 gated: false,
                 sha256: None,
             }],
