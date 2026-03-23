@@ -331,10 +331,15 @@ pub async fn run(
 /// Render SSE progress events using indicatif progress bars.
 /// Used by both local GPU inference and remote SSE streaming.
 async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>) {
-    let pb = ProgressBar::new_spinner();
-    if is_piped() {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
+    let piped = is_piped();
+    let pb = ProgressBar::with_draw_target(
+        None,
+        if piped {
+            ProgressDrawTarget::stderr()
+        } else {
+            ProgressDrawTarget::stdout()
+        },
+    );
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.cyan} {msg}")
@@ -384,10 +389,14 @@ async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgres
                     pb.disable_steady_tick();
                     pb.set_message("");
 
-                    let bar = ProgressBar::new(total as u64);
-                    if is_piped() {
-                        bar.set_draw_target(ProgressDrawTarget::stderr());
-                    }
+                    let bar = ProgressBar::with_draw_target(
+                        Some(total as u64),
+                        if piped {
+                            ProgressDrawTarget::stderr()
+                        } else {
+                            ProgressDrawTarget::stdout()
+                        },
+                    );
                     bar.set_style(
                         ProgressStyle::default_bar()
                             .template(
@@ -604,10 +613,12 @@ async fn generate_remote_blocking(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
-    let pb = ProgressBar::new_spinner();
-    if piped {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
+    let target = if piped {
+        ProgressDrawTarget::stderr()
+    } else {
+        ProgressDrawTarget::stdout()
+    };
+    let pb = ProgressBar::with_draw_target(None, target);
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} {msg}")
