@@ -101,7 +101,9 @@ pub async fn run() -> Result<()> {
                     } else {
                         format!("{:<nw$}", model.name, nw = nw)
                     };
-                    let size = if model.size_gb > 0.0 {
+                    let size = if let Some(mf) = mold_core::manifest::find_manifest(&model.name) {
+                        format!("{:.1}GB", mf.total_size_gb())
+                    } else if model.size_gb > 0.0 {
                         format!("{:.1}GB", model.size_gb)
                     } else {
                         "—".to_string()
@@ -224,7 +226,7 @@ pub async fn run() -> Result<()> {
                 for (name, mcfg) in &config.models {
                     let family_raw = mcfg.family.as_deref().unwrap_or("");
                     let size = mold_core::manifest::find_manifest(name)
-                        .map(|m| format!("{:.1}GB", m.size_gb))
+                        .map(|m| format!("{:.1}GB", m.total_size_gb()))
                         .unwrap_or_else(|| "—".to_string());
                     let model_paths = mcfg.all_file_paths();
                     let disk_bytes: u64 = model_paths

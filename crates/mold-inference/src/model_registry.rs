@@ -17,7 +17,7 @@ pub fn known_models() -> Vec<ModelInfo> {
             ModelInfo {
                 name: m.name.clone(),
                 family: m.family.clone(),
-                size_gb: m.size_gb,
+                size_gb: m.total_size_gb(),
                 is_loaded: false,
                 last_used: None,
                 hf_repo,

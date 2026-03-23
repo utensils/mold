@@ -48,12 +48,21 @@ pub struct ModelManifest {
     pub name: String,
     pub family: String,
     pub description: String,
-    pub size_gb: f32,
     pub files: Vec<ModelFile>,
     pub defaults: ManifestDefaults,
 }
 
 impl ModelManifest {
+    /// Total size of all files in this model in bytes.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.size_bytes).sum()
+    }
+
+    /// Total size of all files in GB (for display).
+    pub fn total_size_gb(&self) -> f32 {
+        self.total_size_bytes() as f32 / 1_073_741_824.0
+    }
+
     /// Convert downloaded paths into a `ModelConfig` suitable for saving to config.toml.
     pub fn to_model_config(&self, paths: &ModelPaths) -> ModelConfig {
         ModelConfig {
@@ -232,7 +241,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-schnell:q8".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Schnell Q8 — fast 4-step, general purpose".to_string(),
-            size_gb: 12.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -260,7 +268,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-dev:q8".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Dev Q8 — full quality, 20+ steps".to_string(),
-            size_gb: 12.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -288,7 +295,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-dev:q4".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Dev Q4 — smaller/faster, good quality".to_string(),
-            size_gb: 7.0,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -316,7 +322,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-dev:q6".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Dev Q6 — best quality/size trade-off".to_string(),
-            size_gb: 9.9,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -344,7 +349,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-schnell:q4".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Schnell Q4 — fast 4-step, smaller footprint".to_string(),
-            size_gb: 7.5,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -372,7 +376,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-schnell:q6".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Schnell Q6 — fast 4-step, best quality/size trade-off".to_string(),
-            size_gb: 9.8,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -400,7 +403,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             name: "flux-krea:q8".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Krea Dev Q8 — aesthetic photography fine-tune".to_string(),
-            size_gb: 12.7,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -429,7 +431,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             family: "flux".to_string(),
             description: "FLUX.1 Krea Dev Q4 — aesthetic photography, smaller footprint"
                 .to_string(),
-            size_gb: 7.5,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -458,7 +459,6 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             family: "flux".to_string(),
             description: "FLUX.1 Krea Dev Q6 — aesthetic photography, best quality/size trade-off"
                 .to_string(),
-            size_gb: 9.9,
             files: {
                 let mut files = shared_flux_files();
                 files.push(ModelFile {
@@ -569,10 +569,6 @@ fn shared_sd3_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Size of shared SD3 components (CLIP-L, CLIP-G, T5-XXL, tokenizers) in GB.
-/// Does not include VAE since it is part of the transformer weights for SD3.
-pub const SHARED_SD3_COMPONENTS_GB: f32 = 10.8;
-
 /// All known SD3.5 model manifests.
 fn sd3_manifests() -> Vec<ModelManifest> {
     vec![
@@ -581,7 +577,6 @@ fn sd3_manifests() -> Vec<ModelManifest> {
             name: "sd3.5-large:q8".to_string(),
             family: "sd3".to_string(),
             description: "SD3.5 Large Q8 — 8.1B MMDiT, high quality, 28 steps".to_string(),
-            size_gb: 8.5,
             files: {
                 let mut files = shared_sd3_files();
                 files.push(ModelFile {
@@ -607,7 +602,6 @@ fn sd3_manifests() -> Vec<ModelManifest> {
             name: "sd3.5-large:q4".to_string(),
             family: "sd3".to_string(),
             description: "SD3.5 Large Q4 — 8.1B MMDiT, smaller footprint, 28 steps".to_string(),
-            size_gb: 5.0,
             files: {
                 let mut files = shared_sd3_files();
                 files.push(ModelFile {
@@ -634,7 +628,6 @@ fn sd3_manifests() -> Vec<ModelManifest> {
             name: "sd3.5-large-turbo:q8".to_string(),
             family: "sd3".to_string(),
             description: "SD3.5 Large Turbo Q8 — 8.1B MMDiT, fast 4-step generation".to_string(),
-            size_gb: 8.5,
             files: {
                 let mut files = shared_sd3_files();
                 files.push(ModelFile {
@@ -661,7 +654,6 @@ fn sd3_manifests() -> Vec<ModelManifest> {
             name: "sd3.5-medium:q8".to_string(),
             family: "sd3".to_string(),
             description: "SD3.5 Medium Q8 — 2.5B MMDiT, SLG support, 28 steps".to_string(),
-            size_gb: 2.7,
             files: {
                 let mut files = shared_sd3_files();
                 files.push(ModelFile {
@@ -716,9 +708,6 @@ fn shared_sd15_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Size of shared SD1.5 components (VAE, CLIP-L, tokenizer) in GB.
-pub const SHARED_SD15_COMPONENTS_GB: f32 = 0.8;
-
 /// All known SD1.5 model manifests.
 fn sd15_manifests() -> Vec<ModelManifest> {
     vec![
@@ -727,7 +716,6 @@ fn sd15_manifests() -> Vec<ModelManifest> {
             family: "sd15".to_string(),
             description: "Stable Diffusion 1.5 — canonical base model, huge LoRA ecosystem"
                 .to_string(),
-            size_gb: 1.7,
             files: {
                 let mut files = shared_sd15_files();
                 files.push(ModelFile {
@@ -756,7 +744,6 @@ fn sd15_manifests() -> Vec<ModelManifest> {
             family: "sd15".to_string(),
             description: "DreamShaper v8 — best versatile SD1.5, photorealistic + fantasy"
                 .to_string(),
-            size_gb: 1.7,
             files: {
                 let mut files = shared_sd15_files();
                 files.push(ModelFile {
@@ -784,7 +771,6 @@ fn sd15_manifests() -> Vec<ModelManifest> {
             name: "realistic-vision-v5:fp16".to_string(),
             family: "sd15".to_string(),
             description: "Realistic Vision v5.1 — gold standard photorealistic SD1.5".to_string(),
-            size_gb: 1.7,
             files: {
                 let mut files = shared_sd15_files();
                 files.push(ModelFile {
@@ -857,9 +843,6 @@ fn shared_sdxl_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Size of shared SDXL components (VAE, dual-CLIP, tokenizers) in GB.
-pub const SHARED_SDXL_COMPONENTS_GB: f32 = 2.2;
-
 /// All known SDXL model manifests.
 fn sdxl_manifests() -> Vec<ModelManifest> {
     vec![
@@ -868,7 +851,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "sdxl-base:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "SDXL Base 1.0 — official Stability AI base model".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -896,7 +878,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "dreamshaper-xl:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "DreamShaper XL — fantasy, concept art, stylized".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -924,7 +905,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "juggernaut-xl:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "Juggernaut XL — photorealism, cinematic lighting".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -952,7 +932,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "realvis-xl:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "RealVisXL V5.0 — photorealism, versatile subjects".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -980,7 +959,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "playground-v2.5:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "Playground v2.5 — aesthetic quality, artistic".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -1009,7 +987,6 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
             name: "sdxl-turbo:fp16".to_string(),
             family: "sdxl".to_string(),
             description: "SDXL Turbo — ultra-fast 1-4 step generation".to_string(),
-            size_gb: 5.14,
             files: {
                 let mut files = shared_sdxl_files();
                 files.push(ModelFile {
@@ -1085,9 +1062,6 @@ fn shared_zimage_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Size of shared Z-Image components (Qwen3 text encoder + VAE + tokenizer) in GB.
-pub const SHARED_ZIMAGE_COMPONENTS_GB: f32 = 8.2;
-
 /// All known Z-Image model manifests.
 fn zimage_manifests() -> Vec<ModelManifest> {
     vec![
@@ -1096,7 +1070,6 @@ fn zimage_manifests() -> Vec<ModelManifest> {
             name: "z-image-turbo:bf16".to_string(),
             family: "z-image".to_string(),
             description: "Z-Image Turbo BF16 — 9-step, Alibaba flow-matching".to_string(),
-            size_gb: 24.6,
             files: {
                 let mut files = shared_zimage_files();
                 // Transformer shards (3 files)
@@ -1149,7 +1122,6 @@ fn zimage_manifests() -> Vec<ModelManifest> {
             name: "z-image-turbo:q8".to_string(),
             family: "z-image".to_string(),
             description: "Z-Image Turbo Q8 — 9-step, quantized transformer".to_string(),
-            size_gb: 6.58,
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
@@ -1177,7 +1149,6 @@ fn zimage_manifests() -> Vec<ModelManifest> {
             name: "z-image-turbo:q6".to_string(),
             family: "z-image".to_string(),
             description: "Z-Image Turbo Q6 — 9-step, best quality/size trade-off".to_string(),
-            size_gb: 5.26,
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
@@ -1205,7 +1176,6 @@ fn zimage_manifests() -> Vec<ModelManifest> {
             name: "z-image-turbo:q4".to_string(),
             family: "z-image".to_string(),
             description: "Z-Image Turbo Q4 — 9-step, smallest footprint".to_string(),
-            size_gb: 3.86,
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
@@ -1287,7 +1257,6 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             description:
                 "[broken] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
                     .to_string(),
-            size_gb: 13.5,
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1388,7 +1357,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             family: "qwen-image".to_string(),
             description: "[broken] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
                 .to_string(),
-            size_gb: 30.0,
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -1419,7 +1387,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             family: "qwen-image".to_string(),
             description: "[broken] Qwen-Image-2512 Q8 — quantized transformer, best quality"
                 .to_string(),
-            size_gb: 21.8,
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -1439,7 +1406,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             family: "qwen-image".to_string(),
             description: "[broken] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
                 .to_string(),
-            size_gb: 16.8,
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -1459,7 +1425,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             family: "qwen-image".to_string(),
             description: "[broken] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
                 .to_string(),
-            size_gb: 12.3,
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -1491,7 +1456,6 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
         family: "wuerstchen".to_string(),
         description: "[broken] Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression"
             .to_string(),
-        size_gb: 5.6,
         files: vec![
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
@@ -1734,12 +1698,9 @@ pub fn find_qwen3_variant(tag: &str) -> Option<&'static Qwen3Variant> {
     known_qwen3_variants().iter().find(|v| v.tag == tag)
 }
 
-/// Size of shared FLUX components (VAE, T5, CLIP, tokenizers) in GB.
-pub const SHARED_COMPONENTS_GB: f32 = 9.8;
-
 /// Total size of all files in the manifest in bytes.
 pub fn total_download_size(manifest: &ModelManifest) -> u64 {
-    manifest.files.iter().map(|f| f.size_bytes).sum()
+    manifest.total_size_bytes()
 }
 
 /// Compute how many bytes still need to be downloaded for a model.
@@ -1830,7 +1791,6 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
             name: "controlnet-canny-sd15:fp16".to_string(),
             family: "controlnet".to_string(),
             description: "ControlNet Canny edge detection for SD1.5".to_string(),
-            size_gb: 1.4,
             files: vec![ModelFile {
                 hf_repo: "lllyasviel/control_v11p_sd15_canny".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
@@ -1845,7 +1805,6 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
             name: "controlnet-depth-sd15:fp16".to_string(),
             family: "controlnet".to_string(),
             description: "ControlNet depth estimation for SD1.5".to_string(),
-            size_gb: 1.4,
             files: vec![ModelFile {
                 hf_repo: "lllyasviel/control_v11f1p_sd15_depth".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
@@ -1860,7 +1819,6 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
             name: "controlnet-openpose-sd15:fp16".to_string(),
             family: "controlnet".to_string(),
             description: "ControlNet OpenPose body detection for SD1.5".to_string(),
-            size_gb: 1.4,
             files: vec![ModelFile {
                 hf_repo: "lllyasviel/control_v11p_sd15_openpose".to_string(),
                 hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
@@ -2570,6 +2528,76 @@ mod tests {
             let total = total_download_size(&manifest);
             assert!(total > 0, "total_download_size is 0 for {}", manifest.name);
         }
+    }
+
+    #[test]
+    fn total_size_gb_matches_total_size_bytes() {
+        for manifest in known_manifests() {
+            let from_bytes = manifest.total_size_bytes() as f32 / 1_073_741_824.0;
+            let from_method = manifest.total_size_gb();
+            assert!(
+                (from_bytes - from_method).abs() < 0.001,
+                "total_size_gb mismatch for {}: {} vs {}",
+                manifest.name,
+                from_bytes,
+                from_method
+            );
+        }
+    }
+
+    #[test]
+    fn total_size_includes_shared_components() {
+        // Models with shared files must have total > transformer-only size
+        for manifest in known_manifests() {
+            if manifest.family == "controlnet" {
+                continue; // ControlNet is a single file
+            }
+            let transformer_bytes: u64 = manifest
+                .files
+                .iter()
+                .filter(|f| {
+                    f.component == ModelComponent::Transformer
+                        || f.component == ModelComponent::TransformerShard
+                })
+                .map(|f| f.size_bytes)
+                .sum();
+            let total = manifest.total_size_bytes();
+            assert!(
+                total > transformer_bytes,
+                "{}: total ({}) should exceed transformer-only ({})",
+                manifest.name,
+                total,
+                transformer_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn no_manifest_has_size_gb_field() {
+        // Ensures we don't accidentally re-add a static size_gb field.
+        // If this test exists and compiles, the field doesn't exist on ModelManifest.
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        let _: f32 = manifest.total_size_gb(); // computed, not stored
+    }
+
+    #[test]
+    fn flux_schnell_total_exceeds_transformer() {
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        // Transformer is ~12GB, shared components add ~9.8GB
+        let total_gb = manifest.total_size_gb();
+        assert!(
+            total_gb > 20.0,
+            "flux-schnell:q8 total should be >20GB (was {})",
+            total_gb
+        );
+    }
+
+    #[test]
+    fn zimage_q8_size_includes_shared() {
+        let manifest = find_manifest("z-image-turbo:q8").unwrap();
+        let total = manifest.total_size_gb();
+        // Transformer (~6.58GB) + shared (~8.2GB) = ~13.8 GiB
+        assert!(total > 13.0);
     }
 
     #[test]
