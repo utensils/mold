@@ -70,6 +70,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Ensure modelsDir exists before the service starts.
+    # systemd's ReadWritePaths fails at namespace setup if the path is missing,
+    # so ExecStartPre mkdir is too late — tmpfiles runs earlier in boot.
+    systemd.tmpfiles.rules = [
+      "d ${cfg.modelsDir} 0755 root root -"
+    ];
+
     systemd.services.mold = {
       description = "mold AI image generation server";
       after = [ "network.target" ];
@@ -88,7 +95,6 @@ in
 
       serviceConfig = {
         Type = "simple";
-        ExecStartPre = "+${pkgs.coreutils}/bin/mkdir -p ${cfg.modelsDir}";
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 5;
@@ -102,6 +108,7 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
+        PrivateDevices = false;
         ReadWritePaths = [ cfg.modelsDir ];
 
         # GPU access
