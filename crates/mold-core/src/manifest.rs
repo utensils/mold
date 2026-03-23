@@ -53,6 +53,20 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
+    /// Size of the model-specific files in bytes.
+    pub fn model_size_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .filter(|f| is_model_specific_component(f.component))
+            .map(|f| f.size_bytes)
+            .sum()
+    }
+
+    /// Size of the model-specific files in GB (for display).
+    pub fn model_size_gb(&self) -> f32 {
+        self.model_size_bytes() as f32 / 1_073_741_824.0
+    }
+
     /// Total size of all files in this model in bytes.
     pub fn total_size_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size_bytes).sum()
@@ -135,6 +149,13 @@ impl ModelManifest {
     }
 }
 
+fn is_model_specific_component(component: ModelComponent) -> bool {
+    matches!(
+        component,
+        ModelComponent::Transformer | ModelComponent::TransformerShard
+    )
+}
+
 /// Determine the clean storage path for a model file relative to the models directory.
 ///
 /// - **Transformer / TransformerShard**: `<model-name>/<hf_filename>` (model-specific)
@@ -146,28 +167,26 @@ impl ModelManifest {
 pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     let sanitized_name = manifest.name.replace(':', "-");
 
-    match file.component {
-        ModelComponent::Transformer | ModelComponent::TransformerShard => {
-            PathBuf::from(&sanitized_name).join(&file.hf_filename)
-        }
-        _ => {
-            // Check if this filename collides with another file in the same
-            // manifest from a different HF repo. If so, use the repo name
-            // as a subfolder to disambiguate (e.g. Wuerstchen has two
-            // text_encoder/model.safetensors from different repos).
-            let has_collision = manifest.files.iter().any(|other| {
-                other.hf_filename == file.hf_filename && other.hf_repo != file.hf_repo
-            });
-            if has_collision {
-                let repo_leaf = file.hf_repo.rsplit('/').next().unwrap_or(&manifest.family);
-                PathBuf::from("shared")
-                    .join(repo_leaf)
-                    .join(&file.hf_filename)
-            } else {
-                PathBuf::from("shared")
-                    .join(&manifest.family)
-                    .join(&file.hf_filename)
-            }
+    if is_model_specific_component(file.component) {
+        PathBuf::from(&sanitized_name).join(&file.hf_filename)
+    } else {
+        // Check if this filename collides with another file in the same
+        // manifest from a different HF repo. If so, use the repo name
+        // as a subfolder to disambiguate (e.g. Wuerstchen has two
+        // text_encoder/model.safetensors from different repos).
+        let has_collision = manifest
+            .files
+            .iter()
+            .any(|other| other.hf_filename == file.hf_filename && other.hf_repo != file.hf_repo);
+        if has_collision {
+            let repo_leaf = file.hf_repo.rsplit('/').next().unwrap_or(&manifest.family);
+            PathBuf::from("shared")
+                .join(repo_leaf)
+                .join(&file.hf_filename)
+        } else {
+            PathBuf::from("shared")
+                .join(&manifest.family)
+                .join(&file.hf_filename)
         }
     }
 }
@@ -2546,6 +2565,21 @@ mod tests {
     }
 
     #[test]
+    fn model_size_gb_matches_model_size_bytes() {
+        for manifest in known_manifests() {
+            let from_bytes = manifest.model_size_bytes() as f32 / 1_073_741_824.0;
+            let from_method = manifest.model_size_gb();
+            assert!(
+                (from_bytes - from_method).abs() < 0.001,
+                "model_size_gb mismatch for {}: {} vs {}",
+                manifest.name,
+                from_bytes,
+                from_method
+            );
+        }
+    }
+
+    #[test]
     fn total_size_includes_shared_components() {
         // Models with shared files must have total > transformer-only size
         for manifest in known_manifests() {
@@ -2563,11 +2597,17 @@ mod tests {
                 .sum();
             let total = manifest.total_size_bytes();
             assert!(
-                total > transformer_bytes,
-                "{}: total ({}) should exceed transformer-only ({})",
+                total >= transformer_bytes,
+                "{}: total ({}) should be >= transformer-only ({})",
                 manifest.name,
                 total,
                 transformer_bytes
+            );
+            assert_eq!(
+                manifest.model_size_bytes(),
+                transformer_bytes,
+                "{}: model size should match model-specific files",
+                manifest.name
             );
         }
     }
@@ -2593,11 +2633,29 @@ mod tests {
     }
 
     #[test]
+    fn flux_schnell_model_size_is_transformer_only() {
+        let manifest = find_manifest("flux-schnell:q8").unwrap();
+        let model_gb = manifest.model_size_gb();
+        assert!(
+            model_gb > 11.0 && model_gb < 13.0,
+            "flux-schnell:q8 model size should be transformer-only (~11.8GiB), was {}",
+            model_gb
+        );
+        assert!(manifest.total_size_gb() > model_gb);
+    }
+
+    #[test]
     fn zimage_q8_size_includes_shared() {
         let manifest = find_manifest("z-image-turbo:q8").unwrap();
         let total = manifest.total_size_gb();
         // Transformer (~6.58GB) + shared (~8.2GB) = ~13.8 GiB
         assert!(total > 13.0);
+    }
+
+    #[test]
+    fn controlnet_model_size_matches_total_size() {
+        let manifest = find_manifest("controlnet-canny-sd15:fp16").unwrap();
+        assert_eq!(manifest.model_size_bytes(), manifest.total_size_bytes());
     }
 
     #[test]

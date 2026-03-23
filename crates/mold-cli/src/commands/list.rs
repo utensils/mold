@@ -102,7 +102,7 @@ pub async fn run() -> Result<()> {
                         format!("{:<nw$}", model.name, nw = nw)
                     };
                     let size = if let Some(mf) = mold_core::manifest::find_manifest(&model.name) {
-                        format!("{:.1}GB", mf.total_size_gb())
+                        format!("{:.1}GB", mf.model_size_gb())
                     } else if model.size_gb > 0.0 {
                         format!("{:.1}GB", model.size_gb)
                     } else {
@@ -139,26 +139,26 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let (size_str, fetch_col) =
-                        if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
-                            let (total_bytes, remaining_bytes) =
-                                mold_core::manifest::compute_download_size(mf);
-                            let total_gb = total_bytes as f64 / 1_073_741_824.0;
-                            let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
-                            let fetch = if remaining_bytes == 0 {
-                                format!("{:>7}", "cached").dimmed().to_string()
-                            } else {
-                                format!("{:.1}GB", remaining_gb)
-                            };
-                            (format!("{:.1}GB", total_gb), fetch)
+                    let (size_str, fetch_col) = if let Some(mf) =
+                        mold_core::manifest::find_manifest(&m.name)
+                    {
+                        let (_, remaining_bytes) = mold_core::manifest::compute_download_size(mf);
+                        let model_gb = mf.model_size_gb() as f64;
+                        let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
+                        let fetch = if remaining_bytes == 0 {
+                            format!("{:>7}", "cached").dimmed().to_string()
                         } else {
-                            let s = if m.size_gb > 0.0 {
-                                format!("{:.1}GB", m.size_gb)
-                            } else {
-                                "—".to_string()
-                            };
-                            (s.clone(), s)
+                            format!("{:.1}GB", remaining_gb)
                         };
+                        (format!("{:.1}GB", model_gb), fetch)
+                    } else {
+                        let s = if m.size_gb > 0.0 {
+                            format!("{:.1}GB", m.size_gb)
+                        } else {
+                            "—".to_string()
+                        };
+                        (s.clone(), s)
+                    };
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),
@@ -226,7 +226,7 @@ pub async fn run() -> Result<()> {
                 for (name, mcfg) in &config.models {
                     let family_raw = mcfg.family.as_deref().unwrap_or("");
                     let size = mold_core::manifest::find_manifest(name)
-                        .map(|m| format!("{:.1}GB", m.total_size_gb()))
+                        .map(|m| format!("{:.1}GB", m.model_size_gb()))
                         .unwrap_or_else(|| "—".to_string());
                     let model_paths = mcfg.all_file_paths();
                     let disk_bytes: u64 = model_paths
@@ -283,11 +283,10 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let (total_bytes, remaining_bytes) =
-                        mold_core::manifest::compute_download_size(m);
-                    let total_gb = total_bytes as f64 / 1_073_741_824.0;
+                    let (_, remaining_bytes) = mold_core::manifest::compute_download_size(m);
+                    let model_gb = m.model_size_gb() as f64;
                     let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
-                    let size_str = format!("{:.1}GB", total_gb);
+                    let size_str = format!("{:.1}GB", model_gb);
                     let fetch_col = if remaining_bytes == 0 {
                         format!("{:>7}", "cached").dimmed().to_string()
                     } else {
