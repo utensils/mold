@@ -1344,6 +1344,57 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 scheduler: Some(Scheduler::Ddim),
             },
         },
+        // --- Pony / CyberRealistic (standard SDXL architecture, anime/art/photorealistic) ---
+        ModelManifest {
+            name: "pony-v6:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "Pony Diffusion V6 XL — anime, art, stylized generation".to_string(),
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "kitty7779/ponyDiffusionV6XL".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_135_149_760,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some(Scheduler::EulerAncestral),
+            },
+        },
+        ModelManifest {
+            name: "cyberrealistic-pony:fp16".to_string(),
+            family: "sdxl".to_string(),
+            description: "CyberRealistic Pony v16 — photorealistic Pony fine-tune".to_string(),
+            files: {
+                let mut files = shared_sdxl_files();
+                files.push(ModelFile {
+                    hf_repo: "LillyCherry/cyberrealisticPony_v160".to_string(),
+                    hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_135_149_760,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: Some(Scheduler::EulerAncestral),
+            },
+        },
         // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
         ModelManifest {
             name: "sdxl-turbo:fp16".to_string(),
@@ -1638,6 +1689,82 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None, // Uses flow-matching Euler
+            },
+        },
+        // Flux.2 Klein-4B GGUF quantizations (from unsloth, Apache 2.0)
+        ModelManifest {
+            name: "flux2-klein:q8".to_string(),
+            family: "flux2".to_string(),
+            description: "[broken] Flux.2 Klein-4B Q8 — best GGUF quality".to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-4b-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 4_300_644_928,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein:q6".to_string(),
+            family: "flux2".to_string(),
+            description: "[broken] Flux.2 Klein-4B Q6 — good quality/size trade-off".to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-4b-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 3_409_273_408,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein:q4".to_string(),
+            family: "flux2".to_string(),
+            description: "[broken] Flux.2 Klein-4B Q4 — smaller footprint".to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-4b-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 2_604_311_104,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
             },
         },
     ]
@@ -2466,9 +2593,46 @@ mod tests {
     }
 
     #[test]
+    fn pony_v6_exists() {
+        let manifest = find_manifest("pony-v6:fp16").unwrap();
+        assert_eq!(manifest.family, "sdxl");
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::EulerAncestral));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.hf_repo.contains("ponyDiffusionV6XL")));
+    }
+
+    #[test]
+    fn cyberrealistic_pony_exists() {
+        let manifest = find_manifest("cyberrealistic-pony:fp16").unwrap();
+        assert_eq!(manifest.family, "sdxl");
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::EulerAncestral));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.hf_repo.contains("cyberrealisticPony")));
+    }
+
+    #[test]
+    fn flux2_klein_gguf_exists() {
+        assert!(find_manifest("flux2-klein:q8").is_some());
+        assert!(find_manifest("flux2-klein:q6").is_some());
+        assert!(find_manifest("flux2-klein:q4").is_some());
+    }
+
+    #[test]
+    fn flux2_klein_resolves_to_q8() {
+        // bare "flux2-klein" should resolve to :q8 (not :bf16) since q8 is tried first
+        // Actually, it tries :q8 first in resolve_model_name
+        let name = resolve_model_name("flux2-klein");
+        assert_eq!(name, "flux2-klein:q8");
+    }
+
+    #[test]
     fn known_manifests_count() {
-        // 22 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 48
-        assert_eq!(known_manifests().len(), 48);
+        // 22 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 53
+        assert_eq!(known_manifests().len(), 53);
     }
 
     #[test]
