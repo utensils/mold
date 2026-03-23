@@ -501,6 +501,32 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 scheduler: None,
             },
         },
+        ModelManifest {
+            name: "flux-krea:fp8".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Krea Dev FP8 — aesthetic photography, scaled FP8 quantization"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "Clybius/FLUX.1-Krea-dev-scaled-fp8".to_string(),
+                    hf_filename: "flux1-krea-dev_float8_e4m3fn_learned_svd.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 11_904_609_210,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 4.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
         // ── jibMixFlux v7 PixelHeaven (FLUX-dev fine-tune by J1B) ──────────
         ModelManifest {
             name: "jibmix-flux:fp8".to_string(),
@@ -599,6 +625,219 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             defaults: ManifestDefaults {
                 steps: 25,
                 guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // ── UltraReal Fine-Tune (photorealistic FLUX-dev fine-tune by Danrisi) ──
+        ModelManifest {
+            name: "ultrareal-v2:bf16".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v2.0 BF16 — photorealistic, full precision"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "youknownothing/UltrarealFineTune-Flux".to_string(),
+                    hf_filename: "ultrarealFineTune_v20.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 23_802_910_336,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v3:q8".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v3 Q8 — photorealistic, best GGUF quality"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "belisarius/FLUX.1-dev-ultrarealFineTune_v3Experimental-GGUF"
+                        .to_string(),
+                    hf_filename: "ultrarealFineTune_v3Experimental-q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 12_723_103_008,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v3:q6".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v3 Q6 — photorealistic, best quality/size trade-off"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "belisarius/FLUX.1-dev-ultrarealFineTune_v3Experimental-GGUF"
+                        .to_string(),
+                    hf_filename: "ultrarealFineTune_v3Experimental-q6_k.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_857_000_736,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v3:q4".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v3 Q4 — photorealistic, smaller footprint"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "belisarius/FLUX.1-dev-ultrarealFineTune_v3Experimental-GGUF"
+                        .to_string(),
+                    hf_filename: "ultrarealFineTune_v3Experimental-q4_k_s.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 6_805_988_640,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v4:q8".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v4 Q8 — photorealistic (latest), best GGUF quality"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "void-gryph/ultrareal-fine-tune-GGUF".to_string(),
+                    hf_filename: "ultrareal-fine-tune.Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 12_619_809_408,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v4:q5".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v4 Q5 — photorealistic (latest), good quality/size"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "void-gryph/ultrareal-fine-tune-GGUF".to_string(),
+                    hf_filename: "ultrareal-fine-tune.Q5_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_170_103_424,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "ultrareal-v4:q4".to_string(),
+            family: "flux".to_string(),
+            description: "UltraReal Fine-Tune v4 Q4 — photorealistic (latest), smaller footprint"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "void-gryph/ultrareal-fine-tune-GGUF".to_string(),
+                    hf_filename: "ultrareal-fine-tune.Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 6_686_868_096,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        // ── iNiverse Mix SFW/NSFW (FLUX-dev fine-tune by JinnGames) ──────────
+        ModelManifest {
+            name: "iniverse-mix:fp8".to_string(),
+            family: "flux".to_string(),
+            description: "iNiverse Mix F1D RealNSFW GuoFeng v2 FP8 — realistic SFW/NSFW mix"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "modelzpalace/iniverseMixSFWNSFW_f1dRealnsfwGuofengV2".to_string(),
+                    hf_filename: "iniverseMixSFWNSFW_f1dRealnsfwGuofengV2.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 11_901_513_960,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -2151,9 +2390,85 @@ mod tests {
     }
 
     #[test]
+    fn flux_krea_fp8_exists() {
+        let manifest = find_manifest("flux-krea:fp8").unwrap();
+        assert_eq!(manifest.family, "flux");
+        assert!(!manifest.defaults.is_schnell);
+        assert_eq!(manifest.defaults.guidance, 4.5);
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.hf_filename.contains("float8_e4m3fn")));
+    }
+
+    #[test]
+    fn jibmix_flux_manifests_exist() {
+        assert!(find_manifest("jibmix-flux:fp8").is_some());
+        assert!(find_manifest("jibmix-flux:q5").is_some());
+        assert!(find_manifest("jibmix-flux:q4").is_some());
+        assert!(find_manifest("jibmix-flux:q3").is_some());
+    }
+
+    #[test]
+    fn jibmix_flux_defaults() {
+        let manifest = find_manifest("jibmix-flux:q4").unwrap();
+        assert_eq!(manifest.family, "flux");
+        assert!(!manifest.defaults.is_schnell);
+        assert_eq!(manifest.defaults.steps, 25);
+        assert_eq!(manifest.defaults.guidance, 3.0);
+    }
+
+    #[test]
+    fn ultrareal_v2_exists() {
+        let manifest = find_manifest("ultrareal-v2:bf16").unwrap();
+        assert_eq!(manifest.family, "flux");
+        assert!(!manifest.defaults.is_schnell);
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.hf_filename.ends_with(".safetensors")
+                && f.component == ModelComponent::Transformer));
+    }
+
+    #[test]
+    fn ultrareal_v3_manifests_exist() {
+        assert!(find_manifest("ultrareal-v3:q8").is_some());
+        assert!(find_manifest("ultrareal-v3:q6").is_some());
+        assert!(find_manifest("ultrareal-v3:q4").is_some());
+    }
+
+    #[test]
+    fn ultrareal_v4_manifests_exist() {
+        assert!(find_manifest("ultrareal-v4:q8").is_some());
+        assert!(find_manifest("ultrareal-v4:q5").is_some());
+        assert!(find_manifest("ultrareal-v4:q4").is_some());
+    }
+
+    #[test]
+    fn ultrareal_v4_defaults() {
+        let manifest = find_manifest("ultrareal-v4:q8").unwrap();
+        assert_eq!(manifest.family, "flux");
+        assert!(!manifest.defaults.is_schnell);
+        assert_eq!(manifest.defaults.steps, 25);
+        assert_eq!(manifest.defaults.guidance, 3.5);
+    }
+
+    #[test]
+    fn iniverse_mix_exists() {
+        let manifest = find_manifest("iniverse-mix:fp8").unwrap();
+        assert_eq!(manifest.family, "flux");
+        assert!(!manifest.defaults.is_schnell);
+        assert_eq!(manifest.defaults.steps, 25);
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.hf_filename.contains("iniverseMixSFWNSFW")));
+    }
+
+    #[test]
     fn known_manifests_count() {
-        // 13 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 39
-        assert_eq!(known_manifests().len(), 39);
+        // 22 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 48
+        assert_eq!(known_manifests().len(), 48);
     }
 
     #[test]
