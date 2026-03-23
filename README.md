@@ -236,6 +236,43 @@ mold completions fish | source     # fish
 - **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal
 - Models auto-download on first use (~2-30GB depending on model)
 
+## AI Agent Skill
+
+Mold ships with an [AI agent skill](.claude/skills/mold/SKILL.md) that teaches AI assistants how to use the CLI for image generation. This lets agents generate images on your behalf using natural language.
+
+### Claude Code
+
+The skill is automatically available when working in the mold repo. To use it in other projects, copy the skill directory:
+
+```bash
+# Copy to your project (project-scoped)
+cp -r path/to/mold/.claude/skills/mold .claude/skills/
+
+# Or install globally (available in all projects)
+cp -r path/to/mold/.claude/skills/mold ~/.claude/skills/
+```
+
+Then use it via `/mold a cat on a skateboard` or let Claude invoke it automatically when you ask to generate images.
+
+### OpenClaw
+
+Copy the skill to your OpenClaw workspace:
+
+```bash
+cp -r path/to/mold/.claude/skills/mold ~/.openclaw/workspace/skills/
+```
+
+Or install directly from the repo:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/utensils/mold.git /tmp/mold-skill
+cd /tmp/mold-skill && git sparse-checkout set .claude/skills/mold
+cp -r .claude/skills/mold ~/.openclaw/workspace/skills/
+rm -rf /tmp/mold-skill
+```
+
+The skill format is compatible with both Claude Code and OpenClaw (both use `SKILL.md` with YAML frontmatter).
+
 ## How it works
 
 Mold is a single Rust binary built on [candle](https://github.com/huggingface/candle) — a pure Rust ML framework. No Python runtime, no libtorch, no ONNX. Just your GPU doing math.
