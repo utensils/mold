@@ -2030,18 +2030,12 @@ pub fn resolve_model_name(input: &str) -> String {
             return format!("{base}:{suffix}");
         }
     }
-    // Try :q8 first (FLUX convention), then :fp16 (SDXL convention), then :bf16 (Z-Image convention)
-    let q8 = format!("{input}:q8");
-    if find_manifest_exact(&q8).is_some() {
-        return q8;
-    }
-    let fp16 = format!("{input}:fp16");
-    if find_manifest_exact(&fp16).is_some() {
-        return fp16;
-    }
-    let bf16 = format!("{input}:bf16");
-    if find_manifest_exact(&bf16).is_some() {
-        return bf16;
+    // Try default tags in preference order: :q8 (FLUX/GGUF), :fp16 (SDXL), :bf16 (Z-Image), :fp8 (community fine-tunes)
+    for tag in ["q8", "fp16", "bf16", "fp8"] {
+        let candidate = format!("{input}:{tag}");
+        if find_manifest_exact(&candidate).is_some() {
+            return candidate;
+        }
     }
     // Fallback to :q8 for backward compatibility
     format!("{input}:q8")
@@ -2537,6 +2531,12 @@ mod tests {
     }
 
     #[test]
+    fn jibmix_flux_bare_resolves_to_fp8() {
+        // No :q8/:fp16/:bf16 tag exists, so bare name resolves to :fp8
+        assert_eq!(resolve_model_name("jibmix-flux"), "jibmix-flux:fp8");
+    }
+
+    #[test]
     fn jibmix_flux_defaults() {
         let manifest = find_manifest("jibmix-flux:q4").unwrap();
         assert_eq!(manifest.family, "flux");
@@ -2590,6 +2590,11 @@ mod tests {
             .files
             .iter()
             .any(|f| f.hf_filename.contains("iniverseMixSFWNSFW")));
+    }
+
+    #[test]
+    fn iniverse_mix_bare_resolves_to_fp8() {
+        assert_eq!(resolve_model_name("iniverse-mix"), "iniverse-mix:fp8");
     }
 
     #[test]
