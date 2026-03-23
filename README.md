@@ -212,7 +212,7 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 | `qwen-image:q8` | 28 | 21.8GB | Qwen-Image-2512, poor quality on MPS |
 | `qwen-image:q4` | 28 | 12.3GB | Qwen-Image, smallest footprint |
 
-> Bare names default to `:q8` for FLUX/Z-Image or `:fp16` for SD1.5/SDXL. So `mold run flux-schnell "a cat"` just works.
+> Bare names resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8` in order. So `mold run flux-schnell "a cat"` just works.
 
 ## Server API
 
