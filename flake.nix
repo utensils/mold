@@ -177,6 +177,7 @@
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
+              pkgs.llvmPackages.libcxxClang
             ]
             ++ lib.optionals isLinux [
               pkgs.cudaPackages.cuda_nvcc

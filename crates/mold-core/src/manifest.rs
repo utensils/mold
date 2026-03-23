@@ -501,6 +501,110 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 scheduler: None,
             },
         },
+        // ── jibMixFlux v7 PixelHeaven (FLUX-dev fine-tune by J1B) ──────────
+        ModelManifest {
+            name: "jibmix-flux:fp8".to_string(),
+            family: "flux".to_string(),
+            description: "jibMixFlux v7.2 PixelHeaven FP8 — photorealistic fine-tune".to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "ak199621/jibMixFlux_v72PixelHeaven.safetensors".to_string(),
+                    hf_filename: "jibMixFlux_v72PixelHeaven.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 11_901_516_784,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "jibmix-flux:q5".to_string(),
+            family: "flux".to_string(),
+            description: "jibMixFlux v7 PixelHeaven Q5 — photorealistic, best GGUF quality"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "TheLounger/Jib_Mix_Flux_v7_Beta-GGUF".to_string(),
+                    hf_filename: "Jib_Mix_Flux_v7_Beta-Q5_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 8_421_981_344,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "jibmix-flux:q4".to_string(),
+            family: "flux".to_string(),
+            description: "jibMixFlux v7 PixelHeaven Q4 — photorealistic, good quality/size"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "TheLounger/Jib_Mix_Flux_v7_Beta-GGUF".to_string(),
+                    hf_filename: "Jib_Mix_Flux_v7_Beta-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 6_934_297_760,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "jibmix-flux:q3".to_string(),
+            family: "flux".to_string(),
+            description: "jibMixFlux v7 PixelHeaven Q3 — photorealistic, smaller footprint"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "TheLounger/Jib_Mix_Flux_v7_Beta-GGUF".to_string(),
+                    hf_filename: "Jib_Mix_Flux_v7_Beta-Q3_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_370_969_248,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
     ];
     manifests.extend(sd15_manifests());
     manifests.extend(sd3_manifests());
@@ -2048,8 +2152,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 9 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 35
-        assert_eq!(known_manifests().len(), 35);
+        // 13 FLUX + 3 SD1.5 + 4 SD3 + 6 SDXL + 4 Z-Image + 1 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 39
+        assert_eq!(known_manifests().len(), 39);
     }
 
     #[test]
