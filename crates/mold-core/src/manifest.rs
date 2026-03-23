@@ -179,15 +179,15 @@ fn shared_flux_files() -> Vec<ModelFile> {
             hf_repo: "black-forest-labs/FLUX.1-schnell".to_string(),
             hf_filename: "ae.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 335_000_000, // ~335MB
-            gated: true,             // BFL repos now require authentication
+            size_bytes: 335_304_388,
+            gated: true, // BFL repos now require authentication
             sha256: Some("afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
         },
         ModelFile {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
             hf_filename: "t5xxl_fp16.safetensors".to_string(),
             component: ModelComponent::T5Encoder,
-            size_bytes: 9_200_000_000, // ~9.2GB
+            size_bytes: 9_787_841_024,
             gated: false,
             sha256: Some("6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"),
         },
@@ -195,7 +195,7 @@ fn shared_flux_files() -> Vec<ModelFile> {
             hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
             hf_filename: "clip_l.safetensors".to_string(),
             component: ModelComponent::ClipEncoder,
-            size_bytes: 246_000_000, // ~246MB
+            size_bytes: 246_144_152,
             gated: false,
             sha256: Some("660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
         },
@@ -247,7 +247,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                     hf_repo: "city96/FLUX.1-schnell-gguf".to_string(),
                     hf_filename: "flux1-schnell-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 12_000_000_000, // ~12GB
+                    size_bytes: 12_687_821_728,
                     gated: false,
                     sha256: Some(
                         "f6694941193b10148dbf1f0f498d4ccd3e9875c127fc53946213b68580c66f10",
@@ -517,7 +517,7 @@ fn shared_sd3_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/stable-diffusion-3.5-large".to_string(),
             hf_filename: "text_encoders/clip_l.safetensors".to_string(),
             component: ModelComponent::ClipEncoder,
-            size_bytes: 246_000_000, // ~246MB
+            size_bytes: 246_144_152,
             gated: true,
             sha256: None,
         },
@@ -685,7 +685,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             hf_repo: "stabilityai/sd-vae-ft-mse".to_string(),
             hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 335_000_000, // ~335MB
+            size_bytes: 334_643_276,
             gated: false,
             sha256: Some("a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815"),
         },
@@ -693,7 +693,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
             hf_filename: "text_encoder/model.safetensors".to_string(),
             component: ModelComponent::ClipEncoder,
-            size_bytes: 492_000_000, // ~492MB (CLIP-L)
+            size_bytes: 492_265_874,
             gated: false,
             sha256: Some("d008943c017f0092921106440254dbbe00b6a285f7883ec8ba160c3faad88334"),
         },
@@ -722,7 +722,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                     hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 1_720_000_000, // ~1.72GB
+                    size_bytes: 3_438_167_540,
                     gated: false,
                     sha256: Some(
                         "19da7aaa4b880e59d56843f1fcb4dd9b599c28a1d9d9af7c1143057c8ffae9f1",
@@ -1021,7 +1021,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
             hf_filename: "text_encoder/model-00001-of-00003.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 3_960_000_000, // ~3.96GB
+            size_bytes: 3_957_900_840,
             gated: false,
             sha256: Some("328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223"),
         },
@@ -1029,7 +1029,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
             hf_filename: "text_encoder/model-00002-of-00003.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 3_990_000_000, // ~3.99GB
+            size_bytes: 3_987_450_520,
             gated: false,
             sha256: Some("6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5"),
         },
@@ -1037,7 +1037,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
             hf_filename: "text_encoder/model-00003-of-00003.safetensors".to_string(),
             component: ModelComponent::TextEncoder,
-            size_bytes: 99_600_000, // ~99.6MB
+            size_bytes: 99_630_640,
             gated: false,
             sha256: Some("7ca841ee75b9c61267c0c6148fd8d096d3d21b6d3e161256a9b878154f91fc52"),
         },
@@ -1046,7 +1046,7 @@ fn shared_zimage_files() -> Vec<ModelFile> {
             hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
             hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
             component: ModelComponent::Vae,
-            size_bytes: 168_000_000, // ~168MB
+            size_bytes: 167_666_902,
             gated: false,
             sha256: Some("f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"),
         },
@@ -1128,7 +1128,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                     hf_repo: "leejet/Z-Image-Turbo-GGUF".to_string(),
                     hf_filename: "z_image_turbo-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 6_580_000_000, // ~6.58GB
+                    size_bytes: 6_577_440_704,
                     gated: false,
                     sha256: Some(
                         "df1c5baa86d1398c979495a6072dbcee79444fdb884a2445582ba0769c44e9a1",
@@ -1263,7 +1263,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                     hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
                     hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 7_700_000_000, // ~7.7GB estimated for 4B params in BF16
+                    size_bytes: 7_751_109_744,
                     gated: false,
                     sha256: None,
                 });
