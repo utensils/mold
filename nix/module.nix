@@ -123,7 +123,7 @@ in
         CacheDirectory = "mold";
       }
       // lib.optionalAttrs (cfg.hfTokenFile != null) {
-        EnvironmentFile = "/run/mold/env";
+        EnvironmentFile = "-/run/mold/env";
       }
       // {
 
