@@ -166,9 +166,10 @@ mod tests {
     use super::*;
 
     fn test_config() -> Config {
-        let mut config = Config::default();
-        config.default_model = "flux-schnell".to_string();
-        config
+        Config {
+            default_model: "flux-schnell".to_string(),
+            ..Config::default()
+        }
     }
 
     #[test]

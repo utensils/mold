@@ -41,9 +41,6 @@ pub(crate) struct QwenImageConfig {
     pub patch_size: usize,
     /// 3D RoPE axis dimensions [16, 56, 56].
     pub axes_dims_rope: Vec<usize>,
-    /// Whether to include guidance embedding (false for Qwen-Image).
-    #[allow(dead_code)]
-    pub guidance_embeds: bool,
     /// RMSNorm epsilon.
     pub norm_eps: f64,
 }
@@ -69,7 +66,6 @@ impl QwenImageConfig {
             out_channels: 16, // VAE latent channels
             patch_size: 2,
             axes_dims_rope: vec![16, 56, 56],
-            guidance_embeds: false,
             norm_eps: 1e-6,
         }
     }
@@ -163,8 +159,6 @@ struct JointAttention {
     // Dimensions
     n_heads: usize,
     head_dim: usize,
-    #[allow(dead_code)]
-    use_accelerated_attn: bool,
 }
 
 impl JointAttention {
@@ -208,7 +202,6 @@ impl JointAttention {
             norm_added_k,
             n_heads,
             head_dim,
-            use_accelerated_attn: true,
         })
     }
 
@@ -687,11 +680,5 @@ impl QwenImageTransformer2DModel {
         // 7. Unpatchify: (B, num_patches, patch_dim) -> (B, C, 1, H, W) -> squeeze -> (B, C, H, W)
         let x_out = unpatchify(&img_out, orig_size, patch_size, 1, self.cfg.out_channels)?;
         x_out.squeeze(2)
-    }
-
-    /// Get the model configuration.
-    #[allow(dead_code)]
-    pub fn config(&self) -> &QwenImageConfig {
-        &self.cfg
     }
 }

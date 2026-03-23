@@ -227,9 +227,9 @@ is_schnell = false
     }
 
     #[test]
-    fn model_paths_config_takes_precedence_over_env() {
+    fn model_paths_env_takes_precedence_over_config() {
         let _lock = ENV_LOCK.lock().unwrap();
-        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/should-not-use.gguf");
+        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
 
         let mut models = HashMap::new();
         models.insert("flux-schnell".to_string(), full_model_config("/cfg"));
@@ -240,11 +240,38 @@ is_schnell = false
         let paths = ModelPaths::resolve("flux-schnell", &cfg).unwrap();
         assert_eq!(
             paths.transformer.to_str().unwrap(),
-            "/cfg/transformer.gguf",
-            "config path should override env var"
+            "/env/transformer.gguf",
+            "env path should override config path"
         );
 
         std::env::remove_var("MOLD_TRANSFORMER_PATH");
+    }
+
+    #[test]
+    fn model_paths_optional_env_takes_precedence_over_config() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
+        std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", "/env/clip.tokenizer.json");
+
+        let mut models = HashMap::new();
+        models.insert("flux-schnell".to_string(), full_model_config("/cfg"));
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let paths = ModelPaths::resolve("flux-schnell", &cfg).unwrap();
+
+        assert_eq!(
+            paths.t5_encoder.as_ref().unwrap().to_str().unwrap(),
+            "/env/t5.safetensors"
+        );
+        assert_eq!(
+            paths.clip_tokenizer.as_ref().unwrap().to_str().unwrap(),
+            "/env/clip.tokenizer.json"
+        );
+
+        std::env::remove_var("MOLD_T5_PATH");
+        std::env::remove_var("MOLD_CLIP_TOKENIZER_PATH");
     }
 
     // ── resolved_models_dir ───────────────────────────────────────────────────

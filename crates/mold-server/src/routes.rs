@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
@@ -181,6 +181,37 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+fn sse_message_to_event(msg: SseMessage) -> SseEvent {
+    fn serialize_event<T: Serialize>(event_name: &str, payload: &T) -> SseEvent {
+        match serde_json::to_string(payload) {
+            Ok(data) => SseEvent::default().event(event_name).data(data),
+            Err(err) => SseEvent::default().event("error").data(
+                serde_json::json!({
+                    "message": format!("failed to serialize SSE payload: {err}")
+                })
+                .to_string(),
+            ),
+        }
+    }
+
+    match msg {
+        SseMessage::Progress(payload) => serialize_event("progress", &payload),
+        SseMessage::Complete(payload) => serialize_event("complete", &payload),
+        SseMessage::Error(payload) => serialize_event("error", &payload),
+    }
+}
+
+fn take_generated_image(
+    response: &mut mold_core::GenerateResponse,
+) -> Result<mold_core::ImageData, ApiError> {
+    if response.images.is_empty() {
+        return Err(ApiError::inference(
+            "generation error: engine returned no images",
+        ));
+    }
+    Ok(response.images.remove(0))
+}
+
 /// Check model availability without loading. Returns:
 /// - `Ok(None)` — model is already loaded and ready
 /// - `Ok(Some(paths))` — model paths resolved, needs loading
@@ -231,8 +262,38 @@ async fn check_model_available(
 
 /// Ensure the requested model is loaded and ready for inference.
 async fn ensure_model_ready(state: &AppState, model_name: &str) -> Result<(), ApiError> {
+    ensure_model_ready_with_progress(state, model_name, None).await
+}
+
+async fn ensure_model_ready_with_progress(
+    state: &AppState,
+    model_name: &str,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<(), ApiError> {
+    let _guard = state.model_load_lock.lock().await;
+    {
+        let mut engine = state.engine.lock().await;
+        if let Some(engine) = engine.as_mut() {
+            if engine.model_name() == model_name {
+                if let Some(tx) = progress_tx {
+                    let tx = tx.clone();
+                    engine.set_on_progress(Box::new(move |event| {
+                        let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+                    }));
+                }
+                if !engine.is_loaded() {
+                    tracing::info!(model = %model_name, "loading existing engine...");
+                    engine.load().map_err(|e| {
+                        tracing::error!("model load failed: {e:#}");
+                        ApiError::internal(format!("model load error: {e}"))
+                    })?;
+                }
+                return Ok(());
+            }
+        }
+    }
     match check_model_available(state, model_name).await? {
-        Some(paths) => create_and_load_engine(state, model_name, paths, None).await,
+        Some(paths) => create_and_load_engine(state, model_name, paths, progress_tx).await,
         None => Ok(()),
     }
 }
@@ -338,7 +399,10 @@ async fn generate(
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = engine.blocking_lock();
-            guard.as_mut().unwrap().generate(&req)
+            let engine = guard.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("no engine available after model readiness check")
+            })?;
+            engine.generate(&req)
         }))
     })
     .await
@@ -367,16 +431,17 @@ async fn generate(
         }
     };
 
-    let img = response.images.remove(0);
+    let img = take_generated_image(&mut response)?;
     let content_type = match img.format {
-        OutputFormat::Png => "image/png",
-        OutputFormat::Jpeg => "image/jpeg",
+        OutputFormat::Png => HeaderValue::from_static("image/png"),
+        OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
     };
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::CONTENT_TYPE, content_type);
     headers.insert(
         "x-mold-seed-used",
-        response.seed_used.to_string().parse().unwrap(),
+        HeaderValue::from_str(&response.seed_used.to_string())
+            .map_err(|e| ApiError::internal(format!("failed to serialize seed header: {e}")))?,
     );
     Ok((headers, img.data))
 }
@@ -415,7 +480,7 @@ async fn generate_stream(
     }
 
     // Check model availability (404/400 returned as HTTP errors before SSE starts)
-    let model_paths = check_model_available(&state, &req.model).await?;
+    let _ = check_model_available(&state, &req.model).await?;
 
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
@@ -424,15 +489,13 @@ async fn generate_stream(
     let bg_tx = tx;
     tokio::spawn(async move {
         // Load model if needed (with progress events)
-        if let Some(paths) = model_paths {
-            if let Err(api_err) =
-                create_and_load_engine(&state, &req.model, paths, Some(&bg_tx)).await
-            {
-                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                    message: api_err.error,
-                }));
-                return;
-            }
+        if let Err(api_err) =
+            ensure_model_ready_with_progress(&state, &req.model, Some(&bg_tx)).await
+        {
+            let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
+                message: api_err.error,
+            }));
+            return;
         }
 
         // Run inference in blocking thread with progress callback
@@ -442,7 +505,9 @@ async fn generate_stream(
         let result = tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut guard = engine.blocking_lock();
-                let e = guard.as_mut().unwrap();
+                let e = guard.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("no engine available after model readiness check")
+                })?;
                 // Install progress callback for the generate phase
                 let progress_tx = gen_tx.clone();
                 e.set_on_progress(Box::new(move |event| {
@@ -455,7 +520,13 @@ async fn generate_stream(
 
         match result {
             Ok(Ok(Ok(mut response))) => {
-                let img = response.images.remove(0);
+                let img = match take_generated_image(&mut response) {
+                    Ok(img) => img,
+                    Err(err) => {
+                        let _ = bg_tx.send(SseMessage::Error(SseErrorEvent { message: err.error }));
+                        return;
+                    }
+                };
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),
                     format: img.format,
@@ -492,20 +563,8 @@ async fn generate_stream(
     });
 
     // Build SSE stream from the channel receiver
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|msg| {
-        let event = match msg {
-            SseMessage::Progress(p) => SseEvent::default()
-                .event("progress")
-                .data(serde_json::to_string(&p).unwrap()),
-            SseMessage::Complete(c) => SseEvent::default()
-                .event("complete")
-                .data(serde_json::to_string(&c).unwrap()),
-            SseMessage::Error(e) => SseEvent::default()
-                .event("error")
-                .data(serde_json::to_string(&e).unwrap()),
-        };
-        Ok::<_, Infallible>(event)
-    });
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+        .map(|msg| Ok::<_, Infallible>(sse_message_to_event(msg)));
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -762,20 +821,8 @@ async fn pull_model_endpoint(
         }
     });
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|msg| {
-        let event = match msg {
-            SseMessage::Progress(p) => SseEvent::default()
-                .event("progress")
-                .data(serde_json::to_string(&p).unwrap()),
-            SseMessage::Complete(c) => SseEvent::default()
-                .event("complete")
-                .data(serde_json::to_string(&c).unwrap()),
-            SseMessage::Error(e) => SseEvent::default()
-                .event("error")
-                .data(serde_json::to_string(&e).unwrap()),
-        };
-        Ok::<_, Infallible>(event)
-    });
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+        .map(|msg| Ok::<_, Infallible>(sse_message_to_event(msg)));
 
     Ok(PullResponse::Sse(
         Sse::new(stream)

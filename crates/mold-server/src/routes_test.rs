@@ -6,6 +6,11 @@ mod tests {
     };
     use mold_core::{GenerateRequest, GenerateResponse, ImageData};
     use mold_inference::InferenceEngine;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
     use tower::ServiceExt;
 
     use crate::{routes::create_router, state::AppState};
@@ -22,6 +27,9 @@ mod tests {
     struct MockEngine {
         loaded: bool,
         fail: bool,
+        empty_images: bool,
+        load_count: Arc<AtomicUsize>,
+        load_delay: Duration,
     }
 
     impl MockEngine {
@@ -29,12 +37,36 @@ mod tests {
             Self {
                 loaded: true,
                 fail: false,
+                empty_images: false,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
             }
         }
         fn failing() -> Self {
             Self {
                 loaded: true,
                 fail: true,
+                empty_images: false,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
+            }
+        }
+        fn empty_images() -> Self {
+            Self {
+                loaded: true,
+                fail: false,
+                empty_images: true,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
+            }
+        }
+        fn unloaded(load_count: Arc<AtomicUsize>, load_delay: Duration) -> Self {
+            Self {
+                loaded: false,
+                fail: false,
+                empty_images: false,
+                load_count,
+                load_delay,
             }
         }
     }
@@ -44,15 +76,19 @@ mod tests {
             if self.fail {
                 anyhow::bail!("mock engine error");
             }
-            // Return a minimal 1x1 transparent PNG
-            Ok(GenerateResponse {
-                images: vec![ImageData {
+            let images = if self.empty_images {
+                vec![]
+            } else {
+                vec![ImageData {
                     data: minimal_png(),
                     format: req.output_format,
                     width: req.width,
                     height: req.height,
                     index: 0,
-                }],
+                }]
+            };
+            Ok(GenerateResponse {
+                images,
                 generation_time_ms: 1,
                 model: req.model.clone(),
                 seed_used: req.seed.unwrap_or(42),
@@ -68,19 +104,25 @@ mod tests {
         }
 
         fn load(&mut self) -> anyhow::Result<()> {
+            self.load_count.fetch_add(1, Ordering::SeqCst);
+            if !self.load_delay.is_zero() {
+                std::thread::sleep(self.load_delay);
+            }
             self.loaded = true;
             Ok(())
         }
     }
 
     fn app_with(engine: MockEngine) -> axum::Router {
-        let state = AppState::with_engine(engine);
+        app_with_state(AppState::with_engine(engine))
+    }
+
+    fn app_with_state(state: AppState) -> axum::Router {
         create_router(state)
     }
 
     fn app_empty() -> axum::Router {
-        let state = AppState::empty(mold_core::Config::default());
-        create_router(state)
+        app_with_state(AppState::empty(mold_core::Config::default()))
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
@@ -356,6 +398,28 @@ mod tests {
             .contains("mock engine error"));
     }
 
+    #[tokio::test]
+    async fn generate_empty_images_returns_500() {
+        let app = app_with(MockEngine::empty_images());
+        let body = generate_body("a cat", 768, 768);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "INFERENCE_ERROR");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("returned no images"));
+    }
+
     // ── /api/generate — unknown model ────────────────────────────────────────
 
     #[tokio::test]
@@ -576,5 +640,74 @@ mod tests {
             text.contains("mock engine error"),
             "error event should contain the engine error message"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_empty_images_returns_sse_error() {
+        let app = app_with(MockEngine::empty_images());
+        let body = generate_body("a cat", 768, 768);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("event: error"));
+        assert!(text.contains("returned no images"));
+    }
+
+    #[tokio::test]
+    async fn unload_loaded_model_returns_200() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("unloaded mock-model"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_only_load_existing_engine_once() {
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let state = AppState {
+            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
+                MockEngine::unloaded(load_count.clone(), Duration::from_millis(50)),
+            )))),
+            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            start_time: std::time::Instant::now(),
+            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let app = app_with_state(state);
+        let req1 = Request::post("/api/generate")
+            .header("content-type", "application/json")
+            .body(Body::from(generate_body("a cat", 768, 768)))
+            .unwrap();
+        let req2 = Request::post("/api/generate")
+            .header("content-type", "application/json")
+            .body(Body::from(generate_body("a cat", 768, 768)))
+            .unwrap();
+
+        let (resp1, resp2) = tokio::join!(app.clone().oneshot(req1), app.oneshot(req2));
+        assert_eq!(resp1.unwrap().status(), StatusCode::OK);
+        assert_eq!(resp2.unwrap().status(), StatusCode::OK);
+        assert_eq!(load_count.load(Ordering::SeqCst), 1);
     }
 }

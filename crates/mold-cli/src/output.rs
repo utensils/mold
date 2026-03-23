@@ -44,9 +44,7 @@ mod tests {
     #[test]
     fn is_piped_returns_bool() {
         // In test context, stdout is typically not a terminal (piped by cargo test)
-        let result = is_piped();
-        // Just verify it doesn't panic; actual value depends on test runner
-        assert!(result == true || result == false);
+        let _ = is_piped();
     }
 
     #[test]

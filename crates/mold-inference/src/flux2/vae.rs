@@ -14,8 +14,6 @@ use candle_nn::{conv2d, group_norm, Conv2d, Conv2dConfig, GroupNorm, Linear, Mod
 /// Flux.2 VAE configuration.
 #[derive(Debug, Clone)]
 pub struct Flux2VaeConfig {
-    #[allow(dead_code)]
-    pub in_channels: usize,
     pub out_channels: usize,
     pub block_out_channels: Vec<usize>,
     pub layers_per_block: usize,
@@ -30,7 +28,6 @@ pub struct Flux2VaeConfig {
 impl Flux2VaeConfig {
     pub fn klein() -> Self {
         Self {
-            in_channels: 3,
             out_channels: 3,
             block_out_channels: vec![128, 256, 512, 512],
             layers_per_block: 2,
