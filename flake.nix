@@ -54,7 +54,7 @@
           cudaComputeCap = "89";
 
           pkgs = import inputs.nixpkgs {
-            inherit system;
+            localSystem = system;
             overlays = [ inputs.rust-overlay.overlays.default ];
             config.allowUnfree = true;
           };
@@ -128,6 +128,7 @@
             description = "Local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
             homepage = "https://github.com/utensils/mold";
             license = licenses.mit;
+            mainProgram = "mold";
             maintainers = [ ];
           };
 
