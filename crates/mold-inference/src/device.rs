@@ -566,14 +566,16 @@ mod tests {
 
     #[test]
     fn t5_threshold_accounts_for_headroom() {
-        assert!(T5_VRAM_THRESHOLD > 9_200_000_000);
-        assert!(T5_VRAM_THRESHOLD < 25_000_000_000);
+        let threshold = std::hint::black_box(T5_VRAM_THRESHOLD);
+        assert!(threshold > 9_200_000_000);
+        assert!(threshold < 25_000_000_000);
     }
 
     #[test]
     fn clip_threshold_accounts_for_headroom() {
-        assert!(CLIP_VRAM_THRESHOLD > 246_000_000);
-        assert!(CLIP_VRAM_THRESHOLD < 2_000_000_000);
+        let threshold = std::hint::black_box(CLIP_VRAM_THRESHOLD);
+        assert!(threshold > 246_000_000);
+        assert!(threshold < 2_000_000_000);
     }
 
     // --- Dynamic T5 threshold tests ---
@@ -663,7 +665,7 @@ mod tests {
     #[test]
     fn budget_hard_fail_when_exceeds_90pct_available() {
         // 19 GB component, 20 GB available → 19 > 18 (90% of 20) → fail
-        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(1 * GB));
+        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(GB));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Not enough memory"), "got: {msg}");
@@ -672,7 +674,7 @@ mod tests {
     #[test]
     fn budget_ok_at_exactly_90pct_available() {
         // 18 GB component, 20 GB available → 18 == 18 (90% of 20) → pass (not >)
-        let result = preflight_check_budget("UNet", 18 * GB, 20 * GB, Some(1 * GB));
+        let result = preflight_check_budget("UNet", 18 * GB, 20 * GB, Some(GB));
         assert!(result.is_ok());
     }
 
@@ -716,7 +718,7 @@ mod tests {
 
     #[test]
     fn budget_error_message_includes_component_name() {
-        let result = preflight_check_budget("MyModel", 19 * GB, 20 * GB, Some(1 * GB));
+        let result = preflight_check_budget("MyModel", 19 * GB, 20 * GB, Some(GB));
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("MyModel"),
@@ -726,7 +728,7 @@ mod tests {
 
     #[test]
     fn budget_error_message_includes_sizes() {
-        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(1 * GB));
+        let result = preflight_check_budget("UNet", 19 * GB, 20 * GB, Some(GB));
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("19.0 GB"), "should show needed size");
         assert!(msg.contains("20.0 GB"), "should show available size");

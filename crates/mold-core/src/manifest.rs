@@ -1863,7 +1863,7 @@ mod tests {
             .iter()
             .find(|f| f.component == ModelComponent::Transformer)
             .unwrap();
-        let path = storage_path(&manifest, transformer_file);
+        let path = storage_path(manifest, transformer_file);
         assert!(
             path.starts_with("flux-schnell-q8"),
             "transformer should be under model-specific dir, got: {}",
@@ -1876,7 +1876,7 @@ mod tests {
     fn storage_path_shared_components_under_family() {
         let manifest = find_manifest("flux-schnell:q8").unwrap();
         for file in &manifest.files {
-            let path = storage_path(&manifest, file);
+            let path = storage_path(manifest, file);
             match file.component {
                 ModelComponent::Transformer | ModelComponent::TransformerShard => {
                     assert!(path.starts_with("flux-schnell-q8"));
@@ -1901,7 +1901,7 @@ mod tests {
             .iter()
             .find(|f| f.component == ModelComponent::TextEncoder)
             .unwrap();
-        let path = storage_path(&manifest, encoder_file);
+        let path = storage_path(manifest, encoder_file);
         // Nested HF filename like "text_encoder/model-00001-of-00003.safetensors"
         // should be preserved under shared/z-image/
         assert!(
@@ -1920,7 +1920,7 @@ mod tests {
             .iter()
             .find(|f| f.component == ModelComponent::Transformer)
             .unwrap();
-        let path = storage_path(&manifest, transformer_file);
+        let path = storage_path(manifest, transformer_file);
         assert!(
             path.starts_with("sdxl-base-fp16"),
             "got: {}",
@@ -1936,7 +1936,7 @@ mod tests {
             .iter()
             .find(|f| f.component == ModelComponent::Transformer)
             .unwrap();
-        let path = storage_path(&manifest, transformer_file);
+        let path = storage_path(manifest, transformer_file);
         assert!(
             !path.to_string_lossy().contains(':'),
             "colons should be replaced with dashes"
@@ -2517,7 +2517,7 @@ mod tests {
     #[test]
     fn total_download_size_equals_sum_of_file_sizes() {
         for manifest in known_manifests() {
-            let total = total_download_size(&manifest);
+            let total = total_download_size(manifest);
             let sum: u64 = manifest.files.iter().map(|f| f.size_bytes).sum();
             assert_eq!(
                 total, sum,
@@ -2531,7 +2531,7 @@ mod tests {
     fn compute_download_remaining_lte_total() {
         // remaining_bytes must always be <= total_bytes
         for manifest in known_manifests() {
-            let (total, remaining) = compute_download_size(&manifest);
+            let (total, remaining) = compute_download_size(manifest);
             assert!(
                 remaining <= total,
                 "remaining ({remaining}) > total ({total}) for {}",
@@ -2544,7 +2544,7 @@ mod tests {
     fn total_file_bytes_is_positive_for_all_manifests() {
         // Every manifest must have files that sum to a positive total
         for manifest in known_manifests() {
-            let total = total_download_size(&manifest);
+            let total = total_download_size(manifest);
             assert!(total > 0, "total_download_size is 0 for {}", manifest.name);
         }
     }
@@ -2664,7 +2664,7 @@ mod tests {
         let paths: Vec<_> = manifest
             .files
             .iter()
-            .map(|f| storage_path(&manifest, f))
+            .map(|f| storage_path(manifest, f))
             .collect();
         // No two files should resolve to the same local path
         let unique: std::collections::HashSet<_> = paths.iter().collect();

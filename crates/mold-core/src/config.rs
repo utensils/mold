@@ -196,10 +196,10 @@ impl ModelPaths {
     }
 
     fn resolve_path(config_val: Option<&str>, env_var: &str) -> Option<PathBuf> {
-        if let Some(path) = config_val {
+        if let Ok(path) = std::env::var(env_var) {
             return Some(PathBuf::from(path));
         }
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = config_val {
             return Some(PathBuf::from(path));
         }
         None

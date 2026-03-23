@@ -87,12 +87,6 @@ impl QwenImageScheduler {
         }
     }
 
-    /// Get the current sigma value.
-    #[allow(dead_code)]
-    pub fn current_sigma(&self) -> f64 {
-        self.sigmas[self.step_index]
-    }
-
     /// Get the current timestep normalized for model input.
     ///
     /// Returns `sigma * num_train_timesteps` which the transformer expects.
@@ -114,12 +108,6 @@ impl QwenImageScheduler {
 
         self.step_index += 1;
         Ok(prev_sample)
-    }
-
-    /// Reset scheduler to the beginning.
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.step_index = 0;
     }
 }
 

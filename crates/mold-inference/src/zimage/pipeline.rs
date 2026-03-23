@@ -975,17 +975,20 @@ mod tests {
     fn qwen3_threshold_allows_gpu_on_24gb_with_quantized_xformer() {
         // Key improvement: with drop-and-reload, BF16 Qwen3 fits on GPU
         // when quantized transformer is used on 24GB cards
-        assert!(QWEN3_FP16_VRAM_THRESHOLD < 17_000_000_000);
+        let threshold = std::hint::black_box(QWEN3_FP16_VRAM_THRESHOLD);
+        assert!(threshold < 17_000_000_000);
     }
 
     #[test]
     fn qwen3_threshold_exceeds_encoder_size() {
-        assert!(QWEN3_FP16_VRAM_THRESHOLD > 8_200_000_000);
+        let threshold = std::hint::black_box(QWEN3_FP16_VRAM_THRESHOLD);
+        assert!(threshold > 8_200_000_000);
     }
 
     #[test]
     fn vae_threshold_accounts_for_decode_workspace() {
-        assert!(VAE_DECODE_VRAM_THRESHOLD > 160_000_000);
-        assert!(VAE_DECODE_VRAM_THRESHOLD < 15_000_000_000);
+        let threshold = std::hint::black_box(VAE_DECODE_VRAM_THRESHOLD);
+        assert!(threshold > 160_000_000);
+        assert!(threshold < 15_000_000_000);
     }
 }

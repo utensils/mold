@@ -37,8 +37,8 @@ mod tests {
     fn solid_red_tensor(h: usize, w: usize) -> Tensor {
         let mut data = vec![0u8; 3 * h * w];
         // Channel 0 (R) = 255, channels 1 and 2 stay 0
-        for i in 0..(h * w) {
-            data[i] = 255;
+        for value in data.iter_mut().take(h * w) {
+            *value = 255;
         }
         Tensor::from_vec(data, (3, h, w), &Device::Cpu)
             .unwrap()

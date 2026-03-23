@@ -9,6 +9,8 @@ pub struct AppState {
     pub engine: Arc<Mutex<Option<Box<dyn InferenceEngine>>>>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
     pub start_time: Instant,
+    /// Guards concurrent model loads and hot-swaps.
+    pub model_load_lock: Arc<Mutex<()>>,
     /// Guards concurrent pulls — only one download at a time.
     pub pull_lock: Arc<Mutex<()>>,
 }
@@ -20,6 +22,7 @@ impl AppState {
             engine: Arc::new(Mutex::new(Some(engine))),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
+            model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -30,6 +33,7 @@ impl AppState {
             engine: Arc::new(Mutex::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
+            model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -40,6 +44,7 @@ impl AppState {
             engine: Arc::new(Mutex::new(Some(Box::new(engine)))),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
+            model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
         }
     }

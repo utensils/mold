@@ -62,24 +62,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         }
     };
 
-    let cors = match std::env::var("MOLD_CORS_ORIGIN") {
-        Ok(origin) if !origin.is_empty() => CorsLayer::new()
-            .allow_origin(
-                origin
-                    .parse::<axum::http::HeaderValue>()
-                    .expect("invalid MOLD_CORS_ORIGIN value"),
-            )
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers(tower_http::cors::Any)
-            .expose_headers(["x-mold-seed-used"
-                .parse::<axum::http::HeaderName>()
-                .unwrap()]),
-        _ => CorsLayer::permissive(),
-    };
+    let cors = build_cors_layer()?;
 
     let app = routes::create_router(state)
         .layer(TraceLayer::new_for_http())
@@ -92,4 +75,53 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn build_cors_layer() -> Result<CorsLayer> {
+    let cors = match std::env::var("MOLD_CORS_ORIGIN") {
+        Ok(origin) if !origin.is_empty() => {
+            let origin = origin
+                .parse::<axum::http::HeaderValue>()
+                .map_err(|_| anyhow::anyhow!("invalid MOLD_CORS_ORIGIN value: {origin}"))?;
+            CorsLayer::new()
+                .allow_origin(origin)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers(tower_http::cors::Any)
+                .expose_headers([axum::http::header::HeaderName::from_static(
+                    "x-mold-seed-used",
+                )])
+        }
+        _ => CorsLayer::permissive(),
+    };
+    Ok(cors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_cors_layer;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn invalid_cors_origin_returns_error() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MOLD_CORS_ORIGIN", "\nnot-a-header");
+        let result = build_cors_layer();
+        std::env::remove_var("MOLD_CORS_ORIGIN");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn valid_cors_origin_builds_layer() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MOLD_CORS_ORIGIN", "https://example.com");
+        let result = build_cors_layer();
+        std::env::remove_var("MOLD_CORS_ORIGIN");
+        assert!(result.is_ok());
+    }
 }
