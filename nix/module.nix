@@ -70,11 +70,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Ensure modelsDir exists before the service starts.
-    # systemd's ReadWritePaths fails at namespace setup if the path is missing,
-    # so ExecStartPre mkdir is too late — tmpfiles runs earlier in boot.
+    users.users.mold = {
+      isSystemUser = true;
+      group = "mold";
+      home = "/var/lib/mold";
+    };
+    users.groups.mold = { };
+
     systemd.tmpfiles.rules = [
-      "d ${cfg.modelsDir} 0755 root root -"
+      "d ${cfg.modelsDir} 0755 mold mold -"
     ];
 
     systemd.services.mold = {
@@ -95,33 +99,26 @@ in
 
       serviceConfig = {
         Type = "simple";
+        User = "mold";
+        Group = "mold";
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}";
         Restart = "on-failure";
         RestartSec = 5;
 
-        DynamicUser = true;
         StateDirectory = "mold";
         CacheDirectory = "mold";
 
         # Hardening
         NoNewPrivileges = true;
-        ProtectSystem = "strict";
+        ProtectSystem = "full";
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
-        ReadWritePaths = [ cfg.modelsDir ];
 
         # GPU access
         SupplementaryGroups = [
           "video"
           "render"
-        ];
-        DeviceAllow = [
-          "/dev/nvidia0"
-          "/dev/nvidiactl"
-          "/dev/nvidia-uvm"
-          "/dev/nvidia-uvm-tools"
-          "/dev/dri/renderD128"
         ];
       };
     };
