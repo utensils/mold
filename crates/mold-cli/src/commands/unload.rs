@@ -1,24 +1,24 @@
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::MoldClient;
+use mold_core::{classify_server_error, ServerAvailability};
 
+use crate::control::CliContext;
 use crate::ui::print_server_unavailable;
 
 pub async fn run() -> Result<()> {
-    let client = crate::control::client_for_host(None);
+    let ctx = CliContext::new(None);
 
-    match client.unload_model().await {
+    match ctx.client().unload_model().await {
         Ok(body) => {
             println!("{} {}", "●".green(), body);
             Ok(())
         }
-        Err(e) => {
-            if MoldClient::is_connection_error(&e) {
-                print_server_unavailable(client.host(), &e);
+        Err(e) => match classify_server_error(&e) {
+            ServerAvailability::FallbackLocal => {
+                print_server_unavailable(ctx.client().host(), &e);
                 Err(crate::AlreadyReported.into())
-            } else {
-                Err(e)
             }
-        }
+            ServerAvailability::SurfaceError => Err(e),
+        },
     }
 }

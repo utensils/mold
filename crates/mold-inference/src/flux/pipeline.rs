@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, restore_cached_tensor_pair, store_cached_tensor_pair, CachedTensorPair, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, prompt_text_key, restore_cached_tensor_pair, store_cached_tensor_pair,
+    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
@@ -88,8 +88,12 @@ impl FluxEngine {
         device: &Device,
         dtype: DType,
     ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        let restored =
-            restore_cached_tensor_pair(&self.prompt_cache, &prompt.to_string(), device, dtype)?;
+        let restored = restore_cached_tensor_pair(
+            &self.prompt_cache,
+            &prompt_text_key(prompt),
+            device,
+            dtype,
+        )?;
         let Some(restored) = restored else {
             return Ok(None);
         };
@@ -104,7 +108,12 @@ impl FluxEngine {
         t5_emb: &candle_core::Tensor,
         clip_emb: &candle_core::Tensor,
     ) -> Result<()> {
-        store_cached_tensor_pair(&self.prompt_cache, prompt.to_string(), t5_emb, clip_emb)
+        store_cached_tensor_pair(
+            &self.prompt_cache,
+            prompt_text_key(prompt),
+            t5_emb,
+            clip_emb,
+        )
     }
 
     /// Detect is_schnell from override, model name, or transformer filename.

@@ -8,10 +8,61 @@ use std::sync::Mutex;
 pub(crate) const DEFAULT_PROMPT_CACHE_CAPACITY: usize = 16;
 pub(crate) const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 8;
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct PromptCacheKey {
+    prompt: String,
+    guidance_bits: u64,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct ImageSizeCacheKey {
+    image_hash: u64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct LatentSizeCacheKey {
+    image_hash: u64,
+    latent_h: usize,
+    latent_w: usize,
+}
+
 pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
     hasher.finish()
+}
+
+pub(crate) fn prompt_cache_key(prompt: &str, guidance: f64) -> PromptCacheKey {
+    PromptCacheKey {
+        prompt: prompt.to_string(),
+        guidance_bits: guidance.to_bits(),
+    }
+}
+
+pub(crate) fn prompt_text_key(prompt: &str) -> String {
+    prompt.to_string()
+}
+
+pub(crate) fn image_size_cache_key(bytes: &[u8], width: u32, height: u32) -> ImageSizeCacheKey {
+    ImageSizeCacheKey {
+        image_hash: hash_bytes(bytes),
+        width,
+        height,
+    }
+}
+
+pub(crate) fn latent_size_cache_key(
+    bytes: &[u8],
+    latent_h: usize,
+    latent_w: usize,
+) -> LatentSizeCacheKey {
+    LatentSizeCacheKey {
+        image_hash: hash_bytes(bytes),
+        latent_h,
+        latent_w,
+    }
 }
 
 #[derive(Debug)]
@@ -133,6 +184,26 @@ where
     Ok(())
 }
 
+pub(crate) fn get_or_insert_cached_tensor<K, F>(
+    cache: &Mutex<LruCache<K, CachedTensor>>,
+    key: K,
+    device: &Device,
+    dtype: DType,
+    build: F,
+) -> Result<(Tensor, bool)>
+where
+    K: Eq + Hash + Clone,
+    F: FnOnce() -> Result<Tensor>,
+{
+    if let Some(tensor) = restore_cached_tensor(cache, &key, device, dtype)? {
+        return Ok((tensor, true));
+    }
+
+    let tensor = build()?;
+    store_cached_tensor(cache, key, &tensor)?;
+    Ok((tensor, false))
+}
+
 pub(crate) fn restore_cached_tensor_pair<K>(
     cache: &Mutex<LruCache<K, CachedTensorPair>>,
     key: &K,
@@ -169,6 +240,26 @@ where
     Ok(())
 }
 
+pub(crate) fn get_or_insert_cached_tensor_pair<K, F>(
+    cache: &Mutex<LruCache<K, CachedTensorPair>>,
+    key: K,
+    device: &Device,
+    dtype: DType,
+    build: F,
+) -> Result<((Tensor, Tensor), bool)>
+where
+    K: Eq + Hash + Clone,
+    F: FnOnce() -> Result<(Tensor, Tensor)>,
+{
+    if let Some((first, second)) = restore_cached_tensor_pair(cache, &key, device, dtype)? {
+        return Ok(((first, second), true));
+    }
+
+    let (first, second) = build()?;
+    store_cached_tensor_pair(cache, key, &first, &second)?;
+    Ok(((first, second), false))
+}
+
 pub(crate) fn clear_cache<K, V>(cache: &Mutex<LruCache<K, V>>)
 where
     K: Eq + Hash + Clone,
@@ -203,5 +294,25 @@ mod tests {
         assert_eq!(cache.get_cloned(&"a"), Some(1));
         assert!(cache.get_cloned(&"b").is_none());
         assert_eq!(cache.get_cloned(&"c"), Some(3));
+    }
+
+    #[test]
+    fn prompt_cache_key_includes_guidance_bits() {
+        assert_ne!(
+            prompt_cache_key("hello", 1.0),
+            prompt_cache_key("hello", 7.5)
+        );
+    }
+
+    #[test]
+    fn image_size_cache_key_hashes_bytes_and_dimensions() {
+        assert_ne!(
+            image_size_cache_key(b"abc", 512, 512),
+            image_size_cache_key(b"abc", 1024, 1024)
+        );
+        assert_ne!(
+            image_size_cache_key(b"abc", 512, 512),
+            image_size_cache_key(b"def", 512, 512)
+        );
     }
 }

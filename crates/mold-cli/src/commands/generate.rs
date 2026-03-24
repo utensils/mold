@@ -2,16 +2,16 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    clamp_to_megapixel_limit, Config, GenerateRequest, GenerateResponse, ImageData, MoldClient,
-    OutputFormat, Scheduler,
+    clamp_to_megapixel_limit, classify_generate_error, Config, GenerateRequest, GenerateResponse,
+    GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::control::{client_for_host, stream_server_pull};
+use crate::control::CliContext;
 use crate::output::{is_piped, status};
-use crate::ui::render_progress;
+use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -53,7 +53,8 @@ pub async fn run(
     }
 
     // Load config and pull model-specific defaults.
-    let config = Config::load_or_default();
+    let ctx = CliContext::new(host.as_deref());
+    let config = ctx.config().clone();
     let model_cfg = config.resolved_model_config(model);
 
     // When source_image is provided and width/height not specified, derive from image dimensions
@@ -182,7 +183,6 @@ pub async fn run(
         )
         .await?
     } else {
-        let client = client_for_host(host.as_deref());
         let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
         let mut total_time_ms: u64 = 0;
         let mut last_seed_used: u64 = base_seed;
@@ -204,7 +204,7 @@ pub async fn run(
             }
 
             let response = generate_remote(
-                &client,
+                ctx.client(),
                 &iter_req,
                 &config,
                 model,
@@ -357,53 +357,46 @@ async fn generate_remote(
             )
             .await
         }
-        Err(e) if MoldClient::is_model_not_found(&e) => {
-            let _ = render.await;
-            status!(
-                "{} Model '{}' not on server — pulling...",
-                "●".cyan(),
-                model.bold()
-            );
-
-            // Stream download progress from server
-            stream_server_pull(client, model).await?;
-
-            status!("{} Generating...", "●".cyan());
-
-            // Retry with SSE streaming after pull
-            let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
-            let render2 = tokio::spawn(render_progress(rx2));
-            match client.generate_stream(req, tx2).await {
-                Ok(Some(response)) => {
-                    let _ = render2.await;
-                    Ok(response)
-                }
-                _ => {
-                    // Fall back to blocking if SSE still fails
-                    let _ = render2.await;
-                    Ok(client.generate(req.clone()).await?)
-                }
-            }
-        }
-        Err(e) if MoldClient::is_connection_error(&e) => {
-            let _ = render.await;
-            status!("{} Using local GPU inference", "●".cyan());
-            generate_local(
-                req,
-                config,
-                t5_variant,
-                qwen3_variant,
-                eager,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
-        }
         Err(e) => {
             let _ = render.await;
-            Err(e)
+            match classify_generate_error(&e) {
+                GenerateServerAction::PullModelAndRetry => {
+                    print_server_pull_missing_model(model);
+                    let pull_ctx = CliContext::new(Some(client.host()));
+                    pull_ctx.stream_server_pull(model).await?;
+
+                    status!("{} Generating...", "●".cyan());
+
+                    let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+                    let render2 = tokio::spawn(render_progress(rx2));
+                    match client.generate_stream(req, tx2).await {
+                        Ok(Some(response)) => {
+                            let _ = render2.await;
+                            Ok(response)
+                        }
+                        _ => {
+                            let _ = render2.await;
+                            Ok(client.generate(req.clone()).await?)
+                        }
+                    }
+                }
+                GenerateServerAction::FallbackLocal => {
+                    print_using_local_inference();
+                    generate_local(
+                        req,
+                        config,
+                        t5_variant,
+                        qwen3_variant,
+                        eager,
+                        cli_width,
+                        cli_height,
+                        cli_steps,
+                        cli_guidance,
+                    )
+                    .await
+                }
+                GenerateServerAction::SurfaceError => Err(e),
+            }
         }
     }
 }
@@ -447,37 +440,34 @@ async fn generate_remote_blocking(
             pb.finish_and_clear();
             Ok(response)
         }
-        Err(e) if MoldClient::is_model_not_found(&e) => {
+        Err(e) => {
             pb.finish_and_clear();
-            status!(
-                "{} Model '{}' not on server — pulling...",
-                "●".cyan(),
-                model.bold()
-            );
-
-            // Stream download progress from server
-            stream_server_pull(client, model).await?;
-
-            status!("{} Generating...", "●".cyan());
-            Ok(client.generate(req.clone()).await?)
+            match classify_generate_error(&e) {
+                GenerateServerAction::PullModelAndRetry => {
+                    print_server_pull_missing_model(model);
+                    let pull_ctx = CliContext::new(Some(client.host()));
+                    pull_ctx.stream_server_pull(model).await?;
+                    status!("{} Generating...", "●".cyan());
+                    Ok(client.generate(req.clone()).await?)
+                }
+                GenerateServerAction::FallbackLocal => {
+                    print_using_local_inference();
+                    generate_local(
+                        req,
+                        config,
+                        t5_variant,
+                        qwen3_variant,
+                        eager,
+                        cli_width,
+                        cli_height,
+                        cli_steps,
+                        cli_guidance,
+                    )
+                    .await
+                }
+                GenerateServerAction::SurfaceError => Err(e),
+            }
         }
-        Err(e) if MoldClient::is_connection_error(&e) => {
-            pb.finish_and_clear();
-            status!("{} Using local GPU inference", "●".cyan());
-            generate_local(
-                req,
-                config,
-                t5_variant,
-                qwen3_variant,
-                eager,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
-        }
-        Err(e) => Err(e),
     }
 }
 
@@ -604,7 +594,7 @@ async fn generate_local(
     )
     .await?;
 
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
     engine.set_on_progress(Box::new(move |event| {
         let _ = tx.send(event.into());
     }));
@@ -677,7 +667,7 @@ async fn generate_local_batch(
             );
         }
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
         engine.set_on_progress(Box::new(move |event| {
             let _ = tx.send(event.into());
         }));

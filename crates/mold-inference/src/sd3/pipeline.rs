@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, restore_cached_tensor_pair, store_cached_tensor_pair, CachedTensorPair, LruCache,
+    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, CachedTensorPair, LruCache,
     DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
@@ -84,37 +84,39 @@ impl SD3Engine {
         dtype: DType,
         is_quantized: bool,
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        if let Some((context, y)) = restore_cached_tensor_pair(
+        let cache_key = prompt_text_key(prompt);
+        let ((context, y), cache_hit) = get_or_insert_cached_tensor_pair(
             &self.prompt_cache,
-            &prompt.to_string(),
+            cache_key,
             device,
             if is_quantized { DType::F32 } else { dtype },
-        )? {
+            || {
+                self.progress.stage_start("Encoding prompt (SD3 triple)");
+                let encode_start = Instant::now();
+                let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
+                let (context_uncond, y_uncond) = triple_encoder.encode("", device, dtype)?;
+                self.progress
+                    .stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
+
+                let pair = if is_quantized {
+                    (
+                        candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
+                            .to_dtype(DType::F32)?,
+                        candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
+                    )
+                } else {
+                    (
+                        candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
+                        candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
+                    )
+                };
+                Ok(pair)
+            },
+        )?;
+        if cache_hit {
             self.progress.info("Reusing cached SD3 prompt conditioning");
             return Ok((context, y));
         }
-
-        self.progress.stage_start("Encoding prompt (SD3 triple)");
-        let encode_start = Instant::now();
-        let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
-        let (context_uncond, y_uncond) = triple_encoder.encode("", device, dtype)?;
-        self.progress
-            .stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
-
-        let (context, y) = if is_quantized {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
-                    .to_dtype(DType::F32)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
-            )
-        } else {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
-            )
-        };
-
-        store_cached_tensor_pair(&self.prompt_cache, prompt.to_string(), &context, &y)?;
         Ok((context, y))
     }
 

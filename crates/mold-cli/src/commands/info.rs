@@ -412,29 +412,6 @@ mod tests {
     }
 
     #[test]
-    fn format_family_flux() {
-        let result = format_family("flux");
-        assert!(result.contains("FLUX.1"));
-    }
-
-    #[test]
-    fn format_family_sdxl() {
-        let result = format_family("sdxl");
-        assert!(result.contains("SDXL"));
-    }
-
-    #[test]
-    fn format_family_sd15() {
-        let result = format_family("sd15");
-        assert!(result.contains("SD 1.5"));
-    }
-
-    #[test]
-    fn format_family_unknown() {
-        assert_eq!(format_family("other"), "OTHER");
-    }
-
-    #[test]
     fn unknown_model_returns_error() {
         let result = run("nonexistent-model-xyz", false);
         assert!(result.is_err());

@@ -3,10 +3,11 @@ use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::download::DownloadError;
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name, ModelManifest};
-use mold_core::MoldClient;
+use mold_core::{classify_server_error, ServerAvailability};
 
-use crate::control::stream_server_pull;
+use crate::control::CliContext;
 use crate::output::status;
+use crate::ui::print_server_fallback;
 use crate::AlreadyReported;
 
 /// Download a model and write its config. Returns the updated Config.
@@ -139,30 +140,28 @@ pub async fn run(model: &str) -> Result<()> {
         }
     };
 
-    let client = MoldClient::from_env();
-    match pull_via_server(&client, manifest).await {
+    let ctx = CliContext::new(None);
+    match pull_via_server(&ctx, manifest).await {
         Ok(()) => {}
-        Err(e) if MoldClient::is_connection_error(&e) => {
-            status!(
-                "{} Server unavailable at {} — pulling locally",
-                "●".yellow(),
-                client.host().bold(),
-            );
-            pull_and_configure(model).await?;
-        }
-        Err(e) => return Err(e),
+        Err(e) => match classify_server_error(&e) {
+            ServerAvailability::FallbackLocal => {
+                print_server_fallback(ctx.client().host(), "pulling locally");
+                pull_and_configure(model).await?;
+            }
+            ServerAvailability::SurfaceError => return Err(e),
+        },
     }
 
     status!("  mold run \"your prompt\"");
     Ok(())
 }
 
-async fn pull_via_server(client: &MoldClient, manifest: &ModelManifest) -> Result<()> {
+async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<()> {
     status!(
         "{} Pulling {} on {}",
         "●".cyan(),
         manifest.name.bold(),
-        client.host().bold(),
+        ctx.client().host().bold(),
     );
     status!(
         "  {}",
@@ -170,14 +169,14 @@ async fn pull_via_server(client: &MoldClient, manifest: &ModelManifest) -> Resul
     );
     status!("");
 
-    stream_server_pull(client, &manifest.name).await?;
+    ctx.stream_server_pull(&manifest.name).await?;
 
     status!("");
     status!(
         "{} {} is ready on {}!",
         "✓".green().bold(),
         manifest.name.bold(),
-        client.host().bold(),
+        ctx.client().host().bold(),
     );
     Ok(())
 }

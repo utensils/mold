@@ -1,12 +1,13 @@
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::control::CliContext;
 use crate::ui::print_server_unavailable;
 
 pub async fn run() -> Result<()> {
-    let client = crate::control::client_for_host(None);
+    let ctx = CliContext::new(None);
 
-    match client.server_status().await {
+    match ctx.client().server_status().await {
         Ok(status) => {
             println!("{} mold server v{}", "●".green(), status.version);
             println!("{} Uptime: {}s", "●".green(), status.uptime_secs,);
@@ -34,7 +35,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Err(e) => {
-            print_server_unavailable(client.host(), &e);
+            print_server_unavailable(ctx.client().host(), &e);
         }
     }
 

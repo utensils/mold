@@ -75,6 +75,57 @@ pub(crate) fn print_server_unavailable(host: &str, err: &dyn std::fmt::Display) 
     );
 }
 
+pub(crate) fn print_server_fallback(host: &str, action: &str) {
+    status!(
+        "{} Server unavailable at {} — {}",
+        "●".yellow(),
+        host.bold(),
+        action,
+    );
+}
+
+pub(crate) fn print_server_pull_missing_model(model: &str) {
+    status!(
+        "{} Model '{}' not on server — pulling...",
+        "●".cyan(),
+        model.bold()
+    );
+}
+
+pub(crate) fn print_using_local_inference() {
+    status!("{} Using local GPU inference", "●".cyan());
+}
+
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+pub(crate) fn format_disk_size(bytes: u64) -> String {
+    if bytes == 0 {
+        "—".to_string()
+    } else if bytes >= 1_073_741_824 {
+        format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
+    } else {
+        format!("{:.0}MB", bytes as f64 / 1_048_576.0)
+    }
+}
+
+pub(crate) fn col_width(
+    items: impl IntoIterator<Item = usize>,
+    header_len: usize,
+    pad: usize,
+) -> usize {
+    items.into_iter().fold(header_len, usize::max) + pad
+}
+
 pub(crate) async fn render_progress(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>,
 ) {
@@ -270,5 +321,30 @@ mod tests {
     #[test]
     fn format_family_unknown_uppercases() {
         assert_eq!(format_family("other"), "OTHER");
+    }
+
+    #[test]
+    fn format_bytes_gb() {
+        assert_eq!(format_bytes(7_516_192_768), "7.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_mb() {
+        assert_eq!(format_bytes(52_428_800), "50.0 MB");
+    }
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn format_disk_size_zero_is_dash() {
+        assert_eq!(format_disk_size(0), "—");
+    }
+
+    #[test]
+    fn col_width_respects_header_and_padding() {
+        assert_eq!(col_width([3usize, 9, 5], 4, 2), 11);
     }
 }

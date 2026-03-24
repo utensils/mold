@@ -7,8 +7,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, hash_bytes, restore_cached_tensor, store_cached_tensor, CachedTensor, LruCache,
-    DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
+    prompt_cache_key, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey, LruCache,
+    PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -28,26 +29,6 @@ struct LoadedSDXL {
     dtype: DType,
 }
 
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct PromptCacheKey {
-    prompt: String,
-    guidance_bits: u64,
-}
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct SourceLatentCacheKey {
-    image_hash: u64,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct MaskCacheKey {
-    image_hash: u64,
-    latent_h: usize,
-    latent_w: usize,
-}
-
 /// SDXL inference engine backed by candle's stable_diffusion module.
 pub struct SDXLEngine {
     loaded: Option<LoadedSDXL>,
@@ -59,8 +40,8 @@ pub struct SDXLEngine {
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
-    source_latent_cache: Mutex<LruCache<SourceLatentCacheKey, CachedTensor>>,
-    mask_cache: Mutex<LruCache<MaskCacheKey, CachedTensor>>,
+    source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
+    mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -364,36 +345,35 @@ impl SDXLEngine {
         } else {
             VAE_SCALE_STANDARD
         };
-        let cache_key = SourceLatentCacheKey {
-            image_hash: hash_bytes(source_bytes),
-            width,
-            height,
-        };
-        let encoded = if let Some(encoded) =
-            restore_cached_tensor(&self.source_latent_cache, &cache_key, device, dtype)?
-        {
+        let cache_key = image_size_cache_key(source_bytes, width, height);
+        let (encoded, cache_hit) = get_or_insert_cached_tensor(
+            &self.source_latent_cache,
+            cache_key,
+            device,
+            dtype,
+            || {
+                self.progress.stage_start("Encoding source image (VAE)");
+                let encode_start = Instant::now();
+
+                let source_tensor = decode_source_image(
+                    source_bytes,
+                    width,
+                    height,
+                    NormalizeRange::MinusOneToOne,
+                    device,
+                    dtype,
+                )?;
+                let encoded = vae.encode(&source_tensor)?;
+                let encoded = (encoded.sample()? * vae_scale)?;
+
+                self.progress
+                    .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                Ok(encoded)
+            },
+        )?;
+        if cache_hit {
             self.progress.info("Reusing cached source image latents");
-            encoded
-        } else {
-            self.progress.stage_start("Encoding source image (VAE)");
-            let encode_start = Instant::now();
-
-            let source_tensor = decode_source_image(
-                source_bytes,
-                width,
-                height,
-                NormalizeRange::MinusOneToOne,
-                device,
-                dtype,
-            )?;
-            let encoded = vae.encode(&source_tensor)?;
-            let encoded = (encoded.sample()? * vae_scale)?;
-
-            self.progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
-            store_cached_tensor(&self.source_latent_cache, cache_key, &encoded)?;
-            encoded
-        };
+        }
 
         let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
         let start_step = start_step.min(steps as usize);
@@ -442,48 +422,46 @@ impl SDXLEngine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let cache_key = PromptCacheKey {
-            prompt: prompt.to_string(),
-            guidance_bits: guidance.to_bits(),
-        };
-        if let Some(cached) = restore_cached_tensor(&self.prompt_cache, &cache_key, device, dtype)?
-        {
+        let cache_key = prompt_cache_key(prompt, guidance);
+        let (text_embeddings, cache_hit) =
+            get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
+                let use_cfg = guidance > 1.0;
+
+                self.progress.stage_start("Encoding prompt (CLIP-L)");
+                let encode_l_start = Instant::now();
+                let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
+                let text_emb_l = clip_l.forward(&tokens_l)?;
+                self.progress
+                    .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+
+                self.progress.stage_start("Encoding prompt (CLIP-G)");
+                let encode_g_start = Instant::now();
+                let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
+                let text_emb_g = clip_g.forward(&tokens_g)?;
+                self.progress
+                    .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+
+                let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
+
+                let text_embeddings = if use_cfg {
+                    let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
+                    let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
+                    let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
+                    let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
+                    let uncond_embeddings =
+                        Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
+                    Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
+                } else {
+                    text_embeddings
+                };
+
+                Ok(text_embeddings.to_dtype(dtype)?)
+            })?;
+        if cache_hit {
             self.progress
                 .info("Reusing cached SDXL prompt conditioning");
-            return Ok(cached);
+            return Ok(text_embeddings);
         }
-
-        let use_cfg = guidance > 1.0;
-
-        self.progress.stage_start("Encoding prompt (CLIP-L)");
-        let encode_l_start = Instant::now();
-        let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
-        let text_emb_l = clip_l.forward(&tokens_l)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
-
-        self.progress.stage_start("Encoding prompt (CLIP-G)");
-        let encode_g_start = Instant::now();
-        let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
-        let text_emb_g = clip_g.forward(&tokens_g)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
-
-        let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
-
-        let text_embeddings = if use_cfg {
-            let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
-            let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
-            let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
-            let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
-            let uncond_embeddings = Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
-            Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
-        } else {
-            text_embeddings
-        };
-
-        let text_embeddings = text_embeddings.to_dtype(dtype)?;
-        store_cached_tensor(&self.prompt_cache, cache_key, &text_embeddings)?;
         Ok(text_embeddings)
     }
 
@@ -495,19 +473,15 @@ impl SDXLEngine {
         device: &Device,
         dtype: DType,
     ) -> Result<Tensor> {
-        let key = MaskCacheKey {
-            image_hash: hash_bytes(mask_bytes),
-            latent_h,
-            latent_w,
-        };
-        if let Some(cached) = restore_cached_tensor(&self.mask_cache, &key, device, dtype)? {
+        let key = latent_size_cache_key(mask_bytes, latent_h, latent_w);
+        let (mask, cache_hit) =
+            get_or_insert_cached_tensor(&self.mask_cache, key, device, dtype, || {
+                crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)
+            })?;
+        if cache_hit {
             self.progress.info("Reusing cached inpaint mask");
-            return Ok(cached);
+            return Ok(mask);
         }
-
-        let mask =
-            crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)?;
-        store_cached_tensor(&self.mask_cache, key, &mask)?;
         Ok(mask)
     }
 

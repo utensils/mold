@@ -1,30 +1,15 @@
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::{build_model_catalog, Config, MoldClient};
 
+use crate::control::{CliContext, ModelCatalogSource};
 use crate::output::colorize_description;
-use crate::ui::{family_label, format_family_padded};
-
-fn format_disk_size(bytes: u64) -> String {
-    if bytes == 0 {
-        "—".to_string()
-    } else if bytes >= 1_073_741_824 {
-        format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
-    } else {
-        format!("{:.0}MB", bytes as f64 / 1_048_576.0)
-    }
-}
-
-/// Compute the minimum column width for a set of strings (with padding).
-fn col_width(items: impl Iterator<Item = usize>, header_len: usize, pad: usize) -> usize {
-    items.fold(header_len, |max, len| max.max(len)) + pad
-}
+use crate::ui::{col_width, family_label, format_disk_size, format_family_padded};
 
 pub async fn run() -> Result<()> {
-    let client = MoldClient::from_env();
+    let ctx = CliContext::new(None);
 
-    match client.list_models_extended().await {
-        Ok(models) => {
+    match ctx.list_models().await? {
+        ModelCatalogSource::Remote(models) => {
             let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
             let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
 
@@ -141,9 +126,8 @@ pub async fn run() -> Result<()> {
                 println!("{}", "Use mold pull <model> to download.".dimmed());
             }
         }
-        Err(_) => {
-            let config = Config::load_or_default();
-            let models = build_model_catalog(&config, None, false);
+        ModelCatalogSource::Local(models) => {
+            let config = ctx.config();
 
             let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
             let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
@@ -276,15 +260,4 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::ui;
-
-    #[test]
-    fn format_family_flux_contains_label() {
-        let result = ui::format_family_padded("flux", 10);
-        assert!(result.contains("FLUX.1"));
-    }
 }
