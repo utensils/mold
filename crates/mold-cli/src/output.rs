@@ -24,12 +24,12 @@ macro_rules! status {
 
 pub(crate) use status;
 
-/// Colorize a model description: render `[broken]` or `[beta]` prefix in
-/// bright red bold, rest dimmed. Normal descriptions are fully dimmed.
+/// Colorize a model description: render `[alpha]` or `[beta]` prefix in
+/// bright yellow bold, rest dimmed. Normal descriptions are fully dimmed.
 pub fn colorize_description(desc: &str) -> String {
     use colored::Colorize;
-    if let Some(rest) = desc.strip_prefix("[broken] ") {
-        format!("{} {}", "[broken]".bright_red().bold(), rest.dimmed())
+    if let Some(rest) = desc.strip_prefix("[alpha] ") {
+        format!("{} {}", "[alpha]".bright_yellow().bold(), rest.dimmed())
     } else if let Some(rest) = desc.strip_prefix("[beta] ") {
         format!("{} {}", "[beta]".bright_yellow().bold(), rest.dimmed())
     } else {
@@ -55,30 +55,29 @@ mod tests {
     }
 
     #[test]
+    fn test_colorize_description_alpha() {
+        let result = colorize_description("[alpha] Experimental model");
+        // Should contain the [alpha] text and the rest of the description.
+        assert!(result.contains("[alpha]"));
+        assert!(result.contains("Experimental model"));
+    }
+
+    #[test]
     fn test_colorize_description_beta() {
         let result = colorize_description("[beta] Experimental model");
-        // Should contain the [beta] text and the rest of the description
-        // The output includes ANSI escape codes for bright_red bold and dimmed
         assert!(result.contains("[beta]"));
         assert!(result.contains("Experimental model"));
     }
 
     #[test]
-    fn test_colorize_description_no_beta() {
+    fn test_colorize_description_no_tag() {
         let result = colorize_description("A stable model description");
-        // Should contain the description text, fully dimmed
         assert!(result.contains("A stable model description"));
-        // Should NOT contain any [beta] styling (no bright_red bold sequences separate from dimmed)
-        // The entire string is wrapped in dimmed formatting only
     }
 
     #[test]
     fn test_colorize_description_empty() {
-        // Empty string should not panic
         let result = colorize_description("");
-        // Empty string has no "[beta] " prefix, so it takes the dimmed path
-        // Result contains ANSI codes wrapping an empty string; should not be empty
-        // because dimmed() adds escape sequences
         let _ = result;
     }
 }
