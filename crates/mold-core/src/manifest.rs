@@ -1668,7 +1668,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             name: "flux2-klein:bf16".to_string(),
             family: "flux2".to_string(),
             description:
-                "[broken] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                "[alpha] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
                     .to_string(),
             files: {
                 let mut files = shared_flux2_files();
@@ -1695,7 +1695,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q8".to_string(),
             family: "flux2".to_string(),
-            description: "[broken] Flux.2 Klein-4B Q8 — best GGUF quality".to_string(),
+            description: "[alpha] Flux.2 Klein-4B Q8 — best GGUF quality".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1720,7 +1720,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q6".to_string(),
             family: "flux2".to_string(),
-            description: "[broken] Flux.2 Klein-4B Q6 — good quality/size trade-off".to_string(),
+            description: "[alpha] Flux.2 Klein-4B Q6 — good quality/size trade-off".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1745,7 +1745,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q4".to_string(),
             family: "flux2".to_string(),
-            description: "[broken] Flux.2 Klein-4B Q4 — smaller footprint".to_string(),
+            description: "[alpha] Flux.2 Klein-4B Q4 — smaller footprint".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1844,7 +1844,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
-            description: "[broken] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
+            description: "[alpha] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
                 .to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1874,7 +1874,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: "[broken] Qwen-Image-2512 Q8 — quantized transformer, best quality"
+            description: "[alpha] Qwen-Image-2512 Q8 — quantized transformer, best quality"
                 .to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1893,7 +1893,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q6".to_string(),
             family: "qwen-image".to_string(),
-            description: "[broken] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
+            description: "[alpha] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
                 .to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1912,7 +1912,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q4".to_string(),
             family: "qwen-image".to_string(),
-            description: "[broken] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
+            description: "[alpha] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
                 .to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
@@ -1943,7 +1943,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
         family: "wuerstchen".to_string(),
-        description: "[broken] Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression"
+        description: "[alpha] Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression"
             .to_string(),
         files: vec![
             ModelFile {

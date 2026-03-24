@@ -247,7 +247,7 @@ pub async fn run() -> Result<()> {
                         mcfg.effective_width(&config),
                         mcfg.effective_height(&config),
                         colorize_description(
-                            // Prefer manifest description (has [broken]/[beta] tags)
+                            // Prefer manifest description (has [alpha]/[beta] tags)
                             // over config description (may be stale from older pull)
                             mold_core::manifest::find_manifest(name)
                                 .map(|m| m.description.as_str())
