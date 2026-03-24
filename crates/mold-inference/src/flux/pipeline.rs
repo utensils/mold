@@ -7,7 +7,10 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::cache::{CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY};
+use crate::cache::{
+    clear_cache, restore_cached_tensor_pair, store_cached_tensor_pair, CachedTensorPair, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
     should_use_gpu, CLIP_VRAM_THRESHOLD,
@@ -85,20 +88,14 @@ impl FluxEngine {
         device: &Device,
         dtype: DType,
     ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        let cached = self
-            .prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .get_cloned(&prompt.to_string());
-        let Some(cached) = cached else {
+        let restored =
+            restore_cached_tensor_pair(&self.prompt_cache, &prompt.to_string(), device, dtype)?;
+        let Some(restored) = restored else {
             return Ok(None);
         };
         self.progress
             .info("Reusing cached FLUX prompt conditioning");
-        Ok(Some((
-            cached.first.restore(device, dtype)?,
-            cached.second.restore(device, dtype)?,
-        )))
+        Ok(Some(restored))
     }
 
     fn store_prompt_cache(
@@ -107,14 +104,7 @@ impl FluxEngine {
         t5_emb: &candle_core::Tensor,
         clip_emb: &candle_core::Tensor,
     ) -> Result<()> {
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .insert(
-                prompt.to_string(),
-                CachedTensorPair::from_tensors(t5_emb, clip_emb)?,
-            );
-        Ok(())
+        store_cached_tensor_pair(&self.prompt_cache, prompt.to_string(), t5_emb, clip_emb)
     }
 
     /// Detect is_schnell from override, model name, or transformer filename.
@@ -909,10 +899,7 @@ impl InferenceEngine for FluxEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .clear();
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

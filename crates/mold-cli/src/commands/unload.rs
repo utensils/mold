@@ -2,8 +2,10 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::MoldClient;
 
+use crate::ui::print_server_unavailable;
+
 pub async fn run() -> Result<()> {
-    let client = MoldClient::from_env();
+    let client = crate::control::client_for_host(None);
 
     match client.unload_model().await {
         Ok(body) => {
@@ -12,16 +14,7 @@ pub async fn run() -> Result<()> {
         }
         Err(e) => {
             if MoldClient::is_connection_error(&e) {
-                eprintln!(
-                    "{} cannot connect to mold server at {}",
-                    "error:".red().bold(),
-                    client.host()
-                );
-                eprintln!(
-                    "  {} start the server with {}",
-                    "hint:".dimmed(),
-                    "mold serve".bold()
-                );
+                print_server_unavailable(client.host(), &e);
                 Err(crate::AlreadyReported.into())
             } else {
                 Err(e)

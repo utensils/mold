@@ -7,7 +7,10 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::cache::{CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY};
+use crate::cache::{
+    clear_cache, restore_cached_tensor_pair, store_cached_tensor_pair, CachedTensorPair, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
@@ -81,21 +84,14 @@ impl SD3Engine {
         dtype: DType,
         is_quantized: bool,
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        if let Some(cached) = self
-            .prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .get_cloned(&prompt.to_string())
-        {
+        if let Some((context, y)) = restore_cached_tensor_pair(
+            &self.prompt_cache,
+            &prompt.to_string(),
+            device,
+            if is_quantized { DType::F32 } else { dtype },
+        )? {
             self.progress.info("Reusing cached SD3 prompt conditioning");
-            return Ok((
-                cached
-                    .first
-                    .restore(device, if is_quantized { DType::F32 } else { dtype })?,
-                cached
-                    .second
-                    .restore(device, if is_quantized { DType::F32 } else { dtype })?,
-            ));
+            return Ok((context, y));
         }
 
         self.progress.stage_start("Encoding prompt (SD3 triple)");
@@ -118,13 +114,7 @@ impl SD3Engine {
             )
         };
 
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .insert(
-                prompt.to_string(),
-                CachedTensorPair::from_tensors(&context, &y)?,
-            );
+        store_cached_tensor_pair(&self.prompt_cache, prompt.to_string(), &context, &y)?;
         Ok((context, y))
     }
 
@@ -737,10 +727,7 @@ impl InferenceEngine for SD3Engine {
 
     fn unload(&mut self) {
         self.loaded = None;
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .clear();
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

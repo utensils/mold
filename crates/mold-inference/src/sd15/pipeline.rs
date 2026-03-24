@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    hash_bytes, CachedTensor, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, hash_bytes, restore_cached_tensor, store_cached_tensor, CachedTensor, LruCache,
+    DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
@@ -343,14 +344,11 @@ impl SD15Engine {
             width,
             height,
         };
-        let cached = self
-            .source_latent_cache
-            .lock()
-            .expect("source_latent_cache poisoned")
-            .get_cloned(&cache_key);
-        let encoded = if let Some(cached) = cached {
+        let encoded = if let Some(encoded) =
+            restore_cached_tensor(&self.source_latent_cache, &cache_key, device, dtype)?
+        {
             self.progress.info("Reusing cached source image latents");
-            cached.restore(device, dtype)?
+            encoded
         } else {
             self.progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
@@ -369,10 +367,7 @@ impl SD15Engine {
 
             self.progress
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
-            self.source_latent_cache
-                .lock()
-                .expect("source_latent_cache poisoned")
-                .insert(cache_key, CachedTensor::from_tensor(&encoded)?);
+            store_cached_tensor(&self.source_latent_cache, cache_key, &encoded)?;
             encoded
         };
 
@@ -428,15 +423,11 @@ impl SD15Engine {
             prompt: prompt.to_string(),
             guidance_bits: guidance.to_bits(),
         };
-        if let Some(cached) = self
-            .prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .get_cloned(&cache_key)
+        if let Some(cached) = restore_cached_tensor(&self.prompt_cache, &cache_key, device, dtype)?
         {
             self.progress
                 .info("Reusing cached CLIP-L prompt conditioning");
-            return cached.restore(device, dtype);
+            return Ok(cached);
         }
 
         let use_cfg = guidance > 1.0;
@@ -457,10 +448,7 @@ impl SD15Engine {
         };
 
         let text_embeddings = text_embeddings.to_dtype(dtype)?;
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .insert(cache_key, CachedTensor::from_tensor(&text_embeddings)?);
+        store_cached_tensor(&self.prompt_cache, cache_key, &text_embeddings)?;
         Ok(text_embeddings)
     }
 
@@ -477,22 +465,14 @@ impl SD15Engine {
             latent_h,
             latent_w,
         };
-        if let Some(cached) = self
-            .mask_cache
-            .lock()
-            .expect("mask_cache poisoned")
-            .get_cloned(&key)
-        {
+        if let Some(cached) = restore_cached_tensor(&self.mask_cache, &key, device, dtype)? {
             self.progress.info("Reusing cached inpaint mask");
-            return cached.restore(device, dtype);
+            return Ok(cached);
         }
 
         let mask =
             crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)?;
-        self.mask_cache
-            .lock()
-            .expect("mask_cache poisoned")
-            .insert(key, CachedTensor::from_tensor(&mask)?);
+        store_cached_tensor(&self.mask_cache, key, &mask)?;
         Ok(mask)
     }
 
@@ -540,15 +520,12 @@ impl SD15Engine {
             width: req.width,
             height: req.height,
         };
-        let cached = self
-            .control_tensor_cache
-            .lock()
-            .expect("control_tensor_cache poisoned")
-            .get_cloned(&control_key);
-        let control_tensor = if let Some(cached) = cached {
+        let control_tensor = if let Some(control_tensor) =
+            restore_cached_tensor(&self.control_tensor_cache, &control_key, device, dtype)?
+        {
             self.progress
                 .info("Reusing cached control image preprocessing");
-            cached.restore(device, dtype)?
+            control_tensor
         } else {
             let control_tensor = crate::img_utils::decode_source_image(
                 control_bytes,
@@ -558,10 +535,7 @@ impl SD15Engine {
                 device,
                 dtype,
             )?;
-            self.control_tensor_cache
-                .lock()
-                .expect("control_tensor_cache poisoned")
-                .insert(control_key, CachedTensor::from_tensor(&control_tensor)?);
+            store_cached_tensor(&self.control_tensor_cache, control_key, &control_tensor)?;
             control_tensor
         };
 
@@ -975,19 +949,10 @@ impl InferenceEngine for SD15Engine {
 
     fn unload(&mut self) {
         self.loaded = None;
-        self.prompt_cache
-            .lock()
-            .expect("prompt_cache poisoned")
-            .clear();
-        self.source_latent_cache
-            .lock()
-            .expect("source_latent_cache poisoned")
-            .clear();
-        self.mask_cache.lock().expect("mask_cache poisoned").clear();
-        self.control_tensor_cache
-            .lock()
-            .expect("control_tensor_cache poisoned")
-            .clear();
+        clear_cache(&self.prompt_cache);
+        clear_cache(&self.source_latent_cache);
+        clear_cache(&self.mask_cache);
+        clear_cache(&self.control_tensor_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

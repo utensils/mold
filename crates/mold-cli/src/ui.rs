@@ -61,6 +61,20 @@ pub(crate) fn format_family(family: &str) -> String {
     }
 }
 
+pub(crate) fn print_server_unavailable(host: &str, err: &dyn std::fmt::Display) {
+    eprintln!(
+        "{} cannot connect to mold server at {}",
+        "error:".red().bold(),
+        host
+    );
+    eprintln!("  {} {}", "cause:".dimmed(), err);
+    eprintln!(
+        "  {} start the server with {}",
+        "hint:".dimmed(),
+        "mold serve".bold()
+    );
+}
+
 pub(crate) async fn render_progress(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>,
 ) {

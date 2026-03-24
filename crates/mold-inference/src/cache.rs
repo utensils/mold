@@ -3,6 +3,7 @@ use candle_core::{DType, Device, Tensor};
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::hash::{DefaultHasher, Hasher};
+use std::sync::Mutex;
 
 pub(crate) const DEFAULT_PROMPT_CACHE_CAPACITY: usize = 16;
 pub(crate) const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 8;
@@ -100,6 +101,79 @@ impl CachedTensorPair {
             second: CachedTensor::from_tensor(second)?,
         })
     }
+}
+
+pub(crate) fn restore_cached_tensor<K>(
+    cache: &Mutex<LruCache<K, CachedTensor>>,
+    key: &K,
+    device: &Device,
+    dtype: DType,
+) -> Result<Option<Tensor>>
+where
+    K: Eq + Hash + Clone,
+{
+    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
+    cached
+        .map(|cached| cached.restore(device, dtype))
+        .transpose()
+}
+
+pub(crate) fn store_cached_tensor<K>(
+    cache: &Mutex<LruCache<K, CachedTensor>>,
+    key: K,
+    tensor: &Tensor,
+) -> Result<()>
+where
+    K: Eq + Hash + Clone,
+{
+    cache
+        .lock()
+        .expect("cache poisoned")
+        .insert(key, CachedTensor::from_tensor(tensor)?);
+    Ok(())
+}
+
+pub(crate) fn restore_cached_tensor_pair<K>(
+    cache: &Mutex<LruCache<K, CachedTensorPair>>,
+    key: &K,
+    device: &Device,
+    dtype: DType,
+) -> Result<Option<(Tensor, Tensor)>>
+where
+    K: Eq + Hash + Clone,
+{
+    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
+    cached
+        .map(|cached| {
+            Ok((
+                cached.first.restore(device, dtype)?,
+                cached.second.restore(device, dtype)?,
+            ))
+        })
+        .transpose()
+}
+
+pub(crate) fn store_cached_tensor_pair<K>(
+    cache: &Mutex<LruCache<K, CachedTensorPair>>,
+    key: K,
+    first: &Tensor,
+    second: &Tensor,
+) -> Result<()>
+where
+    K: Eq + Hash + Clone,
+{
+    cache
+        .lock()
+        .expect("cache poisoned")
+        .insert(key, CachedTensorPair::from_tensors(first, second)?);
+    Ok(())
+}
+
+pub(crate) fn clear_cache<K, V>(cache: &Mutex<LruCache<K, V>>)
+where
+    K: Eq + Hash + Clone,
+{
+    cache.lock().expect("cache poisoned").clear();
 }
 
 #[cfg(test)]
