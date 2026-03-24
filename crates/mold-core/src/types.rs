@@ -203,6 +203,38 @@ pub struct ModelInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelDefaults {
+    #[schema(example = 4)]
+    pub default_steps: u32,
+    #[schema(example = 3.5)]
+    pub default_guidance: f64,
+    #[schema(example = 1024)]
+    pub default_width: u32,
+    #[schema(example = 1024)]
+    pub default_height: u32,
+    #[schema(example = "FLUX Schnell Q8 — fast 4-step generation")]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelInfoExtended {
+    #[serde(flatten)]
+    pub info: ModelInfo,
+    #[serde(flatten)]
+    pub defaults: ModelDefaults,
+    #[serde(default)]
+    pub downloaded: bool,
+}
+
+impl std::ops::Deref for ModelInfoExtended {
+    type Target = ModelInfo;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerStatus {
     #[schema(example = "0.1.0")]
     pub version: String,

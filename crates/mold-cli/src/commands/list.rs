@@ -1,6 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::{Config, MoldClient};
+use mold_core::{build_model_catalog, Config, MoldClient};
 
 use crate::output::colorize_description;
 
@@ -175,35 +175,30 @@ pub async fn run() -> Result<()> {
         }
         Err(_) => {
             let config = Config::load_or_default();
+            let models = build_model_catalog(&config, None, false);
 
-            // Gather available-to-pull models (needed for column width computation)
-            let manifests = mold_core::manifest::known_manifests();
-            let available: Vec<_> = manifests
-                .iter()
-                .filter(|m| !config.models.contains_key(&m.name))
-                .collect();
+            let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
+            let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
 
             // Compute name column width across both installed and available models
             let nw = col_width(
-                config
-                    .models
-                    .keys()
-                    .map(|n| n.len())
+                downloaded
+                    .iter()
+                    .map(|m| m.name.len())
                     .chain(available.iter().map(|m| m.name.len())),
                 4, // "NAME"
                 2,
             );
             let fw = col_width(
-                config
-                    .models
-                    .values()
-                    .map(|c| family_label(c.family.as_deref().unwrap_or("")).len())
+                downloaded
+                    .iter()
+                    .map(|m| family_label(&m.family).len())
                     .chain(available.iter().map(|m| family_label(&m.family).len())),
                 6, // "FAMILY"
                 2,
             );
 
-            if config.models.is_empty() {
+            if downloaded.is_empty() {
                 println!("{} No models configured.", "●".dimmed());
             } else {
                 println!(
@@ -223,8 +218,10 @@ pub async fn run() -> Result<()> {
                 println!("{}", "─".repeat(nw + fw + 64).dimmed());
                 let mut all_unique_paths: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
-                for (name, mcfg) in &config.models {
-                    let family_raw = mcfg.family.as_deref().unwrap_or("");
+                for model in &downloaded {
+                    let name = &model.name;
+                    let mcfg = config.model_config(name);
+                    let family_raw = &model.family;
                     let size = mold_core::manifest::find_manifest(name)
                         .map(|m| format!("{:.1}GB", m.model_size_gb()))
                         .unwrap_or_else(|| "—".to_string());
@@ -242,16 +239,16 @@ pub async fn run() -> Result<()> {
                         format_family_padded(family_raw, fw),
                         size,
                         disk,
-                        mcfg.effective_steps(&config),
-                        format!("{:.1}", mcfg.effective_guidance()),
-                        mcfg.effective_width(&config),
-                        mcfg.effective_height(&config),
+                        model.defaults.default_steps,
+                        format!("{:.1}", model.defaults.default_guidance),
+                        model.defaults.default_width,
+                        model.defaults.default_height,
                         colorize_description(
                             // Prefer manifest description (has [alpha]/[beta] tags)
                             // over config description (may be stale from older pull)
                             mold_core::manifest::find_manifest(name)
                                 .map(|m| m.description.as_str())
-                                .unwrap_or(mcfg.description.as_deref().unwrap_or("")),
+                                .unwrap_or(&model.defaults.description),
                         ),
                         nw = nw,
                     );
@@ -261,7 +258,7 @@ pub async fn run() -> Result<()> {
                     .filter_map(|p| std::fs::metadata(p).ok())
                     .map(|m| m.len())
                     .sum();
-                if config.models.len() > 1 && total_disk > 0 {
+                if downloaded.len() > 1 && total_disk > 0 {
                     println!(
                         "{:>width$}",
                         format!("Total: {}", format_disk_size(total_disk)).dimmed(),
@@ -283,8 +280,10 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let (_, remaining_bytes) = mold_core::manifest::compute_download_size(m);
-                    let model_gb = m.model_size_gb() as f64;
+                    let manifest = mold_core::manifest::find_manifest(&m.name)
+                        .expect("available models should come from the manifest");
+                    let (_, remaining_bytes) = mold_core::manifest::compute_download_size(manifest);
+                    let model_gb = manifest.model_size_gb() as f64;
                     let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
                     let size_str = format!("{:.1}GB", model_gb);
                     let fetch_col = if remaining_bytes == 0 {
@@ -298,7 +297,7 @@ pub async fn run() -> Result<()> {
                         format_family_padded(&m.family, fw),
                         size_str,
                         fetch_col,
-                        colorize_description(&m.description),
+                        colorize_description(&m.defaults.description),
                         nw = nw,
                     );
                 }

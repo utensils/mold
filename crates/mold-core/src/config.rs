@@ -309,6 +309,13 @@ impl Config {
         }
     }
 
+    /// Reload config from disk while preserving runtime-only overrides.
+    pub fn reload_from_disk_preserving_runtime(&self) -> Self {
+        let mut fresh = Self::load_or_default();
+        fresh.models_dir = self.models_dir.clone();
+        fresh
+    }
+
     /// The root mold directory: `~/.mold/` on all platforms.
     /// Falls back to `./.mold` (relative to CWD) if the home directory cannot
     /// be determined (e.g. containers, CI). This preserves write-ability for

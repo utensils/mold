@@ -1,42 +1,11 @@
+use crate::error::MoldError;
+use crate::types::{
+    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ModelInfoExtended, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+};
 use anyhow::Result;
 use base64::Engine as _;
 use reqwest::Client;
-use serde::Deserialize;
-
-use crate::error::MoldError;
-use crate::types::{
-    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent,
-};
-
-/// Extended model info returned by /api/models, includes generation defaults.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelInfoExtended {
-    #[serde(flatten)]
-    pub info: ModelInfo,
-    #[serde(flatten)]
-    pub defaults: ModelDefaults,
-    /// Whether the model is downloaded on the server.
-    #[serde(default)]
-    pub downloaded: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelDefaults {
-    pub default_steps: u32,
-    pub default_guidance: f64,
-    pub default_width: u32,
-    pub default_height: u32,
-    pub description: String,
-}
-
-// Delegate the basic ModelInfo fields for ergonomic access.
-impl std::ops::Deref for ModelInfoExtended {
-    type Target = ModelInfo;
-    fn deref(&self) -> &Self::Target {
-        &self.info
-    }
-}
 
 pub struct MoldClient {
     base_url: String,

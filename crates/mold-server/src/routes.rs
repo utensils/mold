@@ -10,10 +10,9 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    GpuInfo, ModelInfo, ModelPaths, OutputFormat, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent,
+    build_model_catalog, GpuInfo, ModelInfoExtended, ModelPaths, OutputFormat, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
-use mold_inference::model_registry;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
@@ -212,6 +211,17 @@ fn take_generated_image(
     Ok(response.images.remove(0))
 }
 
+async fn refresh_state_config(state: &AppState) -> mold_core::Config {
+    let fresh = {
+        let current = state.config.read().await;
+        current.reload_from_disk_preserving_runtime()
+    };
+
+    let mut config = state.config.write().await;
+    *config = fresh.clone();
+    fresh
+}
+
 /// Check model availability without loading. Returns:
 /// - `Ok(None)` — model is already loaded and ready
 /// - `Ok(Some(paths))` — model paths resolved, needs loading
@@ -241,7 +251,8 @@ async fn check_model_available(
 
     // Config miss — re-read from disk in case config.toml was updated externally
     {
-        let fresh_config = mold_core::Config::load_or_default();
+        let current = state.config.read().await.clone();
+        let fresh_config = current.reload_from_disk_preserving_runtime();
         if let Some(paths) = ModelPaths::resolve(model_name, &fresh_config) {
             let mut config = state.config.write().await;
             *config = fresh_config;
@@ -575,25 +586,6 @@ async fn generate_stream(
 
 // ── /api/models ───────────────────────────────────────────────────────────────
 
-/// Extended model info including generation defaults.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct ModelInfoExtended {
-    #[serde(flatten)]
-    pub info: ModelInfo,
-    /// Whether the model files are downloaded and available for inference.
-    pub downloaded: bool,
-    #[schema(example = 4)]
-    pub default_steps: u32,
-    #[schema(example = 3.5)]
-    pub default_guidance: f64,
-    #[schema(example = 1024)]
-    pub default_width: u32,
-    #[schema(example = 1024)]
-    pub default_height: u32,
-    #[schema(example = "FLUX Schnell Q8 — fast 4-step generation")]
-    pub description: String,
-}
-
 #[utoipa::path(
     get,
     path = "/api/models",
@@ -610,61 +602,12 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
     };
     drop(engine);
 
-    let config = state.config.read().await;
-
-    // Start with known static models, merge with config-defined models.
-    let mut known: std::collections::HashMap<String, ModelInfo> = model_registry::known_models()
-        .into_iter()
-        .map(|m| (m.name.clone(), m))
-        .collect();
-
-    // Add any models from config that aren't in the static registry.
-    for (name, mcfg) in &config.models {
-        let size_gb = mcfg
-            .all_file_paths()
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len() as f32 / 1_073_741_824.0)
-            .sum::<f32>();
-        known.entry(name.clone()).or_insert_with(|| ModelInfo {
-            name: name.clone(),
-            family: mcfg.family.clone().unwrap_or_else(|| "flux".to_string()),
-            size_gb,
-            is_loaded: false,
-            last_used: None,
-            hf_repo: String::new(),
-        });
-    }
-
-    let models: Vec<ModelInfoExtended> = known
-        .into_values()
-        .map(|mut m| {
-            m.is_loaded = is_loaded && m.name == loaded_name;
-            let mut mcfg = config.model_config(&m.name);
-            // Fall back to manifest defaults when config has no model-specific values
-            if mcfg.default_steps.is_none() {
-                if let Some(manifest) = mold_core::manifest::find_manifest(&m.name) {
-                    mcfg.default_steps = Some(manifest.defaults.steps);
-                    mcfg.default_guidance = Some(manifest.defaults.guidance);
-                    mcfg.default_width = Some(manifest.defaults.width);
-                    mcfg.default_height = Some(manifest.defaults.height);
-                    if mcfg.description.is_none() {
-                        mcfg.description = Some(manifest.description.clone());
-                    }
-                }
-            }
-            let downloaded = config.models.contains_key(&m.name);
-            ModelInfoExtended {
-                downloaded,
-                default_steps: mcfg.effective_steps(&config),
-                default_guidance: mcfg.effective_guidance(),
-                default_width: mcfg.effective_width(&config),
-                default_height: mcfg.effective_height(&config),
-                description: mcfg.description.clone().unwrap_or_else(|| m.name.clone()),
-                info: m,
-            }
-        })
-        .collect();
+    let config = refresh_state_config(&state).await;
+    let models = build_model_catalog(
+        &config,
+        (!loaded_name.is_empty()).then_some(loaded_name.as_str()),
+        is_loaded,
+    );
 
     Json(models)
 }
@@ -748,7 +691,7 @@ async fn pull_model_endpoint(
 
         // Re-check availability after acquiring lock
         {
-            let config = state.config.read().await;
+            let config = refresh_state_config(&state).await;
             if ModelPaths::resolve(&model, &config).is_some() {
                 let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
                     model: model.clone(),
@@ -840,7 +783,7 @@ async fn pull_model_blocking(state: AppState, model: String) -> Result<String, A
     let _guard = state.pull_lock.lock().await;
 
     {
-        let config = state.config.read().await;
+        let config = refresh_state_config(&state).await;
         if ModelPaths::resolve(&model, &config).is_some() {
             return Ok(format!("model '{}' already available", model));
         }

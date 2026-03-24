@@ -173,11 +173,14 @@ Clients connect via MOLD_HOST=http://<addr>:<port>")]
         log_format: LogFormat,
     },
 
-    /// Download model weights from HuggingFace
+    /// Download model weights via the running server, or locally if no server is reachable
     #[command(after_long_help = "\
 Examples:
   mold pull flux-schnell:q8
   mold pull sdxl-turbo:fp16
+
+If MOLD_HOST is reachable, the download happens on that server.
+If no server is reachable, mold pulls locally.
 
 Run 'mold list' to see all available models.")]
     Pull {

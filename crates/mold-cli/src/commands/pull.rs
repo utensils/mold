@@ -2,7 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::download::DownloadError;
-use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name};
+use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name, ModelManifest};
+use mold_core::MoldClient;
 
 use crate::output::status;
 use crate::AlreadyReported;
@@ -128,7 +129,58 @@ fn print_unknown_model_error(model: &str) {
 }
 
 pub async fn run(model: &str) -> Result<()> {
-    pull_and_configure(model).await?;
+    let canonical = resolve_model_name(model);
+    let manifest = match find_manifest(&canonical) {
+        Some(m) => m,
+        None => {
+            print_unknown_model_error(model);
+            return Err(AlreadyReported.into());
+        }
+    };
+
+    let client = MoldClient::from_env();
+    match pull_via_server(&client, manifest).await {
+        Ok(()) => {}
+        Err(e) if MoldClient::is_connection_error(&e) => {
+            status!(
+                "{} Server unavailable at {} — pulling locally",
+                "●".yellow(),
+                client.host().bold(),
+            );
+            pull_and_configure(model).await?;
+        }
+        Err(e) => return Err(e),
+    }
+
     status!("  mold run \"your prompt\"");
+    Ok(())
+}
+
+async fn pull_via_server(client: &MoldClient, manifest: &ModelManifest) -> Result<()> {
+    status!(
+        "{} Pulling {} on {}",
+        "●".cyan(),
+        manifest.name.bold(),
+        client.host().bold(),
+    );
+    status!(
+        "  {}",
+        crate::output::colorize_description(&manifest.description)
+    );
+    status!("");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let render = tokio::spawn(super::generate::render_progress(rx));
+    let result = client.pull_model_stream(&manifest.name, tx).await;
+    let _ = render.await;
+    result?;
+
+    status!("");
+    status!(
+        "{} {} is ready on {}!",
+        "✓".green().bold(),
+        manifest.name.bold(),
+        client.host().bold(),
+    );
     Ok(())
 }

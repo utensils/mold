@@ -327,7 +327,9 @@ pub async fn run(
 
 /// Render SSE progress events using indicatif progress bars.
 /// Used by both local GPU inference and remote SSE streaming.
-async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>) {
+pub(crate) async fn render_progress(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>,
+) {
     let pb = ProgressBar::new_spinner();
     if is_piped() {
         pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());

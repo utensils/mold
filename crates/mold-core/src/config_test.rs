@@ -27,6 +27,17 @@ mod tests {
     }
 
     #[test]
+    fn reload_from_disk_preserving_runtime_keeps_models_dir_override() {
+        let cfg = Config {
+            models_dir: "/runtime/models".to_string(),
+            ..Config::default()
+        };
+
+        let reloaded = cfg.reload_from_disk_preserving_runtime();
+        assert_eq!(reloaded.models_dir, "/runtime/models");
+    }
+
+    #[test]
     fn config_load_from_toml() {
         let toml = r#"
 default_model = "flux-dev"
