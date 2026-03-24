@@ -5,6 +5,7 @@ use mold_core::download::DownloadError;
 use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name, ModelManifest};
 use mold_core::MoldClient;
 
+use crate::control::stream_server_pull;
 use crate::output::status;
 use crate::AlreadyReported;
 
@@ -169,11 +170,7 @@ async fn pull_via_server(client: &MoldClient, manifest: &ModelManifest) -> Resul
     );
     status!("");
 
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let render = tokio::spawn(super::generate::render_progress(rx));
-    let result = client.pull_model_stream(&manifest.name, tx).await;
-    let _ = render.await;
-    result?;
+    stream_server_pull(client, &manifest.name).await?;
 
     status!("");
     status!(

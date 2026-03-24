@@ -13,14 +13,9 @@ use crate::zimage::ZImageEngine;
 
 /// Determine the model family from config or manifest, defaulting to "flux".
 fn resolve_family(model_name: &str, config: &Config) -> String {
-    // Check config first
-    let model_cfg = config.model_config(model_name);
+    let model_cfg = config.resolved_model_config(model_name);
     if let Some(family) = model_cfg.family {
         return family;
-    }
-    // Check manifest
-    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
-        return manifest.family.clone();
     }
     // Default to flux for backward compatibility
     "flux".to_string()
@@ -40,7 +35,7 @@ pub fn create_engine(
     load_strategy: LoadStrategy,
 ) -> Result<Box<dyn InferenceEngine>> {
     let family = resolve_family(&model_name, config);
-    let model_cfg = config.model_config(&model_name);
+    let model_cfg = config.resolved_model_config(&model_name);
 
     match family.as_str() {
         "flux" => {

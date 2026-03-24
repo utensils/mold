@@ -362,6 +362,40 @@ impl Config {
         ModelConfig::default()
     }
 
+    /// Return a model config merged with manifest defaults and metadata.
+    pub fn resolved_model_config(&self, name: &str) -> ModelConfig {
+        let mut cfg = self.model_config(name);
+
+        if let Some(manifest) = crate::manifest::find_manifest(name) {
+            if cfg.default_steps.is_none() {
+                cfg.default_steps = Some(manifest.defaults.steps);
+            }
+            if cfg.default_guidance.is_none() {
+                cfg.default_guidance = Some(manifest.defaults.guidance);
+            }
+            if cfg.default_width.is_none() {
+                cfg.default_width = Some(manifest.defaults.width);
+            }
+            if cfg.default_height.is_none() {
+                cfg.default_height = Some(manifest.defaults.height);
+            }
+            if cfg.is_schnell.is_none() {
+                cfg.is_schnell = Some(manifest.defaults.is_schnell);
+            }
+            if cfg.scheduler.is_none() {
+                cfg.scheduler = manifest.defaults.scheduler;
+            }
+            if cfg.description.is_none() {
+                cfg.description = Some(manifest.description.clone());
+            }
+            if cfg.family.is_none() {
+                cfg.family = Some(manifest.family.clone());
+            }
+        }
+
+        cfg
+    }
+
     /// Insert or update a model configuration entry.
     pub fn upsert_model(&mut self, name: String, config: ModelConfig) {
         self.models.insert(name, config);

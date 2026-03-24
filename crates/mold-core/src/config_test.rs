@@ -38,6 +38,20 @@ mod tests {
     }
 
     #[test]
+    fn resolved_model_config_uses_manifest_defaults_and_family() {
+        let cfg = Config::default();
+        let resolved = cfg.resolved_model_config("flux-schnell:q8");
+
+        assert_eq!(resolved.default_steps, Some(4));
+        assert_eq!(resolved.default_guidance, Some(0.0));
+        assert_eq!(resolved.default_width, Some(1024));
+        assert_eq!(resolved.default_height, Some(1024));
+        assert_eq!(resolved.is_schnell, Some(true));
+        assert_eq!(resolved.family.as_deref(), Some("flux"));
+        assert!(resolved.description.is_some());
+    }
+
+    #[test]
     fn config_load_from_toml() {
         let toml = r#"
 default_model = "flux-dev"

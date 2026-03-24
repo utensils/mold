@@ -10,16 +10,7 @@ pub fn build_model_catalog(
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
 
     for manifest in known_manifests() {
-        let mut model_cfg = config.model_config(&manifest.name);
-        if model_cfg.default_steps.is_none() {
-            model_cfg.default_steps = Some(manifest.defaults.steps);
-            model_cfg.default_guidance = Some(manifest.defaults.guidance);
-            model_cfg.default_width = Some(manifest.defaults.width);
-            model_cfg.default_height = Some(manifest.defaults.height);
-            if model_cfg.description.is_none() {
-                model_cfg.description = Some(manifest.description.clone());
-            }
-        }
+        let model_cfg = config.resolved_model_config(&manifest.name);
 
         models.push(ModelInfoExtended {
             downloaded: config.models.contains_key(&manifest.name),

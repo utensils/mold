@@ -1,16 +1,17 @@
 use anyhow::Result;
 use colored::Colorize;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     clamp_to_megapixel_limit, Config, GenerateRequest, GenerateResponse, ImageData, MoldClient,
-    OutputFormat, Scheduler, SseProgressEvent,
+    OutputFormat, Scheduler,
 };
 use rand::Rng;
-use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
+use crate::control::{client_for_host, stream_server_pull};
 use crate::output::{is_piped, status};
+use crate::ui::render_progress;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -53,23 +54,7 @@ pub async fn run(
 
     // Load config and pull model-specific defaults.
     let config = Config::load_or_default();
-    let model_cfg = config.model_config(model);
-    // Fall back to manifest defaults for models not yet in config (e.g. unpulled)
-    let model_cfg = if model_cfg.default_steps.is_none() {
-        if let Some(manifest) = mold_core::manifest::find_manifest(model) {
-            mold_core::ModelConfig {
-                default_steps: Some(manifest.defaults.steps),
-                default_guidance: Some(manifest.defaults.guidance),
-                default_width: Some(manifest.defaults.width),
-                default_height: Some(manifest.defaults.height),
-                ..model_cfg
-            }
-        } else {
-            model_cfg
-        }
-    } else {
-        model_cfg
-    };
+    let model_cfg = config.resolved_model_config(model);
 
     // When source_image is provided and width/height not specified, derive from image dimensions
     let (effective_width, effective_height) =
@@ -197,10 +182,7 @@ pub async fn run(
         )
         .await?
     } else {
-        let client = match &host {
-            Some(h) => MoldClient::new(h),
-            None => MoldClient::from_env(),
-        };
+        let client = client_for_host(host.as_deref());
         let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
         let mut total_time_ms: u64 = 0;
         let mut last_seed_used: u64 = base_seed;
@@ -325,161 +307,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Render SSE progress events using indicatif progress bars.
-/// Used by both local GPU inference and remote SSE streaming.
-pub(crate) async fn render_progress(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>,
-) {
-    let pb = ProgressBar::new_spinner();
-    if is_piped() {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    // No steady tick — redraws only on events to avoid flickering with
-    // hf-hub's download bars (which write to stderr independently).
-    pb.tick();
-
-    let mut denoise_bar: Option<ProgressBar> = None;
-    let mut download_multi: Option<MultiProgress> = None;
-    let mut download_bars: HashMap<usize, ProgressBar> = HashMap::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            SseProgressEvent::StageStart { name } => {
-                if let Some(db) = denoise_bar.take() {
-                    db.finish_and_clear();
-                }
-                pb.set_message(format!("{}...", name));
-                pb.tick();
-            }
-            SseProgressEvent::StageDone { name, elapsed_ms } => {
-                if let Some(db) = denoise_bar.take() {
-                    db.finish_and_clear();
-                }
-                let secs = elapsed_ms as f64 / 1000.0;
-                pb.suspend(|| {
-                    status!(
-                        "  {} {} {}",
-                        "✓".green(),
-                        name,
-                        format!("[{:.1}s]", secs).dimmed(),
-                    );
-                });
-            }
-            SseProgressEvent::Info { message } => {
-                pb.suspend(|| {
-                    status!("  {} {}", "·".dimmed(), message.dimmed());
-                });
-            }
-            SseProgressEvent::DenoiseStep {
-                step,
-                total,
-                elapsed_ms,
-            } => {
-                let db = denoise_bar.get_or_insert_with(|| {
-                    pb.disable_steady_tick();
-                    pb.set_message("");
-
-                    let bar = ProgressBar::new(total as u64);
-                    if is_piped() {
-                        bar.set_draw_target(ProgressDrawTarget::stderr());
-                    }
-                    bar.set_style(
-                        ProgressStyle::default_bar()
-                            .template(
-                                "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
-                            )
-                            .unwrap()
-                            .progress_chars("━╸─"),
-                    );
-                    bar.enable_steady_tick(Duration::from_millis(100));
-                    bar
-                });
-                let elapsed_secs = elapsed_ms as f64 / 1000.0;
-                let it_s = if elapsed_secs > 0.0 {
-                    1.0 / elapsed_secs
-                } else {
-                    0.0
-                };
-                db.set_message(format!("{:.2} it/s", it_s));
-                db.set_position(step as u64);
-            }
-            SseProgressEvent::DownloadProgress {
-                filename,
-                file_index,
-                bytes_downloaded,
-                bytes_total,
-                total_files,
-            } => {
-                let multi = download_multi.get_or_insert_with(|| {
-                    pb.disable_steady_tick();
-                    pb.set_message("");
-                    MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
-                });
-                let bar = download_bars.entry(file_index).or_insert_with(|| {
-                    let b = multi.add(ProgressBar::new(bytes_total));
-                    let msg_width = 45usize;
-                    b.set_style(
-                        ProgressStyle::with_template(&format!(
-                            "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
-                        ))
-                        .unwrap()
-                        .progress_chars("━╸─"),
-                    );
-                    // Show total files on first file
-                    if total_files > 0 {
-                        b.set_message(format!("[{}/{}] {}", file_index + 1, total_files, truncate_name(&filename, msg_width - 8)));
-                    } else {
-                        b.set_message(truncate_name(&filename, msg_width));
-                    }
-                    b
-                });
-                bar.set_position(bytes_downloaded);
-            }
-            SseProgressEvent::DownloadDone { file_index, .. } => {
-                if let Some(bar) = download_bars.get(&file_index) {
-                    bar.finish_with_message("done");
-                }
-            }
-            SseProgressEvent::PullComplete { model } => {
-                // Clear download bars
-                for (_, bar) in download_bars.drain() {
-                    bar.finish_and_clear();
-                }
-                if let Some(multi) = download_multi.take() {
-                    multi.clear().ok();
-                }
-                pb.suspend(|| {
-                    status!("{} Pull complete: {}", "✓".green(), model.bold());
-                });
-            }
-        }
-    }
-    if let Some(db) = denoise_bar.take() {
-        db.finish_and_clear();
-    }
-    for (_, bar) in download_bars.drain() {
-        bar.finish_and_clear();
-    }
-    if let Some(multi) = download_multi.take() {
-        multi.clear().ok();
-    }
-    pb.finish_and_clear();
-}
-
-/// Truncate a filename for display, keeping the end (unique part).
-fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len || max_len < 8 {
-        return name.to_string();
-    }
-    let suffix_len = max_len - 3;
-    let start = name.len() - suffix_len;
-    format!("...{}", &name[start..])
-}
-
 /// Remote generation: try SSE streaming first, fall back to blocking API.
 #[allow(clippy::too_many_arguments)]
 async fn generate_remote(
@@ -539,10 +366,7 @@ async fn generate_remote(
             );
 
             // Stream download progress from server
-            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
-            let pull_render = tokio::spawn(render_progress(pull_rx));
-            client.pull_model_stream(model, pull_tx).await?;
-            let _ = pull_render.await;
+            stream_server_pull(client, model).await?;
 
             status!("{} Generating...", "●".cyan());
 
@@ -632,10 +456,7 @@ async fn generate_remote_blocking(
             );
 
             // Stream download progress from server
-            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
-            let pull_render = tokio::spawn(render_progress(pull_rx));
-            client.pull_model_stream(model, pull_tx).await?;
-            let _ = pull_render.await;
+            stream_server_pull(client, model).await?;
 
             status!("{} Generating...", "●".cyan());
             Ok(client.generate(req.clone()).await?)
@@ -703,7 +524,7 @@ async fn prepare_local_engine(
                 auto_config = updated_config;
                 effective_config = &auto_config;
 
-                let model_cfg = effective_config.model_config(&model_name);
+                let model_cfg = effective_config.resolved_model_config(&model_name);
                 if cli_width.is_none() {
                     req.width = model_cfg.effective_width(effective_config);
                 }

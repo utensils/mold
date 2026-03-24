@@ -1,5 +1,7 @@
 mod commands;
+mod control;
 mod output;
+mod ui;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;

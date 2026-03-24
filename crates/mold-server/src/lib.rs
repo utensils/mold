@@ -1,3 +1,4 @@
+pub mod model_manager;
 pub mod routes;
 pub mod state;
 

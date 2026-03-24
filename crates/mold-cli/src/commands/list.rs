@@ -3,39 +3,7 @@ use colored::Colorize;
 use mold_core::{build_model_catalog, Config, MoldClient};
 
 use crate::output::colorize_description;
-
-/// Map raw family key to display label.
-fn family_label(family: &str) -> &str {
-    match family {
-        "flux" => "FLUX.1",
-        "flux2" => "FLUX.2",
-        "sd15" => "SD 1.5",
-        "sd3" | "sd3.5" => "SD 3.5",
-        "sdxl" => "SDXL",
-        "z-image" => "Z-Image",
-        "qwen-image" | "qwen_image" => "Qwen-Image",
-        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
-        "controlnet" => "ControlNet",
-        other => other,
-    }
-}
-
-/// Pad plain text first, then colorize — ANSI escapes break `{:<N}` formatting.
-fn format_family_padded(family: &str, width: usize) -> String {
-    let padded = format!("{:<width$}", family_label(family), width = width);
-    match family {
-        "flux" => padded.truecolor(200, 120, 255).to_string(), // purple
-        "flux2" => padded.truecolor(255, 150, 255).to_string(), // pink-magenta
-        "sd15" => padded.green().to_string(),                  // green
-        "sd3" | "sd3.5" => padded.truecolor(100, 220, 160).to_string(), // sea green
-        "sdxl" => padded.yellow().to_string(),                 // yellow
-        "z-image" => padded.cyan().to_string(),                // cyan
-        "qwen-image" | "qwen_image" => padded.truecolor(100, 200, 255).to_string(), // sky blue
-        "wuerstchen" | "wuerstchen-v2" => padded.truecolor(255, 180, 80).to_string(), // orange
-        "controlnet" => padded.bright_red().to_string(),       // bright red
-        _ => padded,
-    }
-}
+use crate::ui::{family_label, format_family_padded};
 
 fn format_disk_size(bytes: u64) -> String {
     if bytes == 0 {
@@ -312,43 +280,11 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::ui;
 
     #[test]
     fn format_family_flux_contains_label() {
-        let result = format_family_padded("flux", 10);
+        let result = ui::format_family_padded("flux", 10);
         assert!(result.contains("FLUX.1"));
-    }
-
-    #[test]
-    fn format_family_sdxl_contains_label() {
-        let result = format_family_padded("sdxl", 10);
-        assert!(result.contains("SDXL"));
-    }
-
-    #[test]
-    fn format_family_sd15_contains_label() {
-        let result = format_family_padded("sd15", 10);
-        assert!(result.contains("SD 1.5"));
-    }
-
-    #[test]
-    fn format_family_unknown_passthrough() {
-        let result = format_family_padded("custom", 10);
-        assert!(result.contains("custom"));
-    }
-
-    #[test]
-    fn format_family_padded_respects_width() {
-        // When colors are disabled (CI/NO_COLOR), the result is plain padded text.
-        // When colors are enabled, ANSI codes make it longer.
-        // Either way, the result should be at least `width` chars.
-        let result = format_family_padded("sdxl", 20);
-        assert!(
-            result.len() >= 20,
-            "result was only {} chars: {:?}",
-            result.len(),
-            result
-        );
     }
 }

@@ -4,6 +4,8 @@ use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{Config, ModelPaths};
 use sha2::{Digest, Sha256};
 
+use crate::ui::format_family;
+
 fn compute_sha256(path: &str) -> Result<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -69,21 +71,6 @@ fn resolve_verify_path(
     resolve_file_path(model_config, component)
 }
 
-fn format_family(family: &str) -> String {
-    match family {
-        "flux" => "FLUX.1".truecolor(200, 120, 255).to_string(),
-        "flux2" => "FLUX.2".truecolor(255, 150, 255).to_string(),
-        "sd15" => "SD 1.5".green().to_string(),
-        "sd3" | "sd3.5" => "SD 3.5".truecolor(100, 220, 160).to_string(),
-        "sdxl" => "SDXL".yellow().to_string(),
-        "z-image" => "Z-Image".cyan().to_string(),
-        "qwen-image" | "qwen_image" => "Qwen-Image".truecolor(100, 200, 255).to_string(),
-        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen".truecolor(255, 180, 80).to_string(),
-        "controlnet" => "ControlNet".bright_red().to_string(),
-        other => other.to_uppercase(),
-    }
-}
-
 fn component_label(component: &ModelComponent) -> &'static str {
     match component {
         ModelComponent::Transformer => "Transformer",
@@ -104,6 +91,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
 pub fn run(name: &str, verify: bool) -> Result<()> {
     let canonical = resolve_model_name(name);
     let config = Config::load_or_default();
+    let resolved_model_cfg = config.resolved_model_config(&canonical);
 
     let manifest = find_manifest(&canonical);
     let model_config = config
@@ -153,15 +141,23 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         // Generation defaults
         println!();
         println!("  {}", "Generation Defaults".bold());
-        println!("  {:<16} {}", "Steps:".dimmed(), m.defaults.steps);
-        println!("  {:<16} {:.1}", "Guidance:".dimmed(), m.defaults.guidance);
+        println!(
+            "  {:<16} {}",
+            "Steps:".dimmed(),
+            resolved_model_cfg.effective_steps(&config)
+        );
+        println!(
+            "  {:<16} {:.1}",
+            "Guidance:".dimmed(),
+            resolved_model_cfg.effective_guidance()
+        );
         println!(
             "  {:<16} {}x{}",
             "Dimensions:".dimmed(),
-            m.defaults.width,
-            m.defaults.height
+            resolved_model_cfg.effective_width(&config),
+            resolved_model_cfg.effective_height(&config)
         );
-        if let Some(scheduler) = m.defaults.scheduler {
+        if let Some(scheduler) = resolved_model_cfg.scheduler.or(m.defaults.scheduler) {
             println!("  {:<16} {}", "Scheduler:".dimmed(), scheduler);
         }
 
@@ -193,11 +189,11 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                 status_marker,
             );
         }
-    } else if let Some(mcfg) = model_config {
+    } else if model_config.is_some() {
         // Custom model — show what we know from config
-        let family = mcfg.family.as_deref().unwrap_or("unknown");
+        let family = resolved_model_cfg.family.as_deref().unwrap_or("unknown");
         println!("  {:<16} {}", "Family:".dimmed(), format_family(family));
-        if let Some(ref desc) = mcfg.description {
+        if let Some(ref desc) = resolved_model_cfg.description {
             println!("  {:<16} {}", "Description:".dimmed(), desc);
         }
         println!();
@@ -205,18 +201,18 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!(
             "  {:<16} {}",
             "Steps:".dimmed(),
-            mcfg.effective_steps(&config)
+            resolved_model_cfg.effective_steps(&config)
         );
         println!(
             "  {:<16} {:.1}",
             "Guidance:".dimmed(),
-            mcfg.effective_guidance()
+            resolved_model_cfg.effective_guidance()
         );
         println!(
             "  {:<16} {}x{}",
             "Dimensions:".dimmed(),
-            mcfg.effective_width(&config),
-            mcfg.effective_height(&config)
+            resolved_model_cfg.effective_width(&config),
+            resolved_model_cfg.effective_height(&config)
         );
     }
 
