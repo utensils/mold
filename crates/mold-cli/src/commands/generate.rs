@@ -179,52 +179,49 @@ pub async fn run(
         }
     }
 
-    // Batch loop: generate N images with incrementing seeds.
-    // The server/engine produces 1 image per request, so we loop client-side.
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
-    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-    let mut total_time_ms: u64 = 0;
-    let mut last_seed_used: u64 = base_seed;
-    let mut last_model = String::new();
+    let response = if local {
+        status!("{} Using local GPU inference", "●".cyan());
+        generate_local_batch(
+            &req,
+            &config,
+            t5_variant.clone(),
+            qwen3_variant.clone(),
+            eager,
+            width,
+            height,
+            steps,
+            guidance,
+            batch,
+            base_seed,
+        )
+        .await?
+    } else {
+        let client = match &host {
+            Some(h) => MoldClient::new(h),
+            None => MoldClient::from_env(),
+        };
+        let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+        let mut total_time_ms: u64 = 0;
+        let mut last_seed_used: u64 = base_seed;
+        let mut last_model = String::new();
 
-    for i in 0..batch {
-        let mut iter_req = req.clone();
-        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-        iter_req.batch_size = 1;
+        for i in 0..batch {
+            let mut iter_req = req.clone();
+            iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+            iter_req.batch_size = 1;
 
-        if batch > 1 {
-            status!(
-                "{} Generating image {}/{} (seed: {})",
-                "●".cyan(),
-                i + 1,
-                batch,
-                iter_req.seed.unwrap(),
-            );
-        }
-
-        let response = if local {
-            if i == 0 {
-                status!("{} Using local GPU inference", "●".cyan());
+            if batch > 1 {
+                status!(
+                    "{} Generating image {}/{} (seed: {})",
+                    "●".cyan(),
+                    i + 1,
+                    batch,
+                    iter_req.seed.unwrap(),
+                );
             }
-            generate_local(
-                &iter_req,
-                &config,
-                t5_variant.clone(),
-                qwen3_variant.clone(),
-                eager,
-                width,
-                height,
-                steps,
-                guidance,
-            )
-            .await?
-        } else {
-            let client = match &host {
-                Some(h) => MoldClient::new(h),
-                None => MoldClient::from_env(),
-            };
 
-            generate_remote(
+            let response = generate_remote(
                 &client,
                 &iter_req,
                 &config,
@@ -241,24 +238,24 @@ pub async fn run(
                 steps,
                 guidance,
             )
-            .await?
-        };
+            .await?;
 
-        total_time_ms += response.generation_time_ms;
-        last_seed_used = response.seed_used;
-        last_model = response.model.clone();
+            total_time_ms += response.generation_time_ms;
+            last_seed_used = response.seed_used;
+            last_model = response.model.clone();
 
-        for mut img in response.images {
-            img.index = i;
-            all_images.push(img);
+            for mut img in response.images {
+                img.index = i;
+                all_images.push(img);
+            }
         }
-    }
 
-    let response = GenerateResponse {
-        images: all_images,
-        generation_time_ms: total_time_ms,
-        model: last_model,
-        seed_used: last_seed_used,
+        GenerateResponse {
+            images: all_images,
+            generation_time_ms: total_time_ms,
+            model: last_model,
+            seed_used: last_seed_used,
+        }
     };
 
     // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
@@ -662,7 +659,7 @@ async fn generate_remote_blocking(
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-async fn generate_local(
+async fn prepare_local_engine(
     req: &GenerateRequest,
     config: &Config,
     t5_variant_override: Option<String>,
@@ -672,7 +669,7 @@ async fn generate_local(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
-) -> Result<GenerateResponse> {
+) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::LoadStrategy;
@@ -755,29 +752,141 @@ async fn generate_local(
     if is_eager {
         std::env::set_var("MOLD_EAGER", "1");
     }
-    let mut engine =
-        mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
+    let engine = mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
+    Ok((req, engine))
+}
 
-    // Set up progress channel — convert ProgressEvent → SseProgressEvent for unified rendering
+#[cfg(any(feature = "cuda", feature = "metal"))]
+async fn generate_local(
+    req: &GenerateRequest,
+    config: &Config,
+    t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    let (req, mut engine) = prepare_local_engine(
+        req,
+        config,
+        t5_variant_override,
+        qwen3_variant_override,
+        eager,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
     engine.set_on_progress(Box::new(move |event| {
         let _ = tx.send(event.into());
     }));
 
-    let req = req.clone();
-
-    // Spawn inference in a blocking thread
     let handle = tokio::task::spawn_blocking(move || {
         engine.load()?;
         engine.generate(&req)
     });
 
-    // Render progress events using the shared renderer
     let render = tokio::spawn(render_progress(rx));
-
     let result = handle.await?;
     let _ = render.await;
     result
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+#[allow(clippy::too_many_arguments)]
+async fn generate_local_batch(
+    req: &GenerateRequest,
+    config: &Config,
+    t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+    batch: u32,
+    base_seed: u64,
+) -> Result<GenerateResponse> {
+    let (base_req, mut engine) = prepare_local_engine(
+        req,
+        config,
+        t5_variant_override,
+        qwen3_variant_override,
+        eager,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+
+    engine = tokio::task::spawn_blocking(
+        move || -> Result<Box<dyn mold_inference::InferenceEngine>> {
+            let mut engine = engine;
+            engine.load()?;
+            Ok(engine)
+        },
+    )
+    .await??;
+
+    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut total_time_ms = 0;
+    let mut last_seed_used = base_seed;
+    let mut last_model = String::new();
+
+    for i in 0..batch {
+        let mut iter_req = base_req.clone();
+        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+        iter_req.batch_size = 1;
+
+        if batch > 1 {
+            status!(
+                "{} Generating image {}/{} (seed: {})",
+                "●".cyan(),
+                i + 1,
+                batch,
+                iter_req.seed.unwrap(),
+            );
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
+        engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(event.into());
+        }));
+
+        let handle = tokio::task::spawn_blocking(
+            move || -> Result<(Box<dyn mold_inference::InferenceEngine>, GenerateResponse)> {
+                let mut engine = engine;
+                let response = engine.generate(&iter_req)?;
+                Ok((engine, response))
+            },
+        );
+        let render = tokio::spawn(render_progress(rx));
+        let (returned_engine, response) = handle.await??;
+        let _ = render.await;
+        engine = returned_engine;
+
+        total_time_ms += response.generation_time_ms;
+        last_seed_used = response.seed_used;
+        last_model = response.model.clone();
+
+        for mut img in response.images {
+            img.index = i;
+            all_images.push(img);
+        }
+    }
+
+    Ok(GenerateResponse {
+        images: all_images,
+        generation_time_ms: total_time_ms,
+        model: last_model,
+        seed_used: last_seed_used,
+    })
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
@@ -792,6 +901,27 @@ async fn generate_local(
     _cli_height: Option<u32>,
     _cli_steps: Option<u32>,
     _cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    anyhow::bail!(
+        "No mold server running and this binary was built without GPU support.\n\
+         Either start a server with `mold serve` or rebuild with --features cuda"
+    )
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+#[allow(clippy::too_many_arguments)]
+async fn generate_local_batch(
+    _req: &GenerateRequest,
+    _config: &Config,
+    _t5_variant: Option<String>,
+    _qwen3_variant: Option<String>,
+    _eager: bool,
+    _cli_width: Option<u32>,
+    _cli_height: Option<u32>,
+    _cli_steps: Option<u32>,
+    _cli_guidance: Option<f64>,
+    _batch: u32,
+    _base_seed: u64,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

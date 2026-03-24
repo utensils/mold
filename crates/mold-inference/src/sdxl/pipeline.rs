@@ -3,8 +3,12 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
+use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::cache::{
+    hash_bytes, CachedTensor, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
@@ -23,6 +27,26 @@ struct LoadedSDXL {
     dtype: DType,
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct PromptCacheKey {
+    prompt: String,
+    guidance_bits: u64,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct SourceLatentCacheKey {
+    image_hash: u64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct MaskCacheKey {
+    image_hash: u64,
+    latent_h: usize,
+    latent_w: usize,
+}
+
 /// SDXL inference engine backed by candle's stable_diffusion module.
 pub struct SDXLEngine {
     loaded: Option<LoadedSDXL>,
@@ -33,6 +57,9 @@ pub struct SDXLEngine {
     progress: ProgressReporter,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    source_latent_cache: Mutex<LruCache<SourceLatentCacheKey, CachedTensor>>,
+    mask_cache: Mutex<LruCache<MaskCacheKey, CachedTensor>>,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -56,6 +83,9 @@ impl SDXLEngine {
             is_turbo,
             progress: ProgressReporter::default(),
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
         }
     }
 
@@ -328,30 +358,47 @@ impl SDXLEngine {
         dtype: DType,
     ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
-
-        self.progress.stage_start("Encoding source image (VAE)");
-        let encode_start = Instant::now();
-
-        let source_tensor = decode_source_image(
-            source_bytes,
-            width,
-            height,
-            NormalizeRange::MinusOneToOne,
-            device,
-            dtype,
-        )?;
-
         let vae_scale = if self.is_turbo {
             VAE_SCALE_TURBO
         } else {
             VAE_SCALE_STANDARD
         };
+        let cache_key = SourceLatentCacheKey {
+            image_hash: hash_bytes(source_bytes),
+            width,
+            height,
+        };
+        let cached = self
+            .source_latent_cache
+            .lock()
+            .expect("source_latent_cache poisoned")
+            .get_cloned(&cache_key);
+        let encoded = if let Some(cached) = cached {
+            self.progress.info("Reusing cached source image latents");
+            cached.restore(device, dtype)?
+        } else {
+            self.progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
 
-        let encoded = vae.encode(&source_tensor)?;
-        let encoded = (encoded.sample()? * vae_scale)?;
+            let source_tensor = decode_source_image(
+                source_bytes,
+                width,
+                height,
+                NormalizeRange::MinusOneToOne,
+                device,
+                dtype,
+            )?;
+            let encoded = vae.encode(&source_tensor)?;
+            let encoded = (encoded.sample()? * vae_scale)?;
 
-        self.progress
-            .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.source_latent_cache
+                .lock()
+                .expect("source_latent_cache poisoned")
+                .insert(cache_key, CachedTensor::from_tensor(&encoded)?);
+            encoded
+        };
 
         let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
         let start_step = start_step.min(steps as usize);
@@ -400,6 +447,21 @@ impl SDXLEngine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
+        let cache_key = PromptCacheKey {
+            prompt: prompt.to_string(),
+            guidance_bits: guidance.to_bits(),
+        };
+        if let Some(cached) = self
+            .prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .get_cloned(&cache_key)
+        {
+            self.progress
+                .info("Reusing cached SDXL prompt conditioning");
+            return cached.restore(device, dtype);
+        }
+
         let use_cfg = guidance > 1.0;
 
         self.progress.stage_start("Encoding prompt (CLIP-L)");
@@ -429,7 +491,44 @@ impl SDXLEngine {
             text_embeddings
         };
 
-        Ok(text_embeddings.to_dtype(dtype)?)
+        let text_embeddings = text_embeddings.to_dtype(dtype)?;
+        self.prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .insert(cache_key, CachedTensor::from_tensor(&text_embeddings)?);
+        Ok(text_embeddings)
+    }
+
+    fn cached_mask(
+        &self,
+        mask_bytes: &[u8],
+        latent_h: usize,
+        latent_w: usize,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor> {
+        let key = MaskCacheKey {
+            image_hash: hash_bytes(mask_bytes),
+            latent_h,
+            latent_w,
+        };
+        if let Some(cached) = self
+            .mask_cache
+            .lock()
+            .expect("mask_cache poisoned")
+            .get_cloned(&key)
+        {
+            self.progress.info("Reusing cached inpaint mask");
+            return cached.restore(device, dtype);
+        }
+
+        let mask =
+            crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)?;
+        self.mask_cache
+            .lock()
+            .expect("mask_cache poisoned")
+            .insert(key, CachedTensor::from_tensor(&mask)?);
+        Ok(mask)
     }
 
     /// Generate an image using sequential loading strategy.
@@ -554,71 +653,66 @@ impl SDXLEngine {
         let sched = req.scheduler.unwrap_or(self.scheduler);
         let is_img2img = req.source_image.is_some();
 
-        let (mut latents, start_step, inpaint_ctx) =
-            if let Some(ref source_bytes) = req.source_image {
-                self.progress
-                    .info("img2img mode: encoding source image before denoising");
+        let (mut latents, start_step, inpaint_ctx) = if let Some(ref source_bytes) =
+            req.source_image
+        {
+            self.progress
+                .info("img2img mode: encoding source image before denoising");
 
-                self.progress.stage_start("Loading VAE (GPU)");
-                let vae_start_t = Instant::now();
-                let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-                self.progress
-                    .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
+            self.progress.stage_start("Loading VAE (GPU)");
+            let vae_start_t = Instant::now();
+            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+            self.progress
+                .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
 
-                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
-                    &vae,
-                    source_bytes,
-                    req.width,
-                    req.height,
-                    req.strength,
-                    req.steps,
-                    sched,
-                    seed,
-                    &device,
-                    dtype,
-                )?;
+            let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                &vae,
+                source_bytes,
+                req.width,
+                req.height,
+                req.strength,
+                req.steps,
+                sched,
+                seed,
+                &device,
+                dtype,
+            )?;
 
-                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let mask = crate::img_utils::decode_mask_image(
-                        mask_bytes,
-                        height / 8,
-                        width / 8,
-                        &device,
-                        dtype,
-                    )?;
-                    Some(crate::img_utils::InpaintContext {
-                        original_latents: encoded,
-                        mask,
-                        noise,
-                    })
-                } else {
-                    None
-                };
-
-                drop(vae);
-                self.progress.info("Freed VAE (will reload for decode)");
-                device.synchronize()?;
-
-                (latents, start_step, inpaint_ctx)
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = self.cached_mask(mask_bytes, height / 8, width / 8, &device, dtype)?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded,
+                    mask,
+                    noise,
+                })
             } else {
-                let latent_h = height / 8;
-                let latent_w = width / 8;
-                let init_scheduler = crate::scheduler::build_scheduler(
-                    sched,
-                    req.steps as usize,
-                    PredictionType::Epsilon,
-                    self.is_turbo,
-                )?;
-                let init_noise_sigma = init_scheduler.init_noise_sigma();
-                drop(init_scheduler);
-                let latents = (crate::engine::seeded_randn(
-                    seed,
-                    &[1, 4, latent_h, latent_w],
-                    &device,
-                    DType::F32,
-                )? * init_noise_sigma)?;
-                (latents.to_dtype(dtype)?, 0, None)
+                None
             };
+
+            drop(vae);
+            self.progress.info("Freed VAE (will reload for decode)");
+            device.synchronize()?;
+
+            (latents, start_step, inpaint_ctx)
+        } else {
+            let latent_h = height / 8;
+            let latent_w = width / 8;
+            let init_scheduler = crate::scheduler::build_scheduler(
+                sched,
+                req.steps as usize,
+                PredictionType::Epsilon,
+                self.is_turbo,
+            )?;
+            let init_noise_sigma = init_scheduler.init_noise_sigma();
+            drop(init_scheduler);
+            let latents = (crate::engine::seeded_randn(
+                seed,
+                &[1, 4, latent_h, latent_w],
+                &device,
+                DType::F32,
+            )? * init_noise_sigma)?;
+            (latents.to_dtype(dtype)?, 0, None)
+        };
 
         self.denoise_loop(
             &unet,
@@ -754,7 +848,7 @@ impl InferenceEngine for SDXLEngine {
                     loaded.dtype,
                 )?;
                 let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let mask = crate::img_utils::decode_mask_image(
+                    let mask = self.cached_mask(
                         mask_bytes,
                         height / 8,
                         width / 8,
@@ -856,6 +950,15 @@ impl InferenceEngine for SDXLEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        self.prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .clear();
+        self.source_latent_cache
+            .lock()
+            .expect("source_latent_cache poisoned")
+            .clear();
+        self.mask_cache.lock().expect("mask_cache poisoned").clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

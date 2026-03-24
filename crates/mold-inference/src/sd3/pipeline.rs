@@ -4,8 +4,10 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::cache::{CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY};
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
@@ -45,6 +47,7 @@ pub struct SD3Engine {
     progress: ProgressReporter,
     t5_variant: Option<String>,
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
 }
 
 impl SD3Engine {
@@ -66,7 +69,63 @@ impl SD3Engine {
             progress: ProgressReporter::default(),
             t5_variant,
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
+    }
+
+    fn encode_conditioning(
+        &self,
+        triple_encoder: &mut encoders::sd3_clip::SD3TripleEncoder,
+        prompt: &str,
+        device: &Device,
+        dtype: DType,
+        is_quantized: bool,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+        if let Some(cached) = self
+            .prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .get_cloned(&prompt.to_string())
+        {
+            self.progress.info("Reusing cached SD3 prompt conditioning");
+            return Ok((
+                cached
+                    .first
+                    .restore(device, if is_quantized { DType::F32 } else { dtype })?,
+                cached
+                    .second
+                    .restore(device, if is_quantized { DType::F32 } else { dtype })?,
+            ));
+        }
+
+        self.progress.stage_start("Encoding prompt (SD3 triple)");
+        let encode_start = Instant::now();
+        let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
+        let (context_uncond, y_uncond) = triple_encoder.encode("", device, dtype)?;
+        self.progress
+            .stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
+
+        let (context, y) = if is_quantized {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
+                    .to_dtype(DType::F32)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
+            )
+        } else {
+            (
+                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
+                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
+            )
+        };
+
+        self.prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .insert(
+                prompt.to_string(),
+                CachedTensorPair::from_tensors(&context, &y)?,
+            );
+        Ok((context, y))
     }
 
     /// Detect if the transformer is quantized (GGUF).
@@ -385,31 +444,17 @@ impl SD3Engine {
         self.progress
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
-        self.progress.stage_start("Encoding prompt (SD3 triple)");
-        let encode_start = Instant::now();
-        let (context_cond, y_cond) = triple_encoder.encode(&req.prompt, &device, gpu_dtype)?;
-        let (context_uncond, y_uncond) = triple_encoder.encode("", &device, gpu_dtype)?;
-        self.progress
-            .stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
+        let (context, y) = self.encode_conditioning(
+            &mut triple_encoder,
+            &req.prompt,
+            &device,
+            gpu_dtype,
+            is_quantized,
+        )?;
 
         // Drop encoders to free memory
         drop(triple_encoder);
         self.progress.info("Freed SD3 triple encoder");
-
-        // Concatenate cond/uncond for CFG
-        // For quantized models, cast embeddings to F32 (GGUF dequantizes to F32)
-        let (context, y) = if is_quantized {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
-                    .to_dtype(DType::F32)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
-            )
-        } else {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
-            )
-        };
 
         // --- Phase 2: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
@@ -558,9 +603,9 @@ impl InferenceEngine for SD3Engine {
         // Eager mode: use pre-loaded components
         let progress = &self.progress;
 
-        let loaded = self
+        let mut loaded = self
             .loaded
-            .as_mut()
+            .take()
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
 
         let start = Instant::now();
@@ -579,130 +624,103 @@ impl InferenceEngine for SD3Engine {
             "starting SD3 generation"
         );
 
-        // Reload encoders if they were dropped
-        if !loaded.triple_encoder.is_loaded() {
-            progress.stage_start("Reloading SD3 triple encoder");
-            let reload_start = Instant::now();
-            loaded.triple_encoder.reload(loaded.dtype)?;
-            progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
-        }
+        let result = (|| -> Result<GenerateResponse> {
+            if !loaded.triple_encoder.is_loaded() {
+                progress.stage_start("Reloading SD3 triple encoder");
+                let reload_start = Instant::now();
+                loaded.triple_encoder.reload(loaded.dtype)?;
+                progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
+            }
 
-        // 1. Encode prompt with triple encoder
-        progress.stage_start("Encoding prompt (SD3 triple)");
-        let encode_start = Instant::now();
-        let (context_cond, y_cond) =
-            loaded
-                .triple_encoder
-                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
-        let (context_uncond, y_uncond) =
-            loaded
-                .triple_encoder
-                .encode("", &loaded.device, loaded.dtype)?;
-        progress.stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
-
-        // Drop encoders from GPU to free VRAM for denoising
-        if loaded.triple_encoder.on_gpu {
-            loaded.triple_encoder.drop_weights();
-            tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
-        }
-
-        // Concatenate for CFG (quantized models need F32)
-        let (context, y) = if loaded._is_quantized {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?
-                    .to_dtype(DType::F32)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?.to_dtype(DType::F32)?,
-            )
-        } else {
-            (
-                candle_core::Tensor::cat(&[&context_cond, &context_uncond], 0)?,
-                candle_core::Tensor::cat(&[&y_cond, &y_uncond], 0)?,
-            )
-        };
-
-        // 2. Denoise
-        let time_shift = 3.0;
-        let slg_config = if loaded.is_medium {
-            Some(SkipLayerGuidanceConfig {
-                scale: 2.5,
-                start: 0.01,
-                end: 0.2,
-                layers: vec![7, 8, 9],
-            })
-        } else {
-            None
-        };
-
-        let denoise_label = format!("Denoising ({} steps)", req.steps);
-        progress.stage_start(&denoise_label);
-        let denoise_start = Instant::now();
-
-        let x = sampling::euler_sample(
-            &loaded.transformer,
-            &y,
-            &context,
-            req.steps as usize,
-            req.guidance,
-            time_shift,
-            height,
-            width,
-            slg_config.as_ref(),
-            loaded._is_quantized,
-            seed,
-            progress,
-        )?;
-
-        progress.stage_done(&denoise_label, denoise_start.elapsed());
-
-        // Free denoising intermediates
-        drop(context);
-        drop(y);
-        drop(context_cond);
-        drop(context_uncond);
-        drop(y_cond);
-        drop(y_uncond);
-
-        // 3. VAE decode
-        progress.stage_start("VAE decode");
-        let vae_decode_start = Instant::now();
-
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&loaded.vae_vb_path),
-                loaded.dtype,
+            let (context, y) = self.encode_conditioning(
+                &mut loaded.triple_encoder,
+                &req.prompt,
                 &loaded.device,
-            )?
-        };
-        let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
-        let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+                loaded.dtype,
+                loaded._is_quantized,
+            )?;
 
-        // SD3 VAE scaling: x / 1.5305 + 0.0609
-        // Quantized denoiser outputs F32; cast to match VAE dtype (F16 on GPU).
-        let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
-        let img = autoencoder.decode(&x)?;
+            if loaded.triple_encoder.on_gpu {
+                loaded.triple_encoder.drop_weights();
+                tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
+            }
 
-        let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
-        let img = img.i(0)?;
+            let time_shift = 3.0;
+            let slg_config = if loaded.is_medium {
+                Some(SkipLayerGuidanceConfig {
+                    scale: 2.5,
+                    start: 0.01,
+                    end: 0.2,
+                    layers: vec![7, 8, 9],
+                })
+            } else {
+                None
+            };
 
-        progress.stage_done("VAE decode", vae_decode_start.elapsed());
+            let denoise_label = format!("Denoising ({} steps)", req.steps);
+            progress.stage_start(&denoise_label);
+            let denoise_start = Instant::now();
 
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+            let x = sampling::euler_sample(
+                &loaded.transformer,
+                &y,
+                &context,
+                req.steps as usize,
+                req.guidance,
+                time_shift,
+                height,
+                width,
+                slg_config.as_ref(),
+                loaded._is_quantized,
+                seed,
+                progress,
+            )?;
 
-        let generation_time_ms = start.elapsed().as_millis() as u64;
-        tracing::info!(generation_time_ms, seed, "SD3 generation complete");
+            progress.stage_done(&denoise_label, denoise_start.elapsed());
+            drop(context);
+            drop(y);
 
-        Ok(GenerateResponse {
-            images: vec![ImageData {
-                data: image_bytes,
-                format: req.output_format,
-                width: req.width,
-                height: req.height,
-                index: 0,
-            }],
-            generation_time_ms,
-            model: req.model.clone(),
-            seed_used: seed,
-        })
+            progress.stage_start("VAE decode");
+            let vae_decode_start = Instant::now();
+
+            let vae_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&loaded.vae_vb_path),
+                    loaded.dtype,
+                    &loaded.device,
+                )?
+            };
+            let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
+            let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+
+            let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
+            let img = autoencoder.decode(&x)?;
+
+            let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
+            let img = img.i(0)?;
+
+            progress.stage_done("VAE decode", vae_decode_start.elapsed());
+
+            let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+
+            let generation_time_ms = start.elapsed().as_millis() as u64;
+            tracing::info!(generation_time_ms, seed, "SD3 generation complete");
+
+            Ok(GenerateResponse {
+                images: vec![ImageData {
+                    data: image_bytes,
+                    format: req.output_format,
+                    width: req.width,
+                    height: req.height,
+                    index: 0,
+                }],
+                generation_time_ms,
+                model: req.model.clone(),
+                seed_used: seed,
+            })
+        })();
+        self.loaded = Some(loaded);
+        result
     }
 
     fn model_name(&self) -> &str {
@@ -719,6 +737,10 @@ impl InferenceEngine for SD3Engine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        self.prompt_cache
+            .lock()
+            .expect("prompt_cache poisoned")
+            .clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

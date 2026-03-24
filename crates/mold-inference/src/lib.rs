@@ -1,3 +1,4 @@
+mod cache;
 pub mod controlnet;
 pub mod device;
 mod encoders;
