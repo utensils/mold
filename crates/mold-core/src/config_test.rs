@@ -149,6 +149,17 @@ is_schnell = false
 
     #[test]
     fn model_paths_resolve_from_config() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
         let mut models = HashMap::new();
         models.insert("test-flux".to_string(), full_model_config("/tmp"));
         let cfg = Config {

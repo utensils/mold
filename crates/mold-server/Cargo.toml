@@ -11,12 +11,10 @@ description = "HTTP inference server for mold"
 
 [lib]
 name = "mold_server"
-test = false
 
 [[bin]]
 name = "mold-server"
 path = "src/main.rs"
-test = false
 
 [features]
 default = []

@@ -6,8 +6,13 @@ use candle_transformers::models::wuerstchen::diffnext::WDiffNeXt;
 use candle_transformers::models::wuerstchen::paella_vq::PaellaVQ;
 use candle_transformers::models::wuerstchen::prior::WPrior;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::cache::{
+    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, CachedTensorPair, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
@@ -58,6 +63,7 @@ pub struct WuerstchenEngine {
     paths: ModelPaths,
     progress: ProgressReporter,
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
 }
 
 impl WuerstchenEngine {
@@ -68,7 +74,66 @@ impl WuerstchenEngine {
             paths,
             progress: ProgressReporter::default(),
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_prompt_pair_cached(
+        &self,
+        prior_clip: &stable_diffusion::clip::ClipTextTransformer,
+        prior_tokenizer: &tokenizers::Tokenizer,
+        decoder_clip: &stable_diffusion::clip::ClipTextTransformer,
+        decoder_tokenizer: &tokenizers::Tokenizer,
+        prompt: &str,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<(Tensor, Tensor)> {
+        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let cache_key = prompt_text_key(prompt);
+        let ((prior_text_embeddings, decoder_text_embeddings), cache_hit) =
+            get_or_insert_cached_tensor_pair(&self.prompt_cache, cache_key, device, dtype, || {
+                self.progress
+                    .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
+                let encode_start = Instant::now();
+                let (prior_tokens, prior_tokens_len) = Self::tokenize(
+                    prior_tokenizer,
+                    prompt,
+                    prior_clip_config.max_position_embeddings,
+                    device,
+                )?;
+                let prior_text_embeddings = prior_clip
+                    .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
+                    .to_dtype(dtype)?;
+                self.progress.stage_done(
+                    "Encoding prompt (Prior CLIP-G, 1280-dim)",
+                    encode_start.elapsed(),
+                );
+
+                self.progress
+                    .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
+                let dec_encode_start = Instant::now();
+                let (dec_tokens, dec_tokens_len) = Self::tokenize(
+                    decoder_tokenizer,
+                    prompt,
+                    dec_clip_config.max_position_embeddings,
+                    device,
+                )?;
+                let decoder_text_embeddings = decoder_clip
+                    .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
+                    .to_dtype(dtype)?;
+                self.progress.stage_done(
+                    "Encoding prompt (Decoder CLIP, 1024-dim)",
+                    dec_encode_start.elapsed(),
+                );
+                Ok((prior_text_embeddings, decoder_text_embeddings))
+            })?;
+        if cache_hit {
+            self.progress
+                .info("Reusing cached Wuerstchen prompt conditioning");
+        }
+        Ok((prior_text_embeddings, decoder_text_embeddings))
     }
 
     /// Validate and return required Wuerstchen paths.
@@ -444,27 +509,43 @@ impl WuerstchenEngine {
             clip_start.elapsed(),
         );
 
+        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+
         self.progress
-            .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
-        let encode_start = Instant::now();
-        let (prior_tokens, prior_tokens_len) = Self::tokenize(
-            &prior_tokenizer,
-            &req.prompt,
-            prior_clip_config.max_position_embeddings,
+            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
+        let dec_clip_start = Instant::now();
+        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let decoder_clip = stable_diffusion::build_clip_transformer(
+            &dec_clip_config,
+            &dec_clip_path,
             &device,
+            DType::F32,
         )?;
-        let prior_text_embeddings = prior_clip
-            .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
-            .to_dtype(dtype)?;
         self.progress.stage_done(
-            "Encoding prompt (Prior CLIP-G, 1280-dim)",
-            encode_start.elapsed(),
+            "Loading Decoder CLIP encoder (1024-dim)",
+            dec_clip_start.elapsed(),
         );
+
+        let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
+            &prior_clip,
+            &prior_tokenizer,
+            &decoder_clip,
+            &decoder_tokenizer,
+            &req.prompt,
+            &device,
+            dtype,
+        )?;
 
         drop(prior_clip);
         drop(prior_tokenizer);
         self.progress.info("Freed Prior CLIP-G encoder");
         tracing::info!("Prior CLIP-G encoder dropped (sequential mode)");
+
+        drop(decoder_clip);
+        drop(decoder_tokenizer);
+        self.progress.info("Freed Decoder CLIP encoder");
+        tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
 
         // --- Phase 2: Prior (Stage C) ---
         let prior_size = std::fs::metadata(&self.paths.transformer)
@@ -525,47 +606,6 @@ impl WuerstchenEngine {
         self.progress.info("Freed Prior (Stage C)");
 
         // --- Phase 3: Decoder (Stage B) ---
-        // 3a. Load Decoder CLIP (1024-dim) and encode prompt
-        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
-
-        self.progress
-            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
-        let dec_clip_start = Instant::now();
-        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let decoder_clip = stable_diffusion::build_clip_transformer(
-            &dec_clip_config,
-            &dec_clip_path,
-            &device,
-            DType::F32,
-        )?;
-        self.progress.stage_done(
-            "Loading Decoder CLIP encoder (1024-dim)",
-            dec_clip_start.elapsed(),
-        );
-
-        self.progress
-            .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
-        let dec_encode_start = Instant::now();
-        let (dec_tokens, dec_tokens_len) = Self::tokenize(
-            &decoder_tokenizer,
-            &req.prompt,
-            dec_clip_config.max_position_embeddings,
-            &device,
-        )?;
-        let decoder_text_embeddings = decoder_clip
-            .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
-            .to_dtype(dtype)?;
-        self.progress.stage_done(
-            "Encoding prompt (Decoder CLIP, 1024-dim)",
-            dec_encode_start.elapsed(),
-        );
-
-        drop(decoder_clip);
-        drop(decoder_tokenizer);
-        self.progress.info("Freed Decoder CLIP encoder");
-        tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
-
         // 3b. Load Decoder (Stage B) model and denoise
         let decoder_size = std::fs::metadata(&decoder_path)
             .map(|m| m.len())
@@ -699,48 +739,15 @@ impl InferenceEngine for WuerstchenEngine {
         );
 
         // 1. Encode prompt with Prior CLIP-G (1280-dim)
-        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let prior_max_len = prior_clip_config.max_position_embeddings;
-
-        self.progress
-            .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
-        let encode_start = Instant::now();
-        let (prior_tokens, prior_tokens_len) = Self::tokenize(
+        let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
+            &loaded.prior_clip,
             &loaded.prior_tokenizer,
-            &req.prompt,
-            prior_max_len,
-            &loaded.device,
-        )?;
-        let prior_text_embeddings = loaded
-            .prior_clip
-            .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
-            .to_dtype(loaded.dtype)?;
-        self.progress.stage_done(
-            "Encoding prompt (Prior CLIP-G, 1280-dim)",
-            encode_start.elapsed(),
-        );
-
-        // 2. Encode prompt with Decoder CLIP (1024-dim)
-        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let dec_max_len = dec_clip_config.max_position_embeddings;
-
-        self.progress
-            .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
-        let dec_encode_start = Instant::now();
-        let (dec_tokens, dec_tokens_len) = Self::tokenize(
+            &loaded.decoder_clip,
             &loaded.decoder_tokenizer,
             &req.prompt,
-            dec_max_len,
             &loaded.device,
+            loaded.dtype,
         )?;
-        let decoder_text_embeddings = loaded
-            .decoder_clip
-            .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
-            .to_dtype(loaded.dtype)?;
-        self.progress.stage_done(
-            "Encoding prompt (Decoder CLIP, 1024-dim)",
-            dec_encode_start.elapsed(),
-        );
 
         // 3. Stage C (Prior): denoise in highly compressed latent space
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
@@ -831,6 +838,7 @@ impl InferenceEngine for WuerstchenEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

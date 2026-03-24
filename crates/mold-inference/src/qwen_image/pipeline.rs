@@ -20,6 +20,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
@@ -29,6 +30,9 @@ use super::sampling::{
 };
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
 use super::vae::QwenImageVae;
+use crate::cache::{
+    clear_cache, prompt_text_key, CachedTensor, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{
     fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check, should_use_gpu,
 };
@@ -65,6 +69,31 @@ enum QwenImageTransformer {
     Quantized(QuantizedQwenImageTransformer2DModel),
 }
 
+#[derive(Clone)]
+struct CachedPromptConditioning {
+    hidden_states: CachedTensor,
+    valid_len: usize,
+}
+
+impl CachedPromptConditioning {
+    fn from_parts(hidden_states: &Tensor, valid_len: usize) -> Result<Self> {
+        Ok(Self {
+            hidden_states: CachedTensor::from_tensor(hidden_states)?,
+            valid_len,
+        })
+    }
+
+    fn restore(&self, device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
+        let hidden_states = self.hidden_states.restore(device, dtype)?;
+        let mut mask = vec![0u8; hidden_states.dim(1)?];
+        for value in &mut mask[..self.valid_len] {
+            *value = 1;
+        }
+        let attention_mask = Tensor::from_vec(mask, (1, hidden_states.dim(1)?), device)?;
+        Ok((hidden_states, attention_mask))
+    }
+}
+
 impl QwenImageTransformer {
     fn forward(
         &self,
@@ -92,6 +121,7 @@ pub struct QwenImageEngine {
     progress: ProgressReporter,
     /// How to load model components.
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
 }
 
 impl QwenImageEngine {
@@ -135,7 +165,45 @@ impl QwenImageEngine {
             paths,
             progress: ProgressReporter::default(),
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
+    }
+
+    fn encode_prompt_cached(
+        progress: &ProgressReporter,
+        prompt_cache: &Mutex<LruCache<String, CachedPromptConditioning>>,
+        text_encoder: &mut encoders::qwen2_text::Qwen2TextEncoder,
+        prompt: &str,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<(Tensor, Tensor)> {
+        let cache_key = prompt_text_key(prompt);
+        if let Some(cached) = prompt_cache
+            .lock()
+            .expect("cache poisoned")
+            .get_cloned(&cache_key)
+        {
+            progress.info("Reusing cached Qwen-Image prompt conditioning");
+            return cached.restore(device, dtype);
+        }
+
+        progress.stage_start("Encoding prompt (Qwen2.5)");
+        let encode_start = Instant::now();
+        let (hidden_states, _attention_mask, valid_len) =
+            text_encoder.encode(prompt, device, dtype)?;
+        progress.stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
+
+        prompt_cache.lock().expect("cache poisoned").insert(
+            cache_key,
+            CachedPromptConditioning::from_parts(&hidden_states, valid_len)?,
+        );
+
+        let mut mask = vec![0u8; hidden_states.dim(1)?];
+        for value in &mut mask[..valid_len] {
+            *value = 1;
+        }
+        let attention_mask = Tensor::from_vec(mask, (1, hidden_states.dim(1)?), device)?;
+        Ok((hidden_states, attention_mask))
     }
 
     /// Resolve transformer shard paths.
@@ -408,12 +476,14 @@ impl QwenImageEngine {
             self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
         self.progress.stage_done(&te_label, te_start.elapsed());
 
-        self.progress.stage_start("Encoding prompt (Qwen2.5)");
-        let encode_start = Instant::now();
-        let (encoder_hidden_states, encoder_attention_mask, _token_count) =
-            text_encoder.encode(&req.prompt, &device, dtype)?;
-        self.progress
-            .stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
+        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
+            &self.progress,
+            &self.prompt_cache,
+            &mut text_encoder,
+            &req.prompt,
+            &device,
+            dtype,
+        )?;
 
         // Drop text encoder to free memory
         drop(text_encoder);
@@ -642,12 +712,14 @@ impl InferenceEngine for QwenImageEngine {
         }
 
         // 2. Encode prompt
-        progress.stage_start("Encoding prompt (Qwen2.5)");
-        let encode_start = Instant::now();
-        let (encoder_hidden_states, encoder_attention_mask, _token_count) = loaded
-            .text_encoder
-            .encode(&req.prompt, &loaded.device, loaded.dtype)?;
-        progress.stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
+        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
+            progress,
+            &self.prompt_cache,
+            &mut loaded.text_encoder,
+            &req.prompt,
+            &loaded.device,
+            loaded.dtype,
+        )?;
 
         // Drop text encoder from GPU to free VRAM for denoising
         if loaded.text_encoder.on_gpu {
@@ -788,6 +860,7 @@ impl InferenceEngine for QwenImageEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

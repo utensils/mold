@@ -393,6 +393,9 @@ impl std::error::Error for ModelNotFoundError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_new_trims_trailing_slash() {
@@ -414,6 +417,7 @@ mod tests {
 
     #[test]
     fn test_from_env_mold_host() {
+        let _lock = ENV_LOCK.lock().unwrap();
         // Single test to avoid env var races between parallel tests
         unsafe { std::env::remove_var("MOLD_HOST") };
         let client = MoldClient::from_env();
