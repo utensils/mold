@@ -152,12 +152,12 @@ pub async fn run() -> Result<()> {
                             let fetch = format_fetch_size(remaining_bytes);
                             (format!("{:.1}GB", model_gb), fetch)
                         } else {
-                            let s = if m.size_gb > 0.0 {
+                            let size_str = if m.size_gb > 0.0 {
                                 format!("{:.1}GB", m.size_gb)
                             } else {
                                 "—".to_string()
                             };
-                            (s.clone(), s)
+                            (size_str, "—".to_string())
                         };
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
