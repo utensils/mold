@@ -67,6 +67,11 @@ impl ModelManifest {
         self.model_size_bytes() as f32 / 1_073_741_824.0
     }
 
+    /// True if any file in this model requires HuggingFace authentication.
+    pub fn is_gated(&self) -> bool {
+        self.files.iter().any(|f| f.gated)
+    }
+
     /// Total size of all files in this model in bytes.
     pub fn total_size_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size_bytes).sum()

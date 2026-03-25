@@ -6,6 +6,17 @@ use crate::output::colorize_description;
 use crate::theme;
 use crate::ui::{col_width, family_label, format_disk_size, format_family_padded};
 
+fn description_with_gated(desc: &str, model_name: &str) -> String {
+    let is_gated = mold_core::manifest::find_manifest(model_name)
+        .map(|m| m.is_gated())
+        .unwrap_or(false);
+    if is_gated && !desc.contains("[gated]") {
+        format!("{desc} [gated]")
+    } else {
+        desc.to_string()
+    }
+}
+
 fn format_fetch_size(remaining_bytes: u64) -> String {
     if remaining_bytes == 0 {
         format!("{:>7}", "cached").dimmed().to_string()
@@ -97,11 +108,12 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", model.defaults.default_guidance),
                         model.defaults.default_width,
                         model.defaults.default_height,
-                        colorize_description(
+                        colorize_description(&description_with_gated(
                             mold_core::manifest::find_manifest(&model.name)
                                 .map(|m| m.description.as_str())
                                 .unwrap_or(&model.defaults.description),
-                        ),
+                            &model.name,
+                        )),
                     );
                 }
             }
@@ -143,7 +155,10 @@ pub async fn run() -> Result<()> {
                         format_family_padded(&m.family, fw),
                         size_str,
                         fetch_col,
-                        colorize_description(&m.defaults.description),
+                        colorize_description(&description_with_gated(
+                            &m.defaults.description,
+                            &m.name
+                        ),),
                         nw = nw,
                     );
                 }
@@ -228,13 +243,12 @@ pub async fn run() -> Result<()> {
                         format!("{:.1}", model.defaults.default_guidance),
                         model.defaults.default_width,
                         model.defaults.default_height,
-                        colorize_description(
-                            // Prefer manifest description (has [alpha]/[beta] tags)
-                            // over config description (may be stale from older pull)
+                        colorize_description(&description_with_gated(
                             mold_core::manifest::find_manifest(name)
                                 .map(|m| m.description.as_str())
                                 .unwrap_or(&model.defaults.description),
-                        ),
+                            name,
+                        )),
                         nw = nw,
                     );
                 }
@@ -281,7 +295,10 @@ pub async fn run() -> Result<()> {
                         format_family_padded(&m.family, fw),
                         size_str,
                         fetch_col,
-                        colorize_description(&m.defaults.description),
+                        colorize_description(&description_with_gated(
+                            &m.defaults.description,
+                            &m.name
+                        ),),
                         nw = nw,
                     );
                 }
