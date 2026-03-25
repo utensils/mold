@@ -70,20 +70,23 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
 }
 
 /// Path for the Q8 GGUF cache of an FP8 safetensors file.
-/// Cache key: stem + file size + hash of the first 4KB of content.
-/// This ensures different checkpoints with the same basename and size
-/// (e.g. two different `model.safetensors` exports) don't collide,
-/// and in-place replacements invalidate the cache.
+/// Cache key: stem + file size + FNV-1a hash of 4KB sampled from the weight
+/// data region (past the JSON header). This avoids collisions between
+/// different fine-tunes that share the same tensor layout and header.
 fn fp8_gguf_cache_path(path: &Path) -> PathBuf {
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transformer");
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    // Hash the first 4KB for content identity (fast, avoids reading the full 12GB file)
+    // Sample 4KB from the weight data region (past the safetensors JSON header).
+    // The header is typically ~30-60KB; sampling from 25% into the file ensures
+    // we're reading actual weight data, not the identical JSON layout.
+    let sample_offset = size / 4;
     let content_hash = std::fs::File::open(path)
         .and_then(|mut f| {
+            f.seek(SeekFrom::Start(sample_offset))?;
             let mut buf = vec![0u8; 4096];
             let n = f.read(&mut buf)?;
             buf.truncate(n);
@@ -121,32 +124,40 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid cache path: {}", cache_path.display()))?;
 
-    // Clean up orphaned caches from older naming schemes. Previous formats:
-    // v1: {stem}.q8_0.gguf  (no size/hash)
-    // v2: {stem}-{size}.q8_0.gguf  (no content hash)
-    // Current: {stem}-{size}-{hash}.q8_0.gguf
+    // Clean up orphaned caches from older naming schemes only.
+    // v1: {stem}.q8_0.gguf  (no size/hash — exactly "stem.q8_0.gguf")
+    // v2: {stem}-{size}.q8_0.gguf  (size only, no content hash — one dash)
+    // Current v3: {stem}-{size}-{hash}.q8_0.gguf  (two dashes — NOT cleaned)
+    // We only remove v1/v2 formats. Valid v3 caches for other checkpoints
+    // (different size/hash) are preserved to avoid expensive re-quantization.
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transformer");
     std::fs::create_dir_all(parent)?;
+    let old_v1 = parent.join(format!("{stem}.q8_0.gguf"));
+    if old_v1.exists() {
+        tracing::info!(path = %old_v1.display(), "removing v1 orphaned FP8 cache");
+        let _ = std::fs::remove_file(&old_v1);
+    }
+    // v2 format: {stem}-{digits}.q8_0.gguf (one dash, no hash)
     if let Ok(entries) = std::fs::read_dir(parent) {
-        let prefix = stem.to_string();
+        let v2_prefix = format!("{stem}-");
         let suffix = ".q8_0.gguf";
-        let cache_name = cache_path.file_name().and_then(|n| n.to_str());
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name_str) = name.to_str() else {
                 continue;
             };
-            if name_str.starts_with(&prefix)
-                && name_str.ends_with(suffix)
-                && Some(name_str) != cache_name
-            {
-                tracing::info!(
-                    path = %entry.path().display(),
-                    "removing orphaned FP8 cache (old naming format)"
-                );
+            if !name_str.starts_with(&v2_prefix) || !name_str.ends_with(suffix) {
+                continue;
+            }
+            // Extract the middle part between prefix and suffix
+            let middle = &name_str[v2_prefix.len()..name_str.len() - suffix.len()];
+            // v2 has no dash in the middle (just digits for size).
+            // v3 has a dash (size-hash). Only remove v2.
+            if !middle.contains('-') && middle.chars().all(|c| c.is_ascii_digit()) {
+                tracing::info!(path = %entry.path().display(), "removing v2 orphaned FP8 cache");
                 let _ = std::fs::remove_file(entry.path());
             }
         }
