@@ -1094,12 +1094,14 @@ impl QuantizedMMDiT {
             Vec::with_capacity(cfg.depth - 1);
         for i in 0..cfg.depth - 1 {
             let block_vb = vb.pp(format!("joint_blocks.{i}"));
-            // Check if this block has attn2 (MMDiT-X) by trying to find the weight
+            // Check if this block has attn2 (MMDiT-X) by probing for tensor presence only.
+            // Using a shaped get() here can produce a false negative on real tensors if the
+            // probe shape is wrong, which misclassifies SD3.5 Medium blocks as plain MMDiT.
             let has_attn2 = block_vb
                 .pp("x_block")
                 .pp("attn2")
                 .pp("qkv")
-                .get(1, "weight") // probe for existence
+                .get_no_shape("weight")
                 .is_ok();
             // Check for QK norm by probing ln_k (head_dim shape)
             let head_dim = hidden_size / num_heads;

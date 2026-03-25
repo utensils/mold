@@ -1,42 +1,11 @@
+use crate::error::MoldError;
+use crate::types::{
+    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ModelInfoExtended, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+};
 use anyhow::Result;
 use base64::Engine as _;
 use reqwest::Client;
-use serde::Deserialize;
-
-use crate::error::MoldError;
-use crate::types::{
-    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent,
-};
-
-/// Extended model info returned by /api/models, includes generation defaults.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelInfoExtended {
-    #[serde(flatten)]
-    pub info: ModelInfo,
-    #[serde(flatten)]
-    pub defaults: ModelDefaults,
-    /// Whether the model is downloaded on the server.
-    #[serde(default)]
-    pub downloaded: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelDefaults {
-    pub default_steps: u32,
-    pub default_guidance: f64,
-    pub default_width: u32,
-    pub default_height: u32,
-    pub description: String,
-}
-
-// Delegate the basic ModelInfo fields for ergonomic access.
-impl std::ops::Deref for ModelInfoExtended {
-    type Target = ModelInfo;
-    fn deref(&self) -> &Self::Target {
-        &self.info
-    }
-}
 
 pub struct MoldClient {
     base_url: String,
@@ -424,6 +393,7 @@ impl std::error::Error for ModelNotFoundError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
 
     #[test]
     fn test_new_trims_trailing_slash() {
@@ -445,6 +415,7 @@ mod tests {
 
     #[test]
     fn test_from_env_mold_host() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Single test to avoid env var races between parallel tests
         unsafe { std::env::remove_var("MOLD_HOST") };
         let client = MoldClient::from_env();

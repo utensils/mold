@@ -1,3 +1,4 @@
+pub mod model_manager;
 pub mod routes;
 pub mod state;
 
@@ -14,6 +15,8 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()> {
+    Config::install_runtime_models_dir_override(models_dir.clone());
+
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
     let model_name = config.default_model.clone();

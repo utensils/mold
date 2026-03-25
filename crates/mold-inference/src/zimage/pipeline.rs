@@ -7,10 +7,15 @@ use candle_transformers::models::z_image::{
 };
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use super::quantized_transformer::QuantizedZImageTransformer2DModel;
 use super::transformer::ZImageTransformer;
+use crate::cache::{
+    clear_cache, get_or_insert_cached_tensor, prompt_text_key, CachedTensor, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
     should_use_gpu,
@@ -64,6 +69,7 @@ pub struct ZImageEngine {
     qwen3_variant: Option<String>,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<String, CachedTensor>>,
 }
 
 impl ZImageEngine {
@@ -80,7 +86,33 @@ impl ZImageEngine {
             progress: ProgressReporter::default(),
             qwen3_variant,
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
+    }
+
+    fn encode_prompt_cached(
+        progress: &ProgressReporter,
+        prompt_cache: &Mutex<LruCache<String, CachedTensor>>,
+        encoder: &mut encoders::qwen3::Qwen3Encoder,
+        prompt: &str,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<(Tensor, Tensor)> {
+        let cache_key = prompt_text_key(prompt);
+        let (cap_feats, cache_hit) =
+            get_or_insert_cached_tensor(prompt_cache, cache_key, device, dtype, || {
+                progress.stage_start("Encoding prompt (Qwen3)");
+                let encode_start = Instant::now();
+                let (cap_feats, _token_count) = encoder.encode(prompt, device, dtype)?;
+                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                Ok(cap_feats)
+            })?;
+        if cache_hit {
+            progress.cache_hit("prompt conditioning");
+        }
+        let token_count = cap_feats.dim(1)?;
+        let cap_mask = Tensor::ones((1, token_count), DType::U8, device)?;
+        Ok((cap_feats, cap_mask))
     }
 
     /// Resolve transformer shard paths: use `transformer_shards` if non-empty,
@@ -429,12 +461,14 @@ impl ZImageEngine {
         };
         self.progress.stage_done(&te_label, te_start.elapsed());
 
-        self.progress.stage_start("Encoding prompt (Qwen3)");
-        let encode_start = Instant::now();
-        let (cap_feats, token_count) = text_encoder.encode(&req.prompt, &device, dtype)?;
-        let cap_mask = Tensor::ones((1, token_count), DType::U8, &device)?;
-        self.progress
-            .stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+        let (cap_feats, cap_mask) = Self::encode_prompt_cached(
+            &self.progress,
+            &self.prompt_cache,
+            &mut text_encoder,
+            &req.prompt,
+            &device,
+            dtype,
+        )?;
 
         // Drop text encoder to free memory before loading transformer
         drop(text_encoder);
@@ -673,17 +707,15 @@ impl InferenceEngine for ZImageEngine {
         }
 
         // 2. Encode prompt with Qwen3
-        progress.stage_start("Encoding prompt (Qwen3)");
-        let encode_start = Instant::now();
-
-        let (cap_feats, token_count) =
-            loaded
-                .text_encoder
-                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
-        let cap_mask = Tensor::ones((1, token_count), DType::U8, &loaded.device)?;
-
-        progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
-        tracing::info!(token_count, "text encoding complete");
+        let (cap_feats, cap_mask) = Self::encode_prompt_cached(
+            progress,
+            &self.prompt_cache,
+            &mut loaded.text_encoder,
+            &req.prompt,
+            &loaded.device,
+            loaded.dtype,
+        )?;
+        tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
 
         // Drop text encoder from GPU to free VRAM for denoising + VAE decode.
         // It will be reloaded on the next generate() call.
@@ -867,10 +899,15 @@ impl InferenceEngine for ZImageEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+
+    fn clear_on_progress(&mut self) {
+        self.progress.clear_callback();
     }
 }
 

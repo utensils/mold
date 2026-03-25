@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::manifest::resolve_model_name;
 use crate::types::Scheduler;
+
+static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Per-model file path + default settings configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -131,8 +134,20 @@ impl ModelPaths {
     /// Returns None if transformer and VAE paths can't be resolved.
     /// All other paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
-        let model_cfg = config.models.get(model_name);
+        if let Some(model_cfg) = config.discovered_manifest_model_config(model_name) {
+            return Self::resolve_from_model_config(Some(&model_cfg));
+        }
 
+        if crate::manifest::find_manifest(model_name).is_some() && config.has_models_dir_override()
+        {
+            return Self::resolve_from_model_config(None);
+        }
+
+        let model_cfg = config.lookup_model_config(model_name);
+        Self::resolve_from_model_config(model_cfg.as_ref())
+    }
+
+    fn resolve_from_model_config(model_cfg: Option<&ModelConfig>) -> Option<Self> {
         let transformer = Self::resolve_path(
             model_cfg.and_then(|m| m.transformer.as_deref()),
             "MOLD_TRANSFORMER_PATH",
@@ -279,6 +294,10 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn install_runtime_models_dir_override(models_dir: PathBuf) {
+        let _ = RUNTIME_MODELS_DIR_OVERRIDE.get_or_init(|| models_dir);
+    }
+
     pub fn load_or_default() -> Self {
         let Some(config_path) = Self::config_path() else {
             eprintln!("warning: could not determine home directory — using default config");
@@ -309,6 +328,13 @@ impl Config {
         }
     }
 
+    /// Reload config from disk while preserving runtime-only overrides.
+    pub fn reload_from_disk_preserving_runtime(&self) -> Self {
+        let mut fresh = Self::load_or_default();
+        fresh.models_dir = self.models_dir.clone();
+        fresh
+    }
+
     /// The root mold directory: `~/.mold/` on all platforms.
     /// Falls back to `./.mold` (relative to CWD) if the home directory cannot
     /// be determined (e.g. containers, CI). This preserves write-ability for
@@ -330,6 +356,9 @@ impl Config {
     }
 
     pub fn resolved_models_dir(&self) -> PathBuf {
+        if let Some(models_dir) = RUNTIME_MODELS_DIR_OVERRIDE.get() {
+            return models_dir.clone();
+        }
         if let Ok(env_dir) = std::env::var("MOLD_MODELS_DIR") {
             PathBuf::from(env_dir)
         } else {
@@ -339,20 +368,78 @@ impl Config {
         }
     }
 
+    pub fn has_models_dir_override(&self) -> bool {
+        RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
+    }
+
+    pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let models_dir = self.resolved_models_dir();
+        let downloads = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = models_dir.join(crate::manifest::storage_path(manifest, file));
+                path.exists().then_some((file.component, path))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        crate::manifest::paths_from_downloads(&downloads)
+    }
+
+    pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
+        self.resolved_local_manifest_model_config(name).is_some()
+    }
+
     /// Return the ModelConfig for a given model name, or an empty default.
     /// Tries the exact name first, then the canonical `name:tag` form.
     pub fn model_config(&self, name: &str) -> ModelConfig {
-        if let Some(cfg) = self.models.get(name) {
-            return cfg.clone();
-        }
-        // Try canonical name resolution (e.g. "flux-dev-q4" -> "flux-dev:q4")
-        let canonical = resolve_model_name(name);
-        if canonical != name {
-            if let Some(cfg) = self.models.get(&canonical) {
-                return cfg.clone();
+        let mut cfg = self.lookup_model_config(name).unwrap_or_default();
+
+        if let Some(discovered) = self.resolved_local_manifest_model_config(name) {
+            overlay_model_paths(&mut cfg, &discovered);
+            if cfg.description.is_none() {
+                cfg.description = discovered.description;
+            }
+            if cfg.family.is_none() {
+                cfg.family = discovered.family;
             }
         }
-        ModelConfig::default()
+
+        cfg
+    }
+
+    /// Return a model config merged with manifest defaults and metadata.
+    pub fn resolved_model_config(&self, name: &str) -> ModelConfig {
+        let mut cfg = self.model_config(name);
+
+        if let Some(manifest) = crate::manifest::find_manifest(name) {
+            if cfg.default_steps.is_none() {
+                cfg.default_steps = Some(manifest.defaults.steps);
+            }
+            if cfg.default_guidance.is_none() {
+                cfg.default_guidance = Some(manifest.defaults.guidance);
+            }
+            if cfg.default_width.is_none() {
+                cfg.default_width = Some(manifest.defaults.width);
+            }
+            if cfg.default_height.is_none() {
+                cfg.default_height = Some(manifest.defaults.height);
+            }
+            if cfg.is_schnell.is_none() {
+                cfg.is_schnell = Some(manifest.defaults.is_schnell);
+            }
+            if cfg.scheduler.is_none() {
+                cfg.scheduler = manifest.defaults.scheduler;
+            }
+            if cfg.description.is_none() {
+                cfg.description = Some(manifest.description.clone());
+            }
+            if cfg.family.is_none() {
+                cfg.family = Some(manifest.family.clone());
+            }
+        }
+
+        cfg
     }
 
     /// Insert or update a model configuration entry.
@@ -380,5 +467,62 @@ impl Config {
     /// Whether a config file exists on disk.
     pub fn exists_on_disk() -> bool {
         Self::config_path().is_some_and(|p| p.exists())
+    }
+
+    fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
+        if let Some(cfg) = self.models.get(name) {
+            return Some(cfg.clone());
+        }
+        let canonical = resolve_model_name(name);
+        if canonical != name {
+            return self.models.get(&canonical).cloned();
+        }
+        None
+    }
+
+    fn discovered_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let paths = self.discovered_manifest_paths(name)?;
+        Some(manifest.to_model_config(&paths))
+    }
+
+    fn resolved_local_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let paths = ModelPaths::resolve(name, self)?;
+        Some(manifest.to_model_config(&paths))
+    }
+}
+
+fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
+    target.transformer = source.transformer.clone();
+    target.transformer_shards = source.transformer_shards.clone();
+    target.vae = source.vae.clone();
+
+    if source.t5_encoder.is_some() {
+        target.t5_encoder = source.t5_encoder.clone();
+    }
+    if source.clip_encoder.is_some() {
+        target.clip_encoder = source.clip_encoder.clone();
+    }
+    if source.t5_tokenizer.is_some() {
+        target.t5_tokenizer = source.t5_tokenizer.clone();
+    }
+    if source.clip_tokenizer.is_some() {
+        target.clip_tokenizer = source.clip_tokenizer.clone();
+    }
+    if source.clip_encoder_2.is_some() {
+        target.clip_encoder_2 = source.clip_encoder_2.clone();
+    }
+    if source.clip_tokenizer_2.is_some() {
+        target.clip_tokenizer_2 = source.clip_tokenizer_2.clone();
+    }
+    if source.text_encoder_files.is_some() {
+        target.text_encoder_files = source.text_encoder_files.clone();
+    }
+    if source.text_tokenizer.is_some() {
+        target.text_tokenizer = source.text_tokenizer.clone();
+    }
+    if source.decoder.is_some() {
+        target.decoder = source.decoder.clone();
     }
 }

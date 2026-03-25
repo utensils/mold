@@ -1,16 +1,17 @@
 use anyhow::Result;
 use colored::Colorize;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    clamp_to_megapixel_limit, Config, GenerateRequest, GenerateResponse, ImageData, MoldClient,
-    OutputFormat, Scheduler, SseProgressEvent,
+    clamp_to_megapixel_limit, classify_generate_error, Config, GenerateRequest, GenerateResponse,
+    GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
-use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
+use crate::control::{stream_server_pull, CliContext};
 use crate::output::{is_piped, status};
+use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -52,24 +53,9 @@ pub async fn run(
     }
 
     // Load config and pull model-specific defaults.
-    let config = Config::load_or_default();
-    let model_cfg = config.model_config(model);
-    // Fall back to manifest defaults for models not yet in config (e.g. unpulled)
-    let model_cfg = if model_cfg.default_steps.is_none() {
-        if let Some(manifest) = mold_core::manifest::find_manifest(model) {
-            mold_core::ModelConfig {
-                default_steps: Some(manifest.defaults.steps),
-                default_guidance: Some(manifest.defaults.guidance),
-                default_width: Some(manifest.defaults.width),
-                default_height: Some(manifest.defaults.height),
-                ..model_cfg
-            }
-        } else {
-            model_cfg
-        }
-    } else {
-        model_cfg
-    };
+    let ctx = CliContext::new(host.as_deref());
+    let config = ctx.config().clone();
+    let model_cfg = config.resolved_model_config(model);
 
     // When source_image is provided and width/height not specified, derive from image dimensions
     let (effective_width, effective_height) =
@@ -179,53 +165,46 @@ pub async fn run(
         }
     }
 
-    // Batch loop: generate N images with incrementing seeds.
-    // The server/engine produces 1 image per request, so we loop client-side.
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
-    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-    let mut total_time_ms: u64 = 0;
-    let mut last_seed_used: u64 = base_seed;
-    let mut last_model = String::new();
+    let response = if local {
+        status!("{} Using local GPU inference", "●".cyan());
+        generate_local_batch(
+            &req,
+            &config,
+            t5_variant.clone(),
+            qwen3_variant.clone(),
+            eager,
+            width,
+            height,
+            steps,
+            guidance,
+            batch,
+            base_seed,
+        )
+        .await?
+    } else {
+        let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+        let mut total_time_ms: u64 = 0;
+        let mut last_seed_used: u64 = base_seed;
+        let mut last_model = String::new();
 
-    for i in 0..batch {
-        let mut iter_req = req.clone();
-        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-        iter_req.batch_size = 1;
+        for i in 0..batch {
+            let mut iter_req = req.clone();
+            iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+            iter_req.batch_size = 1;
 
-        if batch > 1 {
-            status!(
-                "{} Generating image {}/{} (seed: {})",
-                "●".cyan(),
-                i + 1,
-                batch,
-                iter_req.seed.unwrap(),
-            );
-        }
-
-        let response = if local {
-            if i == 0 {
-                status!("{} Using local GPU inference", "●".cyan());
+            if batch > 1 {
+                status!(
+                    "{} Generating image {}/{} (seed: {})",
+                    "●".cyan(),
+                    i + 1,
+                    batch,
+                    iter_req.seed.unwrap(),
+                );
             }
-            generate_local(
-                &iter_req,
-                &config,
-                t5_variant.clone(),
-                qwen3_variant.clone(),
-                eager,
-                width,
-                height,
-                steps,
-                guidance,
-            )
-            .await?
-        } else {
-            let client = match &host {
-                Some(h) => MoldClient::new(h),
-                None => MoldClient::from_env(),
-            };
 
-            generate_remote(
-                &client,
+            let response = generate_remote(
+                ctx.client(),
                 &iter_req,
                 &config,
                 model,
@@ -241,24 +220,24 @@ pub async fn run(
                 steps,
                 guidance,
             )
-            .await?
-        };
+            .await?;
 
-        total_time_ms += response.generation_time_ms;
-        last_seed_used = response.seed_used;
-        last_model = response.model.clone();
+            total_time_ms += response.generation_time_ms;
+            last_seed_used = response.seed_used;
+            last_model = response.model.clone();
 
-        for mut img in response.images {
-            img.index = i;
-            all_images.push(img);
+            for mut img in response.images {
+                img.index = i;
+                all_images.push(img);
+            }
         }
-    }
 
-    let response = GenerateResponse {
-        images: all_images,
-        generation_time_ms: total_time_ms,
-        model: last_model,
-        seed_used: last_seed_used,
+        GenerateResponse {
+            images: all_images,
+            generation_time_ms: total_time_ms,
+            model: last_model,
+            seed_used: last_seed_used,
+        }
     };
 
     // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
@@ -328,159 +307,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Render SSE progress events using indicatif progress bars.
-/// Used by both local GPU inference and remote SSE streaming.
-async fn render_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>) {
-    let pb = ProgressBar::new_spinner();
-    if is_piped() {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    // No steady tick — redraws only on events to avoid flickering with
-    // hf-hub's download bars (which write to stderr independently).
-    pb.tick();
-
-    let mut denoise_bar: Option<ProgressBar> = None;
-    let mut download_multi: Option<MultiProgress> = None;
-    let mut download_bars: HashMap<usize, ProgressBar> = HashMap::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            SseProgressEvent::StageStart { name } => {
-                if let Some(db) = denoise_bar.take() {
-                    db.finish_and_clear();
-                }
-                pb.set_message(format!("{}...", name));
-                pb.tick();
-            }
-            SseProgressEvent::StageDone { name, elapsed_ms } => {
-                if let Some(db) = denoise_bar.take() {
-                    db.finish_and_clear();
-                }
-                let secs = elapsed_ms as f64 / 1000.0;
-                pb.suspend(|| {
-                    status!(
-                        "  {} {} {}",
-                        "✓".green(),
-                        name,
-                        format!("[{:.1}s]", secs).dimmed(),
-                    );
-                });
-            }
-            SseProgressEvent::Info { message } => {
-                pb.suspend(|| {
-                    status!("  {} {}", "·".dimmed(), message.dimmed());
-                });
-            }
-            SseProgressEvent::DenoiseStep {
-                step,
-                total,
-                elapsed_ms,
-            } => {
-                let db = denoise_bar.get_or_insert_with(|| {
-                    pb.disable_steady_tick();
-                    pb.set_message("");
-
-                    let bar = ProgressBar::new(total as u64);
-                    if is_piped() {
-                        bar.set_draw_target(ProgressDrawTarget::stderr());
-                    }
-                    bar.set_style(
-                        ProgressStyle::default_bar()
-                            .template(
-                                "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
-                            )
-                            .unwrap()
-                            .progress_chars("━╸─"),
-                    );
-                    bar.enable_steady_tick(Duration::from_millis(100));
-                    bar
-                });
-                let elapsed_secs = elapsed_ms as f64 / 1000.0;
-                let it_s = if elapsed_secs > 0.0 {
-                    1.0 / elapsed_secs
-                } else {
-                    0.0
-                };
-                db.set_message(format!("{:.2} it/s", it_s));
-                db.set_position(step as u64);
-            }
-            SseProgressEvent::DownloadProgress {
-                filename,
-                file_index,
-                bytes_downloaded,
-                bytes_total,
-                total_files,
-            } => {
-                let multi = download_multi.get_or_insert_with(|| {
-                    pb.disable_steady_tick();
-                    pb.set_message("");
-                    MultiProgress::with_draw_target(ProgressDrawTarget::stderr())
-                });
-                let bar = download_bars.entry(file_index).or_insert_with(|| {
-                    let b = multi.add(ProgressBar::new(bytes_total));
-                    let msg_width = 45usize;
-                    b.set_style(
-                        ProgressStyle::with_template(&format!(
-                            "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
-                        ))
-                        .unwrap()
-                        .progress_chars("━╸─"),
-                    );
-                    // Show total files on first file
-                    if total_files > 0 {
-                        b.set_message(format!("[{}/{}] {}", file_index + 1, total_files, truncate_name(&filename, msg_width - 8)));
-                    } else {
-                        b.set_message(truncate_name(&filename, msg_width));
-                    }
-                    b
-                });
-                bar.set_position(bytes_downloaded);
-            }
-            SseProgressEvent::DownloadDone { file_index, .. } => {
-                if let Some(bar) = download_bars.get(&file_index) {
-                    bar.finish_with_message("done");
-                }
-            }
-            SseProgressEvent::PullComplete { model } => {
-                // Clear download bars
-                for (_, bar) in download_bars.drain() {
-                    bar.finish_and_clear();
-                }
-                if let Some(multi) = download_multi.take() {
-                    multi.clear().ok();
-                }
-                pb.suspend(|| {
-                    status!("{} Pull complete: {}", "✓".green(), model.bold());
-                });
-            }
-        }
-    }
-    if let Some(db) = denoise_bar.take() {
-        db.finish_and_clear();
-    }
-    for (_, bar) in download_bars.drain() {
-        bar.finish_and_clear();
-    }
-    if let Some(multi) = download_multi.take() {
-        multi.clear().ok();
-    }
-    pb.finish_and_clear();
-}
-
-/// Truncate a filename for display, keeping the end (unique part).
-fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len || max_len < 8 {
-        return name.to_string();
-    }
-    let suffix_len = max_len - 3;
-    let start = name.len() - suffix_len;
-    format!("...{}", &name[start..])
-}
-
 /// Remote generation: try SSE streaming first, fall back to blocking API.
 #[allow(clippy::too_many_arguments)]
 async fn generate_remote(
@@ -531,56 +357,45 @@ async fn generate_remote(
             )
             .await
         }
-        Err(e) if MoldClient::is_model_not_found(&e) => {
-            let _ = render.await;
-            status!(
-                "{} Model '{}' not on server — pulling...",
-                "●".cyan(),
-                model.bold()
-            );
-
-            // Stream download progress from server
-            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
-            let pull_render = tokio::spawn(render_progress(pull_rx));
-            client.pull_model_stream(model, pull_tx).await?;
-            let _ = pull_render.await;
-
-            status!("{} Generating...", "●".cyan());
-
-            // Retry with SSE streaming after pull
-            let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
-            let render2 = tokio::spawn(render_progress(rx2));
-            match client.generate_stream(req, tx2).await {
-                Ok(Some(response)) => {
-                    let _ = render2.await;
-                    Ok(response)
-                }
-                _ => {
-                    // Fall back to blocking if SSE still fails
-                    let _ = render2.await;
-                    Ok(client.generate(req.clone()).await?)
-                }
-            }
-        }
-        Err(e) if MoldClient::is_connection_error(&e) => {
-            let _ = render.await;
-            status!("{} Using local GPU inference", "●".cyan());
-            generate_local(
-                req,
-                config,
-                t5_variant,
-                qwen3_variant,
-                eager,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
-        }
         Err(e) => {
             let _ = render.await;
-            Err(e)
+            match classify_generate_error(&e) {
+                GenerateServerAction::PullModelAndRetry => {
+                    print_server_pull_missing_model(model);
+                    stream_server_pull(client, model).await?;
+
+                    status!("{} Generating...", "●".cyan());
+
+                    let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+                    let render2 = tokio::spawn(render_progress(rx2));
+                    match client.generate_stream(req, tx2).await {
+                        Ok(Some(response)) => {
+                            let _ = render2.await;
+                            Ok(response)
+                        }
+                        _ => {
+                            let _ = render2.await;
+                            Ok(client.generate(req.clone()).await?)
+                        }
+                    }
+                }
+                GenerateServerAction::FallbackLocal => {
+                    print_using_local_inference();
+                    generate_local(
+                        req,
+                        config,
+                        t5_variant,
+                        qwen3_variant,
+                        eager,
+                        cli_width,
+                        cli_height,
+                        cli_steps,
+                        cli_guidance,
+                    )
+                    .await
+                }
+                GenerateServerAction::SurfaceError => Err(e),
+            }
         }
     }
 }
@@ -624,45 +439,38 @@ async fn generate_remote_blocking(
             pb.finish_and_clear();
             Ok(response)
         }
-        Err(e) if MoldClient::is_model_not_found(&e) => {
+        Err(e) => {
             pb.finish_and_clear();
-            status!(
-                "{} Model '{}' not on server — pulling...",
-                "●".cyan(),
-                model.bold()
-            );
-
-            // Stream download progress from server
-            let (pull_tx, pull_rx) = tokio::sync::mpsc::unbounded_channel();
-            let pull_render = tokio::spawn(render_progress(pull_rx));
-            client.pull_model_stream(model, pull_tx).await?;
-            let _ = pull_render.await;
-
-            status!("{} Generating...", "●".cyan());
-            Ok(client.generate(req.clone()).await?)
+            match classify_generate_error(&e) {
+                GenerateServerAction::PullModelAndRetry => {
+                    print_server_pull_missing_model(model);
+                    stream_server_pull(client, model).await?;
+                    status!("{} Generating...", "●".cyan());
+                    Ok(client.generate(req.clone()).await?)
+                }
+                GenerateServerAction::FallbackLocal => {
+                    print_using_local_inference();
+                    generate_local(
+                        req,
+                        config,
+                        t5_variant,
+                        qwen3_variant,
+                        eager,
+                        cli_width,
+                        cli_height,
+                        cli_steps,
+                        cli_guidance,
+                    )
+                    .await
+                }
+                GenerateServerAction::SurfaceError => Err(e),
+            }
         }
-        Err(e) if MoldClient::is_connection_error(&e) => {
-            pb.finish_and_clear();
-            status!("{} Using local GPU inference", "●".cyan());
-            generate_local(
-                req,
-                config,
-                t5_variant,
-                qwen3_variant,
-                eager,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
-        }
-        Err(e) => Err(e),
     }
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-async fn generate_local(
+async fn prepare_local_engine(
     req: &GenerateRequest,
     config: &Config,
     t5_variant_override: Option<String>,
@@ -672,7 +480,7 @@ async fn generate_local(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
-) -> Result<GenerateResponse> {
+) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
     use mold_core::manifest::find_manifest;
     use mold_core::{validate_generate_request, ModelPaths};
     use mold_inference::LoadStrategy;
@@ -704,7 +512,7 @@ async fn generate_local(
                 auto_config = updated_config;
                 effective_config = &auto_config;
 
-                let model_cfg = effective_config.model_config(&model_name);
+                let model_cfg = effective_config.resolved_model_config(&model_name);
                 if cli_width.is_none() {
                     req.width = model_cfg.effective_width(effective_config);
                 }
@@ -755,29 +563,142 @@ async fn generate_local(
     if is_eager {
         std::env::set_var("MOLD_EAGER", "1");
     }
-    let mut engine =
-        mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
+    let engine = mold_inference::create_engine(model_name, paths, effective_config, load_strategy)?;
+    Ok((req, engine))
+}
 
-    // Set up progress channel — convert ProgressEvent → SseProgressEvent for unified rendering
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
+#[cfg(any(feature = "cuda", feature = "metal"))]
+async fn generate_local(
+    req: &GenerateRequest,
+    config: &Config,
+    t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    let (req, mut engine) = prepare_local_engine(
+        req,
+        config,
+        t5_variant_override,
+        qwen3_variant_override,
+        eager,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
     engine.set_on_progress(Box::new(move |event| {
         let _ = tx.send(event.into());
     }));
 
-    let req = req.clone();
-
-    // Spawn inference in a blocking thread
     let handle = tokio::task::spawn_blocking(move || {
         engine.load()?;
         engine.generate(&req)
     });
 
-    // Render progress events using the shared renderer
     let render = tokio::spawn(render_progress(rx));
-
     let result = handle.await?;
     let _ = render.await;
     result
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+#[allow(clippy::too_many_arguments)]
+async fn generate_local_batch(
+    req: &GenerateRequest,
+    config: &Config,
+    t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
+    eager: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+    batch: u32,
+    base_seed: u64,
+) -> Result<GenerateResponse> {
+    let (base_req, mut engine) = prepare_local_engine(
+        req,
+        config,
+        t5_variant_override,
+        qwen3_variant_override,
+        eager,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+
+    engine = tokio::task::spawn_blocking(
+        move || -> Result<Box<dyn mold_inference::InferenceEngine>> {
+            let mut engine = engine;
+            engine.load()?;
+            Ok(engine)
+        },
+    )
+    .await??;
+
+    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut total_time_ms = 0;
+    let mut last_seed_used = base_seed;
+    let mut last_model = String::new();
+
+    for i in 0..batch {
+        let mut iter_req = base_req.clone();
+        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+        iter_req.batch_size = 1;
+
+        if batch > 1 {
+            status!(
+                "{} Generating image {}/{} (seed: {})",
+                "●".cyan(),
+                i + 1,
+                batch,
+                iter_req.seed.unwrap(),
+            );
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
+        engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(event.into());
+        }));
+
+        let handle = tokio::task::spawn_blocking(
+            move || -> Result<(Box<dyn mold_inference::InferenceEngine>, GenerateResponse)> {
+                let mut engine = engine;
+                let response = engine.generate(&iter_req)?;
+                Ok((engine, response))
+            },
+        );
+        let render = tokio::spawn(render_progress(rx));
+        let (mut returned_engine, response) = handle.await??;
+        returned_engine.clear_on_progress(); // drop tx so render_progress can drain and exit
+        let _ = render.await;
+        engine = returned_engine;
+
+        total_time_ms += response.generation_time_ms;
+        last_seed_used = response.seed_used;
+        last_model = response.model.clone();
+
+        for mut img in response.images {
+            img.index = i;
+            all_images.push(img);
+        }
+    }
+
+    Ok(GenerateResponse {
+        images: all_images,
+        generation_time_ms: total_time_ms,
+        model: last_model,
+        seed_used: last_seed_used,
+    })
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
@@ -792,6 +713,27 @@ async fn generate_local(
     _cli_height: Option<u32>,
     _cli_steps: Option<u32>,
     _cli_guidance: Option<f64>,
+) -> Result<GenerateResponse> {
+    anyhow::bail!(
+        "No mold server running and this binary was built without GPU support.\n\
+         Either start a server with `mold serve` or rebuild with --features cuda"
+    )
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+#[allow(clippy::too_many_arguments)]
+async fn generate_local_batch(
+    _req: &GenerateRequest,
+    _config: &Config,
+    _t5_variant: Option<String>,
+    _qwen3_variant: Option<String>,
+    _eager: bool,
+    _cli_width: Option<u32>,
+    _cli_height: Option<u32>,
+    _cli_steps: Option<u32>,
+    _cli_guidance: Option<f64>,
+    _batch: u32,
+    _base_seed: u64,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

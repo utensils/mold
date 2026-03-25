@@ -9,6 +9,8 @@ pub enum ProgressEvent {
     StageDone { name: String, elapsed: Duration },
     /// Informational message (e.g. "CUDA detected, using GPU")
     Info { message: String },
+    /// A cached artifact was reused instead of recomputed.
+    CacheHit { resource: String },
     /// A single denoising step completed.
     DenoiseStep {
         step: usize,
@@ -55,8 +57,18 @@ impl ProgressReporter {
         });
     }
 
+    pub fn cache_hit(&self, resource: &str) {
+        self.emit(ProgressEvent::CacheHit {
+            resource: resource.to_string(),
+        });
+    }
+
     pub fn set_callback(&mut self, callback: ProgressCallback) {
         self.callback = Some(callback);
+    }
+
+    pub fn clear_callback(&mut self) {
+        self.callback = None;
     }
 }
 
@@ -69,6 +81,9 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
                 elapsed_ms: elapsed.as_millis() as u64,
             },
             ProgressEvent::Info { message } => mold_core::SseProgressEvent::Info { message },
+            ProgressEvent::CacheHit { resource } => {
+                mold_core::SseProgressEvent::CacheHit { resource }
+            }
             ProgressEvent::DenoiseStep {
                 step,
                 total,
@@ -104,6 +119,7 @@ mod tests {
         reporter.stage_start("Loading model");
         reporter.stage_done("Loading model", Duration::from_millis(42));
         reporter.info("hello");
+        reporter.cache_hit("prompt conditioning");
         reporter.emit(ProgressEvent::DenoiseStep {
             step: 1,
             total: 10,
@@ -227,5 +243,33 @@ mod tests {
             "new callback got wrong event: {}",
             entries2[0]
         );
+    }
+
+    #[test]
+    fn test_clear_callback_stops_future_events() {
+        let mut reporter = ProgressReporter::default();
+        let (cb, log) = capturing_callback();
+        reporter.set_callback(cb);
+        reporter.info("before-clear");
+        reporter.clear_callback();
+        reporter.info("after-clear");
+
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("before-clear"));
+    }
+
+    #[test]
+    fn test_cache_hit_emits_structured_event() {
+        let mut reporter = ProgressReporter::default();
+        let (cb, log) = capturing_callback();
+        reporter.set_callback(cb);
+
+        reporter.cache_hit("prompt conditioning");
+
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("CacheHit"));
+        assert!(entries[0].contains("prompt conditioning"));
     }
 }

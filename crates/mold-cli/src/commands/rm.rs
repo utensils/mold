@@ -7,25 +7,13 @@ use colored::Colorize;
 use mold_core::manifest::resolve_model_name;
 use mold_core::Config;
 
+use crate::ui::format_bytes;
 use crate::AlreadyReported;
 
 /// Provide completions for installed (configured) model names only.
 pub fn complete_installed_model_name() -> Vec<CompletionCandidate> {
     let config = Config::load_or_default();
     config.models.keys().map(CompletionCandidate::new).collect()
-}
-
-/// Format a byte count as a human-readable size string.
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 /// Get file size, returning 0 if the file doesn't exist or can't be read.
@@ -97,7 +85,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                 "  {}   {} ({})",
                 "Delete:".red(),
                 filename,
-                format_size(*size)
+                format_bytes(*size)
             );
         }
         for (path, refs) in &shared_files {
@@ -124,7 +112,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
             print!(
                 "Remove {}? This will free {}. [y/N] ",
                 canonical.bold(),
-                format_size(total_freed)
+                format_bytes(total_freed)
             );
             io::stdout().flush()?;
             let mut input = String::new();
@@ -186,7 +174,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         println!(
             "Removed {} (freed {})",
             canonical.bold(),
-            format_size(freed)
+            format_bytes(freed)
         );
     }
 
@@ -201,21 +189,6 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
-
-    #[test]
-    fn format_size_gb() {
-        assert_eq!(format_size(7_516_192_768), "7.0 GB");
-    }
-
-    #[test]
-    fn format_size_mb() {
-        assert_eq!(format_size(52_428_800), "50.0 MB");
-    }
-
-    #[test]
-    fn format_size_zero() {
-        assert_eq!(format_size(0), "0 B");
-    }
 
     #[test]
     fn all_file_paths_collects_all() {

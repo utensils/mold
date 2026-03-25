@@ -1,11 +1,33 @@
 #[cfg(test)]
 mod tests {
     use crate::config::{Config, ModelConfig, ModelPaths};
+    use crate::manifest::{find_manifest, storage_path};
+    use crate::test_support::ENV_LOCK;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::path::PathBuf;
 
-    // Serialize tests that mutate env vars to avoid race conditions.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    fn test_models_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "mold-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    fn populate_manifest_files(root: &std::path::Path, model: &str) {
+        let manifest = find_manifest(model).unwrap();
+        for file in &manifest.files {
+            let path = root.join(storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"test").unwrap();
+        }
+    }
 
     // ── Config deserialization ────────────────────────────────────────────────
 
@@ -24,6 +46,31 @@ mod tests {
     fn config_load_or_default_missing_file() {
         let cfg = Config::load_or_default();
         assert!(!cfg.default_model.is_empty());
+    }
+
+    #[test]
+    fn reload_from_disk_preserving_runtime_keeps_models_dir_override() {
+        let cfg = Config {
+            models_dir: "/runtime/models".to_string(),
+            ..Config::default()
+        };
+
+        let reloaded = cfg.reload_from_disk_preserving_runtime();
+        assert_eq!(reloaded.models_dir, "/runtime/models");
+    }
+
+    #[test]
+    fn resolved_model_config_uses_manifest_defaults_and_family() {
+        let cfg = Config::default();
+        let resolved = cfg.resolved_model_config("flux-schnell:q8");
+
+        assert_eq!(resolved.default_steps, Some(4));
+        assert_eq!(resolved.default_guidance, Some(0.0));
+        assert_eq!(resolved.default_width, Some(1024));
+        assert_eq!(resolved.default_height, Some(1024));
+        assert_eq!(resolved.is_schnell, Some(true));
+        assert_eq!(resolved.family.as_deref(), Some("flux"));
+        assert!(resolved.description.is_some());
     }
 
     #[test]
@@ -124,6 +171,17 @@ is_schnell = false
 
     #[test]
     fn model_paths_resolve_from_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
         let mut models = HashMap::new();
         models.insert("test-flux".to_string(), full_model_config("/tmp"));
         let cfg = Config {
@@ -154,7 +212,7 @@ is_schnell = false
     #[test]
     fn model_paths_resolve_partial_config_returns_none() {
         // Only transformer is set; other paths are missing → None.
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut models = HashMap::new();
         models.insert(
             "partial".to_string(),
@@ -182,7 +240,7 @@ is_schnell = false
 
     #[test]
     fn model_paths_resolve_unknown_model_no_env_returns_none() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for var in [
             "MOLD_TRANSFORMER_PATH",
             "MOLD_VAE_PATH",
@@ -199,7 +257,7 @@ is_schnell = false
 
     #[test]
     fn model_paths_env_var_fallback() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
         std::env::set_var("MOLD_VAE_PATH", "/env/vae.safetensors");
         std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
@@ -227,8 +285,113 @@ is_schnell = false
     }
 
     #[test]
+    fn model_paths_resolve_manifest_from_models_dir_without_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("resolve-manifest");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let paths = ModelPaths::resolve("flux-schnell:q8", &Config::default()).unwrap();
+
+        assert!(paths.transformer.starts_with(&models_dir));
+        assert!(paths.vae.starts_with(&models_dir));
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn model_paths_models_dir_override_does_not_fall_back_to_stale_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("override-empty");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mut models = HashMap::new();
+        models.insert("flux-schnell:q8".to_string(), full_model_config("/cfg"));
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+
+        assert!(ModelPaths::resolve("flux-schnell:q8", &cfg).is_none());
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn model_config_prefers_discovered_manifest_paths_from_models_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("model-config-discovery");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let cfg = Config::default();
+        let model_cfg = cfg.model_config("flux-schnell:q8");
+
+        assert!(model_cfg
+            .transformer
+            .as_deref()
+            .is_some_and(|path| path.starts_with(models_dir.to_string_lossy().as_ref())));
+        assert!(model_cfg
+            .vae
+            .as_deref()
+            .is_some_and(|path| path.starts_with(models_dir.to_string_lossy().as_ref())));
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn manifest_model_is_downloaded_uses_active_models_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let empty_dir = test_models_dir("manifest-empty");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &empty_dir);
+        let cfg = Config::default();
+        assert!(!cfg.manifest_model_is_downloaded("flux-schnell:q8"));
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&empty_dir);
+
+        let full_dir = test_models_dir("manifest-full");
+        populate_manifest_files(&full_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &full_dir);
+        let cfg = Config::default();
+        assert!(cfg.manifest_model_is_downloaded("flux-schnell:q8"));
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(full_dir);
+    }
+
+    #[test]
+    fn manifest_model_is_downloaded_respects_component_env_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_MODELS_DIR");
+        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
+        std::env::set_var("MOLD_VAE_PATH", "/env/vae.safetensors");
+        std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
+        std::env::set_var("MOLD_CLIP_PATH", "/env/clip.safetensors");
+        std::env::set_var("MOLD_T5_TOKENIZER_PATH", "/env/t5.tokenizer.json");
+        std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", "/env/clip.tokenizer.json");
+
+        let cfg = Config::default();
+        assert!(cfg.manifest_model_is_downloaded("flux-schnell:q8"));
+
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
     fn model_paths_env_takes_precedence_over_config() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
 
         let mut models = HashMap::new();
@@ -249,7 +412,7 @@ is_schnell = false
 
     #[test]
     fn model_paths_optional_env_takes_precedence_over_config() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
         std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", "/env/clip.tokenizer.json");
 
@@ -278,7 +441,7 @@ is_schnell = false
 
     #[test]
     fn resolved_models_dir_from_env() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_MODELS_DIR", "/custom/models");
         let dir = Config::default().resolved_models_dir();
         assert_eq!(dir.to_str().unwrap(), "/custom/models");
@@ -287,7 +450,7 @@ is_schnell = false
 
     #[test]
     fn resolved_models_dir_default_expands_tilde() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_MODELS_DIR");
         let dir = Config::default().resolved_models_dir();
         assert!(

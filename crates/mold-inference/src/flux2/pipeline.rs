@@ -16,11 +16,16 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
 use super::vae::{Flux2AutoEncoder, Flux2VaeConfig};
+use crate::cache::{
+    clear_cache, get_or_insert_cached_tensor, prompt_text_key, CachedTensor, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
@@ -57,6 +62,7 @@ pub struct Flux2Engine {
     qwen3_variant: Option<String>,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<String, CachedTensor>>,
 }
 
 impl Flux2Engine {
@@ -74,6 +80,7 @@ impl Flux2Engine {
             progress: ProgressReporter::default(),
             qwen3_variant,
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
 
@@ -152,6 +159,34 @@ impl Flux2Engine {
             &Self::QWEN3_HIDDEN_LAYERS,
         )?;
         Ok(stacked)
+    }
+
+    fn encode_prompt_cached(
+        progress: &ProgressReporter,
+        prompt_cache: &Mutex<LruCache<String, CachedTensor>>,
+        encoder: &mut encoders::qwen3::Qwen3Encoder,
+        prompt: &str,
+        target_device: &Device,
+        target_dtype: DType,
+    ) -> Result<Tensor> {
+        let cache_key = prompt_text_key(prompt);
+        let (txt_emb, cache_hit) = get_or_insert_cached_tensor(
+            prompt_cache,
+            cache_key,
+            target_device,
+            target_dtype,
+            || {
+                progress.stage_start("Encoding prompt (Qwen3)");
+                let encode_start = Instant::now();
+                let txt_emb = Self::encode_and_stack(encoder, prompt, target_device, target_dtype)?;
+                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                Ok(txt_emb)
+            },
+        )?;
+        if cache_hit {
+            progress.cache_hit("prompt conditioning");
+        }
+        Ok(txt_emb)
     }
 
     /// Load all model components (Eager mode).
@@ -367,11 +402,14 @@ impl Flux2Engine {
         self.progress
             .stage_done(&enc_stage_label, enc_stage.elapsed());
 
-        self.progress.stage_start("Encoding prompt (Qwen3)");
-        let encode_start = Instant::now();
-        let txt_emb = Self::encode_and_stack(&mut text_encoder, &req.prompt, &device, gpu_dtype)?;
-        self.progress
-            .stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+        let txt_emb = Self::encode_prompt_cached(
+            &self.progress,
+            &self.prompt_cache,
+            &mut text_encoder,
+            &req.prompt,
+            &device,
+            gpu_dtype,
+        )?;
 
         // Drop text encoder to free memory
         drop(text_encoder);
@@ -548,15 +586,14 @@ impl InferenceEngine for Flux2Engine {
         }
 
         // 1. Encode prompt with Qwen3
-        progress.stage_start("Encoding prompt (Qwen3)");
-        let encode_start = Instant::now();
-        let txt_emb = Self::encode_and_stack(
+        let txt_emb = Self::encode_prompt_cached(
+            progress,
+            &self.prompt_cache,
             &mut loaded.text_encoder,
             &req.prompt,
             &loaded.device,
             loaded.dtype,
         )?;
-        progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
         tracing::info!("Qwen3 encoding complete");
 
         // Drop Qwen3 from GPU to free VRAM for denoising
@@ -654,9 +691,14 @@ impl InferenceEngine for Flux2Engine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+
+    fn clear_on_progress(&mut self) {
+        self.progress.clear_callback();
     }
 }

@@ -3,8 +3,14 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
+use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::cache::{
+    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
+    prompt_cache_key, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey, LruCache,
+    PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+};
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::image::encode_image;
@@ -33,6 +39,9 @@ pub struct SDXLEngine {
     progress: ProgressReporter,
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
+    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
+    mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -56,6 +65,9 @@ impl SDXLEngine {
             is_turbo,
             progress: ProgressReporter::default(),
             load_strategy,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
         }
     }
 
@@ -328,30 +340,40 @@ impl SDXLEngine {
         dtype: DType,
     ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
-
-        self.progress.stage_start("Encoding source image (VAE)");
-        let encode_start = Instant::now();
-
-        let source_tensor = decode_source_image(
-            source_bytes,
-            width,
-            height,
-            NormalizeRange::MinusOneToOne,
-            device,
-            dtype,
-        )?;
-
         let vae_scale = if self.is_turbo {
             VAE_SCALE_TURBO
         } else {
             VAE_SCALE_STANDARD
         };
+        let cache_key = image_size_cache_key(source_bytes, width, height);
+        let (encoded, cache_hit) = get_or_insert_cached_tensor(
+            &self.source_latent_cache,
+            cache_key,
+            device,
+            dtype,
+            || {
+                self.progress.stage_start("Encoding source image (VAE)");
+                let encode_start = Instant::now();
 
-        let encoded = vae.encode(&source_tensor)?;
-        let encoded = (encoded.sample()? * vae_scale)?;
+                let source_tensor = decode_source_image(
+                    source_bytes,
+                    width,
+                    height,
+                    NormalizeRange::MinusOneToOne,
+                    device,
+                    dtype,
+                )?;
+                let encoded = vae.encode(&source_tensor)?;
+                let encoded = (encoded.sample()? * vae_scale)?;
 
-        self.progress
-            .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                self.progress
+                    .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                Ok(encoded)
+            },
+        )?;
+        if cache_hit {
+            self.progress.cache_hit("source image latents");
+        }
 
         let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
         let start_step = start_step.min(steps as usize);
@@ -400,36 +422,66 @@ impl SDXLEngine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let use_cfg = guidance > 1.0;
+        let cache_key = prompt_cache_key(prompt, guidance);
+        let (text_embeddings, cache_hit) =
+            get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
+                let use_cfg = guidance > 1.0;
 
-        self.progress.stage_start("Encoding prompt (CLIP-L)");
-        let encode_l_start = Instant::now();
-        let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
-        let text_emb_l = clip_l.forward(&tokens_l)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+                self.progress.stage_start("Encoding prompt (CLIP-L)");
+                let encode_l_start = Instant::now();
+                let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
+                let text_emb_l = clip_l.forward(&tokens_l)?;
+                self.progress
+                    .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
 
-        self.progress.stage_start("Encoding prompt (CLIP-G)");
-        let encode_g_start = Instant::now();
-        let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
-        let text_emb_g = clip_g.forward(&tokens_g)?;
-        self.progress
-            .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+                self.progress.stage_start("Encoding prompt (CLIP-G)");
+                let encode_g_start = Instant::now();
+                let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
+                let text_emb_g = clip_g.forward(&tokens_g)?;
+                self.progress
+                    .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
 
-        let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
+                let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
 
-        let text_embeddings = if use_cfg {
-            let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
-            let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
-            let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
-            let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
-            let uncond_embeddings = Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
-            Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
-        } else {
-            text_embeddings
-        };
+                let text_embeddings = if use_cfg {
+                    let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
+                    let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
+                    let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
+                    let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
+                    let uncond_embeddings =
+                        Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
+                    Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
+                } else {
+                    text_embeddings
+                };
 
-        Ok(text_embeddings.to_dtype(dtype)?)
+                Ok(text_embeddings.to_dtype(dtype)?)
+            })?;
+        if cache_hit {
+            self.progress.cache_hit("prompt conditioning");
+            return Ok(text_embeddings);
+        }
+        Ok(text_embeddings)
+    }
+
+    fn cached_mask(
+        &self,
+        mask_bytes: &[u8],
+        latent_h: usize,
+        latent_w: usize,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor> {
+        let key = latent_size_cache_key(mask_bytes, latent_h, latent_w);
+        let (mask, cache_hit) =
+            get_or_insert_cached_tensor(&self.mask_cache, key, device, dtype, || {
+                crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)
+            })?;
+        if cache_hit {
+            self.progress.cache_hit("inpaint mask");
+            return Ok(mask);
+        }
+        Ok(mask)
     }
 
     /// Generate an image using sequential loading strategy.
@@ -554,71 +606,66 @@ impl SDXLEngine {
         let sched = req.scheduler.unwrap_or(self.scheduler);
         let is_img2img = req.source_image.is_some();
 
-        let (mut latents, start_step, inpaint_ctx) =
-            if let Some(ref source_bytes) = req.source_image {
-                self.progress
-                    .info("img2img mode: encoding source image before denoising");
+        let (mut latents, start_step, inpaint_ctx) = if let Some(ref source_bytes) =
+            req.source_image
+        {
+            self.progress
+                .info("img2img mode: encoding source image before denoising");
 
-                self.progress.stage_start("Loading VAE (GPU)");
-                let vae_start_t = Instant::now();
-                let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-                self.progress
-                    .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
+            self.progress.stage_start("Loading VAE (GPU)");
+            let vae_start_t = Instant::now();
+            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
+            self.progress
+                .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
 
-                let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
-                    &vae,
-                    source_bytes,
-                    req.width,
-                    req.height,
-                    req.strength,
-                    req.steps,
-                    sched,
-                    seed,
-                    &device,
-                    dtype,
-                )?;
+            let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
+                &vae,
+                source_bytes,
+                req.width,
+                req.height,
+                req.strength,
+                req.steps,
+                sched,
+                seed,
+                &device,
+                dtype,
+            )?;
 
-                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let mask = crate::img_utils::decode_mask_image(
-                        mask_bytes,
-                        height / 8,
-                        width / 8,
-                        &device,
-                        dtype,
-                    )?;
-                    Some(crate::img_utils::InpaintContext {
-                        original_latents: encoded,
-                        mask,
-                        noise,
-                    })
-                } else {
-                    None
-                };
-
-                drop(vae);
-                self.progress.info("Freed VAE (will reload for decode)");
-                device.synchronize()?;
-
-                (latents, start_step, inpaint_ctx)
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = self.cached_mask(mask_bytes, height / 8, width / 8, &device, dtype)?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded,
+                    mask,
+                    noise,
+                })
             } else {
-                let latent_h = height / 8;
-                let latent_w = width / 8;
-                let init_scheduler = crate::scheduler::build_scheduler(
-                    sched,
-                    req.steps as usize,
-                    PredictionType::Epsilon,
-                    self.is_turbo,
-                )?;
-                let init_noise_sigma = init_scheduler.init_noise_sigma();
-                drop(init_scheduler);
-                let latents = (crate::engine::seeded_randn(
-                    seed,
-                    &[1, 4, latent_h, latent_w],
-                    &device,
-                    DType::F32,
-                )? * init_noise_sigma)?;
-                (latents.to_dtype(dtype)?, 0, None)
+                None
             };
+
+            drop(vae);
+            self.progress.info("Freed VAE (will reload for decode)");
+            device.synchronize()?;
+
+            (latents, start_step, inpaint_ctx)
+        } else {
+            let latent_h = height / 8;
+            let latent_w = width / 8;
+            let init_scheduler = crate::scheduler::build_scheduler(
+                sched,
+                req.steps as usize,
+                PredictionType::Epsilon,
+                self.is_turbo,
+            )?;
+            let init_noise_sigma = init_scheduler.init_noise_sigma();
+            drop(init_scheduler);
+            let latents = (crate::engine::seeded_randn(
+                seed,
+                &[1, 4, latent_h, latent_w],
+                &device,
+                DType::F32,
+            )? * init_noise_sigma)?;
+            (latents.to_dtype(dtype)?, 0, None)
+        };
 
         self.denoise_loop(
             &unet,
@@ -754,7 +801,7 @@ impl InferenceEngine for SDXLEngine {
                     loaded.dtype,
                 )?;
                 let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let mask = crate::img_utils::decode_mask_image(
+                    let mask = self.cached_mask(
                         mask_bytes,
                         height / 8,
                         width / 8,
@@ -856,9 +903,16 @@ impl InferenceEngine for SDXLEngine {
 
     fn unload(&mut self) {
         self.loaded = None;
+        clear_cache(&self.prompt_cache);
+        clear_cache(&self.source_latent_cache);
+        clear_cache(&self.mask_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+
+    fn clear_on_progress(&mut self) {
+        self.progress.clear_callback();
     }
 }

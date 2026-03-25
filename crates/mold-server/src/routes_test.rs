@@ -5,6 +5,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use mold_core::{GenerateRequest, GenerateResponse, ImageData};
+    use mold_inference::progress::ProgressCallback;
     use mold_inference::InferenceEngine;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -30,6 +31,8 @@ mod tests {
         empty_images: bool,
         load_count: Arc<AtomicUsize>,
         load_delay: Duration,
+        progress_set_count: Arc<AtomicUsize>,
+        progress_clear_count: Arc<AtomicUsize>,
     }
 
     impl MockEngine {
@@ -40,6 +43,8 @@ mod tests {
                 empty_images: false,
                 load_count: Arc::new(AtomicUsize::new(0)),
                 load_delay: Duration::from_millis(0),
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn failing() -> Self {
@@ -49,6 +54,8 @@ mod tests {
                 empty_images: false,
                 load_count: Arc::new(AtomicUsize::new(0)),
                 load_delay: Duration::from_millis(0),
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn empty_images() -> Self {
@@ -58,6 +65,8 @@ mod tests {
                 empty_images: true,
                 load_count: Arc::new(AtomicUsize::new(0)),
                 load_delay: Duration::from_millis(0),
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn unloaded(load_count: Arc<AtomicUsize>, load_delay: Duration) -> Self {
@@ -67,6 +76,23 @@ mod tests {
                 empty_images: false,
                 load_count,
                 load_delay,
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn tracked_progress(
+            progress_set_count: Arc<AtomicUsize>,
+            progress_clear_count: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                loaded: true,
+                fail: false,
+                empty_images: false,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
+                progress_set_count,
+                progress_clear_count,
             }
         }
     }
@@ -110,6 +136,14 @@ mod tests {
             }
             self.loaded = true;
             Ok(())
+        }
+
+        fn set_on_progress(&mut self, _callback: ProgressCallback) {
+            self.progress_set_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn clear_on_progress(&mut self) {
+            self.progress_clear_count.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -663,6 +697,48 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("event: error"));
         assert!(text.contains("returned no images"));
+    }
+
+    #[tokio::test]
+    async fn reused_engine_clears_progress_callbacks_between_stream_and_generate() {
+        let progress_set_count = Arc::new(AtomicUsize::new(0));
+        let progress_clear_count = Arc::new(AtomicUsize::new(0));
+        let app = app_with(MockEngine::tracked_progress(
+            progress_set_count.clone(),
+            progress_clear_count.clone(),
+        ));
+
+        let stream_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(stream_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
+        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 1);
+
+        let generate_resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(generate_resp.status(), StatusCode::OK);
+
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
+        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

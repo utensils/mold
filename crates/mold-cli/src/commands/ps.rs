@@ -1,11 +1,13 @@
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::MoldClient;
+
+use crate::control::CliContext;
+use crate::ui::print_server_unavailable;
 
 pub async fn run() -> Result<()> {
-    let client = MoldClient::from_env();
+    let ctx = CliContext::new(None);
 
-    match client.server_status().await {
+    match ctx.client().server_status().await {
         Ok(status) => {
             println!("{} mold server v{}", "●".green(), status.version);
             println!("{} Uptime: {}s", "●".green(), status.uptime_secs,);
@@ -33,12 +35,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Err(e) => {
-            println!("{} Cannot connect to mold server: {}", "✗".red(), e,);
-            println!(
-                "{} Start the server with: {}",
-                "●".green(),
-                "mold serve".bold(),
-            );
+            print_server_unavailable(ctx.client().host(), &e);
         }
     }
 
