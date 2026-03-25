@@ -24,7 +24,20 @@ fn normalize_source_dimensions(width: u32, height: u32) -> (u32, u32) {
 fn source_image_default_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     let img = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
-    Ok(normalize_source_dimensions(img.width(), img.height()))
+    let orig_w = img.width();
+    let orig_h = img.height();
+    let (w, h) = normalize_source_dimensions(orig_w, orig_h);
+    if w != orig_w || h != orig_h {
+        status!(
+            "{} Source image {}x{} resized to {}x{} (megapixel limit / 16px alignment)",
+            theme::icon_warn(),
+            orig_w,
+            orig_h,
+            w,
+            h
+        );
+    }
+    Ok((w, h))
 }
 
 fn effective_dimensions(

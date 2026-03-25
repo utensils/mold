@@ -527,6 +527,8 @@ async fn generate_stream(
                 }));
             }
             Ok(Ok(Err(e))) => {
+                // clear_active_generation was already called inside spawn_blocking,
+                // but guard against any future code path that might skip it.
                 *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::error!("generation error: {e:#}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {

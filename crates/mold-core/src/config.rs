@@ -394,10 +394,11 @@ impl Config {
 
     /// Resolve the effective default model with idiot-proof fallback chain:
     /// 1. `MOLD_DEFAULT_MODEL` env var (if set and non-empty)
-    /// 2. Config file `default_model` (if that model is downloaded)
-    /// 3. Last-used model from `$MOLD_HOME/last-model` (if downloaded)
-    /// 4. If exactly one model is downloaded, use it automatically
-    /// 5. Fall back to config value (will trigger auto-pull on use)
+    /// 2. Config file `default_model` (if that model has a custom `[models]` entry)
+    /// 3. Config file `default_model` (if that model is a known manifest model that is downloaded)
+    /// 4. Last-used model from `$MOLD_HOME/last-model` (if downloaded)
+    /// 5. If exactly one model is downloaded, use it automatically
+    /// 6. Fall back to config value (will trigger auto-pull on use)
     pub fn resolved_default_model(&self) -> String {
         // 1. Env var override
         if let Ok(m) = std::env::var("MOLD_DEFAULT_MODEL") {
