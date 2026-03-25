@@ -36,8 +36,7 @@ in
 
     modelsDir = lib.mkOption {
       type = lib.types.str;
-      default = "${cfg.homeDir}/models";
-      defaultText = lib.literalExpression ''"''${cfg.homeDir}/models"'';
+      defaultText = lib.literalExpression ''"''${config.services.mold.homeDir}/models"'';
       description = "Directory for storing downloaded models.";
     };
 
@@ -89,6 +88,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";
+
     users.users.mold = {
       isSystemUser = true;
       group = "mold";

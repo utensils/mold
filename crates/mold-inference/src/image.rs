@@ -133,8 +133,19 @@ fn write_jpeg(
 }
 
 /// Write a JPEG COM (comment) marker segment.
+/// Truncates payload to 65533 bytes (JPEG segment limit: 65535 - 2 for length field).
 fn write_jpeg_com_marker(out: &mut Vec<u8>, data: &[u8]) {
-    let len = (data.len() + 2) as u16; // +2 for the length field itself
+    const MAX_PAYLOAD: usize = 65533;
+    let data = if data.len() > MAX_PAYLOAD {
+        tracing::warn!(
+            "JPEG COM marker truncated from {} to {MAX_PAYLOAD} bytes",
+            data.len()
+        );
+        &data[..MAX_PAYLOAD]
+    } else {
+        data
+    };
+    let len = (data.len() + 2) as u16;
     out.push(0xFF);
     out.push(0xFE); // COM marker
     out.extend_from_slice(&len.to_be_bytes());
@@ -187,9 +198,15 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
 }
 
 /// Write a JPEG APP1 marker with the standard XMP namespace prefix.
+/// Skips the marker entirely if the payload exceeds the 65535-byte segment limit.
 fn write_jpeg_xmp_marker(out: &mut Vec<u8>, xmp_data: &[u8]) {
     let namespace = b"http://ns.adobe.com/xap/1.0/\0";
-    let total_len = (namespace.len() + xmp_data.len() + 2) as u16;
+    let total = namespace.len() + xmp_data.len() + 2; // +2 for length field
+    if total > 0xFFFF {
+        tracing::warn!("XMP packet too large for JPEG APP1 marker ({total} bytes), skipping");
+        return;
+    }
+    let total_len = total as u16;
     out.push(0xFF);
     out.push(0xE1); // APP1 marker
     out.extend_from_slice(&total_len.to_be_bytes());
