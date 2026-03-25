@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()> {
-    std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+    Config::install_runtime_models_dir_override(models_dir.clone());
 
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();

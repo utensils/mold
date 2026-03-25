@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::manifest::resolve_model_name;
 use crate::types::Scheduler;
+
+static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Per-model file path + default settings configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -291,6 +294,10 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn install_runtime_models_dir_override(models_dir: PathBuf) {
+        let _ = RUNTIME_MODELS_DIR_OVERRIDE.get_or_init(|| models_dir);
+    }
+
     pub fn load_or_default() -> Self {
         let Some(config_path) = Self::config_path() else {
             eprintln!("warning: could not determine home directory — using default config");
@@ -349,6 +356,9 @@ impl Config {
     }
 
     pub fn resolved_models_dir(&self) -> PathBuf {
+        if let Some(models_dir) = RUNTIME_MODELS_DIR_OVERRIDE.get() {
+            return models_dir.clone();
+        }
         if let Ok(env_dir) = std::env::var("MOLD_MODELS_DIR") {
             PathBuf::from(env_dir)
         } else {

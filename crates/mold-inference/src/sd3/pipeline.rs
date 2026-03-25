@@ -15,7 +15,7 @@ use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
 };
 use crate::encoders;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -77,7 +77,8 @@ impl SD3Engine {
     }
 
     fn encode_conditioning(
-        &self,
+        progress: &ProgressReporter,
+        prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
         triple_encoder: &mut encoders::sd3_clip::SD3TripleEncoder,
         prompt: &str,
         device: &Device,
@@ -86,17 +87,16 @@ impl SD3Engine {
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
         let cache_key = prompt_text_key(prompt);
         let ((context, y), cache_hit) = get_or_insert_cached_tensor_pair(
-            &self.prompt_cache,
+            prompt_cache,
             cache_key,
             device,
             if is_quantized { DType::F32 } else { dtype },
             || {
-                self.progress.stage_start("Encoding prompt (SD3 triple)");
+                progress.stage_start("Encoding prompt (SD3 triple)");
                 let encode_start = Instant::now();
                 let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
                 let (context_uncond, y_uncond) = triple_encoder.encode("", device, dtype)?;
-                self.progress
-                    .stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
+                progress.stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
 
                 let pair = if is_quantized {
                     (
@@ -114,7 +114,7 @@ impl SD3Engine {
             },
         )?;
         if cache_hit {
-            self.progress.info("Reusing cached SD3 prompt conditioning");
+            progress.info("Reusing cached SD3 prompt conditioning");
             return Ok((context, y));
         }
         Ok((context, y))
@@ -436,7 +436,9 @@ impl SD3Engine {
         self.progress
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
-        let (context, y) = self.encode_conditioning(
+        let (context, y) = Self::encode_conditioning(
+            &self.progress,
+            &self.prompt_cache,
             &mut triple_encoder,
             &req.prompt,
             &device,
@@ -594,11 +596,13 @@ impl InferenceEngine for SD3Engine {
 
         // Eager mode: use pre-loaded components
         let progress = &self.progress;
+        let prompt_cache = &self.prompt_cache;
 
-        let mut loaded = self
-            .loaded
-            .take()
+        let mut loaded = OptionRestoreGuard::take(&mut self.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
+        let loaded_dtype = loaded.dtype;
+        let loaded_device = loaded.device.clone();
+        let is_quantized = loaded._is_quantized;
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -616,20 +620,22 @@ impl InferenceEngine for SD3Engine {
             "starting SD3 generation"
         );
 
-        let result = (|| -> Result<GenerateResponse> {
+        (|| -> Result<GenerateResponse> {
             if !loaded.triple_encoder.is_loaded() {
                 progress.stage_start("Reloading SD3 triple encoder");
                 let reload_start = Instant::now();
-                loaded.triple_encoder.reload(loaded.dtype)?;
+                loaded.triple_encoder.reload(loaded_dtype)?;
                 progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
             }
 
-            let (context, y) = self.encode_conditioning(
+            let (context, y) = Self::encode_conditioning(
+                progress,
+                prompt_cache,
                 &mut loaded.triple_encoder,
                 &req.prompt,
-                &loaded.device,
-                loaded.dtype,
-                loaded._is_quantized,
+                &loaded_device,
+                loaded_dtype,
+                is_quantized,
             )?;
 
             if loaded.triple_encoder.on_gpu {
@@ -710,9 +716,7 @@ impl InferenceEngine for SD3Engine {
                 model: req.model.clone(),
                 seed_used: seed,
             })
-        })();
-        self.loaded = Some(loaded);
-        result
+        })()
     }
 
     fn model_name(&self) -> &str {

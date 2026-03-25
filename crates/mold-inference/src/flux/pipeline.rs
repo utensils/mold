@@ -16,7 +16,7 @@ use crate::device::{
     should_use_gpu, CLIP_VRAM_THRESHOLD,
 };
 use crate::encoders;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
 use crate::image::encode_image;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -83,37 +83,28 @@ impl FluxEngine {
     }
 
     fn restore_prompt_cache(
-        &self,
+        progress: &ProgressReporter,
+        prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
         prompt: &str,
         device: &Device,
         dtype: DType,
     ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        let restored = restore_cached_tensor_pair(
-            &self.prompt_cache,
-            &prompt_text_key(prompt),
-            device,
-            dtype,
-        )?;
+        let restored =
+            restore_cached_tensor_pair(prompt_cache, &prompt_text_key(prompt), device, dtype)?;
         let Some(restored) = restored else {
             return Ok(None);
         };
-        self.progress
-            .info("Reusing cached FLUX prompt conditioning");
+        progress.info("Reusing cached FLUX prompt conditioning");
         Ok(Some(restored))
     }
 
     fn store_prompt_cache(
-        &self,
+        prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
         prompt: &str,
         t5_emb: &candle_core::Tensor,
         clip_emb: &candle_core::Tensor,
     ) -> Result<()> {
-        store_cached_tensor_pair(
-            &self.prompt_cache,
-            prompt_text_key(prompt),
-            t5_emb,
-            clip_emb,
-        )
+        store_cached_tensor_pair(prompt_cache, prompt_text_key(prompt), t5_emb, clip_emb)
     }
 
     /// Detect is_schnell from override, model name, or transformer filename.
@@ -420,9 +411,13 @@ impl FluxEngine {
         self.progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        let (t5_emb, clip_emb) = if let Some((t5_emb, clip_emb)) =
-            self.restore_prompt_cache(&req.prompt, &device, gpu_dtype)?
-        {
+        let (t5_emb, clip_emb) = if let Some((t5_emb, clip_emb)) = Self::restore_prompt_cache(
+            &self.progress,
+            &self.prompt_cache,
+            &req.prompt,
+            &device,
+            gpu_dtype,
+        )? {
             (t5_emb, clip_emb)
         } else {
             // --- Phase 1: T5 encoding ---
@@ -510,7 +505,7 @@ impl FluxEngine {
             self.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
 
-            self.store_prompt_cache(&req.prompt, &t5_emb, &clip_emb)?;
+            Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
             (t5_emb, clip_emb)
         };
 
@@ -757,6 +752,7 @@ impl InferenceEngine for FluxEngine {
         // Eager mode: use pre-loaded components
         // Borrow progress reporter separately from loaded state.
         let progress = &self.progress;
+        let prompt_cache = &self.prompt_cache;
 
         // Grab path references before borrowing loaded mutably
         let t5_encoder_path = self
@@ -770,10 +766,9 @@ impl InferenceEngine for FluxEngine {
             .clip_encoder
             .clone()
             .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?;
+        let transformer_path = self.paths.transformer.clone();
 
-        let mut loaded = self
-            .loaded
-            .take()
+        let mut loaded = OptionRestoreGuard::take(&mut self.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
 
         let start = Instant::now();
@@ -781,6 +776,8 @@ impl InferenceEngine for FluxEngine {
 
         let width = req.width as usize;
         let height = req.height as usize;
+        let loaded_dtype = loaded.dtype;
+        let loaded_device = loaded.device.clone();
 
         tracing::info!(
             prompt = %req.prompt,
@@ -791,7 +788,7 @@ impl InferenceEngine for FluxEngine {
             "starting generation"
         );
 
-        let result = (|| -> Result<GenerateResponse> {
+        (|| -> Result<GenerateResponse> {
             if loaded.flux_model.is_none() {
                 let xformer_label = if loaded.is_quantized {
                     "Reloading FLUX transformer (GPU, quantized)"
@@ -807,14 +804,14 @@ impl InferenceEngine for FluxEngine {
                 };
                 loaded.flux_model = Some(if loaded.is_quantized {
                     let vb = quantized_var_builder::VarBuilder::from_gguf(
-                        &self.paths.transformer,
+                        &transformer_path,
                         &loaded.device,
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else {
                     let flux_vb = unsafe {
                         VarBuilder::from_mmaped_safetensors(
-                            std::slice::from_ref(&self.paths.transformer),
+                            std::slice::from_ref(&transformer_path),
                             loaded.dtype,
                             &loaded.device,
                         )?
@@ -824,10 +821,15 @@ impl InferenceEngine for FluxEngine {
                 progress.stage_done(xformer_label, reload_start.elapsed());
             }
 
-            if let Some((t5_emb, clip_emb)) =
-                self.restore_prompt_cache(&req.prompt, &loaded.device, loaded.dtype)?
-            {
-                return self.generate_with_embeddings(
+            if let Some((t5_emb, clip_emb)) = Self::restore_prompt_cache(
+                progress,
+                prompt_cache,
+                &req.prompt,
+                &loaded_device,
+                loaded_dtype,
+            )? {
+                return Self::generate_with_embeddings(
+                    progress,
                     req,
                     &mut loaded,
                     t5_emb,
@@ -842,13 +844,13 @@ impl InferenceEngine for FluxEngine {
             if loaded.t5.model.is_none() {
                 progress.stage_start("Reloading T5 encoder (GPU)");
                 let reload_start = Instant::now();
-                loaded.t5.reload(&t5_encoder_path, loaded.dtype)?;
+                loaded.t5.reload(&t5_encoder_path, loaded_dtype)?;
                 progress.stage_done("Reloading T5 encoder (GPU)", reload_start.elapsed());
             }
             if loaded.clip.model.is_none() {
                 progress.stage_start("Reloading CLIP encoder (GPU)");
                 let reload_start = Instant::now();
-                loaded.clip.reload(&clip_encoder_path, loaded.dtype)?;
+                loaded.clip.reload(&clip_encoder_path, loaded_dtype)?;
                 progress.stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
             }
 
@@ -856,7 +858,7 @@ impl InferenceEngine for FluxEngine {
             let encode_t5 = Instant::now();
             let t5_emb = loaded
                 .t5
-                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
+                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
             progress.stage_done("Encoding prompt (T5)", encode_t5.elapsed());
             tracing::info!("T5 encoding complete");
 
@@ -864,10 +866,10 @@ impl InferenceEngine for FluxEngine {
             let encode_clip = Instant::now();
             let clip_emb = loaded
                 .clip
-                .encode(&req.prompt, &loaded.device, loaded.dtype)?;
+                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
             progress.stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
             tracing::info!("CLIP encoding complete");
-            self.store_prompt_cache(&req.prompt, &t5_emb, &clip_emb)?;
+            Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
             if loaded.t5.on_gpu {
                 loaded.t5.drop_weights();
@@ -878,7 +880,8 @@ impl InferenceEngine for FluxEngine {
                 tracing::info!("CLIP encoder dropped from GPU to free VRAM for denoising");
             }
 
-            self.generate_with_embeddings(
+            Self::generate_with_embeddings(
+                progress,
                 req,
                 &mut loaded,
                 t5_emb,
@@ -888,9 +891,7 @@ impl InferenceEngine for FluxEngine {
                 height,
                 start,
             )
-        })();
-        self.loaded = Some(loaded);
-        result
+        })()
     }
 
     fn model_name(&self) -> &str {
@@ -923,7 +924,7 @@ impl InferenceEngine for FluxEngine {
 impl FluxEngine {
     #[allow(clippy::too_many_arguments)]
     fn generate_with_embeddings(
-        &self,
+        progress: &ProgressReporter,
         req: &GenerateRequest,
         loaded: &mut LoadedFlux,
         t5_emb: candle_core::Tensor,
@@ -933,8 +934,6 @@ impl FluxEngine {
         height: usize,
         start: Instant,
     ) -> Result<GenerateResponse> {
-        let progress = &self.progress;
-
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
             DType::F32

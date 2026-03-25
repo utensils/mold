@@ -1,6 +1,7 @@
 use anyhow::Result;
 use mold_core::GenerateRequest;
 use mold_core::GenerateResponse;
+use std::ops::{Deref, DerefMut};
 
 use crate::progress::ProgressCallback;
 
@@ -29,6 +30,46 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
     /// Clear any previously installed progress callback.
     fn clear_on_progress(&mut self) {}
+}
+
+/// Restores an `Option<T>` slot even if the current scope unwinds.
+pub(crate) struct OptionRestoreGuard<'a, T> {
+    slot: &'a mut Option<T>,
+    value: Option<T>,
+}
+
+impl<'a, T> OptionRestoreGuard<'a, T> {
+    pub(crate) fn take(slot: &'a mut Option<T>) -> Option<Self> {
+        let value = slot.take()?;
+        Some(Self {
+            slot,
+            value: Some(value),
+        })
+    }
+}
+
+impl<T> Deref for OptionRestoreGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+            .as_ref()
+            .expect("option restore guard must hold a value")
+    }
+}
+
+impl<T> DerefMut for OptionRestoreGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+            .as_mut()
+            .expect("option restore guard must hold a value")
+    }
+}
+
+impl<T> Drop for OptionRestoreGuard<'_, T> {
+    fn drop(&mut self) {
+        *self.slot = self.value.take();
+    }
 }
 
 /// Select the optimal dtype for GPU inference.
@@ -146,5 +187,15 @@ mod tests {
             gpu_dtype(&candle_core::Device::Cpu),
             candle_core::DType::F32
         );
+    }
+
+    #[test]
+    fn option_restore_guard_restores_taken_value_on_drop() {
+        let mut slot = Some(String::from("loaded"));
+        {
+            let mut guard = OptionRestoreGuard::take(&mut slot).unwrap();
+            guard.push_str("-mutated");
+        }
+        assert_eq!(slot.as_deref(), Some("loaded-mutated"));
     }
 }

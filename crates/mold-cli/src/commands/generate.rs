@@ -9,7 +9,7 @@ use rand::Rng;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::control::CliContext;
+use crate::control::{stream_server_pull, CliContext};
 use crate::output::{is_piped, status};
 use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
 
@@ -362,8 +362,7 @@ async fn generate_remote(
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
                     print_server_pull_missing_model(model);
-                    let pull_ctx = CliContext::new(Some(client.host()));
-                    pull_ctx.stream_server_pull(model).await?;
+                    stream_server_pull(client, model).await?;
 
                     status!("{} Generating...", "●".cyan());
 
@@ -445,8 +444,7 @@ async fn generate_remote_blocking(
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
                     print_server_pull_missing_model(model);
-                    let pull_ctx = CliContext::new(Some(client.host()));
-                    pull_ctx.stream_server_pull(model).await?;
+                    stream_server_pull(client, model).await?;
                     status!("{} Generating...", "●".cyan());
                     Ok(client.generate(req.clone()).await?)
                 }
