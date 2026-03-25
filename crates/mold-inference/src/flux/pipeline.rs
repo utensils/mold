@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp};
-use candle_nn::VarBuilder;
+use candle_core::{DType, Device, IndexOp, Shape, Tensor};
+use candle_nn::{var_builder::SimpleBackend, Init, VarBuilder};
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -34,6 +34,62 @@ fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
     } else {
         vb
     }
+}
+
+/// Stage FLUX safetensors through CPU so float8 checkpoints do not require
+/// CUDA-side fp8 cast kernels during model construction.
+struct CpuStagedMmapedSafetensors {
+    inner: candle_core::safetensors::MmapedSafetensors,
+}
+
+impl SimpleBackend for CpuStagedMmapedSafetensors {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let tensor = self
+            .inner
+            .load(name, &Device::Cpu)?
+            .to_dtype(dtype)?
+            .to_device(dev)?;
+        if tensor.shape() != &s {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        self.inner
+            .load(name, &Device::Cpu)?
+            .to_dtype(dtype)?
+            .to_device(dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.inner.get(name).is_ok()
+    }
+}
+
+fn flux_safetensors_var_builder<'a>(
+    path: &std::path::Path,
+    dtype: DType,
+    device: &Device,
+) -> Result<VarBuilder<'a>> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
+    Ok(VarBuilder::from_backend(
+        Box::new(CpuStagedMmapedSafetensors { inner: tensors }),
+        dtype,
+        device.clone(),
+    ))
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -255,13 +311,11 @@ impl FluxEngine {
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
-            let flux_vb = flux_transformer_var_builder(unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.transformer),
-                    gpu_dtype,
-                    &device,
-                )?
-            });
+            let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
+                &self.paths.transformer,
+                gpu_dtype,
+                &device,
+            )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
         self.progress
@@ -554,13 +608,11 @@ impl FluxEngine {
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
-            let flux_vb = flux_transformer_var_builder(unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.transformer),
-                    gpu_dtype,
-                    &device,
-                )?
-            });
+            let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
+                &self.paths.transformer,
+                gpu_dtype,
+                &device,
+            )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
         self.progress
@@ -830,13 +882,11 @@ impl InferenceEngine for FluxEngine {
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else {
-                    let flux_vb = flux_transformer_var_builder(unsafe {
-                        VarBuilder::from_mmaped_safetensors(
-                            std::slice::from_ref(&transformer_path),
-                            loaded.dtype,
-                            &loaded.device,
-                        )?
-                    });
+                    let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
+                        &transformer_path,
+                        loaded.dtype,
+                        &loaded.device,
+                    )?);
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 });
                 progress.stage_done(xformer_label, reload_start.elapsed());
