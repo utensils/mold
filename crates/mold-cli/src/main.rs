@@ -4,7 +4,7 @@ mod output;
 mod theme;
 mod ui;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 use mold_core::{OutputFormat, Scheduler};
 
@@ -67,7 +67,7 @@ Examples:
         prompt_rest: Vec<String>,
 
         /// Output file path
-        #[arg(short, long, help_heading = "Output")]
+        #[arg(short, long, help_heading = "Output", value_hint = ValueHint::FilePath)]
         output: Option<String>,
 
         /// Output format
@@ -129,7 +129,7 @@ Examples:
         eager: bool,
 
         /// Source image for img2img (file path or - for stdin)
-        #[arg(short = 'i', long, help_heading = "img2img")]
+        #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Option<String>,
 
         /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
@@ -137,11 +137,11 @@ Examples:
         strength: f64,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
-        #[arg(long, requires = "image", help_heading = "img2img")]
+        #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
         mask: Option<String>,
 
         /// Control image for ControlNet conditioning (file path, e.g. edges.png)
-        #[arg(long, help_heading = "ControlNet")]
+        #[arg(long, help_heading = "ControlNet", value_hint = ValueHint::FilePath)]
         control: Option<String>,
 
         /// ControlNet model name (e.g. controlnet-canny-sd15)
@@ -175,7 +175,7 @@ environment before starting mold serve.")]
         bind: String,
 
         /// Models directory
-        #[arg(long, env = "MOLD_MODELS_DIR")]
+        #[arg(long, env = "MOLD_MODELS_DIR", value_hint = ValueHint::DirPath)]
         models_dir: Option<String>,
 
         /// Log output format
