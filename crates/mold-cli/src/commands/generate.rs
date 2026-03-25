@@ -325,6 +325,9 @@ pub async fn run(
         );
     }
 
+    // Remember the model for next time (best-effort, non-fatal)
+    Config::write_last_model(&response.model);
+
     Ok(())
 }
 

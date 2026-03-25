@@ -674,4 +674,90 @@ is_schnell = false
         // Empty env should fall through to config value
         assert_eq!(result, "flux-schnell");
     }
+
+    // ── last-model state file ─────────────────────────────────────────────
+
+    #[test]
+    fn write_and_read_last_model_roundtrip() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-last-model-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("MOLD_HOME", &dir);
+
+        Config::write_last_model("flux-dev:q4");
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("flux-dev:q4".to_string()));
+    }
+
+    #[test]
+    fn read_last_model_missing_file_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-no-last-model-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_last_model_empty_file_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-empty-last-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("last-model"), "  \n").unwrap();
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            result.is_none(),
+            "empty/whitespace-only file should be None"
+        );
+    }
+
+    #[test]
+    fn write_last_model_trims_on_read() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-trim-last-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a file with trailing newline
+        std::fs::write(dir.join("last-model"), "sdxl-turbo:fp16\n").unwrap();
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("sdxl-turbo:fp16".to_string()));
+    }
 }

@@ -392,22 +392,31 @@ impl Config {
         RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
     }
 
-    /// Resolve the effective default model with smart fallback:
+    /// Resolve the effective default model with idiot-proof fallback chain:
     /// 1. `MOLD_DEFAULT_MODEL` env var (if set and non-empty)
     /// 2. Config file `default_model` (if that model is downloaded)
-    /// 3. If exactly one model is downloaded, use it automatically
-    /// 4. Fall back to config value (will trigger auto-pull on use)
+    /// 3. Last-used model from `$MOLD_HOME/last-model` (if downloaded)
+    /// 4. If exactly one model is downloaded, use it automatically
+    /// 5. Fall back to config value (will trigger auto-pull on use)
     pub fn resolved_default_model(&self) -> String {
+        // 1. Env var override
         if let Ok(m) = std::env::var("MOLD_DEFAULT_MODEL") {
             if !m.is_empty() {
                 return m;
             }
         }
+        // 2. Config value — if downloaded
         let configured = &self.default_model;
         if self.manifest_model_is_downloaded(configured) {
             return configured.clone();
         }
-        // Smart fallback: if exactly one model is downloaded, use it
+        // 3. Last-used model — if still downloaded
+        if let Some(last) = Self::read_last_model() {
+            if self.manifest_model_is_downloaded(&last) {
+                return last;
+            }
+        }
+        // 4. Single downloaded model
         let downloaded: Vec<String> = crate::manifest::known_manifests()
             .iter()
             .filter(|m| self.manifest_model_is_downloaded(&m.name))
@@ -416,7 +425,36 @@ impl Config {
         if downloaded.len() == 1 {
             return downloaded.into_iter().next().unwrap();
         }
+        // 5. Config default (will auto-pull)
         configured.clone()
+    }
+
+    /// Path to the last-model state file: `$MOLD_HOME/last-model`
+    fn last_model_path() -> Option<PathBuf> {
+        Self::mold_dir().map(|d| d.join("last-model"))
+    }
+
+    /// Read the last-used model name from the state file.
+    pub fn read_last_model() -> Option<String> {
+        let path = Self::last_model_path()?;
+        std::fs::read_to_string(path).ok().and_then(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    /// Write the last-used model name to the state file (best-effort, non-fatal).
+    pub fn write_last_model(model: &str) {
+        if let Some(path) = Self::last_model_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, model);
+        }
     }
 
     /// Resolve the output directory for server-mode image persistence.
