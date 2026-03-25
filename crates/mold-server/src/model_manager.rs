@@ -173,10 +173,13 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
         Some(e) if e.is_loaded() => {
             let name = e.model_name().to_string();
             e.unload();
-            drop(engine);
+            // Update snapshot while still holding the engine lock to avoid
+            // a window where engine is unloaded but snapshot still says loaded.
             let mut snapshot = state.engine_snapshot.write().await;
             snapshot.model_name = Some(name.clone());
             snapshot.is_loaded = false;
+            drop(snapshot);
+            drop(engine);
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }

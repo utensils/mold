@@ -217,6 +217,7 @@ fn take_generated_image(
 
 /// Save an image to the configured output directory (async version for non-spawned routes).
 /// Non-fatal: logs a warning on failure but never returns an error.
+/// Filesystem I/O is offloaded to a blocking thread to avoid stalling the async runtime.
 async fn maybe_save_to_output_dir(
     state: &AppState,
     img: &mold_core::ImageData,
@@ -227,7 +228,13 @@ async fn maybe_save_to_output_dir(
     let Some(dir) = config.resolved_output_dir() else {
         return;
     };
-    save_image_to_dir(&dir, img, model, batch_size);
+    let dir = dir.to_path_buf();
+    let img = img.clone();
+    let model = model.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        save_image_to_dir(&dir, &img, &model, batch_size);
+    })
+    .await;
 }
 
 fn save_image_to_dir(
@@ -468,6 +475,7 @@ async fn generate_stream(
 
         // Run inference in blocking thread with progress callback
         let engine = state.engine.clone();
+        let active_gen = state.active_generation.clone();
         let gen_tx = bg_tx.clone();
         let gen_req = req.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -512,12 +520,14 @@ async fn generate_stream(
                 }));
             }
             Ok(Ok(Err(e))) => {
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::error!("generation error: {e:#}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
                     message: format!("generation error: {}", clean_error_message(&e)),
                 }));
             }
             Ok(Err(panic_payload)) => {
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 let msg = panic_payload
                     .downcast_ref::<String>()
                     .map(|s| s.as_str())
@@ -529,6 +539,7 @@ async fn generate_stream(
                 }));
             }
             Err(join_err) => {
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::error!("inference task join error: {join_err:?}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
                     message: "inference task failed".to_string(),

@@ -295,6 +295,7 @@ pub struct ServerStatus {
     #[schema(example = "0.2.0")]
     pub version: String,
     pub models_loaded: Vec<String>,
+    #[serde(default)]
     pub busy: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<ActiveGenerationStatus>,

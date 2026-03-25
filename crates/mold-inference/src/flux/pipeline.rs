@@ -67,16 +67,20 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
 }
 
 /// Path for the Q8 GGUF cache of an FP8 safetensors file.
+/// Uses file stem + file size as a cache key so different checkpoints with
+/// the same basename (e.g. `model.safetensors`) don't collide, and
+/// replaced-in-place checkpoints invalidate the cache.
 fn fp8_gguf_cache_path(path: &Path) -> PathBuf {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transformer");
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let cache_root = mold_core::Config::mold_dir()
         .unwrap_or_else(|| PathBuf::from(".mold"))
         .join("cache")
         .join("flux-q8");
-    cache_root.join(format!("{stem}.q8_0.gguf"))
+    cache_root.join(format!("{stem}-{size}.q8_0.gguf"))
 }
 
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).

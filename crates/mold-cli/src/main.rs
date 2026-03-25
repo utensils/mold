@@ -192,7 +192,7 @@ Examples:
 If MOLD_HOST is reachable, the download happens on that server.
 If no server is reachable, mold pulls locally.
 
-For gated or private Hugging Face repos, set HF_TOKEN=hf_... before pulling.
+For gated or private Hugging Face repos, export HF_TOKEN=hf_... before pulling.
 When using a remote server, HF_TOKEN must be set in the server process
 environment.
 

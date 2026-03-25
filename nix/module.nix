@@ -140,8 +140,8 @@ in
         RestartSec = 5;
 
         RuntimeDirectory = "mold";
-        StateDirectory = "mold";
-        CacheDirectory = "mold";
+        # StateDirectory and CacheDirectory omitted — homeDir is created
+        # by tmpfiles.rules and may not be under /var/lib/.
       }
       // lib.optionalAttrs (cfg.hfTokenFile != null) {
         EnvironmentFile = "-/run/mold/env";
