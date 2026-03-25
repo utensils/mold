@@ -260,6 +260,7 @@ async fn generate(
             let engine = guard.as_mut().ok_or_else(|| {
                 anyhow::anyhow!("no engine available after model readiness check")
             })?;
+            engine.clear_on_progress();
             engine.generate(&req)
         }))
     })
@@ -378,7 +379,9 @@ async fn generate_stream(
                 e.set_on_progress(Box::new(move |event| {
                     let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
                 }));
-                e.generate(&gen_req)
+                let generate_result = e.generate(&gen_req);
+                e.clear_on_progress();
+                generate_result
             }))
         })
         .await;

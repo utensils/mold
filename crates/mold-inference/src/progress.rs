@@ -58,6 +58,10 @@ impl ProgressReporter {
     pub fn set_callback(&mut self, callback: ProgressCallback) {
         self.callback = Some(callback);
     }
+
+    pub fn clear_callback(&mut self) {
+        self.callback = None;
+    }
 }
 
 impl From<ProgressEvent> for mold_core::SseProgressEvent {
@@ -227,5 +231,19 @@ mod tests {
             "new callback got wrong event: {}",
             entries2[0]
         );
+    }
+
+    #[test]
+    fn test_clear_callback_stops_future_events() {
+        let mut reporter = ProgressReporter::default();
+        let (cb, log) = capturing_callback();
+        reporter.set_callback(cb);
+        reporter.info("before-clear");
+        reporter.clear_callback();
+        reporter.info("after-clear");
+
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("before-clear"));
     }
 }

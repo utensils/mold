@@ -95,6 +95,8 @@ pub(crate) async fn ensure_model_ready(
                     engine.set_on_progress(Box::new(move |event| {
                         callback(event);
                     }));
+                } else {
+                    engine.clear_on_progress();
                 }
                 if !engine.is_loaded() {
                     tracing::info!(model = %model_name, "loading existing engine...");
@@ -192,6 +194,8 @@ async fn create_and_load_engine(
         new_engine.set_on_progress(Box::new(move |event| {
             callback(event);
         }));
+    } else {
+        new_engine.clear_on_progress();
     }
 
     let mut engine = state.engine.lock().await;

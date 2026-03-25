@@ -377,21 +377,7 @@ impl Config {
     }
 
     pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
-        if self.discovered_manifest_paths(name).is_some() {
-            return true;
-        }
-
-        if self.has_models_dir_override() {
-            return false;
-        }
-
-        self.lookup_model_config(name).is_some_and(|cfg| {
-            let all_paths = cfg.all_file_paths();
-            !all_paths.is_empty()
-                && all_paths
-                    .iter()
-                    .all(|path| std::path::Path::new(path).exists())
-        })
+        self.resolved_local_manifest_model_config(name).is_some()
     }
 
     /// Return the ModelConfig for a given model name, or an empty default.
@@ -399,7 +385,7 @@ impl Config {
     pub fn model_config(&self, name: &str) -> ModelConfig {
         let mut cfg = self.lookup_model_config(name).unwrap_or_default();
 
-        if let Some(discovered) = self.discovered_manifest_model_config(name) {
+        if let Some(discovered) = self.resolved_local_manifest_model_config(name) {
             overlay_model_paths(&mut cfg, &discovered);
             if cfg.description.is_none() {
                 cfg.description = discovered.description;
@@ -487,6 +473,12 @@ impl Config {
     fn discovered_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
         let manifest = crate::manifest::find_manifest(name)?;
         let paths = self.discovered_manifest_paths(name)?;
+        Some(manifest.to_model_config(&paths))
+    }
+
+    fn resolved_local_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let paths = ModelPaths::resolve(name, self)?;
         Some(manifest.to_model_config(&paths))
     }
 }

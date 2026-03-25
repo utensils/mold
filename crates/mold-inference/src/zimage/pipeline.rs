@@ -905,6 +905,10 @@ impl InferenceEngine for ZImageEngine {
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
     }
+
+    fn clear_on_progress(&mut self) {
+        self.progress.clear_callback();
+    }
 }
 
 #[cfg(test)]

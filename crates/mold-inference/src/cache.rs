@@ -106,6 +106,11 @@ where
         self.entries.clear();
     }
 
+    pub(crate) fn remove(&mut self, key: &K) {
+        self.entries.remove(key);
+        self.order.retain(|existing| existing != key);
+    }
+
     fn touch(&mut self, key: &K) {
         self.order.retain(|existing| existing != key);
         self.order.push_back(key.clone());
@@ -163,10 +168,7 @@ pub(crate) fn restore_cached_tensor<K>(
 where
     K: Eq + Hash + Clone,
 {
-    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
-    cached
-        .map(|cached| cached.restore(device, dtype))
-        .transpose()
+    restore_or_evict(cache, key, |cached| cached.restore(device, dtype))
 }
 
 pub(crate) fn store_cached_tensor<K>(
@@ -213,15 +215,12 @@ pub(crate) fn restore_cached_tensor_pair<K>(
 where
     K: Eq + Hash + Clone,
 {
-    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
-    cached
-        .map(|cached| {
-            Ok((
-                cached.first.restore(device, dtype)?,
-                cached.second.restore(device, dtype)?,
-            ))
-        })
-        .transpose()
+    restore_or_evict(cache, key, |cached| {
+        Ok((
+            cached.first.restore(device, dtype)?,
+            cached.second.restore(device, dtype)?,
+        ))
+    })
 }
 
 pub(crate) fn store_cached_tensor_pair<K>(
@@ -265,6 +264,29 @@ where
     K: Eq + Hash + Clone,
 {
     cache.lock().expect("cache poisoned").clear();
+}
+
+fn restore_or_evict<K, V, T, F>(
+    cache: &Mutex<LruCache<K, V>>,
+    key: &K,
+    restore: F,
+) -> Result<Option<T>>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+    F: FnOnce(V) -> Result<T>,
+{
+    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
+    match cached {
+        Some(cached) => match restore(cached) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => {
+                cache.lock().expect("cache poisoned").remove(key);
+                Ok(None)
+            }
+        },
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -314,5 +336,19 @@ mod tests {
             image_size_cache_key(b"abc", 512, 512),
             image_size_cache_key(b"def", 512, 512)
         );
+    }
+
+    #[test]
+    fn restore_or_evict_removes_entry_after_restore_failure() {
+        let cache = Mutex::new(LruCache::new(1));
+        cache.lock().unwrap().insert("a", 1usize);
+
+        let restored: Option<usize> = restore_or_evict(&cache, &"a", |_value| {
+            anyhow::bail!("simulated restore failure")
+        })
+        .unwrap();
+
+        assert!(restored.is_none());
+        assert!(cache.lock().unwrap().get_cloned(&"a").is_none());
     }
 }

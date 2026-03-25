@@ -364,6 +364,32 @@ is_schnell = false
     }
 
     #[test]
+    fn manifest_model_is_downloaded_respects_component_env_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_MODELS_DIR");
+        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
+        std::env::set_var("MOLD_VAE_PATH", "/env/vae.safetensors");
+        std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
+        std::env::set_var("MOLD_CLIP_PATH", "/env/clip.safetensors");
+        std::env::set_var("MOLD_T5_TOKENIZER_PATH", "/env/t5.tokenizer.json");
+        std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", "/env/clip.tokenizer.json");
+
+        let cfg = Config::default();
+        assert!(cfg.manifest_model_is_downloaded("flux-schnell:q8"));
+
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
     fn model_paths_env_takes_precedence_over_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");

@@ -27,6 +27,8 @@ pub trait InferenceEngine: Send + Sync {
     /// Set a progress callback for receiving loading/inference status updates.
     /// Default implementation is a no-op for engines that don't support progress.
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
+    /// Clear any previously installed progress callback.
+    fn clear_on_progress(&mut self) {}
 }
 
 /// Select the optimal dtype for GPU inference.

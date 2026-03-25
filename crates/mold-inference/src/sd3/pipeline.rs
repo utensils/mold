@@ -735,4 +735,8 @@ impl InferenceEngine for SD3Engine {
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
     }
+
+    fn clear_on_progress(&mut self) {
+        self.progress.clear_callback();
+    }
 }
