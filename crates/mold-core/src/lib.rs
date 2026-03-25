@@ -10,6 +10,8 @@ pub mod validation;
 
 #[cfg(test)]
 mod config_test;
+#[cfg(test)]
+mod test_support;
 
 pub use catalog::build_model_catalog;
 pub use client::MoldClient;

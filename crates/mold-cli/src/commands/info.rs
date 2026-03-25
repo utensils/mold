@@ -94,10 +94,21 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
     let resolved_model_cfg = config.resolved_model_config(&canonical);
 
     let manifest = find_manifest(&canonical);
-    let model_config = config
-        .models
-        .get(&canonical)
-        .or_else(|| config.models.get(name));
+    let model_config = if manifest.is_some() {
+        let cfg = config.model_config(&canonical);
+        (!cfg.all_file_paths().is_empty()).then_some(cfg)
+    } else {
+        config
+            .models
+            .get(&canonical)
+            .or_else(|| config.models.get(name))
+            .cloned()
+    };
+    let is_installed = if manifest.is_some() {
+        config.manifest_model_is_downloaded(&canonical)
+    } else {
+        model_config.is_some()
+    };
 
     if manifest.is_none() && model_config.is_none() {
         eprintln!(
@@ -218,7 +229,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
 
     // Installation status + local file paths
     println!();
-    if let Some(mcfg) = model_config {
+    if is_installed {
         println!(
             "  {:<16} {}",
             "Status:".dimmed(),
@@ -232,6 +243,9 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!();
         println!("  {}", "Local Files".bold());
         let mut has_files = false;
+        let mcfg = model_config
+            .as_ref()
+            .expect("installed models should have local file paths");
         if let Some(ref p) = mcfg.transformer {
             println!("  {:<20} {}", "Transformer:".dimmed(), p);
             has_files = true;
@@ -317,7 +331,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                 let mut all_ok = true;
                 for file in &m.files {
                     let local_path =
-                        resolve_verify_path(resolved_paths.as_ref(), model_config, &file.component);
+                        resolve_verify_path(resolved_paths.as_ref(), Some(mcfg), &file.component);
                     match (local_path, file.sha256) {
                         (Some(path), Some(expected)) => match compute_sha256(&path) {
                             Ok(actual) if actual == expected => {

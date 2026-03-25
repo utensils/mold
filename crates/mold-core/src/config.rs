@@ -131,8 +131,20 @@ impl ModelPaths {
     /// Returns None if transformer and VAE paths can't be resolved.
     /// All other paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
-        let model_cfg = config.models.get(model_name);
+        if let Some(model_cfg) = config.discovered_manifest_model_config(model_name) {
+            return Self::resolve_from_model_config(Some(&model_cfg));
+        }
 
+        if crate::manifest::find_manifest(model_name).is_some() && config.has_models_dir_override()
+        {
+            return Self::resolve_from_model_config(None);
+        }
+
+        let model_cfg = config.lookup_model_config(model_name);
+        Self::resolve_from_model_config(model_cfg.as_ref())
+    }
+
+    fn resolve_from_model_config(model_cfg: Option<&ModelConfig>) -> Option<Self> {
         let transformer = Self::resolve_path(
             model_cfg.and_then(|m| m.transformer.as_deref()),
             "MOLD_TRANSFORMER_PATH",
@@ -346,20 +358,58 @@ impl Config {
         }
     }
 
+    pub fn has_models_dir_override(&self) -> bool {
+        std::env::var_os("MOLD_MODELS_DIR").is_some()
+    }
+
+    pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let models_dir = self.resolved_models_dir();
+        let downloads = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = models_dir.join(crate::manifest::storage_path(manifest, file));
+                path.exists().then_some((file.component, path))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        crate::manifest::paths_from_downloads(&downloads)
+    }
+
+    pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
+        if self.discovered_manifest_paths(name).is_some() {
+            return true;
+        }
+
+        if self.has_models_dir_override() {
+            return false;
+        }
+
+        self.lookup_model_config(name).is_some_and(|cfg| {
+            let all_paths = cfg.all_file_paths();
+            !all_paths.is_empty()
+                && all_paths
+                    .iter()
+                    .all(|path| std::path::Path::new(path).exists())
+        })
+    }
+
     /// Return the ModelConfig for a given model name, or an empty default.
     /// Tries the exact name first, then the canonical `name:tag` form.
     pub fn model_config(&self, name: &str) -> ModelConfig {
-        if let Some(cfg) = self.models.get(name) {
-            return cfg.clone();
-        }
-        // Try canonical name resolution (e.g. "flux-dev-q4" -> "flux-dev:q4")
-        let canonical = resolve_model_name(name);
-        if canonical != name {
-            if let Some(cfg) = self.models.get(&canonical) {
-                return cfg.clone();
+        let mut cfg = self.lookup_model_config(name).unwrap_or_default();
+
+        if let Some(discovered) = self.discovered_manifest_model_config(name) {
+            overlay_model_paths(&mut cfg, &discovered);
+            if cfg.description.is_none() {
+                cfg.description = discovered.description;
+            }
+            if cfg.family.is_none() {
+                cfg.family = discovered.family;
             }
         }
-        ModelConfig::default()
+
+        cfg
     }
 
     /// Return a model config merged with manifest defaults and metadata.
@@ -421,5 +471,56 @@ impl Config {
     /// Whether a config file exists on disk.
     pub fn exists_on_disk() -> bool {
         Self::config_path().is_some_and(|p| p.exists())
+    }
+
+    fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
+        if let Some(cfg) = self.models.get(name) {
+            return Some(cfg.clone());
+        }
+        let canonical = resolve_model_name(name);
+        if canonical != name {
+            return self.models.get(&canonical).cloned();
+        }
+        None
+    }
+
+    fn discovered_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
+        let manifest = crate::manifest::find_manifest(name)?;
+        let paths = self.discovered_manifest_paths(name)?;
+        Some(manifest.to_model_config(&paths))
+    }
+}
+
+fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
+    target.transformer = source.transformer.clone();
+    target.transformer_shards = source.transformer_shards.clone();
+    target.vae = source.vae.clone();
+
+    if source.t5_encoder.is_some() {
+        target.t5_encoder = source.t5_encoder.clone();
+    }
+    if source.clip_encoder.is_some() {
+        target.clip_encoder = source.clip_encoder.clone();
+    }
+    if source.t5_tokenizer.is_some() {
+        target.t5_tokenizer = source.t5_tokenizer.clone();
+    }
+    if source.clip_tokenizer.is_some() {
+        target.clip_tokenizer = source.clip_tokenizer.clone();
+    }
+    if source.clip_encoder_2.is_some() {
+        target.clip_encoder_2 = source.clip_encoder_2.clone();
+    }
+    if source.clip_tokenizer_2.is_some() {
+        target.clip_tokenizer_2 = source.clip_tokenizer_2.clone();
+    }
+    if source.text_encoder_files.is_some() {
+        target.text_encoder_files = source.text_encoder_files.clone();
+    }
+    if source.text_tokenizer.is_some() {
+        target.text_tokenizer = source.text_tokenizer.clone();
+    }
+    if source.decoder.is_some() {
+        target.decoder = source.decoder.clone();
     }
 }

@@ -13,7 +13,7 @@ pub fn build_model_catalog(
         let model_cfg = config.resolved_model_config(&manifest.name);
 
         models.push(ModelInfoExtended {
-            downloaded: config.models.contains_key(&manifest.name),
+            downloaded: config.manifest_model_is_downloaded(&manifest.name),
             defaults: ModelDefaults {
                 default_steps: model_cfg.effective_steps(config),
                 default_guidance: model_cfg.effective_guidance(),
@@ -87,22 +87,43 @@ pub fn build_model_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{find_manifest, storage_path};
+    use crate::test_support::ENV_LOCK;
     use crate::ModelConfig;
     use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn test_models_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "mold-catalog-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    fn populate_manifest_files(root: &std::path::Path, model: &str) {
+        let manifest = find_manifest(model).unwrap();
+        for file in &manifest.files {
+            let path = root.join(storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"test").unwrap();
+        }
+    }
 
     #[test]
     fn build_model_catalog_marks_downloaded_manifest_models() {
-        let mut models = HashMap::new();
-        models.insert(
-            "flux-schnell:q8".to_string(),
-            ModelConfig {
-                transformer: Some("/tmp/transformer.gguf".to_string()),
-                vae: Some("/tmp/ae.safetensors".to_string()),
-                ..ModelConfig::default()
-            },
-        );
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("downloaded");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
         let config = Config {
-            models,
             ..Config::default()
         };
 
@@ -114,6 +135,9 @@ mod tests {
         assert!(entry.downloaded);
         assert!(entry.is_loaded);
         assert_eq!(entry.defaults.default_steps, 4);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[test]
@@ -141,5 +165,23 @@ mod tests {
         assert!(entry.downloaded);
         assert_eq!(entry.family, "custom");
         assert_eq!(entry.defaults.default_steps, 12);
+    }
+
+    #[test]
+    fn build_model_catalog_marks_manifest_models_available_when_override_dir_is_empty() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("empty");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let entry = build_model_catalog(&Config::default(), None, false)
+            .into_iter()
+            .find(|model| model.name == "flux-schnell:q8")
+            .expect("manifest model should exist");
+
+        assert!(!entry.downloaded);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 }
