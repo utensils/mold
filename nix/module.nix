@@ -28,9 +28,16 @@ in
       description = "Address to bind the server to.";
     };
 
+    homeDir = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/mold";
+      description = "Base mold directory (MOLD_HOME). Config, cache, and default model storage live under this path.";
+    };
+
     modelsDir = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/mold/models";
+      default = "${cfg.homeDir}/models";
+      defaultText = lib.literalExpression ''"''${cfg.homeDir}/models"'';
       description = "Directory for storing downloaded models.";
     };
 
@@ -79,11 +86,12 @@ in
     users.users.mold = {
       isSystemUser = true;
       group = "mold";
-      home = "/var/lib/mold";
+      home = cfg.homeDir;
     };
     users.groups.mold = { };
 
     systemd.tmpfiles.rules = [
+      "d ${cfg.homeDir} 0755 mold mold -"
       "d ${cfg.modelsDir} 0755 mold mold -"
     ];
 
@@ -93,6 +101,7 @@ in
       wantedBy = [ "multi-user.target" ];
 
       environment = {
+        MOLD_HOME = cfg.homeDir;
         MOLD_PORT = toString cfg.port;
         MOLD_MODELS_DIR = cfg.modelsDir;
         MOLD_LOG = cfg.logLevel;
@@ -133,7 +142,7 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
-        ReadWritePaths = [ cfg.modelsDir ];
+        ReadWritePaths = [ cfg.homeDir cfg.modelsDir ];
 
         # GPU access
         SupplementaryGroups = [

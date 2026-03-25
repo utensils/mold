@@ -204,6 +204,7 @@ mold completions <SHELL>        Generate shell completions
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MOLD_HOME` | `~/.mold` | Override base mold directory (config, cache, default models) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port |

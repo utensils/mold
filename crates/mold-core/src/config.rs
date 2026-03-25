@@ -265,7 +265,11 @@ fn default_model() -> String {
 }
 
 fn default_models_dir() -> String {
-    "~/.mold/models".to_string()
+    if let Ok(home) = std::env::var("MOLD_HOME") {
+        format!("{home}/models")
+    } else {
+        "~/.mold/models".to_string()
+    }
 }
 
 fn default_port() -> u16 {
@@ -343,11 +347,12 @@ impl Config {
         fresh
     }
 
-    /// The root mold directory: `~/.mold/` on all platforms.
-    /// Falls back to `./.mold` (relative to CWD) if the home directory cannot
-    /// be determined (e.g. containers, CI). This preserves write-ability for
-    /// `mold pull` and server-side auto-pull even when `HOME` is unset.
+    /// The root mold directory.
+    /// Resolution: `MOLD_HOME` env var → `~/.mold/` → `./.mold` (if HOME unset).
     pub fn mold_dir() -> Option<PathBuf> {
+        if let Ok(home) = std::env::var("MOLD_HOME") {
+            return Some(PathBuf::from(home));
+        }
         Some(
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
