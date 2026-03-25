@@ -241,6 +241,9 @@ pub struct Config {
     #[serde(default = "default_steps")]
     pub default_steps: u32,
 
+    #[serde(default = "default_embed_metadata")]
+    pub embed_metadata: bool,
+
     /// Preferred T5 encoder variant: "fp16" (default), "q8", "q6", "q5", "q4", "q3", or "auto".
     /// "auto" selects the best variant that fits in GPU VRAM.
     /// An explicit quantized tag always uses that variant regardless of VRAM.
@@ -277,6 +280,10 @@ fn default_steps() -> u32 {
     4
 }
 
+fn default_embed_metadata() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -286,6 +293,7 @@ impl Default for Config {
             default_width: default_dimension(),
             default_height: default_dimension(),
             default_steps: default_steps(),
+            embed_metadata: default_embed_metadata(),
             t5_variant: None,
             qwen3_variant: None,
             models: HashMap::new(),
@@ -370,6 +378,27 @@ impl Config {
 
     pub fn has_models_dir_override(&self) -> bool {
         RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
+    }
+
+    pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {
+        if let Some(value) = override_value {
+            return value;
+        }
+
+        match std::env::var("MOLD_EMBED_METADATA") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => {
+                    eprintln!(
+                        "warning: invalid MOLD_EMBED_METADATA value '{}' — using config/default",
+                        value
+                    );
+                    self.embed_metadata
+                }
+            },
+            Err(_) => self.embed_metadata,
+        }
     }
 
     pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {

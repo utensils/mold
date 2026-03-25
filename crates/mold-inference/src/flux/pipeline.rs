@@ -17,7 +17,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
-use crate::image::encode_image;
+use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::transformer::FluxTransformer;
@@ -718,7 +718,14 @@ impl FluxEngine {
             .stage_done("VAE decode", vae_decode_start.elapsed());
         // VAE dropped here
 
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, None);
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(generation_time_ms, seed, "sequential generation complete");
@@ -1091,7 +1098,14 @@ impl FluxEngine {
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 10. Convert candle tensor to image bytes
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, None);
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(generation_time_ms, seed, "generation complete");

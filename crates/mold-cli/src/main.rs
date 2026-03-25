@@ -74,6 +74,10 @@ Examples:
         #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output")]
         format: OutputFormat,
 
+        /// Disable embedded generation metadata in PNG output for this run
+        #[arg(long, help_heading = "Output")]
+        no_metadata: bool,
+
         /// Image width — defaults to model config value
         #[arg(long, help_heading = "Image")]
         width: Option<u32>,
@@ -349,6 +353,7 @@ async fn run() -> anyhow::Result<()> {
             batch,
             host,
             format,
+            no_metadata,
             local,
             t5_variant,
             qwen3_variant,
@@ -373,6 +378,7 @@ async fn run() -> anyhow::Result<()> {
                 batch,
                 host,
                 format,
+                no_metadata,
                 local,
                 t5_variant,
                 qwen3_variant,
@@ -659,6 +665,7 @@ mod tests {
                 height,
                 guidance,
                 format,
+                no_metadata,
                 batch,
                 output,
                 local,
@@ -671,6 +678,7 @@ mod tests {
                 assert_eq!(height, Some(768));
                 assert_eq!(guidance, Some(4.0));
                 assert_eq!(format, OutputFormat::Jpeg);
+                assert!(!no_metadata);
                 assert_eq!(batch, 2);
                 assert_eq!(output.as_deref(), Some("/tmp/test.jpg"));
                 assert!(local);
@@ -691,6 +699,7 @@ mod tests {
                 height,
                 guidance,
                 format,
+                no_metadata,
                 batch,
                 output,
                 local,
@@ -703,6 +712,7 @@ mod tests {
                 assert_eq!(height, None);
                 assert_eq!(guidance, None);
                 assert_eq!(format, OutputFormat::Png);
+                assert!(!no_metadata);
                 assert_eq!(batch, 1);
                 assert_eq!(output, None);
                 assert!(!local);
@@ -735,6 +745,15 @@ mod tests {
         let cli = parse(&["run", "model", "test", "--format", "jpg"]);
         match cli.command {
             Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_no_metadata_flag() {
+        let cli = parse(&["run", "model", "test", "--no-metadata"]);
+        match cli.command {
+            Commands::Run { no_metadata, .. } => assert!(no_metadata),
             _ => panic!("expected Run"),
         }
     }

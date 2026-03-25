@@ -14,7 +14,7 @@ use crate::cache::{
 use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
-use crate::image::encode_image;
+use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// VAE scaling factor for SD1.5 models.
@@ -728,7 +728,14 @@ impl SD15Engine {
         self.progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, Some(sched));
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
@@ -877,7 +884,14 @@ impl InferenceEngine for SD15Engine {
         self.progress.stage_done("VAE decode", vae_start.elapsed());
 
         // 5. Encode to image format
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, Some(sched));
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(generation_time_ms, seed, "SD1.5 generation complete");

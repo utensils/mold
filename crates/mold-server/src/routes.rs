@@ -230,8 +230,9 @@ fn take_generated_image(
 // is handled client-side by the CLI, which sends N requests with incrementing seeds.
 async fn generate(
     State(state): State<AppState>,
-    Json(req): Json<mold_core::GenerateRequest>,
+    Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    apply_default_metadata_setting(&state, &mut req).await;
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
@@ -309,6 +310,15 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
     mold_core::validate_generate_request(req)
 }
 
+async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::GenerateRequest) {
+    if req.embed_metadata.is_some() {
+        return;
+    }
+
+    let config = state.config.read().await;
+    req.embed_metadata = Some(config.effective_embed_metadata(None));
+}
+
 // ── /api/generate/stream (SSE) ───────────────────────────────────────────────
 
 #[utoipa::path(
@@ -325,8 +335,9 @@ fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), Str
 )]
 async fn generate_stream(
     State(state): State<AppState>,
-    Json(req): Json<mold_core::GenerateRequest>,
+    Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    apply_default_metadata_setting(&state, &mut req).await;
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,

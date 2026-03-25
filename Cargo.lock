@@ -2326,6 +2326,7 @@ dependencies = [
  "candle-transformers-mold",
  "image",
  "mold-ai-core",
+ "png",
  "rand 0.8.5",
  "rand_distr 0.4.3",
  "safetensors 0.4.5",

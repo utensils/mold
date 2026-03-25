@@ -95,6 +95,8 @@ pub struct GenerateRequest {
     pub batch_size: u32,
     #[serde(default)]
     pub output_format: OutputFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_metadata: Option<bool>,
     /// Scheduler override for UNet-based models (SD1.5, SDXL).
     /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +159,44 @@ pub struct ImageData {
     pub height: u32,
     #[schema(example = 0)]
     pub index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutputMetadata {
+    pub prompt: String,
+    pub model: String,
+    pub seed: u64,
+    pub steps: u32,
+    pub guidance: f64,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<Scheduler>,
+    pub version: String,
+}
+
+impl OutputMetadata {
+    pub fn from_generate_request(
+        req: &GenerateRequest,
+        seed: u64,
+        scheduler: Option<Scheduler>,
+        version: impl Into<String>,
+    ) -> Self {
+        Self {
+            prompt: req.prompt.clone(),
+            model: req.model.clone(),
+            seed,
+            steps: req.steps,
+            guidance: req.guidance,
+            width: req.width,
+            height: req.height,
+            strength: req.source_image.as_ref().map(|_| req.strength),
+            scheduler,
+            version: version.into(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -372,6 +412,7 @@ mod tests {
             seed: Some(42),
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: Some(true),
             scheduler: None,
             source_image: None,
             strength: 0.75,
@@ -385,6 +426,7 @@ mod tests {
         assert_eq!(back.prompt, req.prompt);
         assert_eq!(back.width, req.width);
         assert_eq!(back.seed, req.seed);
+        assert_eq!(back.embed_metadata, req.embed_metadata);
         assert_eq!(back.scheduler, None);
     }
 
@@ -393,6 +435,7 @@ mod tests {
         let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert!(req.seed.is_none());
+        assert_eq!(req.embed_metadata, None);
         // guidance should default to 3.5 when omitted
         assert!((req.guidance - 3.5).abs() < 0.001);
     }
@@ -487,6 +530,61 @@ mod tests {
         assert_eq!(req.scheduler, None);
     }
 
+    #[test]
+    fn output_metadata_omits_strength_without_source_image() {
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "flux-schnell:q8".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 0.0,
+            seed: Some(7),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: Some(true),
+            scheduler: None,
+            source_image: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, None);
+        assert_eq!(metadata.version, "0.1.0");
+    }
+
+    #[test]
+    fn output_metadata_includes_strength_and_scheduler_when_applicable() {
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "sd15:fp16".to_string(),
+            width: 512,
+            height: 512,
+            steps: 25,
+            guidance: 7.0,
+            seed: Some(9),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: Some(true),
+            scheduler: Some(Scheduler::UniPc),
+            source_image: Some(vec![1, 2, 3]),
+            strength: 0.5,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+
+        let metadata =
+            OutputMetadata::from_generate_request(&req, 9, Some(Scheduler::UniPc), "0.1.0");
+        assert_eq!(metadata.strength, Some(0.5));
+        assert_eq!(metadata.scheduler, Some(Scheduler::UniPc));
+    }
+
     // ── SSE type tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -577,6 +675,7 @@ mod tests {
             seed: None,
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: None,
             scheduler: None,
             source_image: Some(image_bytes.clone()),
             strength: 0.5,
@@ -622,6 +721,7 @@ mod tests {
             seed: None,
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: None,
             scheduler: None,
             source_image: None,
             strength: 0.75,
@@ -650,6 +750,7 @@ mod tests {
             seed: None,
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: None,
             scheduler: None,
             source_image: None,
             strength: 0.75,
@@ -699,6 +800,7 @@ mod tests {
             seed: None,
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: None,
             scheduler: None,
             source_image: Some(source_bytes),
             strength: 0.75,

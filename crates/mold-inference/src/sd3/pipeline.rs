@@ -16,7 +16,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
-use crate::image::encode_image;
+use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::quantized_mmdit::QuantizedMMDiT;
@@ -553,7 +553,14 @@ impl SD3Engine {
         self.progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, None);
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
@@ -699,7 +706,14 @@ impl InferenceEngine for SD3Engine {
 
             progress.stage_done("VAE decode", vae_decode_start.elapsed());
 
-            let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+            let output_metadata = build_output_metadata(req, seed, None);
+            let image_bytes = encode_image(
+                &img,
+                req.output_format,
+                req.width,
+                req.height,
+                output_metadata.as_ref(),
+            )?;
 
             let generation_time_ms = start.elapsed().as_millis() as u64;
             tracing::info!(generation_time_ms, seed, "SD3 generation complete");

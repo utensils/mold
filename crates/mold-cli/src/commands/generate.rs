@@ -27,6 +27,7 @@ pub async fn run(
     batch: u32,
     host: Option<String>,
     format: OutputFormat,
+    no_metadata: bool,
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -56,6 +57,7 @@ pub async fn run(
     // Load config and pull model-specific defaults.
     let ctx = CliContext::new(host.as_deref());
     let config = ctx.config().clone();
+    let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
 
     // When source_image is provided and width/height not specified, derive from image dimensions
@@ -111,6 +113,7 @@ pub async fn run(
         seed,
         batch_size: batch,
         output_format,
+        embed_metadata: Some(embed_metadata),
         scheduler,
         source_image: source_image.clone(),
         strength,
