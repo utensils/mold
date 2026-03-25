@@ -22,6 +22,20 @@ use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::transformer::FluxTransformer;
 
+/// Some FLUX safetensors checkpoints store transformer tensors at the root
+/// while others nest them under `model.diffusion_model`.
+fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
+    if vb.contains_tensor("img_in.weight") {
+        vb
+    } else if vb.contains_tensor("model.diffusion_model.img_in.weight") {
+        vb.pp("model.diffusion_model")
+    } else if vb.contains_tensor("diffusion_model.img_in.weight") {
+        vb.pp("diffusion_model")
+    } else {
+        vb
+    }
+}
+
 /// Loaded FLUX model components, ready for inference.
 /// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
 /// depending on available VRAM (checked at load time after the transformer is loaded).
@@ -241,13 +255,13 @@ impl FluxEngine {
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
-            let flux_vb = unsafe {
+            let flux_vb = flux_transformer_var_builder(unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     std::slice::from_ref(&self.paths.transformer),
                     gpu_dtype,
                     &device,
                 )?
-            };
+            });
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
         self.progress
@@ -540,13 +554,13 @@ impl FluxEngine {
                 quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
-            let flux_vb = unsafe {
+            let flux_vb = flux_transformer_var_builder(unsafe {
                 VarBuilder::from_mmaped_safetensors(
                     std::slice::from_ref(&self.paths.transformer),
                     gpu_dtype,
                     &device,
                 )?
-            };
+            });
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
         self.progress
@@ -816,13 +830,13 @@ impl InferenceEngine for FluxEngine {
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else {
-                    let flux_vb = unsafe {
+                    let flux_vb = flux_transformer_var_builder(unsafe {
                         VarBuilder::from_mmaped_safetensors(
                             std::slice::from_ref(&transformer_path),
                             loaded.dtype,
                             &loaded.device,
                         )?
-                    };
+                    });
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 });
                 progress.stage_done(xformer_label, reload_start.elapsed());
@@ -1122,5 +1136,41 @@ impl FluxEngine {
             model: req.model.clone(),
             seed_used: seed,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flux_transformer_var_builder;
+    use candle_core::{DType, Device, Result, Tensor};
+    use candle_nn::VarBuilder;
+    use std::collections::HashMap;
+
+    #[test]
+    fn flux_var_builder_uses_root_tensors_when_present() -> Result<()> {
+        let tensors = HashMap::from([(
+            "img_in.weight".to_string(),
+            Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
+        )]);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let resolved = flux_transformer_var_builder(vb);
+
+        assert!(resolved.contains_tensor("img_in.weight"));
+        assert_eq!(resolved.prefix(), "");
+        Ok(())
+    }
+
+    #[test]
+    fn flux_var_builder_uses_model_diffusion_model_prefix_when_present() -> Result<()> {
+        let tensors = HashMap::from([(
+            "model.diffusion_model.img_in.weight".to_string(),
+            Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
+        )]);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let resolved = flux_transformer_var_builder(vb);
+
+        assert!(resolved.contains_tensor("img_in.weight"));
+        assert_eq!(resolved.prefix(), "model.diffusion_model");
+        Ok(())
     }
 }
