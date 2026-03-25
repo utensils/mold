@@ -23,8 +23,8 @@ metal = ["mold-inference/metal"]
 
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.1.0" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.1.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.2.0" }
 anyhow = "1"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

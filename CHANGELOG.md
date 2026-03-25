@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-24
+
+### Added
+
+- **Wuerstchen v2 model family**: 3-stage cascade pipeline (Prior → Decoder → VQ-GAN) with CLIP-G text encoder and 42x latent compression ([#25](https://github.com/utensils/mold/pull/25))
+- **Image-to-image mode**: `--image` and `--strength` flags for SD1.5, SDXL, and FLUX; stdin support with `--image -` for piping ([#27](https://github.com/utensils/mold/pull/27))
+- **Inpainting**: `--mask` flag for selective repaint (white=repaint, black=preserve) ([#27](https://github.com/utensils/mold/pull/27))
+- **ControlNet conditioning for SD1.5**: `--control`, `--control-model`, `--control-scale` flags with canny, depth, and openpose models ([#28](https://github.com/utensils/mold/pull/28))
+- **Configurable noise schedulers**: DDIM, Euler Ancestral, UniPC for SD1.5/SDXL via `--scheduler` flag ([#26](https://github.com/utensils/mold/pull/26))
+- **Inference caching**: LRU caches for text encoder embeddings, source image latents, masks, and control tensors — avoids re-encoding on repeated prompts/batches ([#41](https://github.com/utensils/mold/pull/41))
+- **Unified model catalog**: automatic model discovery from `MOLD_MODELS_DIR` without requiring config entries; single source of truth for CLI and server ([#41](https://github.com/utensils/mold/pull/41))
+- **PNG generation metadata**: prompt, model, seed, steps, guidance embedded as PNG text chunks by default; disable with `--no-metadata` ([#43](https://github.com/utensils/mold/pull/43))
+- **18 community models**: FLUX fine-tunes (Krea, JibMix, Ultrareal, Iniverse), SDXL fine-tunes (Pony, Cyberrealistic), and Flux.2 Klein GGUF quantizations ([#39](https://github.com/utensils/mold/pull/39))
+- **NixOS module**: declarative `services.mold` with systemd hardening, GPU access, HF token support, firewall options, and shell completions
+- **Centralized color/theme system**: semantic icon/prefix helpers with ANSI 16-color palette for broad terminal compatibility ([#42](https://github.com/utensils/mold/pull/42))
+
+### Changed
+
+- Custom `thiserror` error enum replaces generic `MoldError` for precise error handling ([#16](https://github.com/utensils/mold/pull/16))
+- Server returns structured JSON error responses with error codes ([#18](https://github.com/utensils/mold/pull/18))
+- `mold list` shows separate SIZE and FETCH columns for accurate disk usage ([#33](https://github.com/utensils/mold/pull/33), [#37](https://github.com/utensils/mold/pull/37))
+- `mold pull` routes through server when available, falls back to local download ([#41](https://github.com/utensils/mold/pull/41))
+- Batch generation reuses loaded engine across iterations for faster multi-image runs ([#41](https://github.com/utensils/mold/pull/41))
+- Generation output shows prompt in header block and model name in completion summary ([#42](https://github.com/utensils/mold/pull/42))
+
+### Fixed
+
+- Batch image generation with proper seed increment across images ([#17](https://github.com/utensils/mold/pull/17))
+- FLUX img2img auto-resize, schedule, and VAE normalization ([#34](https://github.com/utensils/mold/pull/34))
+- Wuerstchen pipeline reliability, context-aware image sizes, and Ctrl+C handling ([#31](https://github.com/utensils/mold/pull/31))
+- Server reliability improvements and code quality cleanup ([#38](https://github.com/utensils/mold/pull/38))
+- UTF-8 safe prompt truncation prevents panics on multi-byte characters ([#42](https://github.com/utensils/mold/pull/42))
+- Multiple Nix build/service fixes: CUDA toolkit discovery, modelsDir permissions, EnvironmentFile loading, cross-eval
+- Broken model descriptions renamed to alpha ([#40](https://github.com/utensils/mold/pull/40))
+
+### Improved
+
+- CLI help messages with examples, environment variable documentation, and grouped options ([#12](https://github.com/utensils/mold/pull/12))
+- Code quality, validation, and deduplication from peer review ([#15](https://github.com/utensils/mold/pull/15))
+
 ## [0.1.0] - 2026-03-19
 
 Initial public release on [crates.io](https://crates.io/crates/mold-ai).
@@ -37,4 +77,5 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server) | Axum HTTP inference server |
 
+[0.2.0]: https://github.com/utensils/mold/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/utensils/mold/releases/tag/v0.1.0

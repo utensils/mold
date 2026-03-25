@@ -185,6 +185,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --control <PATH>        Control image for ControlNet conditioning
         --control-model <NAME>  ControlNet model (e.g. controlnet-canny-sd15; requires --control)
         --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
+        --no-metadata           Disable PNG metadata embedding
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
@@ -221,6 +222,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
+| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 

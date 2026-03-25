@@ -74,7 +74,7 @@
           commonArgs = {
             inherit src;
             pname = "mold";
-            version = "0.1.0";
+            version = "0.2.0";
             strictDeps = true;
             cargoVendorDir = craneLib.vendorCargoDeps {
               inherit src;

@@ -8,11 +8,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["James Brink <brink.james@gmail.com>"]
-description = "Local AI image generation CLI — FLUX, SD3.5, SD 1.5, SDXL, Z-Image, Flux.2, & Qwen-Image diffusion models on your GPU"
+description = "Local AI image generation CLI — FLUX, SD3.5, SD 1.5, SDXL, Z-Image, Flux.2, Qwen-Image, & Wuerstchen diffusion models on your GPU"
 rust-version = "1.85"
 homepage = "https://github.com/utensils/mold"
 repository = "https://github.com/utensils/mold"

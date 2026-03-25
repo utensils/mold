@@ -276,7 +276,7 @@ impl std::ops::Deref for ModelInfoExtended {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerStatus {
-    #[schema(example = "0.1.0")]
+    #[schema(example = "0.2.0")]
     pub version: String,
     pub models_loaded: Vec<String>,
     pub gpu_info: Option<GpuInfo>,
