@@ -6,6 +6,14 @@ use crate::output::colorize_description;
 use crate::theme;
 use crate::ui::{col_width, family_label, format_disk_size, format_family_padded};
 
+fn format_fetch_size(remaining_bytes: u64) -> String {
+    if remaining_bytes == 0 {
+        format!("{:>7}", "cached").dimmed().to_string()
+    } else {
+        format!("{:.1}GB", remaining_bytes as f64 / 1_073_741_824.0)
+    }
+}
+
 pub async fn run() -> Result<()> {
     let ctx = CliContext::new(None);
 
@@ -32,10 +40,11 @@ pub async fn run() -> Result<()> {
                 println!("{} No models downloaded.", theme::icon_neutral());
             } else {
                 println!(
-                    "{:<nw$} {:<fw$} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                    "{:<nw$} {:<fw$} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                     "NAME".bold(),
                     "FAMILY".bold(),
                     "SIZE".bold(),
+                    "DISK".bold(),
                     "STEPS".bold(),
                     "GUIDANCE".bold(),
                     "WIDTH".bold(),
@@ -44,7 +53,7 @@ pub async fn run() -> Result<()> {
                     nw = nw,
                     fw = fw,
                 );
-                println!("{}", "─".repeat(nw + fw + 56).dimmed());
+                println!("{}", "─".repeat(nw + fw + 64).dimmed());
 
                 for model in &downloaded {
                     // Pad plain text first, then colorize — ANSI escapes break `{:<N}`.
@@ -62,11 +71,16 @@ pub async fn run() -> Result<()> {
                     } else {
                         "—".to_string()
                     };
+                    let disk = model
+                        .disk_usage_bytes
+                        .map(format_disk_size)
+                        .unwrap_or_else(|| "—".to_string());
                     println!(
-                        "{} {} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        "{} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                         name,
                         format_family_padded(&model.family, fw),
                         size,
+                        disk,
                         model.defaults.default_steps,
                         format!("{:.1}", model.defaults.default_guidance),
                         model.defaults.default_width,
@@ -93,26 +107,24 @@ pub async fn run() -> Result<()> {
                     fw = fw,
                 );
                 for m in &available {
-                    let (size_str, fetch_col) = if let Some(mf) =
-                        mold_core::manifest::find_manifest(&m.name)
-                    {
-                        let (_, remaining_bytes) = mold_core::manifest::compute_download_size(mf);
-                        let model_gb = mf.model_size_gb() as f64;
-                        let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
-                        let fetch = if remaining_bytes == 0 {
-                            format!("{:>7}", "cached").dimmed().to_string()
+                    let (size_str, fetch_col) =
+                        if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
+                            let model_gb = mf.model_size_gb() as f64;
+                            let remaining_bytes = m.remaining_download_bytes.unwrap_or_else(|| {
+                                let (_, remaining_bytes) =
+                                    mold_core::manifest::compute_download_size(mf);
+                                remaining_bytes
+                            });
+                            let fetch = format_fetch_size(remaining_bytes);
+                            (format!("{:.1}GB", model_gb), fetch)
                         } else {
-                            format!("{:.1}GB", remaining_gb)
+                            let s = if m.size_gb > 0.0 {
+                                format!("{:.1}GB", m.size_gb)
+                            } else {
+                                "—".to_string()
+                            };
+                            (s.clone(), s)
                         };
-                        (format!("{:.1}GB", model_gb), fetch)
-                    } else {
-                        let s = if m.size_gb > 0.0 {
-                            format!("{:.1}GB", m.size_gb)
-                        } else {
-                            "—".to_string()
-                        };
-                        (s.clone(), s)
-                    };
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),
@@ -179,11 +191,13 @@ pub async fn run() -> Result<()> {
                         .map(|m| format!("{:.1}GB", m.model_size_gb()))
                         .unwrap_or_else(|| "—".to_string());
                     let model_paths = mcfg.all_file_paths();
-                    let disk_bytes: u64 = model_paths
-                        .iter()
-                        .filter_map(|p| std::fs::metadata(p).ok())
-                        .map(|m| m.len())
-                        .sum();
+                    let disk_bytes: u64 = model.disk_usage_bytes.unwrap_or_else(|| {
+                        model_paths
+                            .iter()
+                            .filter_map(|p| std::fs::metadata(p).ok())
+                            .map(|m| m.len())
+                            .sum()
+                    });
                     all_unique_paths.extend(model_paths);
                     let disk = format_disk_size(disk_bytes);
                     println!(
@@ -235,15 +249,14 @@ pub async fn run() -> Result<()> {
                 for m in &available {
                     let manifest = mold_core::manifest::find_manifest(&m.name)
                         .expect("available models should come from the manifest");
-                    let (_, remaining_bytes) = mold_core::manifest::compute_download_size(manifest);
+                    let remaining_bytes = m.remaining_download_bytes.unwrap_or_else(|| {
+                        let (_, remaining_bytes) =
+                            mold_core::manifest::compute_download_size(manifest);
+                        remaining_bytes
+                    });
                     let model_gb = manifest.model_size_gb() as f64;
-                    let remaining_gb = remaining_bytes as f64 / 1_073_741_824.0;
                     let size_str = format!("{:.1}GB", model_gb);
-                    let fetch_col = if remaining_bytes == 0 {
-                        format!("{:>7}", "cached").dimmed().to_string()
-                    } else {
-                        format!("{:.1}GB", remaining_gb)
-                    };
+                    let fetch_col = format_fetch_size(remaining_bytes);
                     println!(
                         "  {:<nw$} {} {:>7}  {:>7}  {}",
                         m.name.bold(),

@@ -11,9 +11,19 @@ pub fn build_model_catalog(
 
     for manifest in known_manifests() {
         let model_cfg = config.resolved_model_config(&manifest.name);
+        let downloaded = config.manifest_model_is_downloaded(&manifest.name);
+        let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
+        let disk_usage_bytes = downloaded.then(|| {
+            model_cfg
+                .all_file_paths()
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .map(|meta| meta.len())
+                .sum()
+        });
 
         models.push(ModelInfoExtended {
-            downloaded: config.manifest_model_is_downloaded(&manifest.name),
+            downloaded,
             defaults: ModelDefaults {
                 default_steps: model_cfg.effective_steps(config),
                 default_guidance: model_cfg.effective_guidance(),
@@ -37,6 +47,8 @@ pub fn build_model_catalog(
                     .map(|f| f.hf_repo.clone())
                     .unwrap_or_default(),
             },
+            disk_usage_bytes,
+            remaining_download_bytes: Some(remaining_download_bytes),
         });
     }
 
@@ -48,6 +60,12 @@ pub fn build_model_catalog(
     config_only.sort_by(|(left, _), (right, _)| left.cmp(right));
 
     for (name, model_cfg) in config_only {
+        let disk_usage_bytes: u64 = model_cfg
+            .all_file_paths()
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum();
         let size_gb = model_cfg
             .all_file_paths()
             .iter()
@@ -78,6 +96,8 @@ pub fn build_model_catalog(
                 last_used: None,
                 hf_repo: String::new(),
             },
+            disk_usage_bytes: Some(disk_usage_bytes),
+            remaining_download_bytes: None,
         });
     }
 
@@ -180,6 +200,7 @@ mod tests {
             .expect("manifest model should exist");
 
         assert!(!entry.downloaded);
+        assert!(entry.remaining_download_bytes.is_some());
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);

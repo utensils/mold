@@ -39,3 +39,4 @@ base64 = "0.22"
 futures-core = "0.3"
 tokio-stream = "0.1"
 utoipa = { version = "5", features = ["preserve_order"] }
+sha2 = "0.10"

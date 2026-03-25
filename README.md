@@ -147,6 +147,25 @@ mold info flux-dev:q4        # Model details + disk usage
 mold rm dreamshaper-v8       # Remove a model
 ```
 
+### Hugging Face auth
+
+Some model repos on Hugging Face require an authenticated read token. `mold`
+checks `HF_TOKEN` automatically when downloading model files, and falls back to
+the token saved by `huggingface-cli login` if present.
+
+```bash
+# Local pulls / first-run auto-download
+export HF_TOKEN=hf_...
+mold pull flux-dev:q4
+
+# Remote server pulls: set the token where mold serve is running
+HF_TOKEN=hf_... mold serve
+MOLD_HOST=http://gpu-server:7680 mold pull flux-dev:q4
+```
+
+If a gated repo still returns 401/403, make sure you have accepted that model's
+license on Hugging Face and that the token has at least read access.
+
 ### Remote rendering
 
 Run mold on a beefy GPU server, generate from anywhere:

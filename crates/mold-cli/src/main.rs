@@ -161,7 +161,10 @@ Examples:
   mold serve --bind 127.0.0.1 --port 9000
   MOLD_PORT=8080 mold serve
 
-Clients connect via MOLD_HOST=http://<addr>:<port>")]
+Clients connect via MOLD_HOST=http://<addr>:<port>
+
+For gated or private Hugging Face repos, export HF_TOKEN in the server
+environment before starting mold serve.")]
     Serve {
         /// Server port
         #[arg(long, env = "MOLD_PORT", default_value_t = 7680)]
@@ -188,6 +191,10 @@ Examples:
 
 If MOLD_HOST is reachable, the download happens on that server.
 If no server is reachable, mold pulls locally.
+
+For gated or private Hugging Face repos, set HF_TOKEN=hf_... before pulling.
+When using a remote server, HF_TOKEN must be set in the server process
+environment.
 
 Run 'mold list' to see all available models.")]
     Pull {

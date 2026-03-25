@@ -10,11 +10,13 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -130,6 +132,7 @@ fn clean_error_message(e: &anyhow::Error) -> String {
         mold_core::OutputFormat,
         mold_core::ModelInfo,
         mold_core::ServerStatus,
+        mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
@@ -212,6 +215,33 @@ fn take_generated_image(
     Ok(response.images.remove(0))
 }
 
+fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
+    let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
+    let started_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut active = state
+        .active_generation
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *active = Some(crate::state::ActiveGenerationSnapshot {
+        model: model.to_string(),
+        prompt_sha256,
+        started_at_unix_ms,
+        started_at: Instant::now(),
+    });
+}
+
+fn clear_active_generation(state: &AppState) {
+    let mut active = state
+        .active_generation
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *active = None;
+}
+
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -255,14 +285,23 @@ async fn generate(
 
     // Run inference in a blocking task — panics caught → 500 with body.
     let engine = state.engine.clone();
+    let generation_state = state.clone();
+    let req_for_state = req.clone();
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = engine.blocking_lock();
             let engine = guard.as_mut().ok_or_else(|| {
                 anyhow::anyhow!("no engine available after model readiness check")
             })?;
+            set_active_generation(
+                &generation_state,
+                &req_for_state.model,
+                &req_for_state.prompt,
+            );
             engine.clear_on_progress();
-            engine.generate(&req)
+            let result = engine.generate(&req);
+            clear_active_generation(&generation_state);
+            result
         }))
     })
     .await
@@ -274,6 +313,7 @@ async fn generate(
     let mut response = match result {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
+            clear_active_generation(&state);
             tracing::error!("generation error: {e:#}");
             return Err(ApiError::inference(format!(
                 "generation error: {}",
@@ -281,6 +321,7 @@ async fn generate(
             )));
         }
         Err(panic_payload) => {
+            clear_active_generation(&state);
             let msg = panic_payload
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
@@ -385,6 +426,7 @@ async fn generate_stream(
                 let e = guard.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("no engine available after model readiness check")
                 })?;
+                set_active_generation(&state, &gen_req.model, &gen_req.prompt);
                 // Install progress callback for the generate phase
                 let progress_tx = gen_tx.clone();
                 e.set_on_progress(Box::new(move |event| {
@@ -392,6 +434,7 @@ async fn generate_stream(
                 }));
                 let generate_result = e.generate(&gen_req);
                 e.clear_on_progress();
+                clear_active_generation(&state);
                 generate_result
             }))
         })
@@ -663,16 +706,29 @@ async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
-    let engine = state.engine.lock().await;
-    let models_loaded = match engine.as_ref() {
-        Some(e) if e.is_loaded() => vec![e.model_name().to_string()],
+    let snapshot = state.engine_snapshot.read().await.clone();
+    let models_loaded = match (snapshot.model_name, snapshot.is_loaded) {
+        (Some(model_name), true) => vec![model_name],
         _ => vec![],
     };
-    drop(engine);
+    let current_generation = state
+        .active_generation
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|active| ActiveGenerationStatus {
+            model: active.model.clone(),
+            prompt_sha256: active.prompt_sha256.clone(),
+            started_at_unix_ms: active.started_at_unix_ms,
+            elapsed_ms: active.started_at.elapsed().as_millis() as u64,
+        });
+    let busy = current_generation.is_some();
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         models_loaded,
+        busy,
+        current_generation,
         gpu_info: query_gpu_info(),
         uptime_secs: state.start_time.elapsed().as_secs(),
     })

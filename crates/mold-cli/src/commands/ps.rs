@@ -25,6 +25,30 @@ pub async fn run() -> Result<()> {
                 println!("{} GPU: {}", theme::icon_ok(), "not detected".dimmed());
             }
 
+            println!(
+                "{} Busy: {}",
+                theme::icon_ok(),
+                if status.busy {
+                    "yes".yellow()
+                } else {
+                    "no".dimmed()
+                }
+            );
+
+            if let Some(job) = &status.current_generation {
+                println!("{} Active model: {}", theme::icon_ok(), job.model);
+                println!(
+                    "{} Active prompt SHA-256: {}",
+                    theme::icon_ok(),
+                    job.prompt_sha256.dimmed()
+                );
+                println!(
+                    "{} Active for: {:.1}s",
+                    theme::icon_ok(),
+                    job.elapsed_ms as f64 / 1000.0
+                );
+            }
+
             println!();
             if status.models_loaded.is_empty() {
                 println!("{}", "No models loaded.".dimmed());

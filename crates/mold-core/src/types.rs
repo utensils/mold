@@ -264,6 +264,10 @@ pub struct ModelInfoExtended {
     pub defaults: ModelDefaults,
     #[serde(default)]
     pub downloaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_download_bytes: Option<u64>,
 }
 
 impl std::ops::Deref for ModelInfoExtended {
@@ -275,10 +279,25 @@ impl std::ops::Deref for ModelInfoExtended {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ActiveGenerationStatus {
+    #[schema(example = "flux-schnell:q8")]
+    pub model: String,
+    #[schema(example = "3df0d8c4c7c8f7b7c78dc37f2b5f7dd5f9f2acb95c8f3f873f98f2f0fcb1a9d5")]
+    pub prompt_sha256: String,
+    #[schema(example = 1711305600000_u64)]
+    pub started_at_unix_ms: u64,
+    #[schema(example = 950)]
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerStatus {
     #[schema(example = "0.2.0")]
     pub version: String,
     pub models_loaded: Vec<String>,
+    pub busy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_generation: Option<ActiveGenerationStatus>,
     pub gpu_info: Option<GpuInfo>,
     #[schema(example = 3600)]
     pub uptime_secs: u64,
