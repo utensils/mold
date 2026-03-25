@@ -129,8 +129,9 @@ pub async fn run(
         );
     }
     // Show truncated prompt so the user can confirm their input
-    let display_prompt = if prompt.len() > 60 {
-        format!("{}...", &prompt[..57])
+    let display_prompt = if prompt.chars().count() > 60 {
+        let truncated: String = prompt.chars().take(57).collect();
+        format!("{truncated}...")
     } else {
         prompt.to_string()
     };
