@@ -175,6 +175,22 @@ pub async fn run() -> Result<()> {
                 println!();
                 println!("{}", "Use mold pull <model> to download.".dimmed());
             }
+            let has_gated = models.iter().any(|m| {
+                mold_core::manifest::find_manifest(&m.name)
+                    .map(|mf| mf.is_gated())
+                    .unwrap_or(false)
+            });
+            if has_gated {
+                println!();
+                println!(
+                    "{}",
+                    "Models marked [gated] require a HuggingFace token to download.".dimmed()
+                );
+                println!(
+                    "{}",
+                    "Set HF_TOKEN in your environment before running mold pull.".dimmed()
+                );
+            }
         }
         ModelCatalogSource::Local(models) => {
             let config = ctx.config();
@@ -316,7 +332,22 @@ pub async fn run() -> Result<()> {
                 println!("Use {} to download.", "mold pull <model>".bold());
             }
 
-            println!();
+            let has_gated = models.iter().any(|m| {
+                mold_core::manifest::find_manifest(&m.name)
+                    .map(|mf| mf.is_gated())
+                    .unwrap_or(false)
+            });
+            if has_gated {
+                println!();
+                println!(
+                    "{}",
+                    "Models marked [gated] require a HuggingFace token to download.".dimmed()
+                );
+                println!(
+                    "{}",
+                    "Set HF_TOKEN in your environment before running mold pull.".dimmed()
+                );
+            }
         }
     }
 
