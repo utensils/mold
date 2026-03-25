@@ -271,6 +271,9 @@ pub enum SseProgressEvent {
     Info {
         message: String,
     },
+    CacheHit {
+        resource: String,
+    },
     DenoiseStep {
         step: usize,
         total: usize,
@@ -497,6 +500,19 @@ mod tests {
         assert!(
             matches!(back, SseProgressEvent::StageStart { name } if name == "Loading T5 encoder")
         );
+    }
+
+    #[test]
+    fn sse_progress_cache_hit_roundtrip() {
+        let event = SseProgressEvent::CacheHit {
+            resource: "prompt conditioning".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::CacheHit { resource } if resource == "prompt conditioning"
+        ));
     }
 
     #[test]

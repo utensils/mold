@@ -114,7 +114,7 @@ impl SD3Engine {
             },
         )?;
         if cache_hit {
-            progress.info("Reusing cached SD3 prompt conditioning");
+            progress.cache_hit("prompt conditioning");
             return Ok((context, y));
         }
         Ok((context, y))

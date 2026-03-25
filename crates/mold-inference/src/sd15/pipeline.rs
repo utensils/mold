@@ -341,7 +341,7 @@ impl SD15Engine {
             },
         )?;
         if cache_hit {
-            self.progress.info("Reusing cached source image latents");
+            self.progress.cache_hit("source image latents");
         }
 
         // Compute start step
@@ -415,8 +415,7 @@ impl SD15Engine {
                 Ok(text_embeddings.to_dtype(dtype)?)
             })?;
         if cache_hit {
-            self.progress
-                .info("Reusing cached CLIP-L prompt conditioning");
+            self.progress.cache_hit("prompt conditioning");
             return Ok(text_embeddings);
         }
         Ok(text_embeddings)
@@ -436,7 +435,7 @@ impl SD15Engine {
                 crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)
             })?;
         if cache_hit {
-            self.progress.info("Reusing cached inpaint mask");
+            self.progress.cache_hit("inpaint mask");
             return Ok(mask);
         }
         Ok(mask)
@@ -499,8 +498,7 @@ impl SD15Engine {
             },
         )?;
         if cache_hit {
-            self.progress
-                .info("Reusing cached control image preprocessing");
+            self.progress.cache_hit("control preprocessing");
         }
 
         self.progress

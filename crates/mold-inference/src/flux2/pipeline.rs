@@ -184,7 +184,7 @@ impl Flux2Engine {
             },
         )?;
         if cache_hit {
-            progress.info("Reusing cached Flux.2 prompt conditioning");
+            progress.cache_hit("prompt conditioning");
         }
         Ok(txt_emb)
     }

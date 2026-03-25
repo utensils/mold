@@ -94,7 +94,7 @@ impl FluxEngine {
         let Some(restored) = restored else {
             return Ok(None);
         };
-        progress.info("Reusing cached FLUX prompt conditioning");
+        progress.cache_hit("prompt conditioning");
         Ok(Some(restored))
     }
 

@@ -372,7 +372,7 @@ impl SDXLEngine {
             },
         )?;
         if cache_hit {
-            self.progress.info("Reusing cached source image latents");
+            self.progress.cache_hit("source image latents");
         }
 
         let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
@@ -458,8 +458,7 @@ impl SDXLEngine {
                 Ok(text_embeddings.to_dtype(dtype)?)
             })?;
         if cache_hit {
-            self.progress
-                .info("Reusing cached SDXL prompt conditioning");
+            self.progress.cache_hit("prompt conditioning");
             return Ok(text_embeddings);
         }
         Ok(text_embeddings)
@@ -479,7 +478,7 @@ impl SDXLEngine {
                 crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)
             })?;
         if cache_hit {
-            self.progress.info("Reusing cached inpaint mask");
+            self.progress.cache_hit("inpaint mask");
             return Ok(mask);
         }
         Ok(mask)

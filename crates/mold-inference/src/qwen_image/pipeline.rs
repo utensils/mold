@@ -183,7 +183,7 @@ impl QwenImageEngine {
             .expect("cache poisoned")
             .get_cloned(&cache_key)
         {
-            progress.info("Reusing cached Qwen-Image prompt conditioning");
+            progress.cache_hit("prompt conditioning");
             return cached.restore(device, dtype);
         }
 

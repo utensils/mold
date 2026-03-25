@@ -108,7 +108,7 @@ impl ZImageEngine {
                 Ok(cap_feats)
             })?;
         if cache_hit {
-            progress.info("Reusing cached Z-Image prompt conditioning");
+            progress.cache_hit("prompt conditioning");
         }
         let token_count = cap_feats.dim(1)?;
         let cap_mask = Tensor::ones((1, token_count), DType::U8, device)?;

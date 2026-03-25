@@ -130,8 +130,7 @@ impl WuerstchenEngine {
                 Ok((prior_text_embeddings, decoder_text_embeddings))
             })?;
         if cache_hit {
-            self.progress
-                .info("Reusing cached Wuerstchen prompt conditioning");
+            self.progress.cache_hit("prompt conditioning");
         }
         Ok((prior_text_embeddings, decoder_text_embeddings))
     }

@@ -171,6 +171,11 @@ pub(crate) async fn render_progress(
                     status!("  {} {}", "·".dimmed(), message.dimmed());
                 });
             }
+            SseProgressEvent::CacheHit { resource } => {
+                pb.suspend(|| {
+                    status!("  {}", format_cache_hit_badge(&resource));
+                });
+            }
             SseProgressEvent::DenoiseStep {
                 step,
                 total,
@@ -279,6 +284,15 @@ fn truncate_name(name: &str, max_len: usize) -> String {
     format!("...{}", &name[start..])
 }
 
+fn format_cache_hit_badge(resource: &str) -> String {
+    format!(
+        "{} {} {}",
+        "✓".green(),
+        resource,
+        "[cache hit]".bright_cyan().bold()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +360,12 @@ mod tests {
     #[test]
     fn col_width_respects_header_and_padding() {
         assert_eq!(col_width([3usize, 9, 5], 4, 2), 11);
+    }
+
+    #[test]
+    fn cache_hit_badge_includes_resource_and_marker() {
+        let badge = format_cache_hit_badge("prompt conditioning");
+        assert!(badge.contains("prompt conditioning"));
+        assert!(badge.contains("cache hit"));
     }
 }
