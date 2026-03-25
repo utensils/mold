@@ -680,7 +680,12 @@ impl FluxEngine {
 
         // Use cached transformer path to avoid file I/O on every sequential call.
         let transformer_path = if let Some(ref cached) = self.cached_transformer_path {
-            if cached.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            if cached
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+            {
                 is_quantized = true;
             }
             cached.clone()
