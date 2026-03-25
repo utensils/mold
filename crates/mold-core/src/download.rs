@@ -228,19 +228,24 @@ fn filename_column_width() -> usize {
 struct DownloadProgress {
     bar: ProgressBar,
     max_msg_len: usize,
+    filename: String,
 }
 
 impl DownloadProgress {
     fn new(bar: ProgressBar, max_msg_len: usize) -> Self {
-        Self { bar, max_msg_len }
+        Self {
+            bar,
+            max_msg_len,
+            filename: String::new(),
+        }
     }
 }
 
 impl Progress for DownloadProgress {
     async fn init(&mut self, size: usize, filename: &str) {
         self.bar.set_length(size as u64);
-        self.bar
-            .set_message(truncate_filename(filename, self.max_msg_len));
+        self.filename = truncate_filename(filename, self.max_msg_len);
+        self.bar.set_message(self.filename.clone());
     }
 
     async fn update(&mut self, size: usize) {
@@ -248,7 +253,7 @@ impl Progress for DownloadProgress {
     }
 
     async fn finish(&mut self) {
-        self.bar.finish_with_message("done");
+        self.bar.finish_with_message(self.filename.clone());
     }
 }
 

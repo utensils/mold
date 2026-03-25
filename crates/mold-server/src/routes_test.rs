@@ -9,7 +9,6 @@ mod tests {
     use mold_inference::InferenceEngine;
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
-    use std::sync::OnceLock;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
@@ -22,9 +21,12 @@ mod tests {
         state::{AppState, EngineSnapshot},
     };
 
-    fn env_lock() -> &'static tokio::sync::Mutex<()> {
-        static ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    /// Serialize tests that mutate MOLD_MODELS_DIR env var.
+    /// Uses std::sync::Mutex (not tokio) so it works across independent
+    /// tokio runtimes that #[tokio::test] creates per test.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &ENV_LOCK
     }
 
     /// Parse response body as JSON and return the value.
@@ -420,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_reports_server_disk_and_remaining_download_bytes() {
-        let _lock = env_lock().lock().await;
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("remote-catalog");
         populate_manifest_files(&models_dir, "flux-schnell:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -700,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_known_model_not_downloaded_returns_404() {
-        let _lock = env_lock().lock().await;
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("generate-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -860,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_known_model_not_downloaded_returns_404() {
-        let _lock = env_lock().lock().await;
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("stream-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
