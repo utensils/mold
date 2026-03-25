@@ -96,6 +96,8 @@ pub(crate) fn print_using_local_inference() {
     status!("{} Using local GPU inference", "●".cyan());
 }
 
+/// Human-readable byte size with space before unit (e.g. "7.0 GB").
+/// Used in verbose contexts like `mold rm` confirmation output.
 pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
@@ -108,6 +110,8 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Compact byte size without space (e.g. "7.0GB").
+/// Used in dense table columns like `mold list`.
 pub(crate) fn format_disk_size(bytes: u64) -> String {
     if bytes == 0 {
         "—".to_string()

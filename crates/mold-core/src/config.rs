@@ -369,7 +369,7 @@ impl Config {
     }
 
     pub fn has_models_dir_override(&self) -> bool {
-        std::env::var_os("MOLD_MODELS_DIR").is_some()
+        RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
     }
 
     pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {

@@ -28,6 +28,9 @@ pub(crate) struct LatentSizeCacheKey {
     latent_w: usize,
 }
 
+/// Hash image bytes for cache keying. Uses `DefaultHasher` for speed;
+/// collisions are astronomically unlikely at cache sizes <= 256 entries.
+/// Not stable across Rust versions — used only for in-process LRU lookup.
 pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
