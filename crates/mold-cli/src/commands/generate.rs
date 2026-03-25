@@ -46,6 +46,7 @@ fn effective_dimensions(
     }
 }
 
+#[cfg(any(feature = "cuda", feature = "metal", test))]
 fn preserve_source_dimensions_on_auto_pull(
     req: &GenerateRequest,
     cli_width: Option<u32>,
