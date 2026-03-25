@@ -130,9 +130,8 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!("  {:<16} {}", "Description:".dimmed(), m.description);
         if m.is_gated() {
             println!(
-                "  {:<16} {} — requires HF_TOKEN",
+                "  {:<16} 🔒 Requires HF_TOKEN for download",
                 "Auth:".dimmed(),
-                "Gated".yellow().bold()
             );
         }
 
@@ -200,13 +199,13 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             } else {
                 "not downloaded".dimmed().to_string()
             };
-            let gated_marker = if file.gated { " gated" } else { "" };
+            let gated_marker = if file.gated { " 🔒" } else { "" };
             println!(
                 "  {:<16} {} ({}{}, {})",
                 format!("{}:", component_label(&file.component)).dimmed(),
                 url,
                 size_str,
-                gated_marker.yellow(),
+                gated_marker,
                 status_marker,
             );
         }
@@ -243,7 +242,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!(
             "  {:<16} {}",
             "Status:".dimmed(),
-            "Installed".green().bold()
+            format_args!("✅ {}", "Installed".green().bold())
         );
         if let Some(config_path) = Config::config_path() {
             println!("  {:<16} {}", "Config:".dimmed(), config_path.display());
@@ -403,8 +402,8 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!(
             "  {:<16} {} — run {} to download",
             "Status:".dimmed(),
-            "Not installed".red(),
-            format!("mold pull {}", canonical).bold()
+            format_args!("📦 {}", "Not installed".red()),
+            format_args!("mold pull {}", canonical).to_string().bold()
         );
     }
 

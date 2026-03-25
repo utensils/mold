@@ -28,30 +28,19 @@ pub(crate) use status;
 /// bright yellow bold, rest dimmed. Normal descriptions are fully dimmed.
 pub fn colorize_description(desc: &str) -> String {
     use colored::Colorize;
-    // Handle trailing [gated] tag separately — it can appear with any prefix
-    let (desc, gated_suffix) = if let Some(rest) = desc.strip_suffix(" [gated]") {
-        (rest, Some(format!(" {}", "[gated]".yellow())))
+    // Handle trailing 🔒 emoji separately — it can appear with any prefix
+    let (desc, gated_suffix) = if let Some(rest) = desc.strip_suffix(" 🔒") {
+        (rest, " 🔒")
     } else {
-        (desc, None)
+        (desc, "")
     };
-    let gated = gated_suffix.unwrap_or_default();
 
     if let Some(rest) = desc.strip_prefix("[alpha] ") {
-        format!(
-            "{} {}{}",
-            "[alpha]".bright_yellow().bold(),
-            rest.dimmed(),
-            gated
-        )
+        format!("{}{} 🧪", rest.dimmed(), gated_suffix)
     } else if let Some(rest) = desc.strip_prefix("[beta] ") {
-        format!(
-            "{} {}{}",
-            "[beta]".bright_yellow().bold(),
-            rest.dimmed(),
-            gated
-        )
+        format!("{}{} 🔬", rest.dimmed(), gated_suffix)
     } else {
-        format!("{}{}", desc.dimmed(), gated)
+        format!("{}{}", desc.dimmed(), gated_suffix)
     }
 }
 
@@ -75,15 +64,16 @@ mod tests {
     #[test]
     fn test_colorize_description_alpha() {
         let result = colorize_description("[alpha] Experimental model");
-        // Should contain the [alpha] text and the rest of the description.
-        assert!(result.contains("[alpha]"));
+        assert!(result.contains("🧪"), "should have alpha emoji: {result}");
         assert!(result.contains("Experimental model"));
+        // Emoji should be at the end
+        assert!(result.ends_with("🧪"), "emoji at end: {result}");
     }
 
     #[test]
     fn test_colorize_description_beta() {
         let result = colorize_description("[beta] Experimental model");
-        assert!(result.contains("[beta]"));
+        assert!(result.contains("🔬"), "should have beta emoji: {result}");
         assert!(result.contains("Experimental model"));
     }
 
