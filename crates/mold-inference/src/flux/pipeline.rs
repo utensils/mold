@@ -215,7 +215,7 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     }
 
     // Write GGUF cache (clean up temp file on error)
-    let tmp_path = cache_path.with_extension("tmp");
+    let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
     let write_result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);

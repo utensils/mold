@@ -186,7 +186,7 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
         "<mold:version>{}</mold:version>",
         xml_escape(&metadata.version)
     );
-    let json = serde_json::to_string(metadata).unwrap_or_default();
+    let json = serde_json::to_string(metadata).expect("metadata already serialized in COM marker");
     let _ = write!(
         xmp,
         "<mold:parameters>{}</mold:parameters>",

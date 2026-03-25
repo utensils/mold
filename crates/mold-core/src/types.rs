@@ -297,7 +297,7 @@ pub struct ServerStatus {
     pub models_loaded: Vec<String>,
     #[serde(default)]
     pub busy: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<ActiveGenerationStatus>,
     pub gpu_info: Option<GpuInfo>,
     #[schema(example = 3600)]
