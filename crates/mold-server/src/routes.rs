@@ -215,6 +215,63 @@ fn take_generated_image(
     Ok(response.images.remove(0))
 }
 
+/// Save an image to the configured output directory (async version for non-spawned routes).
+/// Non-fatal: logs a warning on failure but never returns an error.
+async fn maybe_save_to_output_dir(
+    state: &AppState,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+) {
+    let config = state.config.read().await;
+    let Some(dir) = config.resolved_output_dir() else {
+        return;
+    };
+    save_image_to_dir(&dir, img, model, batch_size);
+}
+
+/// Save an image to the configured output directory (sync version for spawned tasks).
+/// Non-fatal: logs a warning on failure.
+fn save_to_output_dir_if_configured(
+    config: &tokio::sync::RwLock<mold_core::Config>,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+) {
+    let Ok(config) = config.try_read() else {
+        tracing::warn!("could not read config for output_dir save (lock held)");
+        return;
+    };
+    let Some(dir) = config.resolved_output_dir() else {
+        return;
+    };
+    save_image_to_dir(&dir, img, model, batch_size);
+}
+
+fn save_image_to_dir(
+    dir: &std::path::Path,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("failed to create output dir {}: {e}", dir.display());
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ext = img.format.to_string();
+    let filename =
+        mold_core::default_output_filename(model, timestamp, &ext, batch_size, img.index);
+    let path = dir.join(&filename);
+    match std::fs::write(&path, &img.data) {
+        Ok(()) => tracing::info!("saved image to {}", path.display()),
+        Err(e) => tracing::warn!("failed to save image to {}: {e}", path.display()),
+    }
+}
+
 fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
     let started_at_unix_ms = SystemTime::now()
@@ -287,6 +344,8 @@ async fn generate(
     let engine = state.engine.clone();
     let generation_state = state.clone();
     let req_for_state = req.clone();
+    let save_model = req.model.clone();
+    let save_batch_size = req.batch_size;
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = engine.blocking_lock();
@@ -333,6 +392,7 @@ async fn generate(
     };
 
     let img = take_generated_image(&mut response)?;
+    maybe_save_to_output_dir(&state, &img, &save_model, save_batch_size).await;
     let content_type = match img.format {
         OutputFormat::Png => HeaderValue::from_static("image/png"),
         OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
@@ -398,6 +458,7 @@ async fn generate_stream(
 
     // Spawn background task for model loading + inference
     let bg_tx = tx;
+    let config_for_save = state.config.clone();
     tokio::spawn(async move {
         // Load model if needed (with progress events)
         let progress = std::sync::Arc::new({
@@ -449,6 +510,12 @@ async fn generate_stream(
                         return;
                     }
                 };
+                save_to_output_dir_if_configured(
+                    &config_for_save,
+                    &img,
+                    &req.model,
+                    req.batch_size,
+                );
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),
                     format: img.format,

@@ -255,6 +255,12 @@ pub struct Config {
     #[serde(default)]
     pub qwen3_variant: Option<String>,
 
+    /// Optional directory to persist copies of generated images (server mode).
+    /// When set, every image produced by /api/generate is saved here.
+    /// Disabled by default (None).
+    #[serde(default)]
+    pub output_dir: Option<String>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -300,6 +306,7 @@ impl Default for Config {
             embed_metadata: default_embed_metadata(),
             t5_variant: None,
             qwen3_variant: None,
+            output_dir: None,
             models: HashMap::new(),
         }
     }
@@ -383,6 +390,21 @@ impl Config {
 
     pub fn has_models_dir_override(&self) -> bool {
         RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
+    }
+
+    /// Resolve the output directory for server-mode image persistence.
+    /// `MOLD_OUTPUT_DIR` env var takes precedence over the config file value.
+    /// Returns `None` when disabled (default).
+    pub fn resolved_output_dir(&self) -> Option<PathBuf> {
+        let raw = if let Ok(env_dir) = std::env::var("MOLD_OUTPUT_DIR") {
+            Some(env_dir)
+        } else {
+            self.output_dir.clone()
+        };
+        raw.map(|dir| {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            PathBuf::from(dir.replace("~", &home.to_string_lossy()))
+        })
     }
 
     pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {

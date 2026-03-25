@@ -764,12 +764,7 @@ async fn generate_local_batch(
 
 /// Build a default output filename, sanitizing colons from model names.
 fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u32) -> String {
-    let safe_model = model.replace(':', "-");
-    if batch == 1 {
-        format!("mold-{safe_model}-{timestamp}.{ext}")
-    } else {
-        format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
-    }
+    mold_core::default_output_filename(model, timestamp, ext, batch, index)
 }
 
 #[cfg(test)]

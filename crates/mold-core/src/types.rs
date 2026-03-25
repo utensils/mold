@@ -841,4 +841,32 @@ mod tests {
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert!(req.mask_image.is_none());
     }
+
+    #[test]
+    fn default_output_filename_single() {
+        let name = super::default_output_filename("flux-dev:q8", 1700000000, "png", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000.png");
+    }
+
+    #[test]
+    fn default_output_filename_batch() {
+        let name = super::default_output_filename("flux-dev:q8", 1700000000, "png", 4, 2);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000-2.png");
+    }
+}
+
+/// Build a default output filename, sanitizing colons from model names.
+pub fn default_output_filename(
+    model: &str,
+    timestamp: u64,
+    ext: &str,
+    batch: u32,
+    index: u32,
+) -> String {
+    let safe_model = model.replace(':', "-");
+    if batch == 1 {
+        format!("mold-{safe_model}-{timestamp}.{ext}")
+    } else {
+        format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
+    }
 }

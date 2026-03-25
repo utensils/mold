@@ -83,7 +83,7 @@ mold run "a cat" --no-metadata
 MOLD_EMBED_METADATA=0 mold run "a cat"
 ```
 
-In `~/.mold/config.toml`:
+In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 
 ```toml
 embed_metadata = false
@@ -177,6 +177,41 @@ mold serve
 # From your laptop
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 ```
+
+### Server image persistence
+
+Save a copy of every server-generated image to disk (disabled by default):
+
+```bash
+# Via environment variable
+MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
+
+# Via config file
+# output_dir = "/srv/mold/gallery"
+```
+
+Images are saved alongside the normal HTTP response using the same naming convention as the CLI (`mold-{model}-{timestamp}.{ext}`). Save failures log a warning but never fail the request.
+
+## Configuration
+
+Mold looks for `config.toml` inside the base mold directory (`~/.mold/` by default). Override the base with `MOLD_HOME`:
+
+```bash
+export MOLD_HOME=/data/mold    # config at /data/mold/config.toml, models at /data/mold/models/
+```
+
+Key environment variables (highest precedence, override config file):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default model storage |
+| `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
+| `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
+| `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
+| `MOLD_LOG` | `warn` / `info` | Log level |
+| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
+
+See [CLAUDE.md](CLAUDE.md) for the full list.
 
 ## Models
 

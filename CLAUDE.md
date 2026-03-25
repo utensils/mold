@@ -222,6 +222,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
+| `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
 

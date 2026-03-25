@@ -75,6 +75,12 @@ in
       description = "Path to a file containing the HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile.";
     };
 
+    outputDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional directory to persist copies of server-generated images. Null means disabled (default).";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -93,6 +99,9 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.homeDir} 0755 mold mold -"
       "d ${cfg.modelsDir} 0755 mold mold -"
+    ]
+    ++ lib.optionals (cfg.outputDir != null) [
+      "d ${cfg.outputDir} 0755 mold mold -"
     ];
 
     systemd.services.mold = {
@@ -109,6 +118,9 @@ in
       }
       // lib.optionalAttrs (cfg.corsOrigin != null) {
         MOLD_CORS_ORIGIN = cfg.corsOrigin;
+      }
+      // lib.optionalAttrs (cfg.outputDir != null) {
+        MOLD_OUTPUT_DIR = cfg.outputDir;
       }
       // cfg.environment;
 
@@ -142,7 +154,8 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
-        ReadWritePaths = [ cfg.homeDir cfg.modelsDir ];
+        ReadWritePaths = [ cfg.homeDir cfg.modelsDir ]
+          ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ];
 
         # GPU access
         SupplementaryGroups = [
