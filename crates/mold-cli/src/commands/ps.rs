@@ -2,6 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::control::CliContext;
+use crate::theme;
 use crate::ui::print_server_unavailable;
 
 pub async fn run() -> Result<()> {
@@ -9,19 +10,19 @@ pub async fn run() -> Result<()> {
 
     match ctx.client().server_status().await {
         Ok(status) => {
-            println!("{} mold server v{}", "●".green(), status.version);
-            println!("{} Uptime: {}s", "●".green(), status.uptime_secs,);
+            println!("{} mold server v{}", theme::icon_ok(), status.version);
+            println!("{} Uptime: {}s", theme::icon_ok(), status.uptime_secs,);
 
             if let Some(gpu) = &status.gpu_info {
                 println!(
                     "{} GPU: {} ({}/{} MB VRAM)",
-                    "●".green(),
+                    theme::icon_ok(),
                     gpu.name,
                     gpu.vram_used_mb,
                     gpu.vram_total_mb,
                 );
             } else {
-                println!("{} GPU: {}", "●".green(), "not detected".dimmed());
+                println!("{} GPU: {}", theme::icon_ok(), "not detected".dimmed());
             }
 
             println!();

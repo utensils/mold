@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::control::{stream_server_pull, CliContext};
 use crate::output::{is_piped, status};
+use crate::theme;
 use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
 
 #[allow(clippy::too_many_arguments)]
@@ -74,7 +75,7 @@ pub async fn run(
                         if cw != w || ch != h {
                             status!(
                                 "{} Source image {}x{} exceeds megapixel limit, resizing to {}x{}",
-                                "●".yellow(),
+                                theme::icon_warn(),
                                 orig_w,
                                 orig_h,
                                 cw,
@@ -122,36 +123,48 @@ pub async fn run(
     if let Some(desc) = &model_cfg.description {
         status!(
             "{} {} — {}",
-            "●".green(),
+            theme::icon_ok(),
             model.bold(),
             crate::output::colorize_description(desc)
         );
     }
+    // Show truncated prompt so the user can confirm their input
+    let display_prompt = if prompt.len() > 60 {
+        format!("{}...", &prompt[..57])
+    } else {
+        prompt.to_string()
+    };
+    status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
     if mask_image.is_some() {
         status!(
             "{} inpainting mode (strength: {:.2})",
-            "●".magenta(),
+            theme::icon_mode(),
             strength,
         );
     } else if source_image.is_some() {
-        status!("{} img2img mode (strength: {:.2})", "●".magenta(), strength,);
+        status!(
+            "{} img2img mode (strength: {:.2})",
+            theme::icon_mode(),
+            strength,
+        );
     }
     if let Some(ref cm) = control_model {
         status!(
             "{} ControlNet: {} (scale: {:.2})",
-            "●".magenta(),
+            theme::icon_mode(),
             cm.bold(),
             control_scale
         );
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",
-        "●".cyan(),
+        theme::icon_info(),
         effective_width,
         effective_height,
         effective_steps,
         effective_guidance,
     );
+    status!("{}", "─".repeat(40).dimmed());
 
     // Validate output directory exists
     if let Some(ref path) = output {
@@ -167,7 +180,7 @@ pub async fn run(
 
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let response = if local {
-        status!("{} Using local GPU inference", "●".cyan());
+        print_using_local_inference();
         generate_local_batch(
             &req,
             &config,
@@ -196,7 +209,7 @@ pub async fn run(
             if batch > 1 {
                 status!(
                     "{} Generating image {}/{} (seed: {})",
-                    "●".cyan(),
+                    theme::icon_info(),
                     i + 1,
                     batch,
                     iter_req.seed.unwrap(),
@@ -279,26 +292,28 @@ pub async fn run(
             };
 
             if std::path::Path::new(&filename).exists() {
-                status!("{} Overwriting: {}", "!".yellow(), filename);
+                status!("{} Overwriting: {}", theme::icon_alert(), filename);
             }
             std::fs::write(&filename, &img.data)?;
-            status!("{} Saved: {}", "✓".green(), filename.bold());
+            status!("{} Saved: {}", theme::icon_done(), filename.bold());
         }
     }
 
     let secs = response.generation_time_ms as f64 / 1000.0;
     if batch > 1 {
         status!(
-            "{} Done in {:.1}s ({} images, base seed: {})",
-            "✓".green(),
+            "{} Done — {} in {:.1}s ({} images, base seed: {})",
+            theme::icon_done(),
+            model.bold(),
             secs,
             batch,
             base_seed,
         );
     } else {
         status!(
-            "{} Done in {:.1}s (seed: {})",
-            "✓".green(),
+            "{} Done — {} in {:.1}s (seed: {})",
+            theme::icon_done(),
+            model.bold(),
             secs,
             response.seed_used,
         );
@@ -364,7 +379,7 @@ async fn generate_remote(
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model).await?;
 
-                    status!("{} Generating...", "●".cyan());
+                    status!("{} Generating...", theme::icon_info());
 
                     let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
                     let render2 = tokio::spawn(render_progress(rx2));
@@ -425,7 +440,7 @@ async fn generate_remote_blocking(
     }
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
+            .template(&format!("{{spinner:.{}}} {{msg}}", theme::SPINNER_STYLE))
             .unwrap(),
     );
     pb.set_message(format!(
@@ -445,7 +460,7 @@ async fn generate_remote_blocking(
                 GenerateServerAction::PullModelAndRetry => {
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model).await?;
-                    status!("{} Generating...", "●".cyan());
+                    status!("{} Generating...", theme::icon_info());
                     Ok(client.generate(req.clone()).await?)
                 }
                 GenerateServerAction::FallbackLocal => {
@@ -499,7 +514,7 @@ async fn prepare_local_engine(
             if find_manifest(&model_name).is_some() {
                 status!(
                     "{} Model '{}' not found locally, pulling...",
-                    "●".cyan(),
+                    theme::icon_info(),
                     model_name.bold(),
                 );
                 let updated_config = super::pull::pull_and_configure(&model_name).await?;
@@ -527,7 +542,7 @@ async fn prepare_local_engine(
                 }
                 status!(
                     "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
-                    "●".cyan(),
+                    theme::icon_info(),
                     req.width,
                     req.height,
                     req.steps,
@@ -658,7 +673,7 @@ async fn generate_local_batch(
         if batch > 1 {
             status!(
                 "{} Generating image {}/{} (seed: {})",
-                "●".cyan(),
+                theme::icon_info(),
                 i + 1,
                 batch,
                 iter_req.seed.unwrap(),

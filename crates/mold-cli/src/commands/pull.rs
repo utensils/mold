@@ -7,6 +7,7 @@ use mold_core::{classify_server_error, ServerAvailability};
 
 use crate::control::CliContext;
 use crate::output::status;
+use crate::theme;
 use crate::ui::print_server_fallback;
 use crate::AlreadyReported;
 
@@ -30,7 +31,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     if cached_gb > 0.1 {
         status!(
             "{} Pulling {} ({:.1}GB to download, {:.1}GB already cached)",
-            "●".cyan(),
+            theme::icon_info(),
             manifest.name.bold(),
             remaining_gb,
             cached_gb,
@@ -38,7 +39,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     } else {
         status!(
             "{} Pulling {} ({:.1}GB to download)",
-            "●".cyan(),
+            theme::icon_info(),
             manifest.name.bold(),
             total_gb,
         );
@@ -59,7 +60,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                 }
                 DownloadError::Unauthorized { repo, .. } => {
                     eprintln!();
-                    eprintln!("{} Authentication required for {repo}", "✗".red().bold());
+                    eprintln!("{} Authentication required for {repo}", theme::icon_fail());
                     eprintln!();
                     eprintln!("  1. Create a token at: https://huggingface.co/settings/tokens");
                     eprintln!("     (select at least \"Read\" access)");
@@ -70,7 +71,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                         eprintln!();
                         eprintln!(
                             "  {} HF_TOKEN is set but was rejected — it may be invalid or expired.",
-                            "!".yellow().bold()
+                            theme::icon_alert()
                         );
                     }
                 }
@@ -78,7 +79,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                     eprintln!();
                     eprintln!(
                         "{} This model requires access approval on HuggingFace.",
-                        "✗".red().bold()
+                        theme::icon_fail()
                     );
                     eprintln!();
 
@@ -97,20 +98,20 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                 }
                 other => {
                     eprintln!();
-                    eprintln!("{} Download failed: {other}", "✗".red().bold());
+                    eprintln!("{} Download failed: {other}", theme::icon_fail());
                 }
             }
             AlreadyReported.into()
         })?;
 
     status!("");
-    status!("{} {} is ready!", "✓".green().bold(), canonical.bold());
+    status!("{} {} is ready!", theme::icon_done(), canonical.bold());
 
     Ok(config)
 }
 
 fn print_unknown_model_error(model: &str) {
-    eprintln!("{} Unknown model: {}", "✗".red().bold(), model.bold());
+    eprintln!("{} Unknown model: {}", theme::icon_fail(), model.bold());
     eprintln!();
     eprintln!("Available models:");
     let all = known_manifests();
@@ -159,7 +160,7 @@ pub async fn run(model: &str) -> Result<()> {
 async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<()> {
     status!(
         "{} Pulling {} on {}",
-        "●".cyan(),
+        theme::icon_info(),
         manifest.name.bold(),
         ctx.client().host().bold(),
     );
@@ -174,7 +175,7 @@ async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<(
     status!("");
     status!(
         "{} {} is ready on {}!",
-        "✓".green().bold(),
+        theme::icon_done(),
         manifest.name.bold(),
         ctx.client().host().bold(),
     );

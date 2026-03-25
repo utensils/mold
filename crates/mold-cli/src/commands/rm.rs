@@ -7,6 +7,7 @@ use colored::Colorize;
 use mold_core::manifest::resolve_model_name;
 use mold_core::Config;
 
+use crate::theme;
 use crate::ui::format_bytes;
 use crate::AlreadyReported;
 
@@ -43,7 +44,7 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         if !config.models.contains_key(&canonical) {
             eprintln!(
                 "{} {} is not installed",
-                "error:".red().bold(),
+                theme::prefix_error(),
                 canonical.bold()
             );
             any_error = true;
@@ -129,12 +130,12 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
             match std::fs::remove_file(path) {
                 Ok(()) => freed += size,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    eprintln!("{} {} already deleted", "warning:".yellow().bold(), path);
+                    eprintln!("{} {} already deleted", theme::prefix_warning(), path);
                 }
                 Err(e) => {
                     eprintln!(
                         "{} failed to delete {}: {}",
-                        "warning:".yellow().bold(),
+                        theme::prefix_warning(),
                         path,
                         e
                     );
@@ -156,13 +157,13 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
             if config.models.is_empty() {
                 eprintln!(
                     "{} default model reset to {}",
-                    "note:".dimmed(),
+                    theme::prefix_note(),
                     "flux-schnell".bold()
                 );
             } else {
                 eprintln!(
                     "{} default model changed to {}",
-                    "note:".dimmed(),
+                    theme::prefix_note(),
                     new_default.bold()
                 );
             }

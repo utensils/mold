@@ -1,7 +1,8 @@
 use anyhow::Result;
-use colored::Colorize;
 use mold_core::Config;
 use std::path::PathBuf;
+
+use crate::theme;
 
 pub async fn run(port: u16, bind: &str, models_dir: Option<String>) -> Result<()> {
     let config = Config::load_or_default();
@@ -14,10 +15,15 @@ pub async fn run(port: u16, bind: &str, models_dir: Option<String>) -> Result<()
     // Ensure models directory exists
     std::fs::create_dir_all(&models_path)?;
 
-    println!("{} Starting mold server on {}:{}", "●".green(), bind, port,);
+    println!(
+        "{} Starting mold server on {}:{}",
+        theme::icon_ok(),
+        bind,
+        port,
+    );
     println!(
         "{} Models directory: {}",
-        "●".green(),
+        theme::icon_ok(),
         models_path.display(),
     );
 
