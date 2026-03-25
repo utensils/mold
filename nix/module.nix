@@ -133,6 +133,7 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
+        ReadWritePaths = [ cfg.modelsDir ];
 
         # GPU access
         SupplementaryGroups = [
