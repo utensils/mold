@@ -405,18 +405,22 @@ impl Config {
                 return m;
             }
         }
-        // 2. Config value — if downloaded
+        // 2. Explicit config entry — honor custom/manual models even when not manifest-backed.
         let configured = &self.default_model;
+        if self.lookup_model_config(configured).is_some() {
+            return configured.clone();
+        }
+        // 3. Configured manifest model — if downloaded
         if self.manifest_model_is_downloaded(configured) {
             return configured.clone();
         }
-        // 3. Last-used model — if still downloaded
+        // 4. Last-used model — if still downloaded
         if let Some(last) = Self::read_last_model() {
             if self.manifest_model_is_downloaded(&last) {
                 return last;
             }
         }
-        // 4. Single downloaded model
+        // 5. Single downloaded model
         let downloaded: Vec<String> = crate::manifest::known_manifests()
             .iter()
             .filter(|m| self.manifest_model_is_downloaded(&m.name))
@@ -425,7 +429,7 @@ impl Config {
         if downloaded.len() == 1 {
             return downloaded.into_iter().next().unwrap();
         }
-        // 5. Config default (will auto-pull)
+        // 6. Config default (will auto-pull)
         configured.clone()
     }
 

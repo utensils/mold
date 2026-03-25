@@ -675,6 +675,82 @@ is_schnell = false
         assert_eq!(result, "flux-schnell");
     }
 
+    #[test]
+    fn resolved_default_model_prefers_config_only_model_over_manifest_fallbacks() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("default-model-config-only");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mold_home = std::env::temp_dir().join(format!(
+            "mold-home-config-default-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("last-model"), "flux-schnell:q8\n").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let mut models = HashMap::new();
+        models.insert(
+            "custom-model".to_string(),
+            ModelConfig {
+                transformer: Some("/models/custom/transformer.safetensors".to_string()),
+                vae: Some("/models/custom/vae.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            default_model: "custom-model".to_string(),
+            models,
+            ..Config::default()
+        };
+
+        assert_eq!(cfg.resolved_default_model(), "custom-model");
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    #[test]
+    fn resolved_default_model_missing_manifest_falls_back_to_downloaded_last_model() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("default-model-last");
+        populate_manifest_files(&models_dir, "sdxl-turbo:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mold_home = std::env::temp_dir().join(format!(
+            "mold-home-last-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("last-model"), "sdxl-turbo:fp16\n").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = Config {
+            default_model: "flux-dev:q4".to_string(),
+            ..Config::default()
+        };
+
+        assert_eq!(cfg.resolved_default_model(), "sdxl-turbo:fp16");
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
     // ── last-model state file ─────────────────────────────────────────────
 
     #[test]

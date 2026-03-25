@@ -2,8 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    classify_generate_error, Config, GenerateRequest, GenerateResponse, GenerateServerAction,
-    ImageData, MoldClient, OutputFormat, Scheduler,
+    clamp_to_megapixel_limit, classify_generate_error, Config, GenerateRequest, GenerateResponse,
+    GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
 use std::io::Write;
@@ -13,6 +13,46 @@ use crate::control::{stream_server_pull, CliContext};
 use crate::output::{is_piped, status};
 use crate::theme;
 use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
+
+fn normalize_source_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let (width, height) = clamp_to_megapixel_limit(width, height);
+    let width = width.saturating_sub(width % 16).max(16);
+    let height = height.saturating_sub(height % 16).max(16);
+    (width, height)
+}
+
+fn source_image_default_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
+    Ok(normalize_source_dimensions(img.width(), img.height()))
+}
+
+fn effective_dimensions(
+    config: &Config,
+    model_cfg: &mold_core::ModelConfig,
+    width: Option<u32>,
+    height: Option<u32>,
+    source_image: Option<&[u8]>,
+) -> Result<(u32, u32)> {
+    match (width, height, source_image) {
+        (Some(width), Some(height), _) => Ok((width, height)),
+        (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
+        (None, Some(height), _) => Ok((model_cfg.effective_width(config), height)),
+        (None, None, Some(source_image)) => source_image_default_dimensions(source_image),
+        (None, None, None) => Ok((
+            model_cfg.effective_width(config),
+            model_cfg.effective_height(config),
+        )),
+    }
+}
+
+fn preserve_source_dimensions_on_auto_pull(
+    req: &GenerateRequest,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+) -> bool {
+    req.source_image.is_some() && cli_width.is_none() && cli_height.is_none()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -62,14 +102,11 @@ pub async fn run(
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
 
-    // Always use the model's native resolution as default. For img2img, the source
-    // image is resized to fit the target dimensions by decode_source_image() (Lanczos3).
-    // This prevents OOM when feeding a high-res source to a low-res model (e.g. 1024x1024
-    // source → SD1.5 which is native 512x512). Users can override with --width/--height.
-    let (effective_width, effective_height) = (
-        width.unwrap_or_else(|| model_cfg.effective_width(&config)),
-        height.unwrap_or_else(|| model_cfg.effective_height(&config)),
-    );
+    // Default to the source image size for img2img/inpainting when neither
+    // dimension was provided. We still normalize to the validation envelope
+    // (multiples of 16, megapixel clamp) to avoid invalid requests and OOMs.
+    let (effective_width, effective_height) =
+        effective_dimensions(&config, &model_cfg, width, height, source_image.as_deref())?;
     let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
     let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
 
@@ -505,10 +542,12 @@ async fn prepare_local_engine(
                 effective_config = &auto_config;
 
                 let model_cfg = effective_config.resolved_model_config(&model_name);
-                if cli_width.is_none() {
+                let preserve_source_dimensions =
+                    preserve_source_dimensions_on_auto_pull(&req, cli_width, cli_height);
+                if cli_width.is_none() && !preserve_source_dimensions {
                     req.width = model_cfg.effective_width(effective_config);
                 }
-                if cli_height.is_none() {
+                if cli_height.is_none() && !preserve_source_dimensions {
                     req.height = model_cfg.effective_height(effective_config);
                 }
                 if cli_steps.is_none() {
@@ -741,6 +780,7 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mold_core::ModelConfig;
 
     #[test]
     fn filename_sanitizes_colon() {
@@ -812,5 +852,110 @@ mod tests {
         let name2 = default_filename("flux-dev:q4", 500, "jpg", 1, 0);
         assert_eq!(name2, "mold-flux-dev-q4-500.jpg");
         assert!(name2.ends_with(".jpg"));
+    }
+
+    fn png_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |_, _| image::Rgb([255, 0, 0]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn effective_dimensions_uses_model_defaults_for_txt2img() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, None).unwrap(),
+            (1024, 1024)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_uses_source_image_defaults_for_img2img() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1280, 704);
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            (1280, 704)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_normalizes_source_image_dimensions() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1001, 777);
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            (992, 768)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_explicit_overrides_win_for_img2img() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1280, 704);
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, Some(512), Some(768), Some(&source)).unwrap(),
+            (512, 768)
+        );
+    }
+
+    #[test]
+    fn preserve_source_dimensions_on_auto_pull_only_when_both_dimensions_are_implicit() {
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            model: "flux-schnell:q8".to_string(),
+            width: 1280,
+            height: 704,
+            steps: 4,
+            guidance: 0.0,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: Some(png_with_dimensions(1280, 704)),
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+
+        assert!(preserve_source_dimensions_on_auto_pull(&req, None, None));
+        assert!(!preserve_source_dimensions_on_auto_pull(
+            &req,
+            Some(512),
+            None
+        ));
+        assert!(!preserve_source_dimensions_on_auto_pull(
+            &req,
+            None,
+            Some(512)
+        ));
     }
 }

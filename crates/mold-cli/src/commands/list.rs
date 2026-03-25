@@ -28,6 +28,15 @@ fn format_fetch_size(remaining_bytes: u64) -> String {
     }
 }
 
+fn remote_remaining_download_bytes(model: &mold_core::ModelInfoExtended) -> Option<u64> {
+    let manifest = mold_core::manifest::find_manifest(&model.name)?;
+    Some(
+        model
+            .remaining_download_bytes
+            .unwrap_or_else(|| manifest.total_size_bytes()),
+    )
+}
+
 pub async fn run() -> Result<()> {
     let ctx = CliContext::new(None);
     let default_model =
@@ -144,11 +153,8 @@ pub async fn run() -> Result<()> {
                     let (size_str, fetch_col) =
                         if let Some(mf) = mold_core::manifest::find_manifest(&m.name) {
                             let model_gb = mf.model_size_gb() as f64;
-                            let remaining_bytes = m.remaining_download_bytes.unwrap_or_else(|| {
-                                let (_, remaining_bytes) =
-                                    mold_core::manifest::compute_download_size(mf);
-                                remaining_bytes
-                            });
+                            let remaining_bytes = remote_remaining_download_bytes(m)
+                                .expect("manifest-backed remote model should have a manifest");
                             let fetch = format_fetch_size(remaining_bytes);
                             (format!("{:.1}GB", model_gb), fetch)
                         } else {
@@ -352,4 +358,54 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_fetch_size, remote_remaining_download_bytes};
+    use mold_core::{ModelDefaults, ModelInfo, ModelInfoExtended};
+
+    fn remote_model(name: &str, remaining_download_bytes: Option<u64>) -> ModelInfoExtended {
+        ModelInfoExtended {
+            info: ModelInfo {
+                name: name.to_string(),
+                family: "flux".to_string(),
+                size_gb: 0.0,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: String::new(),
+            },
+            defaults: ModelDefaults {
+                default_steps: 4,
+                default_guidance: 0.0,
+                default_width: 1024,
+                default_height: 1024,
+                description: "test".to_string(),
+            },
+            downloaded: false,
+            disk_usage_bytes: None,
+            remaining_download_bytes,
+        }
+    }
+
+    #[test]
+    fn remote_remaining_download_bytes_uses_server_value_when_present() {
+        let model = remote_model("flux-schnell:q8", Some(123));
+        assert_eq!(remote_remaining_download_bytes(&model), Some(123));
+    }
+
+    #[test]
+    fn remote_remaining_download_bytes_falls_back_to_full_manifest_size() {
+        let model = remote_model("flux-schnell:q8", None);
+        let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
+        assert_eq!(
+            remote_remaining_download_bytes(&model),
+            Some(manifest.total_size_bytes())
+        );
+    }
+
+    #[test]
+    fn format_fetch_size_zero_reports_cached() {
+        assert!(format_fetch_size(0).contains("cached"));
+    }
 }

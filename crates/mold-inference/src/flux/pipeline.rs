@@ -56,7 +56,11 @@ fn flux_safetensors_transformer_is_fp8(path: &std::path::Path) -> Result<bool> {
 
 fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: bool) -> DType {
     if is_quantized {
-        DType::BF16
+        if is_cuda {
+            DType::BF16
+        } else {
+            DType::F32
+        }
     } else if is_cuda && transformer_is_fp8 {
         // FP8 safetensors must go through F16 on CUDA (candle has a kernel naming
         // bug that prevents direct CUDA FP8→BF16 casts). Loading uses
@@ -1485,10 +1489,11 @@ mod tests {
     }
 
     #[test]
-    fn flux_runtime_dtype_quantized_always_bf16() {
+    fn flux_runtime_dtype_quantized_matches_gpu_policy() {
         assert_eq!(flux_runtime_dtype(true, true, false), DType::BF16);
-        assert_eq!(flux_runtime_dtype(false, true, false), DType::BF16);
+        assert_eq!(flux_runtime_dtype(false, true, false), DType::F32);
         assert_eq!(flux_runtime_dtype(true, true, true), DType::BF16);
+        assert_eq!(flux_runtime_dtype(false, true, true), DType::F32);
     }
 
     #[test]
