@@ -518,4 +518,131 @@ is_schnell = false
             dir
         );
     }
+
+    // ── resolved_output_dir ───────────────────────────────────────────────
+
+    #[test]
+    fn resolved_output_dir_none_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let cfg = Config::default();
+        assert!(cfg.resolved_output_dir().is_none());
+    }
+
+    #[test]
+    fn resolved_output_dir_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "/tmp/mold-output");
+        let result = Config::default().resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/mold-output"));
+    }
+
+    #[test]
+    fn resolved_output_dir_empty_env_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "");
+        let result = Config::default().resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert!(result.is_none(), "empty env var should disable output_dir");
+    }
+
+    #[test]
+    fn resolved_output_dir_from_config_field() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/images".to_string());
+        assert_eq!(
+            cfg.resolved_output_dir().unwrap(),
+            PathBuf::from("/srv/images")
+        );
+    }
+
+    #[test]
+    fn resolved_output_dir_empty_config_field_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some(String::new());
+        assert!(cfg.resolved_output_dir().is_none());
+    }
+
+    #[test]
+    fn resolved_output_dir_env_overrides_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "/env/path");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/path".to_string());
+        let result = cfg.resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert_eq!(result.unwrap(), PathBuf::from("/env/path"));
+    }
+
+    #[test]
+    fn resolved_output_dir_expands_tilde() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("~/mold-output".to_string());
+        let dir = cfg.resolved_output_dir().unwrap();
+        assert!(
+            !dir.to_str().unwrap().contains('~'),
+            "tilde should be expanded: got {:?}",
+            dir
+        );
+    }
+
+    // ── mold_dir / MOLD_HOME ─────────────────────────────────────────────
+
+    #[test]
+    fn mold_dir_defaults_to_dot_mold() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_HOME");
+        let dir = Config::mold_dir().unwrap();
+        assert!(
+            dir.ends_with(".mold"),
+            "should end with .mold: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn mold_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_HOME", "/custom/mold");
+        let dir = Config::mold_dir().unwrap();
+        std::env::remove_var("MOLD_HOME");
+        assert_eq!(dir, PathBuf::from("/custom/mold"));
+    }
+
+    #[test]
+    fn default_models_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_HOME", "/custom/mold");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let cfg = Config::default();
+        let dir = cfg.resolved_models_dir();
+        std::env::remove_var("MOLD_HOME");
+        assert_eq!(dir, PathBuf::from("/custom/mold/models"));
+    }
+
+    // ── output_dir deserialization ────────────────────────────────────────
+
+    #[test]
+    fn config_output_dir_absent_in_toml() {
+        let toml = r#"default_model = "flux-schnell""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.output_dir.is_none());
+    }
+
+    #[test]
+    fn config_output_dir_present_in_toml() {
+        let toml = r#"
+            default_model = "flux-schnell"
+            output_dir = "/srv/gallery"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.output_dir.as_deref(), Some("/srv/gallery"));
+    }
 }

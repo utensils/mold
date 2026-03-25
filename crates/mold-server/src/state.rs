@@ -82,3 +82,28 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_snapshot_default_is_unloaded() {
+        let snap = EngineSnapshot::default();
+        assert!(snap.model_name.is_none());
+        assert!(!snap.is_loaded);
+    }
+
+    #[test]
+    fn active_generation_snapshot_stores_fields() {
+        let snap = ActiveGenerationSnapshot {
+            model: "flux-dev:q8".to_string(),
+            prompt_sha256: "abc123".to_string(),
+            started_at_unix_ms: 1700000000000,
+            started_at: std::time::Instant::now(),
+        };
+        assert_eq!(snap.model, "flux-dev:q8");
+        assert_eq!(snap.prompt_sha256, "abc123");
+        assert_eq!(snap.started_at_unix_ms, 1700000000000);
+    }
+}

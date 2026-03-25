@@ -854,6 +854,46 @@ mod tests {
         let name = super::default_output_filename("flux-dev:q8", 1700000000, "png", 4, 2);
         assert_eq!(name, "mold-flux-dev-q8-1700000000-2.png");
     }
+
+    #[test]
+    fn default_output_filename_jpeg() {
+        let name = super::default_output_filename("sdxl-turbo", 12345, "jpeg", 1, 0);
+        assert_eq!(name, "mold-sdxl-turbo-12345.jpeg");
+    }
+
+    #[test]
+    fn default_output_filename_millis_timestamp() {
+        // Server uses milliseconds for uniqueness
+        let name = super::default_output_filename("flux-dev-q8", 1700000000123, "png", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000123.png");
+    }
+
+    #[test]
+    fn server_status_deserialize_without_busy_field() {
+        // Older servers don't send `busy` — #[serde(default)] makes it false
+        let json = r#"{
+            "version": "0.1.0",
+            "models_loaded": ["flux-schnell:q8"],
+            "gpu_info": null,
+            "uptime_secs": 3600
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert!(!status.busy, "missing busy field should default to false");
+        assert_eq!(status.models_loaded, vec!["flux-schnell:q8"]);
+    }
+
+    #[test]
+    fn server_status_deserialize_with_busy_true() {
+        let json = r#"{
+            "version": "0.2.0",
+            "models_loaded": [],
+            "busy": true,
+            "gpu_info": null,
+            "uptime_secs": 100
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert!(status.busy);
+    }
 }
 
 /// Build a default output filename, sanitizing colons from model names.

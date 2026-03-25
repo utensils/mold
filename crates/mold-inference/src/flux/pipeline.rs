@@ -1456,4 +1456,60 @@ mod tests {
         assert_eq!(flux_runtime_dtype(true, false, false), DType::BF16);
         assert_eq!(flux_runtime_dtype(false, false, true), DType::F32);
     }
+
+    #[test]
+    fn flux_runtime_dtype_quantized_always_bf16() {
+        assert_eq!(flux_runtime_dtype(true, true, false), DType::BF16);
+        assert_eq!(flux_runtime_dtype(false, true, false), DType::BF16);
+        assert_eq!(flux_runtime_dtype(true, true, true), DType::BF16);
+    }
+
+    #[test]
+    fn fp8_cache_path_includes_file_size() {
+        use std::path::Path;
+        // Create a temp file with known size to test cache path generation
+        let dir = std::env::temp_dir().join(format!("mold-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fp8_file = dir.join("transformer.safetensors");
+        std::fs::write(&fp8_file, vec![0u8; 1024]).unwrap();
+
+        let cache_path = super::fp8_gguf_cache_path(&fp8_file);
+        let filename = cache_path.file_name().unwrap().to_str().unwrap();
+
+        // Should contain the file stem and the size
+        assert!(
+            filename.contains("transformer"),
+            "should contain stem: {filename}"
+        );
+        assert!(
+            filename.contains("1024"),
+            "should contain file size: {filename}"
+        );
+        assert!(
+            filename.ends_with(".q8_0.gguf"),
+            "should end with .q8_0.gguf: {filename}"
+        );
+
+        // Different size → different cache path
+        std::fs::write(&fp8_file, vec![0u8; 2048]).unwrap();
+        let cache_path2 = super::fp8_gguf_cache_path(&fp8_file);
+        assert_ne!(
+            cache_path, cache_path2,
+            "different file sizes should produce different cache paths"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fp8_cache_path_lives_under_cache_flux_q8() {
+        let path = std::path::Path::new("/some/model/my-model.safetensors");
+        // File doesn't exist so size will be 0
+        let cache_path = super::fp8_gguf_cache_path(path);
+        let cache_str = cache_path.to_str().unwrap();
+        assert!(
+            cache_str.contains("cache/flux-q8"),
+            "cache should be under cache/flux-q8: {cache_str}"
+        );
+    }
 }

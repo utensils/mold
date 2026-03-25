@@ -926,4 +926,95 @@ mod tests {
         // Should fall back to root_cause since all lines look like backtrace
         assert!(!msg.is_empty());
     }
+
+    #[test]
+    fn save_image_to_dir_creates_directory_and_writes_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-save-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+
+        let img = mold_core::ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+
+        save_image_to_dir(&dir, &img, "test-model:q8", 1);
+
+        assert!(dir.exists(), "directory should be created");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1, "should have exactly one file");
+        let file = files[0].as_ref().unwrap();
+        let filename = file.file_name().to_str().unwrap().to_string();
+        assert!(filename.starts_with("mold-test-model-q8-"), "{filename}");
+        assert!(filename.ends_with(".png"), "{filename}");
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(contents, vec![0x89, 0x50, 0x4E, 0x47]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_image_to_dir_batch_includes_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-save-batch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let img = mold_core::ImageData {
+            data: vec![0xFF, 0xD8], // JPEG magic
+            format: mold_core::OutputFormat::Jpeg,
+            width: 64,
+            height: 64,
+            index: 2,
+        };
+
+        save_image_to_dir(&dir, &img, "flux-dev", 4);
+
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let filename = files[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            filename.contains("-2.jpeg"),
+            "batch index in name: {filename}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_image_to_dir_invalid_path_logs_warning_no_panic() {
+        // Saving to a path that can't be created should not panic
+        let img = mold_core::ImageData {
+            data: vec![0x00],
+            format: mold_core::OutputFormat::Png,
+            width: 1,
+            height: 1,
+            index: 0,
+        };
+        // /dev/null/impossible can't be created as a directory
+        save_image_to_dir(
+            std::path::Path::new("/dev/null/impossible"),
+            &img,
+            "test",
+            1,
+        );
+        // Test passes if no panic occurred
+    }
 }
