@@ -397,9 +397,13 @@ impl Config {
     /// Returns `None` when disabled (default).
     pub fn resolved_output_dir(&self) -> Option<PathBuf> {
         let raw = if let Ok(env_dir) = std::env::var("MOLD_OUTPUT_DIR") {
-            Some(env_dir)
+            if env_dir.is_empty() {
+                None
+            } else {
+                Some(env_dir)
+            }
         } else {
-            self.output_dir.clone()
+            self.output_dir.clone().filter(|s| !s.is_empty())
         };
         raw.map(|dir| {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));

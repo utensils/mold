@@ -208,12 +208,6 @@ async fn create_and_load_engine(
         new_engine.clear_on_progress();
     }
 
-    {
-        let mut snapshot = state.engine_snapshot.write().await;
-        snapshot.model_name = Some(model_name.to_string());
-        snapshot.is_loaded = false;
-    }
-
     let mut engine = state.engine.lock().await;
 
     if let Some(ref old) = *engine {
@@ -227,6 +221,14 @@ async fn create_and_load_engine(
     }
 
     *engine = Some(new_engine);
+
+    // Update snapshot only after the engine swap — not before the lock is acquired,
+    // otherwise /api/status reports "not loaded" while the old model is still serving.
+    {
+        let mut snapshot = state.engine_snapshot.write().await;
+        snapshot.model_name = Some(model_name.to_string());
+        snapshot.is_loaded = false;
+    }
 
     if let Some(ref mut e) = *engine {
         if !e.is_loaded() {

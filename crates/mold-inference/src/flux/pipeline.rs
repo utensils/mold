@@ -158,14 +158,19 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         qtensors.push((out_name, qt));
     }
 
-    // Write GGUF cache
+    // Write GGUF cache (clean up temp file on error)
     let tmp_path = cache_path.with_extension("tmp");
-    {
+    let write_result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);
         let tensor_refs: Vec<(&str, &candle_core::quantized::QTensor)> =
             qtensors.iter().map(|(n, q)| (n.as_str(), q)).collect();
         candle_core::quantized::gguf_file::write(&mut writer, &[], &tensor_refs)?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
     std::fs::rename(&tmp_path, &cache_path)?;
 

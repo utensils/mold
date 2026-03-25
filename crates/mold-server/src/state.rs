@@ -22,6 +22,9 @@ pub struct ActiveGenerationSnapshot {
 pub struct AppState {
     pub engine: Arc<Mutex<Option<Box<dyn InferenceEngine>>>>,
     pub engine_snapshot: Arc<tokio::sync::RwLock<EngineSnapshot>>,
+    /// Uses std::sync::RwLock (not tokio) because it's only accessed from
+    /// synchronous contexts (inside spawn_blocking closures and brief reads).
+    /// Must never be held across an .await point.
     pub active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
     pub start_time: Instant,

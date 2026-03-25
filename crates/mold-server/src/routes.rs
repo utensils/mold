@@ -230,24 +230,6 @@ async fn maybe_save_to_output_dir(
     save_image_to_dir(&dir, img, model, batch_size);
 }
 
-/// Save an image to the configured output directory (sync version for spawned tasks).
-/// Non-fatal: logs a warning on failure.
-fn save_to_output_dir_if_configured(
-    config: &tokio::sync::RwLock<mold_core::Config>,
-    img: &mold_core::ImageData,
-    model: &str,
-    batch_size: u32,
-) {
-    let Ok(config) = config.try_read() else {
-        tracing::warn!("could not read config for output_dir save (lock held)");
-        return;
-    };
-    let Some(dir) = config.resolved_output_dir() else {
-        return;
-    };
-    save_image_to_dir(&dir, img, model, batch_size);
-}
-
 fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
@@ -258,13 +240,15 @@ fn save_image_to_dir(
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let timestamp = std::time::SystemTime::now()
+    // Use milliseconds for server-side filenames to avoid overwrites when
+    // concurrent requests finish in the same second.
+    let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_millis() as u64;
     let ext = img.format.to_string();
     let filename =
-        mold_core::default_output_filename(model, timestamp, &ext, batch_size, img.index);
+        mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
     let path = dir.join(&filename);
     match std::fs::write(&path, &img.data) {
         Ok(()) => tracing::info!("saved image to {}", path.display()),
@@ -456,9 +440,14 @@ async fn generate_stream(
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
 
+    // Resolve output directory now (before the spawn) to avoid lock contention later.
+    let output_dir = {
+        let config = state.config.read().await;
+        config.resolved_output_dir()
+    };
+
     // Spawn background task for model loading + inference
     let bg_tx = tx;
-    let config_for_save = state.config.clone();
     tokio::spawn(async move {
         // Load model if needed (with progress events)
         let progress = std::sync::Arc::new({
@@ -510,12 +499,9 @@ async fn generate_stream(
                         return;
                     }
                 };
-                save_to_output_dir_if_configured(
-                    &config_for_save,
-                    &img,
-                    &req.model,
-                    req.batch_size,
-                );
+                if let Some(ref dir) = output_dir {
+                    save_image_to_dir(dir, &img, &req.model, req.batch_size);
+                }
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),
                     format: img.format,
