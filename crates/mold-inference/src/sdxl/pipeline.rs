@@ -13,7 +13,7 @@ use crate::cache::{
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
-use crate::image::encode_image;
+use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Loaded SDXL model components, ready for inference.
@@ -716,7 +716,14 @@ impl SDXLEngine {
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
         // VAE dropped here
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, Some(sched));
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
@@ -869,7 +876,14 @@ impl InferenceEngine for SDXLEngine {
         self.progress.stage_done("VAE decode", vae_start.elapsed());
 
         // 8. Encode to image format
-        let image_bytes = encode_image(&img, req.output_format, req.width, req.height)?;
+        let output_metadata = build_output_metadata(req, seed, Some(sched));
+        let image_bytes = encode_image(
+            &img,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         tracing::info!(generation_time_ms, seed, "SDXL generation complete");

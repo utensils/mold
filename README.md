@@ -71,6 +71,24 @@ cat prompt.txt | mold run z-image-turbo --seed 42 | convert - -resize 512x512 th
 echo "cyberpunk samurai" | mold run flux-dev:q4 | viu -
 ```
 
+### Output metadata
+
+PNG output embeds generation metadata by default, including prompt, model, seed, size, steps, and a JSON `mold:parameters` chunk for downstream tools.
+
+```bash
+# Disable metadata for one run
+mold run "a cat" --no-metadata
+
+# Disable metadata globally via environment
+MOLD_EMBED_METADATA=0 mold run "a cat"
+```
+
+In `~/.mold/config.toml`:
+
+```toml
+embed_metadata = false
+```
+
 ### Image-to-image
 
 Transform existing images with a text prompt:

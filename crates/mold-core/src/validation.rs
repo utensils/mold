@@ -134,6 +134,7 @@ mod tests {
             seed: Some(42),
             batch_size: 1,
             output_format: OutputFormat::Png,
+            embed_metadata: None,
             scheduler: None,
             source_image: None,
             strength: 0.75,

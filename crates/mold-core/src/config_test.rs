@@ -39,6 +39,7 @@ mod tests {
         assert_eq!(cfg.default_width, 768);
         assert_eq!(cfg.default_height, 768);
         assert_eq!(cfg.default_steps, 4);
+        assert!(cfg.embed_metadata);
         assert!(cfg.models.is_empty());
     }
 
@@ -81,6 +82,7 @@ server_port = 9000
 default_width = 896
 default_height = 1152
 default_steps = 25
+embed_metadata = false
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.default_model, "flux-dev");
@@ -88,6 +90,7 @@ default_steps = 25
         assert_eq!(cfg.default_width, 896);
         assert_eq!(cfg.default_height, 1152);
         assert_eq!(cfg.default_steps, 25);
+        assert!(!cfg.embed_metadata);
     }
 
     #[test]
@@ -97,6 +100,62 @@ default_steps = 25
         assert_eq!(cfg.default_model, "flux-dev");
         assert_eq!(cfg.server_port, 7680);
         assert_eq!(cfg.default_steps, 4); // default
+        assert!(cfg.embed_metadata);
+    }
+
+    #[test]
+    fn effective_embed_metadata_uses_default_when_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_EMBED_METADATA");
+        let cfg = Config::default();
+        assert!(cfg.effective_embed_metadata(None));
+    }
+
+    #[test]
+    fn effective_embed_metadata_uses_config_when_env_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_EMBED_METADATA");
+        let cfg = Config {
+            embed_metadata: false,
+            ..Config::default()
+        };
+        assert!(!cfg.effective_embed_metadata(None));
+    }
+
+    #[test]
+    fn effective_embed_metadata_env_overrides_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_EMBED_METADATA", "0");
+        let cfg = Config {
+            embed_metadata: true,
+            ..Config::default()
+        };
+        assert!(!cfg.effective_embed_metadata(None));
+        std::env::remove_var("MOLD_EMBED_METADATA");
+    }
+
+    #[test]
+    fn effective_embed_metadata_accepts_true_env_values() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_EMBED_METADATA", "true");
+        let cfg = Config {
+            embed_metadata: false,
+            ..Config::default()
+        };
+        assert!(cfg.effective_embed_metadata(None));
+        std::env::remove_var("MOLD_EMBED_METADATA");
+    }
+
+    #[test]
+    fn effective_embed_metadata_cli_override_wins() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_EMBED_METADATA", "1");
+        let cfg = Config {
+            embed_metadata: true,
+            ..Config::default()
+        };
+        assert!(!cfg.effective_embed_metadata(Some(false)));
+        std::env::remove_var("MOLD_EMBED_METADATA");
     }
 
     // ── ModelConfig defaults ──────────────────────────────────────────────────
