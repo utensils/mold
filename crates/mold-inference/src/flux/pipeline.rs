@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp, Shape, Tensor};
-use candle_nn::{var_builder::SimpleBackend, Init, VarBuilder};
+use candle_core::{DType, Device, IndexOp};
+use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -36,46 +36,32 @@ fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
     }
 }
 
-/// Stage FLUX safetensors through CPU so float8 checkpoints do not require
-/// CUDA-side fp8 cast kernels during model construction.
-struct CpuStagedMmapedSafetensors {
-    inner: candle_core::safetensors::MmapedSafetensors,
+fn flux_safetensors_transformer_is_fp8(path: &std::path::Path) -> Result<bool> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
+    for key in [
+        "img_in.weight",
+        "model.diffusion_model.img_in.weight",
+        "diffusion_model.img_in.weight",
+    ] {
+        if let Ok(view) = tensors.get(key) {
+            return Ok(format!("{:?}", view.dtype()) == "F8_E4M3");
+        }
+    }
+    Ok(false)
 }
 
-impl SimpleBackend for CpuStagedMmapedSafetensors {
-    fn get(
-        &self,
-        s: Shape,
-        name: &str,
-        _: Init,
-        dtype: DType,
-        dev: &Device,
-    ) -> candle_core::Result<Tensor> {
-        let tensor = self
-            .inner
-            .load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(dev)?;
-        if tensor.shape() != &s {
-            Err(candle_core::Error::UnexpectedShape {
-                msg: format!("shape mismatch for {name}"),
-                expected: s,
-                got: tensor.shape().clone(),
-            }
-            .bt())?
-        }
-        Ok(tensor)
-    }
-
-    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
-        self.inner
-            .load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(dev)
-    }
-
-    fn contains_tensor(&self, name: &str) -> bool {
-        self.inner.get(name).is_ok()
+fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: bool) -> DType {
+    if is_quantized {
+        DType::BF16
+    } else if is_cuda && transformer_is_fp8 {
+        // FLUX fp8 safetensors are much faster through the direct CUDA fp8->f16
+        // path than CPU staging, and this avoids the bf16 cast path that has
+        // been failing on some systems.
+        DType::F16
+    } else if is_cuda {
+        DType::BF16
+    } else {
+        DType::F32
     }
 }
 
@@ -84,12 +70,7 @@ fn flux_safetensors_var_builder<'a>(
     dtype: DType,
     device: &Device,
 ) -> Result<VarBuilder<'a>> {
-    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
-    Ok(VarBuilder::from_backend(
-        Box::new(CpuStagedMmapedSafetensors { inner: tensors }),
-        dtype,
-        device.clone(),
-    ))
+    Ok(unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device)? })
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -279,13 +260,15 @@ impl FluxEngine {
 
         let cpu = Device::Cpu;
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = crate::engine::gpu_dtype(&device);
+        let is_quantized = self.detect_is_quantized();
+        let transformer_is_fp8 = !is_quantized
+            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, transformer_is_fp8);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
         // --- Load FLUX transformer + VAE on GPU first (variable size) ---
         // This must happen before T5/CLIP so we can measure remaining VRAM.
-        let is_quantized = self.detect_is_quantized();
 
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
@@ -295,6 +278,8 @@ impl FluxEngine {
 
         let xformer_label = if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
+        } else if gpu_dtype == DType::F16 {
+            "Loading FLUX transformer (GPU, FP16)"
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
@@ -461,7 +446,9 @@ impl FluxEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = crate::engine::gpu_dtype(&device);
+        let transformer_is_fp8 = !is_quantized
+            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, transformer_is_fp8);
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -597,6 +584,8 @@ impl FluxEngine {
 
         let xformer_label = if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
+        } else if gpu_dtype == DType::F16 {
+            "Loading FLUX transformer (GPU, FP16)"
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
@@ -865,6 +854,8 @@ impl InferenceEngine for FluxEngine {
             if loaded.flux_model.is_none() {
                 let xformer_label = if loaded.is_quantized {
                     "Reloading FLUX transformer (GPU, quantized)"
+                } else if loaded.dtype == DType::F16 {
+                    "Reloading FLUX transformer (GPU, FP16)"
                 } else {
                     "Reloading FLUX transformer (GPU, BF16)"
                 };
@@ -1191,7 +1182,7 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::flux_transformer_var_builder;
+    use super::{flux_runtime_dtype, flux_transformer_var_builder};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
     use std::collections::HashMap;
@@ -1222,5 +1213,12 @@ mod tests {
         assert!(resolved.contains_tensor("img_in.weight"));
         assert_eq!(resolved.prefix(), "model.diffusion_model");
         Ok(())
+    }
+
+    #[test]
+    fn flux_runtime_dtype_prefers_f16_for_cuda_fp8_safetensors() {
+        assert_eq!(flux_runtime_dtype(true, false, true), DType::F16);
+        assert_eq!(flux_runtime_dtype(true, false, false), DType::BF16);
+        assert_eq!(flux_runtime_dtype(false, false, true), DType::F32);
     }
 }
