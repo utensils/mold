@@ -329,13 +329,14 @@ async fn main() {
         {
             eprintln!("{} {display}", theme::prefix_error());
             eprintln!();
-            eprintln!("  The model is too large for your GPU's VRAM.");
-            eprintln!("  Try a quantized version that uses less memory:");
+            eprintln!("  GPU ran out of memory during generation.");
+            eprintln!("  Try these fixes:");
             eprintln!();
-            eprintln!("    mold run <model>:q8 \"...\"    # ~12 GB");
-            eprintln!("    mold run <model>:q4 \"...\"    #  ~7 GB");
+            eprintln!("    Reduce resolution:  --width 512 --height 512");
+            eprintln!("    Use a smaller model: mold run <model>:q4 \"...\"");
             eprintln!();
-            eprintln!("  Or reduce image resolution: --width 768 --height 768");
+            eprintln!("  For img2img, the source image resolution is used by default.");
+            eprintln!("  Override with --width/--height to reduce VRAM usage.");
             eprintln!("  Run 'mold list' to see available models and sizes.");
             std::process::exit(1);
         }
