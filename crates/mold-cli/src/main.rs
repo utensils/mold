@@ -308,21 +308,26 @@ async fn main() {
 
         let msg = format!("{e}");
 
+        // Strip candle backtrace frames (numbered lines referencing candle/tokio internals).
+        // Candle's Error::bt() embeds frame numbers in the Display output.
+        let short = msg
+            .lines()
+            .take_while(|line| {
+                let t = line.trim_start();
+                !(t.len() > 2
+                    && t.as_bytes()[0].is_ascii_digit()
+                    && (t.contains("candle") || t.contains("tokio") || t.contains("at /")))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let display = if short.is_empty() { &msg } else { &short };
+
         // Detect CUDA/Metal OOM and print a friendly message with suggestions.
         if msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
             || msg.contains("out of memory")
             || msg.contains("exceeds available VRAM")
         {
-            // Extract the short message (strip candle backtrace frames)
-            let short = msg
-                .lines()
-                .take_while(|line| {
-                    let t = line.trim_start();
-                    !(t.len() > 2 && t.as_bytes()[0].is_ascii_digit() && t.contains("candle"))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            eprintln!("{} {short}", theme::prefix_error());
+            eprintln!("{} {display}", theme::prefix_error());
             eprintln!();
             eprintln!("  The model is too large for your GPU's VRAM.");
             eprintln!("  Try a quantized version that uses less memory:");
@@ -335,8 +340,18 @@ async fn main() {
             std::process::exit(1);
         }
 
-        // Print the error chain cleanly without backtraces
-        eprintln!("{} {e}", theme::prefix_error());
+        // Detect missing tensor errors (incompatible GGUF quantization format).
+        if msg.contains("cannot find tensor") {
+            eprintln!("{} {display}", theme::prefix_error());
+            eprintln!();
+            eprintln!("  The model file may be corrupted or uses an incompatible format.");
+            eprintln!("  Try re-downloading: mold rm <model> && mold pull <model>");
+            eprintln!("  Or try a different variant: mold list");
+            std::process::exit(1);
+        }
+
+        // For all other errors, print the stripped message (no candle backtraces).
+        eprintln!("{} {display}", theme::prefix_error());
         for cause in e.chain().skip(1) {
             eprintln!("  {} {cause}", theme::prefix_cause());
         }
