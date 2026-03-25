@@ -2,8 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    clamp_to_megapixel_limit, classify_generate_error, Config, GenerateRequest, GenerateResponse,
-    GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
+    classify_generate_error, Config, GenerateRequest, GenerateResponse, GenerateServerAction,
+    ImageData, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
 use std::io::Write;
@@ -62,46 +62,14 @@ pub async fn run(
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
 
-    // When source_image is provided and width/height not specified, derive from image dimensions
-    let (effective_width, effective_height) =
-        if source_image.is_some() && width.is_none() && height.is_none() {
-            if let Some(ref img_bytes) = source_image {
-                let reader = image::ImageReader::new(std::io::Cursor::new(img_bytes))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|r| r.into_dimensions().ok());
-                match reader {
-                    Some((orig_w, orig_h)) => {
-                        // Round to nearest multiple of 16, then clamp to megapixel limit
-                        let w = ((orig_w + 8) / 16) * 16;
-                        let h = ((orig_h + 8) / 16) * 16;
-                        let (cw, ch) = clamp_to_megapixel_limit(w, h);
-                        if cw != w || ch != h {
-                            status!(
-                                "{} Source image {}x{} exceeds megapixel limit, resizing to {}x{}",
-                                theme::icon_warn(),
-                                orig_w,
-                                orig_h,
-                                cw,
-                                ch
-                            );
-                        }
-                        (cw, ch)
-                    }
-                    None => (
-                        width.unwrap_or_else(|| model_cfg.effective_width(&config)),
-                        height.unwrap_or_else(|| model_cfg.effective_height(&config)),
-                    ),
-                }
-            } else {
-                unreachable!()
-            }
-        } else {
-            (
-                width.unwrap_or_else(|| model_cfg.effective_width(&config)),
-                height.unwrap_or_else(|| model_cfg.effective_height(&config)),
-            )
-        };
+    // Always use the model's native resolution as default. For img2img, the source
+    // image is resized to fit the target dimensions by decode_source_image() (Lanczos3).
+    // This prevents OOM when feeding a high-res source to a low-res model (e.g. 1024x1024
+    // source → SD1.5 which is native 512x512). Users can override with --width/--height.
+    let (effective_width, effective_height) = (
+        width.unwrap_or_else(|| model_cfg.effective_width(&config)),
+        height.unwrap_or_else(|| model_cfg.effective_height(&config)),
+    );
     let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
     let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
 
