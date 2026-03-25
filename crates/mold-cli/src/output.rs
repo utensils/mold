@@ -28,12 +28,30 @@ pub(crate) use status;
 /// bright yellow bold, rest dimmed. Normal descriptions are fully dimmed.
 pub fn colorize_description(desc: &str) -> String {
     use colored::Colorize;
-    if let Some(rest) = desc.strip_prefix("[alpha] ") {
-        format!("{} {}", "[alpha]".bright_yellow().bold(), rest.dimmed())
-    } else if let Some(rest) = desc.strip_prefix("[beta] ") {
-        format!("{} {}", "[beta]".bright_yellow().bold(), rest.dimmed())
+    // Handle trailing [gated] tag separately — it can appear with any prefix
+    let (desc, gated_suffix) = if let Some(rest) = desc.strip_suffix(" [gated]") {
+        (rest, Some(format!(" {}", "[gated]".yellow())))
     } else {
-        format!("{}", desc.dimmed())
+        (desc, None)
+    };
+    let gated = gated_suffix.unwrap_or_default();
+
+    if let Some(rest) = desc.strip_prefix("[alpha] ") {
+        format!(
+            "{} {}{}",
+            "[alpha]".bright_yellow().bold(),
+            rest.dimmed(),
+            gated
+        )
+    } else if let Some(rest) = desc.strip_prefix("[beta] ") {
+        format!(
+            "{} {}{}",
+            "[beta]".bright_yellow().bold(),
+            rest.dimmed(),
+            gated
+        )
+    } else {
+        format!("{}{}", desc.dimmed(), gated)
     }
 }
 
