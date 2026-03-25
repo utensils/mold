@@ -4,6 +4,8 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -50,19 +52,55 @@ fn flux_safetensors_transformer_is_fp8(path: &std::path::Path) -> Result<bool> {
     Ok(false)
 }
 
-fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: bool) -> DType {
+fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool) -> DType {
     if is_quantized {
         DType::BF16
-    } else if is_cuda && transformer_is_fp8 {
-        // FLUX fp8 safetensors are much faster through the direct CUDA fp8->f16
-        // path than CPU staging, and this avoids the bf16 cast path that has
-        // been failing on some systems.
-        DType::F16
     } else if is_cuda {
         DType::BF16
     } else {
         DType::F32
     }
+}
+
+fn flux_fp16_cache_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("transformer");
+    let cache_root = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| PathBuf::from(".mold"))
+        .join("cache")
+        .join("flux-f16");
+    cache_root.join(format!("{stem}.f16.safetensors"))
+}
+
+fn ensure_flux_fp16_cache(path: &Path, progress: &ProgressReporter) -> Result<PathBuf> {
+    let cache_path = flux_fp16_cache_path(path);
+    if cache_path.exists() {
+        return Ok(cache_path);
+    }
+
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid cache path: {}", cache_path.display()))?;
+    std::fs::create_dir_all(parent)?;
+
+    progress.info("Converting FLUX fp8 checkpoint to local FP16 cache (one-time)");
+    tracing::info!(
+        source = %path.display(),
+        cache = %cache_path.display(),
+        "converting FLUX fp8 safetensors to fp16 cache"
+    );
+
+    let tmp_path = cache_path.with_extension("tmp");
+    let loaded = candle_core::safetensors::load(path, &Device::Cpu)?;
+    let converted: HashMap<String, candle_core::Tensor> = loaded
+        .into_iter()
+        .map(|(name, tensor)| Ok((name, tensor.to_dtype(DType::F16)?)))
+        .collect::<Result<_>>()?;
+    candle_core::safetensors::save(&converted, &tmp_path)?;
+    std::fs::rename(&tmp_path, &cache_path)?;
+    Ok(cache_path)
 }
 
 fn flux_safetensors_var_builder<'a>(
@@ -263,7 +301,12 @@ impl FluxEngine {
         let is_quantized = self.detect_is_quantized();
         let transformer_is_fp8 = !is_quantized
             && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
-        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, transformer_is_fp8);
+        let transformer_path = if transformer_is_fp8 {
+            ensure_flux_fp16_cache(&self.paths.transformer, &self.progress)?
+        } else {
+            self.paths.transformer.clone()
+        };
+        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
@@ -278,15 +321,15 @@ impl FluxEngine {
 
         let xformer_label = if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
-        } else if gpu_dtype == DType::F16 {
-            "Loading FLUX transformer (GPU, FP16)"
+        } else if transformer_is_fp8 {
+            "Loading FLUX transformer (GPU, FP16 cache)"
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
         self.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
         tracing::info!(
-            path = %self.paths.transformer.display(),
+            path = %transformer_path.display(),
             quantized = is_quantized,
             "loading FLUX transformer on GPU..."
         );
@@ -297,7 +340,7 @@ impl FluxEngine {
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
-                &self.paths.transformer,
+                &transformer_path,
                 gpu_dtype,
                 &device,
             )?);
@@ -448,7 +491,12 @@ impl FluxEngine {
         let device = crate::device::create_device(&self.progress)?;
         let transformer_is_fp8 = !is_quantized
             && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
-        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, transformer_is_fp8);
+        let transformer_path = if transformer_is_fp8 {
+            ensure_flux_fp16_cache(&self.paths.transformer, &self.progress)?
+        } else {
+            self.paths.transformer.clone()
+        };
+        let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized);
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -565,7 +613,7 @@ impl FluxEngine {
         };
 
         // --- Phase 3: Load transformer + VAE, denoise ---
-        let xformer_size = std::fs::metadata(&self.paths.transformer)
+        let xformer_size = std::fs::metadata(&transformer_path)
             .map(|m| m.len())
             .unwrap_or(0);
         let vae_file_size = std::fs::metadata(&self.paths.vae)
@@ -584,8 +632,8 @@ impl FluxEngine {
 
         let xformer_label = if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
-        } else if gpu_dtype == DType::F16 {
-            "Loading FLUX transformer (GPU, FP16)"
+        } else if transformer_is_fp8 {
+            "Loading FLUX transformer (GPU, FP16 cache)"
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
@@ -598,7 +646,7 @@ impl FluxEngine {
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
-                &self.paths.transformer,
+                &transformer_path,
                 gpu_dtype,
                 &device,
             )?);
@@ -828,7 +876,13 @@ impl InferenceEngine for FluxEngine {
             .clip_encoder
             .clone()
             .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?;
-        let transformer_path = self.paths.transformer.clone();
+        let transformer_is_fp8 = !self.detect_is_quantized()
+            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        let transformer_path = if transformer_is_fp8 {
+            ensure_flux_fp16_cache(&self.paths.transformer, progress)?
+        } else {
+            self.paths.transformer.clone()
+        };
 
         let mut loaded = OptionRestoreGuard::take(&mut self.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
@@ -854,8 +908,8 @@ impl InferenceEngine for FluxEngine {
             if loaded.flux_model.is_none() {
                 let xformer_label = if loaded.is_quantized {
                     "Reloading FLUX transformer (GPU, quantized)"
-                } else if loaded.dtype == DType::F16 {
-                    "Reloading FLUX transformer (GPU, FP16)"
+                } else if transformer_is_fp8 {
+                    "Reloading FLUX transformer (GPU, FP16 cache)"
                 } else {
                     "Reloading FLUX transformer (GPU, BF16)"
                 };
@@ -1217,8 +1271,8 @@ mod tests {
 
     #[test]
     fn flux_runtime_dtype_prefers_f16_for_cuda_fp8_safetensors() {
-        assert_eq!(flux_runtime_dtype(true, false, true), DType::F16);
-        assert_eq!(flux_runtime_dtype(true, false, false), DType::BF16);
-        assert_eq!(flux_runtime_dtype(false, false, true), DType::F32);
+        assert_eq!(flux_runtime_dtype(true, false), DType::BF16);
+        assert_eq!(flux_runtime_dtype(false, false), DType::F32);
+        assert_eq!(flux_runtime_dtype(true, true), DType::BF16);
     }
 }
