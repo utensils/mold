@@ -283,12 +283,13 @@ pub(crate) async fn render_progress(
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len || max_len < 8 {
+    let char_count = name.chars().count();
+    if char_count <= max_len || max_len < 8 {
         return name.to_string();
     }
     let suffix_len = max_len - 3;
-    let start = name.len() - suffix_len;
-    format!("...{}", &name[start..])
+    let suffix: String = name.chars().skip(char_count - suffix_len).collect();
+    format!("...{suffix}")
 }
 
 fn format_cache_hit_badge(resource: &str) -> String {
