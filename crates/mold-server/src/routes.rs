@@ -508,7 +508,14 @@ async fn generate_stream(
                     }
                 };
                 if let Some(ref dir) = output_dir {
-                    save_image_to_dir(dir, &img, &req.model, req.batch_size);
+                    let dir = dir.clone();
+                    let img_clone = img.clone();
+                    let model = req.model.clone();
+                    let batch_size = req.batch_size;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
+                    })
+                    .await;
                 }
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),

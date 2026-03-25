@@ -70,20 +70,39 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
 }
 
 /// Path for the Q8 GGUF cache of an FP8 safetensors file.
-/// Uses file stem + file size as a cache key so different checkpoints with
-/// the same basename (e.g. `model.safetensors`) don't collide, and
-/// replaced-in-place checkpoints invalidate the cache.
+/// Cache key: stem + file size + hash of the first 4KB of content.
+/// This ensures different checkpoints with the same basename and size
+/// (e.g. two different `model.safetensors` exports) don't collide,
+/// and in-place replacements invalidate the cache.
 fn fp8_gguf_cache_path(path: &Path) -> PathBuf {
+    use std::io::Read;
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transformer");
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    // Hash the first 4KB for content identity (fast, avoids reading the full 12GB file)
+    let content_hash = std::fs::File::open(path)
+        .and_then(|mut f| {
+            let mut buf = vec![0u8; 4096];
+            let n = f.read(&mut buf)?;
+            buf.truncate(n);
+            Ok(buf)
+        })
+        .map(|buf| {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+            for &b in &buf {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0100_0000_01b3); // FNV-1a prime
+            }
+            format!("{h:016x}")
+        })
+        .unwrap_or_else(|_| "0".to_string());
     let cache_root = mold_core::Config::mold_dir()
         .unwrap_or_else(|| PathBuf::from(".mold"))
         .join("cache")
         .join("flux-q8");
-    cache_root.join(format!("{stem}-{size}.q8_0.gguf"))
+    cache_root.join(format!("{stem}-{size}-{content_hash}.q8_0.gguf"))
 }
 
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).
@@ -102,22 +121,36 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid cache path: {}", cache_path.display()))?;
 
-    // Clean up orphaned caches from the old naming scheme (stem.q8_0.gguf without
-    // the -size suffix). These are left behind after the cache key was changed to
-    // include file size for collision avoidance.
+    // Clean up orphaned caches from older naming schemes. Previous formats:
+    // v1: {stem}.q8_0.gguf  (no size/hash)
+    // v2: {stem}-{size}.q8_0.gguf  (no content hash)
+    // Current: {stem}-{size}-{hash}.q8_0.gguf
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transformer");
-    let old_format = parent.join(format!("{stem}.q8_0.gguf"));
-    if old_format.exists() && old_format != cache_path {
-        tracing::info!(
-            path = %old_format.display(),
-            "removing orphaned FP8 cache (old naming format)"
-        );
-        let _ = std::fs::remove_file(&old_format);
-    }
     std::fs::create_dir_all(parent)?;
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        let prefix = stem.to_string();
+        let suffix = ".q8_0.gguf";
+        let cache_name = cache_path.file_name().and_then(|n| n.to_str());
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if name_str.starts_with(&prefix)
+                && name_str.ends_with(suffix)
+                && Some(name_str) != cache_name
+            {
+                tracing::info!(
+                    path = %entry.path().display(),
+                    "removing orphaned FP8 cache (old naming format)"
+                );
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 
     progress.info("Converting FP8 checkpoint to Q8 GGUF cache (one-time, may take a few minutes)");
     tracing::info!(
