@@ -21,6 +21,17 @@ pub(crate) fn build_output_metadata(
     ))
 }
 
+pub(crate) fn update_output_metadata_size(
+    metadata: &mut Option<OutputMetadata>,
+    width: u32,
+    height: u32,
+) {
+    if let Some(metadata) = metadata {
+        metadata.width = width;
+        metadata.height = height;
+    }
+}
+
 /// Encode a candle tensor [3, H, W] of u8 values into PNG or JPEG bytes.
 pub(crate) fn encode_image(
     img: &Tensor,
@@ -59,7 +70,7 @@ fn write_png(
 
     if let Some(metadata) = metadata {
         encoder.add_itxt_chunk("mold:prompt".to_string(), metadata.prompt.clone())?;
-        encoder.add_text_chunk("mold:model".to_string(), metadata.model.clone())?;
+        encoder.add_itxt_chunk("mold:model".to_string(), metadata.model.clone())?;
         encoder.add_text_chunk("mold:seed".to_string(), metadata.seed.to_string())?;
         encoder.add_text_chunk("mold:steps".to_string(), metadata.steps.to_string())?;
         encoder.add_text_chunk("mold:guidance".to_string(), metadata.guidance.to_string())?;
@@ -71,7 +82,7 @@ fn write_png(
         if let Some(scheduler) = metadata.scheduler {
             encoder.add_text_chunk("mold:scheduler".to_string(), scheduler.to_string())?;
         }
-        encoder.add_text_chunk("mold:version".to_string(), metadata.version.clone())?;
+        encoder.add_itxt_chunk("mold:version".to_string(), metadata.version.clone())?;
         encoder.add_itxt_chunk(
             "mold:parameters".to_string(),
             serde_json::to_string(metadata)?,
@@ -191,6 +202,11 @@ mod tests {
         assert!(info
             .utf8_text
             .iter()
+            .any(|chunk| chunk.keyword == "mold:model"
+                && chunk.get_text().unwrap() == "flux-schnell:q8"));
+        assert!(info
+            .utf8_text
+            .iter()
             .any(|chunk| chunk.keyword == "mold:parameters"
                 && chunk
                     .get_text()
@@ -234,5 +250,27 @@ mod tests {
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
+    }
+
+    #[test]
+    fn test_update_output_metadata_size_overrides_dimensions() {
+        let mut metadata = Some(OutputMetadata {
+            prompt: "a cat".to_string(),
+            model: "wuerstchen-v2:fp16".to_string(),
+            seed: 42,
+            steps: 30,
+            guidance: 0.0,
+            width: 1024,
+            height: 1024,
+            strength: None,
+            scheduler: None,
+            version: "0.1.0".to_string(),
+        });
+
+        update_output_metadata_size(&mut metadata, 1008, 1008);
+
+        let metadata = metadata.unwrap();
+        assert_eq!(metadata.width, 1008);
+        assert_eq!(metadata.height, 1008);
     }
 }

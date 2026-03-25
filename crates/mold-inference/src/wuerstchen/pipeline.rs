@@ -15,7 +15,7 @@ use crate::cache::{
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
-use crate::image::{build_output_metadata, encode_image};
+use crate::image::{build_output_metadata, encode_image, update_output_metadata_size};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Wuerstchen v2 prior dimensions.
@@ -675,7 +675,8 @@ impl WuerstchenEngine {
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
         // due to the 42x compression rounding in the cascade.
         let (_, actual_h, actual_w) = img.dims3()?;
-        let output_metadata = build_output_metadata(req, seed, None);
+        let mut output_metadata = build_output_metadata(req, seed, None);
+        update_output_metadata_size(&mut output_metadata, actual_w as u32, actual_h as u32);
         let image_bytes = encode_image(
             &img,
             req.output_format,
@@ -811,7 +812,8 @@ impl InferenceEngine for WuerstchenEngine {
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
         // due to the 42x compression rounding in the cascade.
         let (_, actual_h, actual_w) = img.dims3()?;
-        let output_metadata = build_output_metadata(req, seed, None);
+        let mut output_metadata = build_output_metadata(req, seed, None);
+        update_output_metadata_size(&mut output_metadata, actual_w as u32, actual_h as u32);
         let image_bytes = encode_image(
             &img,
             req.output_format,
