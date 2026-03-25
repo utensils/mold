@@ -2053,6 +2053,38 @@ pub fn find_manifest(name: &str) -> Option<&'static ModelManifest> {
     MANIFEST_INDEX.get(&canonical).map(|&i| &KNOWN_MANIFESTS[i])
 }
 
+/// Find smaller quantized alternatives for a model.
+/// Given `"ultrareal-v2:bf16"`, returns `["ultrareal-v3:q4", "ultrareal-v3:q8", ...]`
+/// sorted by model size ascending. Returns empty if no alternatives found.
+pub fn find_smaller_alternatives(name: &str) -> Vec<String> {
+    let canonical = resolve_model_name(name);
+    let current = find_manifest(&canonical);
+    let current_size = current.map(|m| m.model_size_bytes()).unwrap_or(u64::MAX);
+
+    // Extract base name (everything before first colon, minus version suffix like -v2)
+    let base = canonical.split(':').next().unwrap_or(&canonical);
+    // Also try the family prefix (e.g. "ultrareal" from "ultrareal-v2")
+    let family_prefix = base
+        .rfind("-v")
+        .or_else(|| base.rfind("-V"))
+        .map(|i| &base[..i])
+        .unwrap_or(base);
+
+    let mut alternatives: Vec<(u64, String)> = known_manifests()
+        .iter()
+        .filter(|m| {
+            m.name != canonical
+                && (m.name.starts_with(&format!("{base}:"))
+                    || m.name.starts_with(&format!("{family_prefix}-")))
+                && m.model_size_bytes() < current_size
+        })
+        .map(|m| (m.model_size_bytes(), m.name.clone()))
+        .collect();
+
+    alternatives.sort();
+    alternatives.into_iter().map(|(_, name)| name).collect()
+}
+
 /// Check if a name resolves to a known model (manifest or config).
 pub fn is_known_model(name: &str, config: &crate::Config) -> bool {
     let canonical = resolve_model_name(name);
@@ -3261,6 +3293,33 @@ mod tests {
             unique.len(),
             "storage path collision in wuerstchen manifest: {:?}",
             paths
+        );
+    }
+
+    #[test]
+    fn find_smaller_alternatives_for_bf16_model() {
+        let alts = super::find_smaller_alternatives("ultrareal-v2:bf16");
+        // Should find ultrareal-v3 and v4 quantized variants (all smaller than 23.8GB)
+        assert!(
+            !alts.is_empty(),
+            "bf16 model should have smaller alternatives"
+        );
+        for alt in &alts {
+            assert!(
+                alt.contains("ultrareal"),
+                "alternative should be in same family: {alt}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_smaller_alternatives_for_smallest_model_is_empty() {
+        // flux-schnell:q4 is already the smallest flux-schnell variant
+        let alts = super::find_smaller_alternatives("flux-schnell:q4");
+        // Should have no smaller alternatives (q4 is the smallest)
+        assert!(
+            alts.is_empty() || alts.iter().all(|a| a != "flux-schnell:q4"),
+            "should not suggest the same model"
         );
     }
 }

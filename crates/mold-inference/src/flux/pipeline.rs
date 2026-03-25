@@ -454,6 +454,22 @@ impl FluxEngine {
         // --- Load FLUX transformer + VAE on GPU first (variable size) ---
         // This must happen before T5/CLIP so we can measure remaining VRAM.
 
+        // Check if full-precision transformer fits in VRAM before attempting load.
+        if !is_quantized {
+            let xformer_size = std::fs::metadata(&transformer_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let free = free_vram_bytes().unwrap_or(0);
+            if free > 0 && xformer_size > free {
+                bail!(
+                    "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
+                     use a quantized model (q8/q4) instead of full-precision for this GPU",
+                    xformer_size as f64 / 1e9,
+                    free as f64 / 1e9,
+                );
+            }
+        }
+
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
         } else {
@@ -767,6 +783,21 @@ impl FluxEngine {
         let vae_file_size = std::fs::metadata(&self.paths.vae)
             .map(|m| m.len())
             .unwrap_or(0);
+
+        // For non-quantized (BF16/F16) safetensors, check if the transformer
+        // will fit in VRAM before spending time loading it.
+        if !is_quantized {
+            let free = free_vram_bytes().unwrap_or(0);
+            if free > 0 && xformer_size > free {
+                bail!(
+                    "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
+                     use a quantized model (q8/q4) instead of full-precision for this GPU",
+                    xformer_size as f64 / 1e9,
+                    free as f64 / 1e9,
+                );
+            }
+        }
+
         preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
         if let Some(status) = memory_status_string() {
             self.progress.info(&status);

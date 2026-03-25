@@ -305,6 +305,36 @@ async fn main() {
         if e.downcast_ref::<AlreadyReported>().is_some() {
             std::process::exit(1);
         }
+
+        let msg = format!("{e}");
+
+        // Detect CUDA/Metal OOM and print a friendly message with suggestions.
+        if msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
+            || msg.contains("out of memory")
+            || msg.contains("exceeds available VRAM")
+        {
+            // Extract the short message (strip candle backtrace frames)
+            let short = msg
+                .lines()
+                .take_while(|line| {
+                    let t = line.trim_start();
+                    !(t.len() > 2 && t.as_bytes()[0].is_ascii_digit() && t.contains("candle"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            eprintln!("{} {short}", theme::prefix_error());
+            eprintln!();
+            eprintln!("  The model is too large for your GPU's VRAM.");
+            eprintln!("  Try a quantized version that uses less memory:");
+            eprintln!();
+            eprintln!("    mold run <model>:q8 \"...\"    # ~12 GB");
+            eprintln!("    mold run <model>:q4 \"...\"    #  ~7 GB");
+            eprintln!();
+            eprintln!("  Or reduce image resolution: --width 768 --height 768");
+            eprintln!("  Run 'mold list' to see available models and sizes.");
+            std::process::exit(1);
+        }
+
         // Print the error chain cleanly without backtraces
         eprintln!("{} {e}", theme::prefix_error());
         for cause in e.chain().skip(1) {
