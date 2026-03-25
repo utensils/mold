@@ -10,7 +10,10 @@ fn format_fetch_size(remaining_bytes: u64) -> String {
     if remaining_bytes == 0 {
         format!("{:>7}", "cached").dimmed().to_string()
     } else {
-        format!("{:.1}GB", remaining_bytes as f64 / 1_073_741_824.0)
+        format!(
+            "{:>7}",
+            format!("{:.1}GB", remaining_bytes as f64 / 1_073_741_824.0)
+        )
     }
 }
 

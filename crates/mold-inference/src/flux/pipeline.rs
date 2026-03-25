@@ -37,6 +37,9 @@ fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
     }
 }
 
+/// Check if a FLUX safetensors checkpoint stores weights in FP8 (F8_E4M3).
+/// Uses candle's DType after loading a single small tensor on CPU (img_in.weight
+/// is typically only a few KB).
 fn flux_safetensors_transformer_is_fp8(path: &std::path::Path) -> Result<bool> {
     let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
     for key in [
@@ -44,8 +47,8 @@ fn flux_safetensors_transformer_is_fp8(path: &std::path::Path) -> Result<bool> {
         "model.diffusion_model.img_in.weight",
         "diffusion_model.img_in.weight",
     ] {
-        if let Ok(view) = tensors.get(key) {
-            return Ok(format!("{:?}", view.dtype()) == "F8_E4M3");
+        if let Ok(tensor) = tensors.load(key, &Device::Cpu) {
+            return Ok(tensor.dtype() == DType::F8E4M3);
         }
     }
     Ok(false)
@@ -1415,7 +1418,6 @@ mod tests {
 
     #[test]
     fn fp8_cache_path_includes_file_size() {
-        use std::path::Path;
         // Create a temp file with known size to test cache path generation
         let dir = std::env::temp_dir().join(format!("mold-cache-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

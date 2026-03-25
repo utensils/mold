@@ -78,7 +78,7 @@ pub(crate) async fn ensure_model_ready(
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
-    let loaded_existing = {
+    {
         let mut guard = state.engine.lock().await;
         if let Some(engine) = guard.as_mut() {
             if engine.model_name() == model_name {
@@ -95,25 +95,15 @@ pub(crate) async fn ensure_model_ready(
                         tracing::error!("model load failed: {e:#}");
                         ApiError::internal(format!("model load error: {e}"))
                     })?;
-                    Some(true)
-                } else {
-                    Some(false)
+                    // Update snapshot while holding engine lock to prevent
+                    // unload_model from racing and leaving stale state.
+                    let mut snapshot = state.engine_snapshot.write().await;
+                    snapshot.model_name = Some(model_name.to_string());
+                    snapshot.is_loaded = true;
                 }
-            } else {
-                None
+                return Ok(());
             }
-        } else {
-            None
         }
-    };
-
-    if let Some(loaded_existing) = loaded_existing {
-        if loaded_existing {
-            let mut snapshot = state.engine_snapshot.write().await;
-            snapshot.model_name = Some(model_name.to_string());
-            snapshot.is_loaded = true;
-        }
-        return Ok(());
     }
 
     match check_model_available(state, model_name).await? {
@@ -242,11 +232,15 @@ async fn create_and_load_engine(
             })?;
         }
     }
-    drop(engine);
 
-    let mut snapshot = state.engine_snapshot.write().await;
-    snapshot.model_name = Some(model_name.to_string());
-    snapshot.is_loaded = true;
+    // Update snapshot while holding engine lock to prevent unload_model
+    // from racing and leaving snapshot in a stale is_loaded=true state.
+    {
+        let mut snapshot = state.engine_snapshot.write().await;
+        snapshot.model_name = Some(model_name.to_string());
+        snapshot.is_loaded = true;
+    }
+    drop(engine);
 
     Ok(())
 }
