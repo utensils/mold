@@ -678,7 +678,8 @@ async fn generate_local_batch(
             },
         );
         let render = tokio::spawn(render_progress(rx));
-        let (returned_engine, response) = handle.await??;
+        let (mut returned_engine, response) = handle.await??;
+        returned_engine.clear_on_progress(); // drop tx so render_progress can drain and exit
         let _ = render.await;
         engine = returned_engine;
 
