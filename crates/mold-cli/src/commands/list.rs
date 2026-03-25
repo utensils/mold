@@ -10,8 +10,8 @@ fn description_with_gated(desc: &str, model_name: &str) -> String {
     let is_gated = mold_core::manifest::find_manifest(model_name)
         .map(|m| m.is_gated())
         .unwrap_or(false);
-    if is_gated && !desc.contains("🔒") {
-        format!("{desc} 🔒")
+    if is_gated && !desc.contains("[gated]") {
+        format!("{desc} [gated]")
     } else {
         desc.to_string()
     }
@@ -38,13 +38,12 @@ pub async fn run() -> Result<()> {
             let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
             let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
 
-            // Compute column widths across all models (account for emoji indicators).
-            // Emojis are 2 display cells wide; add 3 per indicator (space + emoji).
+            // Compute column widths across all models (account for ● and ★ indicators)
             let nw = col_width(
                 models.iter().map(|m| {
                     m.name.len()
                         + if m.is_loaded { 2 } else { 0 }
-                        + if m.name == default_model { 3 } else { 0 }
+                        + if m.name == default_model { 2 } else { 0 }
                 }),
                 4, // "NAME"
                 2,
@@ -78,24 +77,16 @@ pub async fn run() -> Result<()> {
                     // Build name with indicators, then manually pad to display width.
                     // format!("{:<N}") counts bytes not display cells, so emojis break it.
                     let is_default = model.name == default_model;
-                    let (label, display_len) = match (model.is_loaded, is_default) {
-                        (true, true) => (
-                            format!("{} ● ⭐", model.name),
-                            model.name.len() + 5, // " ● ⭐" = 5 display cells
-                        ),
-                        (true, false) => (format!("{} ●", model.name), model.name.len() + 2),
-                        (false, true) => (
-                            format!("{} ⭐", model.name),
-                            model.name.len() + 3, // " ⭐" = 3 display cells
-                        ),
-                        (false, false) => (model.name.clone(), model.name.len()),
+                    let label = match (model.is_loaded, is_default) {
+                        (true, true) => format!("{} ● ★", model.name),
+                        (true, false) => format!("{} ●", model.name),
+                        (false, true) => format!("{} ★", model.name),
+                        (false, false) => model.name.clone(),
                     };
-                    let pad_spaces = nw.saturating_sub(display_len);
-                    let padded = format!("{label}{:>width$}", "", width = pad_spaces);
                     let name = if model.is_loaded {
-                        padded.green().to_string()
+                        format!("{:<nw$}", label, nw = nw).green().to_string()
                     } else {
-                        padded
+                        format!("{:<nw$}", label, nw = nw)
                     };
                     let size = if let Some(mf) = mold_core::manifest::find_manifest(&model.name) {
                         format!("{:.1}GB", mf.model_size_gb())
@@ -175,12 +166,6 @@ pub async fn run() -> Result<()> {
                 println!();
                 println!("{}", "Use mold pull <model> to download.".dimmed());
             }
-
-            println!();
-            println!(
-                "{}",
-                "⭐ default  ● loaded  🔒 requires HF_TOKEN  🧪 alpha".dimmed()
-            );
         }
         ModelCatalogSource::Local(models) => {
             let config = ctx.config();
@@ -228,13 +213,10 @@ pub async fn run() -> Result<()> {
                     std::collections::HashSet::new();
                 for model in &downloaded {
                     let is_default = model.name == default_model;
-                    let (display_name, display_len) = if is_default {
-                        (
-                            format!("{} ⭐", model.name),
-                            model.name.len() + 3, // " ⭐" = 3 display cells
-                        )
+                    let display_name = if is_default {
+                        format!("{} ★", model.name)
                     } else {
-                        (model.name.clone(), model.name.len())
+                        model.name.clone()
                     };
                     let name = &model.name;
                     let mcfg = config.model_config(name);
@@ -252,11 +234,9 @@ pub async fn run() -> Result<()> {
                     });
                     all_unique_paths.extend(model_paths);
                     let disk = format_disk_size(disk_bytes);
-                    let pad_spaces = nw.saturating_sub(display_len);
-                    let padded_name = format!("{display_name}{:>width$}", "", width = pad_spaces);
                     println!(
-                        "{} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
-                        padded_name,
+                        "{:<nw$} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        display_name,
                         format_family_padded(family_raw, fw),
                         size,
                         disk,
@@ -327,7 +307,6 @@ pub async fn run() -> Result<()> {
             }
 
             println!();
-            println!("{}", "⭐ default  🔒 requires HF_TOKEN  🧪 alpha".dimmed());
         }
     }
 
