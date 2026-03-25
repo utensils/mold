@@ -186,6 +186,7 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default models |
+| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
 | `MOLD_OUTPUT_DIR` | unset | Save server-generated images to this directory |

@@ -392,6 +392,33 @@ impl Config {
         RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
     }
 
+    /// Resolve the effective default model with smart fallback:
+    /// 1. `MOLD_DEFAULT_MODEL` env var (if set and non-empty)
+    /// 2. Config file `default_model` (if that model is downloaded)
+    /// 3. If exactly one model is downloaded, use it automatically
+    /// 4. Fall back to config value (will trigger auto-pull on use)
+    pub fn resolved_default_model(&self) -> String {
+        if let Ok(m) = std::env::var("MOLD_DEFAULT_MODEL") {
+            if !m.is_empty() {
+                return m;
+            }
+        }
+        let configured = &self.default_model;
+        if self.manifest_model_is_downloaded(configured) {
+            return configured.clone();
+        }
+        // Smart fallback: if exactly one model is downloaded, use it
+        let downloaded: Vec<String> = crate::manifest::known_manifests()
+            .iter()
+            .filter(|m| self.manifest_model_is_downloaded(&m.name))
+            .map(|m| m.name.clone())
+            .collect();
+        if downloaded.len() == 1 {
+            return downloaded.into_iter().next().unwrap();
+        }
+        configured.clone()
+    }
+
     /// Resolve the output directory for server-mode image persistence.
     /// `MOLD_OUTPUT_DIR` env var takes precedence over the config file value.
     /// Returns `None` when disabled (default).

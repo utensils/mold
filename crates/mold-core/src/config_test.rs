@@ -645,4 +645,33 @@ is_schnell = false
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.output_dir.as_deref(), Some("/srv/gallery"));
     }
+
+    // ── resolved_default_model ────────────────────────────────────────────
+
+    #[test]
+    fn resolved_default_model_returns_config_value() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let cfg = Config::default();
+        assert_eq!(cfg.resolved_default_model(), "flux-schnell");
+    }
+
+    #[test]
+    fn resolved_default_model_env_overrides_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_DEFAULT_MODEL", "sdxl-turbo:fp16");
+        let result = Config::default().resolved_default_model();
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        assert_eq!(result, "sdxl-turbo:fp16");
+    }
+
+    #[test]
+    fn resolved_default_model_empty_env_ignored() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_DEFAULT_MODEL", "");
+        let result = Config::default().resolved_default_model();
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        // Empty env should fall through to config value
+        assert_eq!(result, "flux-schnell");
+    }
 }

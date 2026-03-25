@@ -19,17 +19,21 @@ fn format_fetch_size(remaining_bytes: u64) -> String {
 
 pub async fn run() -> Result<()> {
     let ctx = CliContext::new(None);
+    let default_model =
+        mold_core::manifest::resolve_model_name(&ctx.config().resolved_default_model());
 
     match ctx.list_models().await? {
         ModelCatalogSource::Remote(models) => {
             let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
             let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();
 
-            // Compute column widths across all models
+            // Compute column widths across all models (account for ★ and ● indicators)
             let nw = col_width(
-                models
-                    .iter()
-                    .map(|m| m.name.len() + if m.is_loaded { 2 } else { 0 }),
+                models.iter().map(|m| {
+                    m.name.len()
+                        + if m.is_loaded { 2 } else { 0 }
+                        + if m.name == default_model { 2 } else { 0 }
+                }),
                 4, // "NAME"
                 2,
             );
@@ -60,12 +64,17 @@ pub async fn run() -> Result<()> {
 
                 for model in &downloaded {
                     // Pad plain text first, then colorize — ANSI escapes break `{:<N}`.
+                    let is_default = model.name == default_model;
+                    let label = match (model.is_loaded, is_default) {
+                        (true, true) => format!("{} ● ★", model.name),
+                        (true, false) => format!("{} ●", model.name),
+                        (false, true) => format!("{} ★", model.name),
+                        (false, false) => model.name.clone(),
+                    };
                     let name = if model.is_loaded {
-                        format!("{:<nw$}", format!("{} ●", model.name), nw = nw)
-                            .green()
-                            .to_string()
+                        format!("{:<nw$}", label, nw = nw).green().to_string()
                     } else {
-                        format!("{:<nw$}", model.name, nw = nw)
+                        format!("{:<nw$}", label, nw = nw)
                     };
                     let size = if let Some(mf) = mold_core::manifest::find_manifest(&model.name) {
                         format!("{:.1}GB", mf.model_size_gb())
@@ -152,7 +161,7 @@ pub async fn run() -> Result<()> {
             let nw = col_width(
                 downloaded
                     .iter()
-                    .map(|m| m.name.len())
+                    .map(|m| m.name.len() + if m.name == default_model { 2 } else { 0 })
                     .chain(available.iter().map(|m| m.name.len())),
                 4, // "NAME"
                 2,
@@ -187,6 +196,12 @@ pub async fn run() -> Result<()> {
                 let mut all_unique_paths: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 for model in &downloaded {
+                    let is_default = model.name == default_model;
+                    let display_name = if is_default {
+                        format!("{} ★", model.name)
+                    } else {
+                        model.name.clone()
+                    };
                     let name = &model.name;
                     let mcfg = config.model_config(name);
                     let family_raw = &model.family;
@@ -205,7 +220,7 @@ pub async fn run() -> Result<()> {
                     let disk = format_disk_size(disk_bytes);
                     println!(
                         "{:<nw$} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
-                        name,
+                        display_name,
                         format_family_padded(family_raw, fw),
                         size,
                         disk,

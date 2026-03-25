@@ -205,6 +205,7 @@ Key environment variables (highest precedence, override config file):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default model storage |
+| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
 | `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |

@@ -19,7 +19,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
 
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
-    let model_name = config.default_model.clone();
+    let model_name = config.resolved_default_model();
 
     let state = match ModelPaths::resolve(&model_name, &config) {
         Some(paths) => {

@@ -80,6 +80,12 @@ in
       description = "Optional directory to persist copies of server-generated images. Null means disabled (default).";
     };
 
+    defaultModel = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Default model for generation. Null uses built-in default (flux-schnell) with smart fallback to the only downloaded model.";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -122,6 +128,9 @@ in
       }
       // lib.optionalAttrs (cfg.outputDir != null) {
         MOLD_OUTPUT_DIR = cfg.outputDir;
+      }
+      // lib.optionalAttrs (cfg.defaultModel != null) {
+        MOLD_DEFAULT_MODEL = cfg.defaultModel;
       }
       // cfg.environment;
 
