@@ -57,6 +57,8 @@ pub async fn run(
     // Load config and pull model-specific defaults.
     let ctx = CliContext::new(host.as_deref());
     let config = ctx.config().clone();
+    // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
+    // Otherwise we defer to env/config/default precedence inside Config.
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
 
