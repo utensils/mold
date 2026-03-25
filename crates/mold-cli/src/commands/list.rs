@@ -3,6 +3,7 @@ use colored::Colorize;
 
 use crate::control::{CliContext, ModelCatalogSource};
 use crate::output::colorize_description;
+use crate::theme;
 use crate::ui::{col_width, family_label, format_disk_size, format_family_padded};
 
 pub async fn run() -> Result<()> {
@@ -28,7 +29,7 @@ pub async fn run() -> Result<()> {
             );
 
             if downloaded.is_empty() {
-                println!("{} No models downloaded.", "●".dimmed());
+                println!("{} No models downloaded.", theme::icon_neutral());
             } else {
                 println!(
                     "{:<nw$} {:<fw$} {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
@@ -151,7 +152,7 @@ pub async fn run() -> Result<()> {
             );
 
             if downloaded.is_empty() {
-                println!("{} No models configured.", "●".dimmed());
+                println!("{} No models configured.", theme::icon_neutral());
             } else {
                 println!(
                     "{:<nw$} {:<fw$} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",

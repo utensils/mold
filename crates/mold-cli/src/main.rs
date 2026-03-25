@@ -1,6 +1,7 @@
 mod commands;
 mod control;
 mod output;
+mod theme;
 mod ui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -294,10 +295,9 @@ async fn main() {
             std::process::exit(1);
         }
         // Print the error chain cleanly without backtraces
-        use colored::Colorize;
-        eprintln!("{} {e}", "error:".red().bold());
+        eprintln!("{} {e}", theme::prefix_error());
         for cause in e.chain().skip(1) {
-            eprintln!("  {} {cause}", "caused by:".dimmed());
+            eprintln!("  {} {cause}", theme::prefix_cause());
         }
         std::process::exit(1);
     }

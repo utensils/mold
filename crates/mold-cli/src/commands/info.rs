@@ -4,6 +4,7 @@ use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{Config, ModelPaths};
 use sha2::{Digest, Sha256};
 
+use crate::theme;
 use crate::ui::format_family;
 
 fn compute_sha256(path: &str) -> Result<String> {
@@ -113,7 +114,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
     if manifest.is_none() && model_config.is_none() {
         eprintln!(
             "{} Unknown model '{}'. Use {} to see available models.",
-            "error:".red().bold(),
+            theme::prefix_error(),
             canonical,
             "mold list".bold()
         );
@@ -337,7 +338,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                             Ok(actual) if actual == expected => {
                                 println!(
                                     "  {} {} {}",
-                                    "OK".green(),
+                                    "OK".green().bold(),
                                     component_label(&file.component),
                                     path.dimmed()
                                 );
@@ -356,7 +357,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                                 all_ok = false;
                                 println!(
                                     "  {} {} — {}",
-                                    "ERR".red(),
+                                    "ERR".red().bold(),
                                     component_label(&file.component),
                                     e
                                 );
@@ -365,14 +366,14 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
                         (Some(_), None) => {
                             println!(
                                 "  {} {} — no checksum available",
-                                "SKIP".yellow(),
+                                "SKIP".yellow().bold(),
                                 component_label(&file.component)
                             );
                         }
                         (None, _) => {
                             println!(
                                 "  {} {} — file not found locally",
-                                "SKIP".yellow(),
+                                "SKIP".yellow().bold(),
                                 component_label(&file.component)
                             );
                         }

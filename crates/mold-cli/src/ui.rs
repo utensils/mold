@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::output::{is_piped, status};
+use crate::theme;
 
 pub(crate) fn family_label(family: &str) -> &str {
     match family {
@@ -24,14 +25,14 @@ pub(crate) fn family_label(family: &str) -> &str {
 pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
     let padded = format!("{:<width$}", family_label(family), width = width);
     match family {
-        "flux" => padded.truecolor(200, 120, 255).to_string(),
-        "flux2" => padded.truecolor(255, 150, 255).to_string(),
+        "flux" => padded.bright_magenta().to_string(),
+        "flux2" => padded.magenta().to_string(),
         "sd15" => padded.green().to_string(),
-        "sd3" | "sd3.5" => padded.truecolor(100, 220, 160).to_string(),
+        "sd3" | "sd3.5" => padded.bright_green().to_string(),
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
-        "qwen-image" | "qwen_image" => padded.truecolor(100, 200, 255).to_string(),
-        "wuerstchen" | "wuerstchen-v2" => padded.truecolor(255, 180, 80).to_string(),
+        "qwen-image" | "qwen_image" => padded.bright_blue().to_string(),
+        "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "controlnet" => padded.bright_red().to_string(),
         _ => padded,
     }
@@ -64,13 +65,13 @@ pub(crate) fn format_family(family: &str) -> String {
 pub(crate) fn print_server_unavailable(host: &str, err: &dyn std::fmt::Display) {
     eprintln!(
         "{} cannot connect to mold server at {}",
-        "error:".red().bold(),
+        theme::prefix_error(),
         host
     );
-    eprintln!("  {} {}", "cause:".dimmed(), err);
+    eprintln!("  {} {}", theme::prefix_cause(), err);
     eprintln!(
         "  {} start the server with {}",
-        "hint:".dimmed(),
+        theme::prefix_hint(),
         "mold serve".bold()
     );
 }
@@ -78,7 +79,7 @@ pub(crate) fn print_server_unavailable(host: &str, err: &dyn std::fmt::Display) 
 pub(crate) fn print_server_fallback(host: &str, action: &str) {
     status!(
         "{} Server unavailable at {} — {}",
-        "●".yellow(),
+        theme::icon_warn(),
         host.bold(),
         action,
     );
@@ -87,13 +88,13 @@ pub(crate) fn print_server_fallback(host: &str, action: &str) {
 pub(crate) fn print_server_pull_missing_model(model: &str) {
     status!(
         "{} Model '{}' not on server — pulling...",
-        "●".cyan(),
+        theme::icon_info(),
         model.bold()
     );
 }
 
 pub(crate) fn print_using_local_inference() {
-    status!("{} Using local GPU inference", "●".cyan());
+    status!("{} Using local GPU inference", theme::icon_info());
 }
 
 /// Human-readable byte size with space before unit (e.g. "7.0 GB").
@@ -139,7 +140,7 @@ pub(crate) async fn render_progress(
     }
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
+            .template(&format!("{{spinner:.{}}} {{msg}}", theme::SPINNER_STYLE))
             .unwrap(),
     );
     pb.tick();
@@ -164,7 +165,7 @@ pub(crate) async fn render_progress(
                 pb.suspend(|| {
                     status!(
                         "  {} {} {}",
-                        "✓".green(),
+                        theme::icon_done(),
                         name,
                         format!("[{:.1}s]", secs).dimmed(),
                     );
@@ -172,7 +173,7 @@ pub(crate) async fn render_progress(
             }
             SseProgressEvent::Info { message } => {
                 pb.suspend(|| {
-                    status!("  {} {}", "·".dimmed(), message.dimmed());
+                    status!("  {} {}", theme::icon_bullet(), message.dimmed());
                 });
             }
             SseProgressEvent::CacheHit { resource } => {
@@ -195,9 +196,10 @@ pub(crate) async fn render_progress(
                     }
                     bar.set_style(
                         ProgressStyle::default_bar()
-                            .template(
-                                "  {spinner:.cyan} Denoising [{bar:30.cyan/dim}] {pos}/{len} [{elapsed_precise}, {msg}]",
-                            )
+                            .template(&format!(
+                                "  {{spinner:.{c}}} Denoising [{{bar:30.{c}/dim}}] {{pos}}/{{len}} [{{elapsed_precise}}, {{msg}}]",
+                                c = theme::SPINNER_STYLE,
+                            ))
                             .unwrap()
                             .progress_chars("━╸─"),
                     );
@@ -230,7 +232,8 @@ pub(crate) async fn render_progress(
                     let msg_width = 45usize;
                     b.set_style(
                         ProgressStyle::with_template(&format!(
-                            "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
+                            "  {{msg:<{msg_width}}} [{{bar:30.{c}/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
+                            c = theme::SPINNER_STYLE,
                         ))
                         .unwrap()
                         .progress_chars("━╸─"),
@@ -262,7 +265,7 @@ pub(crate) async fn render_progress(
                     multi.clear().ok();
                 }
                 pb.suspend(|| {
-                    status!("{} Pull complete: {}", "✓".green(), model.bold());
+                    status!("{} Pull complete: {}", theme::icon_done(), model.bold());
                 });
             }
         }
@@ -280,18 +283,19 @@ pub(crate) async fn render_progress(
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len || max_len < 8 {
+    let char_count = name.chars().count();
+    if char_count <= max_len || max_len < 8 {
         return name.to_string();
     }
     let suffix_len = max_len - 3;
-    let start = name.len() - suffix_len;
-    format!("...{}", &name[start..])
+    let suffix: String = name.chars().skip(char_count - suffix_len).collect();
+    format!("...{suffix}")
 }
 
 fn format_cache_hit_badge(resource: &str) -> String {
     format!(
         "{} {} {}",
-        "✓".green(),
+        theme::icon_done(),
         resource,
         "[cache hit]".bright_cyan().bold()
     )
