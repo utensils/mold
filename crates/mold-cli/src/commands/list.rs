@@ -74,19 +74,28 @@ pub async fn run() -> Result<()> {
                 println!("{}", "─".repeat(nw + fw + 64).dimmed());
 
                 for model in &downloaded {
-                    // Build name with indicators, then manually pad to display width.
-                    // format!("{:<N}") counts bytes not display cells, so emojis break it.
                     let is_default = model.name == default_model;
-                    let label = match (model.is_loaded, is_default) {
+                    // Pad plain text first (ANSI codes break {:<N} width).
+                    // Then colorize indicators after padding.
+                    let plain_label = match (model.is_loaded, is_default) {
                         (true, true) => format!("{} ● ★", model.name),
                         (true, false) => format!("{} ●", model.name),
                         (false, true) => format!("{} ★", model.name),
                         (false, false) => model.name.clone(),
                     };
-                    let name = if model.is_loaded {
-                        format!("{:<nw$}", label, nw = nw).green().to_string()
+                    let padded = format!("{:<nw$}", plain_label, nw = nw);
+                    let name = if is_default {
+                        // Replace the ★ with a yellow-colored version after padding
+                        let colored = padded.replace("★", &"★".yellow().bold().to_string());
+                        if model.is_loaded {
+                            colored.replace(&model.name, &model.name.green().to_string())
+                        } else {
+                            colored
+                        }
+                    } else if model.is_loaded {
+                        padded.green().to_string()
                     } else {
-                        format!("{:<nw$}", label, nw = nw)
+                        padded
                     };
                     let size = if let Some(mf) = mold_core::manifest::find_manifest(&model.name) {
                         format!("{:.1}GB", mf.model_size_gb())
@@ -214,9 +223,10 @@ pub async fn run() -> Result<()> {
                 for model in &downloaded {
                     let is_default = model.name == default_model;
                     let display_name = if is_default {
-                        format!("{} ★", model.name)
+                        let padded = format!("{:<nw$}", format!("{} ★", model.name), nw = nw);
+                        padded.replace("★", &"★".yellow().bold().to_string())
                     } else {
-                        model.name.clone()
+                        format!("{:<nw$}", model.name, nw = nw)
                     };
                     let name = &model.name;
                     let mcfg = config.model_config(name);
@@ -235,7 +245,7 @@ pub async fn run() -> Result<()> {
                     all_unique_paths.extend(model_paths);
                     let disk = format_disk_size(disk_bytes);
                     println!(
-                        "{:<nw$} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
+                        "{} {} {:>7}  {:>7}  {:<7} {:<9} {:<8} {:<7} {}",
                         display_name,
                         format_family_padded(family_raw, fw),
                         size,
