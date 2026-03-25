@@ -512,10 +512,10 @@ async fn generate_stream(
                     let img_clone = img.clone();
                     let model = req.model.clone();
                     let batch_size = req.batch_size;
-                    let _ = tokio::task::spawn_blocking(move || {
+                    // Fire-and-forget: don't block the SSE Complete event on disk I/O
+                    tokio::task::spawn_blocking(move || {
                         save_image_to_dir(&dir, &img_clone, &model, batch_size);
-                    })
-                    .await;
+                    });
                 }
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),

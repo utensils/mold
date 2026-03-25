@@ -593,6 +593,20 @@ is_schnell = false
         );
     }
 
+    #[test]
+    fn resolved_output_dir_does_not_expand_tilde_in_middle() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/mold~backup/output".to_string());
+        let dir = cfg.resolved_output_dir().unwrap();
+        assert_eq!(
+            dir,
+            PathBuf::from("/srv/mold~backup/output"),
+            "tilde in the middle of a path should not be expanded"
+        );
+    }
+
     // ── mold_dir / MOLD_HOME ─────────────────────────────────────────────
 
     #[test]

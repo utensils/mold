@@ -294,6 +294,8 @@ pub struct FluxEngine {
     /// How to load model components (Eager = all at once, Sequential = load-use-drop).
     load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
+    /// Cached result of FP8 safetensors probe (None = not yet checked).
+    transformer_is_fp8: Option<bool>,
 }
 
 impl FluxEngine {
@@ -317,6 +319,7 @@ impl FluxEngine {
             t5_variant,
             load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            transformer_is_fp8: None,
         }
     }
 
@@ -360,6 +363,18 @@ impl FluxEngine {
     }
 
     /// Detect if the transformer is quantized (GGUF).
+    /// Check if the transformer is FP8 safetensors, caching the result so the
+    /// file is only probed once (not on every `generate_sequential` call).
+    fn check_transformer_is_fp8(&mut self, is_quantized: bool) -> bool {
+        if let Some(cached) = self.transformer_is_fp8 {
+            return cached;
+        }
+        let result = !is_quantized
+            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        self.transformer_is_fp8 = Some(result);
+        result
+    }
+
     fn detect_is_quantized(&self) -> bool {
         self.paths
             .transformer
@@ -448,8 +463,7 @@ impl FluxEngine {
         let cpu = Device::Cpu;
         let device = crate::device::create_device(&self.progress)?;
         let mut is_quantized = self.detect_is_quantized();
-        let transformer_is_fp8 = !is_quantized
-            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
 
         // FP8 safetensors → Q8 GGUF cache: candle lacks native FP8 compute and
         // expanding to F16 doubles VRAM (OOM on 24 GB). Q8 GGUF keeps the model
@@ -659,8 +673,7 @@ impl FluxEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let transformer_is_fp8 = !is_quantized
-            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+        let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
 
         // FP8 safetensors → Q8 GGUF cache (same as eager path)
         let transformer_path = if transformer_is_fp8 {

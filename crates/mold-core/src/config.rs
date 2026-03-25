@@ -476,7 +476,13 @@ impl Config {
         };
         raw.map(|dir| {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            PathBuf::from(dir.replace("~", &home.to_string_lossy()))
+            if dir == "~" {
+                home
+            } else if let Some(rest) = dir.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(dir)
+            }
         })
     }
 
