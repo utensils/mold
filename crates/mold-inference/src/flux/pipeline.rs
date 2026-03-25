@@ -296,6 +296,9 @@ pub struct FluxEngine {
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
     /// Cached result of FP8 safetensors probe (None = not yet checked).
     transformer_is_fp8: Option<bool>,
+    /// Cached resolved transformer path (GGUF cache for FP8, or original path).
+    /// Avoids re-computing the cache key (file I/O) on every sequential generation.
+    cached_transformer_path: Option<PathBuf>,
 }
 
 impl FluxEngine {
@@ -320,6 +323,7 @@ impl FluxEngine {
             load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             transformer_is_fp8: None,
+            cached_transformer_path: None,
         }
     }
 
@@ -673,15 +677,24 @@ impl FluxEngine {
         }
 
         let device = crate::device::create_device(&self.progress)?;
-        let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
 
-        // FP8 safetensors → Q8 GGUF cache (same as eager path)
-        let transformer_path = if transformer_is_fp8 {
-            let p = ensure_fp8_gguf_cache(&self.paths.transformer, &self.progress)?;
-            is_quantized = true;
-            p
+        // Use cached transformer path to avoid file I/O on every sequential call.
+        let transformer_path = if let Some(ref cached) = self.cached_transformer_path {
+            if cached.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+                is_quantized = true;
+            }
+            cached.clone()
         } else {
-            self.paths.transformer.clone()
+            let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
+            let p = if transformer_is_fp8 {
+                let p = ensure_fp8_gguf_cache(&self.paths.transformer, &self.progress)?;
+                is_quantized = true;
+                p
+            } else {
+                self.paths.transformer.clone()
+            };
+            self.cached_transformer_path = Some(p.clone());
+            p
         };
 
         let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, false);

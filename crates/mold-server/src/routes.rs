@@ -218,6 +218,7 @@ fn take_generated_image(
 /// Save an image to the configured output directory (async version for non-spawned routes).
 /// Non-fatal: logs a warning on failure but never returns an error.
 /// Filesystem I/O is offloaded to a blocking thread to avoid stalling the async runtime.
+/// Fire-and-forget image save — does not block the HTTP response on disk I/O.
 async fn maybe_save_to_output_dir(
     state: &AppState,
     img: &mold_core::ImageData,
@@ -231,10 +232,9 @@ async fn maybe_save_to_output_dir(
     let dir = dir.to_path_buf();
     let img = img.clone();
     let model = model.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         save_image_to_dir(&dir, &img, &model, batch_size);
-    })
-    .await;
+    });
 }
 
 fn save_image_to_dir(
