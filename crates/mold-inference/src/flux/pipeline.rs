@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp, Shape};
+use candle_core::{DType, Device, IndexOp};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
@@ -98,6 +98,22 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     let parent = cache_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid cache path: {}", cache_path.display()))?;
+
+    // Clean up orphaned caches from the old naming scheme (stem.q8_0.gguf without
+    // the -size suffix). These are left behind after the cache key was changed to
+    // include file size for collision avoidance.
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("transformer");
+    let old_format = parent.join(format!("{stem}.q8_0.gguf"));
+    if old_format.exists() && old_format != cache_path {
+        tracing::info!(
+            path = %old_format.display(),
+            "removing orphaned FP8 cache (old naming format)"
+        );
+        let _ = std::fs::remove_file(&old_format);
+    }
     std::fs::create_dir_all(parent)?;
 
     progress.info("Converting FP8 checkpoint to Q8 GGUF cache (one-time, may take a few minutes)");
@@ -183,76 +199,12 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     Ok(cache_path)
 }
 
-/// VarBuilder backend that loads tensors on CPU first, converts dtype, then
-/// moves to GPU. Works around candle's broken CUDA FP8 cast kernels (the PTX
-/// symbols use underscored names `cast_f8_e4m3_f16` but the Rust side constructs
-/// `cast_f8e4m3_f16`).  Only used for FP8 safetensors models.
-struct CpuStagedSafetensors {
-    inner: candle_core::safetensors::MmapedSafetensors,
-}
-
-impl candle_nn::var_builder::SimpleBackend for CpuStagedSafetensors {
-    fn get(
-        &self,
-        s: Shape,
-        name: &str,
-        _: candle_nn::Init,
-        dtype: DType,
-        dev: &Device,
-    ) -> candle_core::Result<candle_core::Tensor> {
-        let tensor = self
-            .inner
-            .load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(dev)?;
-        if tensor.shape() != &s {
-            Err(candle_core::Error::UnexpectedShape {
-                msg: format!("shape mismatch for {name}"),
-                expected: s,
-                got: tensor.shape().clone(),
-            }
-            .bt())?
-        }
-        Ok(tensor)
-    }
-
-    fn get_unchecked(
-        &self,
-        name: &str,
-        dtype: DType,
-        dev: &Device,
-    ) -> candle_core::Result<candle_core::Tensor> {
-        self.inner
-            .load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(dev)
-    }
-
-    fn contains_tensor(&self, name: &str) -> bool {
-        self.inner.get(name).is_ok()
-    }
-}
-
 fn flux_safetensors_var_builder<'a>(
     path: &std::path::Path,
     dtype: DType,
     device: &Device,
-    fp8: bool,
 ) -> Result<VarBuilder<'a>> {
-    if fp8 && device.is_cuda() {
-        // FP8→target dtype conversion must happen on CPU because candle's CUDA
-        // backend has a kernel naming mismatch for F8_E4M3 casts.
-        let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
-        Ok(VarBuilder::from_backend(
-            Box::new(CpuStagedSafetensors { inner: tensors }),
-            dtype,
-            device.clone(),
-        ))
-    } else {
-        Ok(unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device)?
-        })
-    }
+    Ok(unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device)? })
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -493,7 +445,6 @@ impl FluxEngine {
                 &transformer_path,
                 gpu_dtype,
                 &device,
-                false,
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
@@ -807,7 +758,6 @@ impl FluxEngine {
                 &transformer_path,
                 gpu_dtype,
                 &device,
-                false,
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
@@ -1111,7 +1061,6 @@ impl InferenceEngine for FluxEngine {
                         &transformer_path,
                         loaded.dtype,
                         &loaded.device,
-                        false, // FP8 models are cached as GGUF, never reloaded as safetensors
                     )?);
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 });

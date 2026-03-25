@@ -242,6 +242,7 @@ default_width = 1024
 default_height = 1024
 # t5_variant = "auto"
 # qwen3_variant = "auto"
+# output_dir = "/srv/mold/gallery"
 
 [models."flux-schnell:q8"]
 transformer = "/path/to/flux1-schnell-Q8_0.gguf"
