@@ -191,7 +191,7 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
-mold info <MODEL> [--verify]    Show model details (memory estimates, optional SHA-256 verify)
+mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify
 mold unload                     Unload the current model from server to free GPU memory
 mold ps                         Show server status + loaded models
 mold version                    Show version

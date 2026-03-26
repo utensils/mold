@@ -1,11 +1,14 @@
+use std::collections::HashSet;
+use std::time::Duration;
+
 use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
-use mold_core::{Config, ModelPaths};
+use mold_core::{build_model_catalog, Config, ModelPaths, MoldClient};
 use sha2::{Digest, Sha256};
 
 use crate::theme;
-use crate::ui::format_family;
+use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
 
 fn compute_sha256(path: &str) -> Result<String> {
     use std::io::Read;
@@ -87,6 +90,152 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::TextTokenizer => "Text Tokenizer",
         ModelComponent::Decoder => "Decoder",
     }
+}
+
+pub async fn run_overview() -> Result<()> {
+    let config = Config::load_or_default();
+    let version = env!("CARGO_PKG_VERSION");
+
+    // Header
+    println!("{}", format!("mold v{version}").bold());
+    println!("{}", "─".repeat(42).dimmed());
+
+    // Installation section
+    println!();
+    println!("  {}", "Installation".bold());
+
+    if let Some(home) = Config::mold_dir() {
+        println!("  {:<18} {}", "Home:".dimmed(), home.display());
+    }
+
+    if let Some(config_path) = Config::config_path() {
+        let status = if config_path.exists() {
+            "exists".green().to_string()
+        } else {
+            "not found".dimmed().to_string()
+        };
+        println!(
+            "  {:<18} {} ({})",
+            "Config:".dimmed(),
+            config_path.display(),
+            status,
+        );
+    }
+
+    let models_dir = config.resolved_models_dir();
+    let models_dir_status = if models_dir.exists() {
+        String::new()
+    } else {
+        format!(" ({})", "not created".dimmed())
+    };
+    println!(
+        "  {:<18} {}{}",
+        "Models dir:".dimmed(),
+        models_dir.display(),
+        models_dir_status,
+    );
+
+    let default_model = resolve_model_name(&config.resolved_default_model());
+    let default_downloaded = config.manifest_model_is_downloaded(&default_model);
+    let default_status = if default_downloaded {
+        "installed".green().to_string()
+    } else {
+        "not installed".dimmed().to_string()
+    };
+    println!(
+        "  {:<18} {} ({})",
+        "Default model:".dimmed(),
+        default_model,
+        default_status,
+    );
+
+    // Installed Models section
+    let catalog = build_model_catalog(&config, None, false);
+    let downloaded: Vec<_> = catalog.iter().filter(|m| m.downloaded).collect();
+
+    println!();
+    println!("  {} ({})", "Installed Models".bold(), downloaded.len());
+
+    if downloaded.is_empty() {
+        println!(
+            "  {} Run {} to download.",
+            "No models installed.".dimmed(),
+            "mold pull <model>".bold(),
+        );
+    } else {
+        let nw = col_width(downloaded.iter().map(|m| m.name.len()), 4, 2);
+        let fw = col_width(
+            downloaded
+                .iter()
+                .map(|m| crate::ui::family_label(&m.family).len()),
+            6,
+            2,
+        );
+
+        let mut all_unique_paths: HashSet<String> = HashSet::new();
+        for model in &downloaded {
+            let mcfg = config.model_config(&model.name);
+            let model_paths = mcfg.all_file_paths();
+            let disk_bytes: u64 = model.disk_usage_bytes.unwrap_or_else(|| {
+                model_paths
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .sum()
+            });
+            all_unique_paths.extend(model_paths);
+            println!(
+                "  {:<nw$} {} {:>7}",
+                model.name,
+                format_family_padded(&model.family, fw),
+                format_disk_size(disk_bytes),
+                nw = nw,
+            );
+        }
+
+        if downloaded.len() > 1 {
+            let total_disk: u64 = all_unique_paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum();
+            if total_disk > 0 {
+                println!(
+                    "{:>width$}",
+                    format!("Total: {}", format_disk_size(total_disk)).dimmed(),
+                    width = nw + fw + 9,
+                );
+            }
+        }
+    }
+
+    // Server section
+    let client = MoldClient::from_env();
+    println!();
+    println!("  {}", "Server".bold());
+    println!("  {:<18} {}", "Host:".dimmed(), client.host());
+
+    match tokio::time::timeout(Duration::from_secs(2), client.server_status()).await {
+        Ok(Ok(status)) => {
+            let loaded = if status.models_loaded.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} loaded)", status.models_loaded.join(", "))
+            };
+            println!(
+                "  {:<18} {} (v{}){}",
+                "Status:".dimmed(),
+                "Running".green(),
+                status.version,
+                loaded,
+            );
+        }
+        _ => {
+            println!("  {:<18} {}", "Status:".dimmed(), "Not running".dimmed(),);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn run(name: &str, verify: bool) -> Result<()> {
@@ -464,6 +613,13 @@ mod tests {
     fn legacy_name_resolves() {
         // flux-dev-q4 should resolve to flux-dev:q4
         let result = run("flux-dev-q4", false);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn overview_returns_ok() {
+        // No server running is fine — overview should print "Not running" and succeed
+        let result = run_overview().await;
         assert!(result.is_ok());
     }
 }
