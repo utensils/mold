@@ -19,6 +19,7 @@ pub mod sdxl;
 pub mod wuerstchen;
 pub mod zimage;
 
+pub use device::reclaim_gpu_memory;
 pub use engine::{InferenceEngine, LoadStrategy};
 pub use error::InferenceError;
 pub use factory::create_engine;
