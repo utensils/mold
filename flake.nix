@@ -115,6 +115,9 @@
             else
               "";
 
+          # Features string for devshell commands: GPU + preview
+          devFeatures = if gpuFeature != "" then "${gpuFeature},preview" else "preview";
+
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
             name = "cuda-toolkit-merged";
@@ -136,7 +139,8 @@
             commonArgs
             // {
               inherit cargoArtifacts meta;
-              cargoExtraArgs = "-p mold-ai" + lib.optionalString (gpuFeature != "") " --features ${gpuFeature}";
+              cargoExtraArgs =
+                "-p mold-ai --features preview" + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
               postInstall = ''
                 installShellCompletion --cmd mold \
                   --bash <($out/bin/mold completions bash) \
@@ -258,8 +262,8 @@
               {
                 category = "build";
                 name = "build-server";
-                help = "cargo build -p mold-ai --features ${gpuFeature} (single binary with GPU)";
-                command = "cargo build -p mold-ai --features ${gpuFeature} \"$@\"";
+                help = "cargo build -p mold-ai --features ${devFeatures} (single binary with GPU + preview)";
+                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
               }
               {
                 category = "check";
@@ -311,19 +315,19 @@
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "cargo run -p mold-ai --features ${gpuFeature} -- \"$@\"";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
                 help = "start the mold server";
-                command = "cargo run -p mold-ai --features ${gpuFeature} -- serve \"$@\"";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
               }
               {
                 category = "run";
                 name = "generate";
                 help = "generate an image from a prompt";
-                command = "cargo run -p mold-ai --features ${gpuFeature} -- run \"$@\"";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- run \"$@\"";
               }
             ];
           };

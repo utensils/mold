@@ -164,8 +164,11 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
-        ReadWritePaths = [ cfg.homeDir cfg.modelsDir ]
-          ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ];
+        ReadWritePaths = [
+          cfg.homeDir
+          cfg.modelsDir
+        ]
+        ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ];
 
         # GPU access
         SupplementaryGroups = [
