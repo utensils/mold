@@ -89,7 +89,7 @@ Shared library used by all other crates:
 - **`client.rs`** — `MoldClient` HTTP client; `is_connection_error()` for local fallback detection
 - **`config.rs`** — `Config`, `ModelConfig`, `ModelPaths`; loads from `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy)
 - **`manifest.rs`** — `ModelManifest` registry of downloadable models with HF sources; `resolve_model_name()` for `name:tag` resolution
-- **`download.rs`** — `pull_model()` wrapping `hf-hub` with progress bars
+- **`download.rs`** — `pull_model()` wrapping `hf-hub` with progress bars; SHA-256 integrity verification (fails on mismatch, `--skip-verify` to override); `.pulling` marker for atomic pull detection; `PullOptions` for controlling verification behavior
 - **`validation.rs`** — `validate_generate_request()` — shared validation (used by both server and CLI)
 - **`error.rs`** — `MoldError` enum with thiserror
 
@@ -189,7 +189,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
-mold pull <MODEL>               Download model from HuggingFace
+mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
 mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify

@@ -10,11 +10,15 @@ fn description_with_gated(desc: &str, model_name: &str) -> String {
     let is_gated = mold_core::manifest::find_manifest(model_name)
         .map(|m| m.is_gated())
         .unwrap_or(false);
-    if is_gated && !desc.contains("[gated]") {
-        format!("{desc} [gated]")
-    } else {
-        desc.to_string()
+    let has_marker = mold_core::download::has_pulling_marker(model_name);
+    let mut result = desc.to_string();
+    if has_marker && !result.contains("[incomplete]") {
+        result = format!("{result} [incomplete]");
     }
+    if is_gated && !result.contains("[gated]") {
+        result = format!("{result} [gated]");
+    }
+    result
 }
 
 fn format_fetch_size(remaining_bytes: u64) -> String {

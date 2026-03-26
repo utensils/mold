@@ -205,6 +205,10 @@ Run 'mold list' to see all available models.")]
         /// Model name to download
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: String,
+
+        /// Skip SHA-256 verification after download
+        #[arg(long)]
+        skip_verify: bool,
     },
 
     /// Remove downloaded model(s) and their unique files
@@ -461,8 +465,9 @@ async fn run() -> anyhow::Result<()> {
         } => {
             commands::serve::run(port, &bind, models_dir).await?;
         }
-        Commands::Pull { model } => {
-            commands::pull::run(&model).await?;
+        Commands::Pull { model, skip_verify } => {
+            let opts = mold_core::download::PullOptions { skip_verify };
+            commands::pull::run(&model, &opts).await?;
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;

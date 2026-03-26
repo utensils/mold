@@ -509,6 +509,9 @@ impl Config {
     }
 
     pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {
+        if crate::download::has_pulling_marker(name) {
+            return None;
+        }
         let manifest = crate::manifest::find_manifest(name)?;
         let models_dir = self.resolved_models_dir();
         let downloads = manifest
@@ -523,6 +526,9 @@ impl Config {
     }
 
     pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
+        if crate::download::has_pulling_marker(name) {
+            return false;
+        }
         self.resolved_local_manifest_model_config(name).is_some()
     }
 

@@ -135,11 +135,14 @@ pub(crate) async fn pull_model(
 
     tracing::info!(model = %model, "pulling model via API");
 
+    let opts = mold_core::download::PullOptions::default();
     let new_config = match progress {
-        Some(callback) => mold_core::download::pull_and_configure_with_callback(model, callback)
-            .await
-            .map(|(config, _)| config),
-        None => mold_core::download::pull_and_configure(model)
+        Some(callback) => {
+            mold_core::download::pull_and_configure_with_callback(model, callback, &opts)
+                .await
+                .map(|(config, _)| config)
+        }
+        None => mold_core::download::pull_and_configure(model, &opts)
             .await
             .map(|(config, _)| config),
     }
