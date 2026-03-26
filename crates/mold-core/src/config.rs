@@ -8,6 +8,30 @@ use crate::types::Scheduler;
 
 static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Which fallback step resolved the default model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultModelSource {
+    /// `MOLD_DEFAULT_MODEL` environment variable
+    EnvVar,
+    /// Config file `default_model` with a custom `[models]` entry
+    ConfigCustomEntry,
+    /// Config file `default_model` (manifest model, downloaded)
+    Config,
+    /// Last-used model from `$MOLD_HOME/last-model`
+    LastUsed,
+    /// Only one model is downloaded — auto-selected
+    OnlyDownloaded,
+    /// Config file default (model not downloaded, will auto-pull)
+    ConfigDefault,
+}
+
+/// Result of resolving the default model: the model name and how it was resolved.
+#[derive(Debug, Clone)]
+pub struct DefaultModelResolution {
+    pub model: String,
+    pub source: DefaultModelSource,
+}
+
 /// Per-model file path + default settings configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ModelConfig {
@@ -400,25 +424,42 @@ impl Config {
     /// 5. If exactly one model is downloaded, use it automatically
     /// 6. Fall back to config value (will trigger auto-pull on use)
     pub fn resolved_default_model(&self) -> String {
+        self.resolve_default_model().model
+    }
+
+    /// Like [`resolved_default_model`] but also returns which fallback step resolved it.
+    pub fn resolve_default_model(&self) -> DefaultModelResolution {
         // 1. Env var override
         if let Ok(m) = std::env::var("MOLD_DEFAULT_MODEL") {
             if !m.is_empty() {
-                return m;
+                return DefaultModelResolution {
+                    model: m,
+                    source: DefaultModelSource::EnvVar,
+                };
             }
         }
         // 2. Explicit config entry — honor custom/manual models even when not manifest-backed.
         let configured = &self.default_model;
         if self.lookup_model_config(configured).is_some() {
-            return configured.clone();
+            return DefaultModelResolution {
+                model: configured.clone(),
+                source: DefaultModelSource::ConfigCustomEntry,
+            };
         }
         // 3. Configured manifest model — if downloaded
         if self.manifest_model_is_downloaded(configured) {
-            return configured.clone();
+            return DefaultModelResolution {
+                model: configured.clone(),
+                source: DefaultModelSource::Config,
+            };
         }
         // 4. Last-used model — if still downloaded
         if let Some(last) = Self::read_last_model() {
             if self.manifest_model_is_downloaded(&last) {
-                return last;
+                return DefaultModelResolution {
+                    model: last,
+                    source: DefaultModelSource::LastUsed,
+                };
             }
         }
         // 5. Single downloaded model
@@ -428,10 +469,16 @@ impl Config {
             .map(|m| m.name.clone())
             .collect();
         if downloaded.len() == 1 {
-            return downloaded.into_iter().next().unwrap();
+            return DefaultModelResolution {
+                model: downloaded.into_iter().next().unwrap(),
+                source: DefaultModelSource::OnlyDownloaded,
+            };
         }
         // 6. Config default (will auto-pull)
-        configured.clone()
+        DefaultModelResolution {
+            model: configured.clone(),
+            source: DefaultModelSource::ConfigDefault,
+        }
     }
 
     /// Path to the last-model state file: `$MOLD_HOME/last-model`
@@ -611,7 +658,9 @@ impl Config {
         Self::config_path().is_some_and(|p| p.exists())
     }
 
-    fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
+    /// Look up a model config entry by name (exact or canonical `name:tag` form).
+    /// Public so CLI commands can check whether a model has a custom config entry.
+    pub fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
         if let Some(cfg) = self.models.get(name) {
             return Some(cfg.clone());
         }

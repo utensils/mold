@@ -252,6 +252,24 @@ Examples:
         verify: bool,
     },
 
+    /// Get or set the default model
+    ///
+    /// With no argument, shows the current default model and how it was resolved.
+    /// With a model name, sets it as the default in the config file.
+    #[command(after_long_help = "\
+Examples:
+  mold default                   Show current default model
+  mold default flux-dev:q4       Set default to flux-dev:q4
+  mold default sdxl-turbo        Set default (bare name auto-resolves)
+
+The default model is used by 'mold run' when no model is specified.
+The MOLD_DEFAULT_MODEL env var takes precedence over the config file.")]
+    Default {
+        /// Model name to set as default (e.g. flux-dev:q4). Omit to show current default.
+        #[arg(add = ArgValueCandidates::new(commands::default::complete_model_name))]
+        model: Option<String>,
+    },
+
     /// Unload the current model from the server to free GPU memory
     #[command(
         after_long_help = "Requires a running server (mold serve). Use 'mold ps' to check status."
@@ -485,6 +503,9 @@ async fn run() -> anyhow::Result<()> {
                 }
                 commands::info::run_overview().await?;
             }
+        }
+        Commands::Default { model } => {
+            commands::default::run(model.as_deref())?;
         }
         Commands::Unload => {
             commands::unload::run().await?;
@@ -900,6 +921,28 @@ mod tests {
         match cli.command {
             Commands::Run { image, .. } => assert!(image.is_none()),
             _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn default_no_args_parses() {
+        let cli = parse(&["default"]);
+        match cli.command {
+            Commands::Default { model } => {
+                assert!(model.is_none());
+            }
+            _ => panic!("expected Default"),
+        }
+    }
+
+    #[test]
+    fn default_with_model_parses() {
+        let cli = parse(&["default", "flux-dev:q4"]);
+        match cli.command {
+            Commands::Default { model } => {
+                assert_eq!(model.as_deref(), Some("flux-dev:q4"));
+            }
+            _ => panic!("expected Default"),
         }
     }
 

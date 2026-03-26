@@ -1,3 +1,4 @@
+pub mod default;
 pub(crate) mod generate;
 pub mod info;
 pub mod list;
