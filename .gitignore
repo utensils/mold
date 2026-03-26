@@ -11,6 +11,9 @@
 *.jpg
 !docs/**/*.png
 
+# Claude Code
+.claude/worktrees/
+
 # Nix / direnv
 .direnv/
 result
