@@ -62,6 +62,9 @@ mod tests {
         progress_set_count: Arc<AtomicUsize>,
         progress_clear_count: Arc<AtomicUsize>,
         generate_blocker: Option<Arc<GenerateBlocker>>,
+        /// When set, load() emits progress events through the stored callback.
+        emit_load_progress: bool,
+        progress_callback: Option<ProgressCallback>,
     }
 
     impl MockEngine {
@@ -75,6 +78,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                emit_load_progress: false,
+                progress_callback: None,
             }
         }
         fn failing() -> Self {
@@ -87,6 +92,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                emit_load_progress: false,
+                progress_callback: None,
             }
         }
         fn empty_images() -> Self {
@@ -99,6 +106,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                emit_load_progress: false,
+                progress_callback: None,
             }
         }
         fn unloaded(load_count: Arc<AtomicUsize>, load_delay: Duration) -> Self {
@@ -111,6 +120,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                emit_load_progress: false,
+                progress_callback: None,
             }
         }
 
@@ -127,6 +138,8 @@ mod tests {
                 progress_set_count,
                 progress_clear_count,
                 generate_blocker: None,
+                emit_load_progress: false,
+                progress_callback: None,
             }
         }
 
@@ -140,6 +153,25 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: Some(blocker),
+                emit_load_progress: false,
+                progress_callback: None,
+            }
+        }
+
+        /// Create an unloaded engine that emits progress events during load(),
+        /// simulating FP8→Q8 conversion status messages.
+        fn unloaded_with_progress() -> Self {
+            Self {
+                loaded: false,
+                fail: false,
+                empty_images: false,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: None,
+                emit_load_progress: true,
+                progress_callback: None,
             }
         }
     }
@@ -186,6 +218,16 @@ mod tests {
 
         fn load(&mut self) -> anyhow::Result<()> {
             self.load_count.fetch_add(1, Ordering::SeqCst);
+            if self.emit_load_progress {
+                if let Some(ref cb) = self.progress_callback {
+                    cb(mold_inference::progress::ProgressEvent::Info {
+                        message: "Converting FP8 checkpoint to Q8 GGUF cache (one-time, may take a few minutes)".to_string(),
+                    });
+                    cb(mold_inference::progress::ProgressEvent::StageStart {
+                        name: "Loading transformer (GPU, quantized)".to_string(),
+                    });
+                }
+            }
             if !self.load_delay.is_zero() {
                 std::thread::sleep(self.load_delay);
             }
@@ -193,12 +235,14 @@ mod tests {
             Ok(())
         }
 
-        fn set_on_progress(&mut self, _callback: ProgressCallback) {
+        fn set_on_progress(&mut self, callback: ProgressCallback) {
             self.progress_set_count.fetch_add(1, Ordering::SeqCst);
+            self.progress_callback = Some(callback);
         }
 
         fn clear_on_progress(&mut self) {
             self.progress_clear_count.fetch_add(1, Ordering::SeqCst);
+            self.progress_callback = None;
         }
     }
 
@@ -1030,5 +1074,57 @@ mod tests {
         assert_eq!(resp1.unwrap().status(), StatusCode::OK);
         assert_eq!(resp2.unwrap().status(), StatusCode::OK);
         assert_eq!(load_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Verify that progress events emitted during model loading (e.g. FP8→Q8
+    /// conversion) are delivered through the SSE stream to the client.
+    #[tokio::test]
+    async fn stream_delivers_load_progress_events() {
+        let state = AppState {
+            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
+                MockEngine::unloaded_with_progress(),
+            )))),
+            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
+                model_name: Some("mock-model".to_string()),
+                is_loaded: false,
+            })),
+            active_generation: Arc::new(std::sync::RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            start_time: std::time::Instant::now(),
+            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a cat", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+
+        // The SSE stream must contain the FP8 conversion info event
+        assert!(
+            text.contains("Converting FP8 checkpoint"),
+            "SSE stream should contain FP8 conversion progress info event, got: {text}"
+        );
+        // And the stage start event from model loading
+        assert!(
+            text.contains("Loading transformer"),
+            "SSE stream should contain model loading stage event, got: {text}"
+        );
+        // Final complete event should also be present
+        assert!(
+            text.contains("event: complete"),
+            "SSE stream should contain complete event, got: {text}"
+        );
     }
 }
