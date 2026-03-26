@@ -514,7 +514,7 @@ async fn run() -> anyhow::Result<()> {
             commands::ps::run().await?;
         }
         Commands::Version => {
-            println!("mold {}", env!("CARGO_PKG_VERSION"));
+            println!("mold {}", mold_core::build_info::version_string());
         }
         Commands::Completions { shell } => {
             generate_completions(&shell)?;

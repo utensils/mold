@@ -94,10 +94,12 @@ fn component_label(component: &ModelComponent) -> &'static str {
 
 pub async fn run_overview() -> Result<()> {
     let config = Config::load_or_default();
-    let version = env!("CARGO_PKG_VERSION");
 
     // Header
-    println!("{}", format!("mold v{version}").bold());
+    println!(
+        "{}",
+        format!("mold v{}", mold_core::build_info::version_string()).bold()
+    );
     println!("{}", "─".repeat(42).dimmed());
 
     // Installation section

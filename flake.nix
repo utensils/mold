@@ -21,6 +21,18 @@
 
   outputs =
     inputs:
+    let
+      # Git metadata for build info — available from the flake's self reference.
+      gitShortRev = inputs.self.shortRev or inputs.self.dirtyShortRev or "unknown";
+      gitDate =
+        let
+          raw = toString (inputs.self.lastModifiedDate or "unknown");
+        in
+        if builtins.stringLength raw >= 8 then
+          "${builtins.substring 0 4 raw}-${builtins.substring 4 2 raw}-${builtins.substring 6 2 raw}"
+        else
+          "unknown";
+    in
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.devshell.flakeModule
@@ -76,6 +88,10 @@
             pname = "mold";
             version = "0.2.0";
             strictDeps = true;
+
+            # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
+            MOLD_GIT_SHA = gitShortRev;
+            MOLD_BUILD_DATE = gitDate;
             cargoVendorDir = craneLib.vendorCargoDeps {
               inherit src;
             };

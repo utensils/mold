@@ -799,6 +799,16 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: if mold_core::build_info::GIT_SHA == "unknown" {
+            None
+        } else {
+            Some(mold_core::build_info::GIT_SHA.to_string())
+        },
+        build_date: if mold_core::build_info::BUILD_DATE == "unknown" {
+            None
+        } else {
+            Some(mold_core::build_info::BUILD_DATE.to_string())
+        },
         models_loaded,
         busy,
         current_generation,
