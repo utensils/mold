@@ -276,6 +276,10 @@ const FLUX_GUIDANCE_EMBEDDING_TENSORS: &[&str] = &[
 
 /// Lightweight check: does a GGUF file contain the FLUX embedding layers?
 /// Reads only the GGUF header (tensor_infos), not the tensor data.
+///
+/// Relies on the city96-format property that embedding tensors are either
+/// all present or all absent. A GGUF with `img_in.weight` but missing other
+/// embeddings would pass this check.
 fn gguf_has_embeddings(path: &Path) -> Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
@@ -286,9 +290,14 @@ fn gguf_has_embeddings(path: &Path) -> Result<bool> {
 ///
 /// Prefers dev models (guaranteed `guidance_in`) over schnell, and larger
 /// quantizations (more likely downloaded) first.
-fn find_flux_reference_gguf() -> Option<PathBuf> {
+///
+/// When `models_dir_override` is `Some`, searches that directory instead of
+/// the config-resolved models dir (used by tests to avoid global state).
+fn find_flux_reference_gguf(models_dir_override: Option<&Path>) -> Option<PathBuf> {
     let config = mold_core::Config::load_or_default();
-    let models_dir = config.resolved_models_dir();
+    let models_dir = models_dir_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config.resolved_models_dir());
 
     // Prioritize dev models (have guidance_in), then schnell as fallback
     let candidates = [
@@ -384,10 +393,14 @@ fn embedding_patched_cache_path(path: &Path) -> PathBuf {
 ///
 /// Returns the original path if the GGUF is already complete, or the path
 /// to a patched cache file.
+///
+/// `models_dir_override` is forwarded to `find_flux_reference_gguf` and
+/// only used by tests to avoid mutating process-global environment variables.
 fn ensure_gguf_embeddings(
     path: &Path,
     is_schnell: bool,
     progress: &ProgressReporter,
+    models_dir_override: Option<&Path>,
 ) -> Result<PathBuf> {
     let cache_path = embedding_patched_cache_path(path);
     if cache_path.exists() {
@@ -411,7 +424,7 @@ fn ensure_gguf_embeddings(
         "GGUF missing embedding layers, searching for reference model"
     );
 
-    let reference_path = find_flux_reference_gguf().ok_or_else(|| {
+    let reference_path = find_flux_reference_gguf(models_dir_override).ok_or_else(|| {
         anyhow::anyhow!(
             "This GGUF is missing FLUX embedding layers (img_in, time_in, vector_in, \
              guidance_in) which are required for inference.\n\n\
@@ -464,10 +477,6 @@ fn ensure_gguf_embeddings(
             continue; // already present in source
         }
         if !ref_content.tensor_infos.contains_key(*name) {
-            // guidance_in may be absent from schnell references — skip if target is also schnell
-            if is_schnell && FLUX_GUIDANCE_EMBEDDING_TENSORS.contains(name) {
-                continue;
-            }
             bail!(
                 "reference GGUF ({}) is also missing required tensor '{}' — \
                  download a complete FLUX-dev model: mold pull flux-dev:q8",
@@ -749,7 +758,7 @@ impl FluxEngine {
 
         // Patch city96-format GGUFs missing embedding layers (img_in, time_in, etc.)
         let transformer_path = if is_quantized {
-            ensure_gguf_embeddings(&transformer_path, is_schnell, &self.progress)?
+            ensure_gguf_embeddings(&transformer_path, is_schnell, &self.progress, None)?
         } else {
             transformer_path
         };
@@ -974,7 +983,7 @@ impl FluxEngine {
             };
             // Patch city96-format GGUFs missing embedding layers
             let p = if is_quantized {
-                ensure_gguf_embeddings(&p, is_schnell, &self.progress)?
+                ensure_gguf_embeddings(&p, is_schnell, &self.progress, None)?
             } else {
                 p
             };
@@ -1959,7 +1968,7 @@ mod tests {
         );
 
         let progress = crate::progress::ProgressReporter::default();
-        let result = super::ensure_gguf_embeddings(&path, false, &progress).unwrap();
+        let result = super::ensure_gguf_embeddings(&path, false, &progress, None).unwrap();
 
         // Should return the original path unchanged
         assert_eq!(result, path);
@@ -1970,7 +1979,7 @@ mod tests {
     #[test]
     fn ensure_gguf_embeddings_patches_incomplete_with_reference() {
         // Test the full patching flow using a synthetic reference GGUF.
-        // We override MOLD_MODELS_DIR to a temp dir containing a fake reference model.
+        // Uses models_dir_override to avoid mutating process-global env vars.
         let dir = std::env::temp_dir().join(format!("mold-emb-patch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1989,7 +1998,8 @@ mod tests {
 
         // Create a fake reference model at the expected manifest path.
         // flux-dev:q8 transformer lives at <models_dir>/flux-dev-q8/flux1-dev-Q8_0.gguf
-        let ref_model_dir = dir.join("models").join("flux-dev-q8");
+        let models_dir = dir.join("models");
+        let ref_model_dir = models_dir.join("flux-dev-q8");
         std::fs::create_dir_all(&ref_model_dir).unwrap();
         let ref_path = ref_model_dir.join("flux1-dev-Q8_0.gguf");
 
@@ -2003,15 +2013,9 @@ mod tests {
         ]);
         write_test_gguf(&ref_path, &all_tensors);
 
-        // Point MOLD_MODELS_DIR at our temp dir so find_flux_reference_gguf finds it
-        let models_dir = dir.join("models");
-        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
-
         let progress = crate::progress::ProgressReporter::default();
-        let result = super::ensure_gguf_embeddings(&incomplete_path, false, &progress);
-
-        // Clean up env before asserting (in case of panic)
-        std::env::remove_var("MOLD_MODELS_DIR");
+        let result =
+            super::ensure_gguf_embeddings(&incomplete_path, false, &progress, Some(&models_dir));
 
         let patched_path = result.unwrap();
         assert_ne!(
@@ -2054,7 +2058,8 @@ mod tests {
         );
 
         let progress = crate::progress::ProgressReporter::default();
-        let result = super::ensure_gguf_embeddings(&incomplete_path, true, &progress).unwrap();
+        let result =
+            super::ensure_gguf_embeddings(&incomplete_path, true, &progress, None).unwrap();
 
         assert_eq!(result, cache_path, "should return cached file");
 
