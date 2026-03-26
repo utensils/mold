@@ -199,9 +199,13 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
 
 /// Write a JPEG APP1 marker with the standard XMP namespace prefix.
 /// Skips the marker entirely if the payload exceeds the 65535-byte segment limit.
+///
+/// Per JPEG spec, the segment length field (u16) counts itself (2 bytes) plus the
+/// payload (namespace + XMP data). The 0xFF 0xE1 marker bytes are NOT included in
+/// the length field. So `total` = 2 + namespace + xmp, and max is 0xFFFF.
 fn write_jpeg_xmp_marker(out: &mut Vec<u8>, xmp_data: &[u8]) {
     let namespace = b"http://ns.adobe.com/xap/1.0/\0";
-    let total = namespace.len() + xmp_data.len() + 2; // +2 for length field
+    let total = namespace.len() + xmp_data.len() + 2; // +2 for the length field itself
     if total > 0xFFFF {
         tracing::warn!("XMP packet too large for JPEG APP1 marker ({total} bytes), skipping");
         return;
