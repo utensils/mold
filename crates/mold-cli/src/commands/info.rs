@@ -201,9 +201,13 @@ pub async fn run_overview() -> Result<()> {
                 .sum();
             if total_disk > 0 {
                 println!(
-                    "{:>width$}",
-                    format!("Total: {}", format_disk_size(total_disk)).dimmed(),
-                    width = nw + fw + 9,
+                    "{}",
+                    format!(
+                        "{:>width$}",
+                        format!("Total: {}", format_disk_size(total_disk)),
+                        width = nw + fw + 9,
+                    )
+                    .dimmed(),
                 );
             }
         }
