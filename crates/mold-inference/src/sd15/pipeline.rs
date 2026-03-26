@@ -14,8 +14,9 @@ use crate::cache::{
 use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
-use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
+use crate::progress::{ProgressCallback, ProgressEvent};
 
 /// VAE scaling factor for SD1.5 models.
 const VAE_SCALE: f64 = 0.18215;
@@ -42,12 +43,8 @@ struct LoadedSD15 {
 ///
 /// Simplified variant of SDXL: single CLIP-L encoder, smaller UNet, 512x512 default.
 pub struct SD15Engine {
-    loaded: Option<LoadedSD15>,
-    model_name: String,
-    paths: ModelPaths,
+    base: EngineBase<LoadedSD15>,
     scheduler: Scheduler,
-    progress: ProgressReporter,
-    load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
@@ -62,12 +59,8 @@ impl SD15Engine {
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
+            base: EngineBase::new(model_name, paths, load_strategy),
             scheduler,
-            progress: ProgressReporter::default(),
-            load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -78,12 +71,14 @@ impl SD15Engine {
     /// Validate and return required SD1.5 paths (CLIP-L encoder + tokenizer).
     fn validate_paths(&self) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
         let clip_encoder = self
+            .base
             .paths
             .clip_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SD1.5 models"))?
             .clone();
         let clip_tokenizer = self
+            .base
             .paths
             .clip_tokenizer
             .as_ref()
@@ -91,8 +86,8 @@ impl SD15Engine {
             .clone();
 
         for (label, path) in [
-            ("transformer (UNet)", &self.paths.transformer),
-            ("vae", &self.paths.vae),
+            ("transformer (UNet)", &self.base.paths.transformer),
+            ("vae", &self.base.paths.vae),
             ("clip_encoder (CLIP-L)", &clip_encoder),
             ("clip_tokenizer (CLIP-L)", &clip_tokenizer),
         ] {
@@ -111,25 +106,25 @@ impl SD15Engine {
 
     /// Load all SD1.5 model components (Eager mode).
     ///
-    /// On error, `self.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// On error, `self.base.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
         // Sequential mode defers loading to generate_sequential()
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
         let (clip_encoder, clip_tokenizer) = self.validate_paths()?;
 
-        tracing::info!(model = %self.model_name, "loading SD1.5 model components...");
+        tracing::info!(model = %self.base.model_name, "loading SD1.5 model components...");
 
-        let device = crate::device::create_device(&self.progress)?;
-        let dtype = if device.is_cuda() || device.is_metal() {
+        let device = crate::device::create_device(&self.base.progress)?;
+        let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
             DType::F32
@@ -138,27 +133,29 @@ impl SD15Engine {
         let sd_config = self.sd_config();
 
         // Load UNet
-        self.progress.stage_start("Loading UNet (GPU)");
+        self.base.progress.stage_start("Loading UNet (GPU)");
         let unet_start = Instant::now();
         let unet = sd_config.build_unet(
-            &self.paths.transformer,
+            &self.base.paths.transformer,
             &device,
             4,     // in_channels
             false, // use_flash_attn
             dtype,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
         // Load VAE
-        self.progress.stage_start("Loading VAE (GPU)");
+        self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-        self.progress
+        let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
+        self.base
+            .progress
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
         // Load CLIP-L encoder
-        self.progress.stage_start("Loading CLIP-L encoder");
+        self.base.progress.stage_start("Loading CLIP-L encoder");
         let clip_start = Instant::now();
         let clip = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
@@ -166,14 +163,15 @@ impl SD15Engine {
             &device,
             DType::F32,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
         // Load tokenizer
         let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
 
-        self.loaded = Some(LoadedSD15 {
+        self.base.loaded = Some(LoadedSD15 {
             unet,
             vae,
             clip,
@@ -183,7 +181,7 @@ impl SD15Engine {
             dtype,
         });
 
-        tracing::info!(model = %self.model_name, "all SD1.5 components loaded successfully");
+        tracing::info!(model = %self.base.model_name, "all SD1.5 components loaded successfully");
         Ok(())
     }
 
@@ -234,7 +232,7 @@ impl SD15Engine {
         let active_timesteps = &timesteps[start_step..];
 
         let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
-        self.progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         for (step_idx, &t) in active_timesteps.iter().enumerate() {
@@ -284,14 +282,15 @@ impl SD15Engine {
                 *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
             }
 
-            self.progress.emit(ProgressEvent::DenoiseStep {
+            self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: active_timesteps.len(),
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.progress
+        self.base
+            .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
         Ok(())
     }
@@ -320,7 +319,9 @@ impl SD15Engine {
             device,
             dtype,
             || {
-                self.progress.stage_start("Encoding source image (VAE)");
+                self.base
+                    .progress
+                    .stage_start("Encoding source image (VAE)");
                 let encode_start = Instant::now();
 
                 let source_tensor = decode_source_image(
@@ -335,13 +336,14 @@ impl SD15Engine {
                 let encoded = vae.encode(&source_tensor)?;
                 let encoded = (encoded.sample()? * VAE_SCALE)?;
 
-                self.progress
+                self.base
+                    .progress
                     .stage_done("Encoding source image (VAE)", encode_start.elapsed());
                 Ok(encoded)
             },
         )?;
         if cache_hit {
-            self.progress.cache_hit("source image latents");
+            self.base.progress.cache_hit("source image latents");
         }
 
         // Compute start step
@@ -397,11 +399,12 @@ impl SD15Engine {
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
                 let use_cfg = guidance > 1.0;
 
-                self.progress.stage_start("Encoding prompt (CLIP-L)");
+                self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_start = Instant::now();
                 let tokens = Self::tokenize(tokenizer, prompt, max_len, device)?;
                 let text_embeddings = clip.forward(&tokens)?;
-                self.progress
+                self.base
+                    .progress
                     .stage_done("Encoding prompt (CLIP-L)", encode_start.elapsed());
 
                 let text_embeddings = if use_cfg {
@@ -415,7 +418,7 @@ impl SD15Engine {
                 Ok(text_embeddings.to_dtype(dtype)?)
             })?;
         if cache_hit {
-            self.progress.cache_hit("prompt conditioning");
+            self.base.progress.cache_hit("prompt conditioning");
             return Ok(text_embeddings);
         }
         Ok(text_embeddings)
@@ -435,7 +438,7 @@ impl SD15Engine {
                 crate::img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, device, dtype)
             })?;
         if cache_hit {
-            self.progress.cache_hit("inpaint mask");
+            self.base.progress.cache_hit("inpaint mask");
             return Ok(mask);
         }
         Ok(mask)
@@ -454,7 +457,7 @@ impl SD15Engine {
                 _ => return Ok(None),
             };
 
-        self.progress.stage_start("Loading ControlNet");
+        self.base.progress.stage_start("Loading ControlNet");
         let cn_start = Instant::now();
 
         // Resolve ControlNet model weights path
@@ -473,11 +476,14 @@ impl SD15Engine {
             candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModelConfig::default();
         let model = ControlNetModel::load(&cn_paths.transformer, device, dtype, unet_config)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading ControlNet", cn_start.elapsed());
 
         // Decode and preprocess control image
-        self.progress.stage_start("Preprocessing control image");
+        self.base
+            .progress
+            .stage_start("Preprocessing control image");
         let preprocess_start = Instant::now();
 
         let control_key = image_size_cache_key(control_bytes, req.width, req.height);
@@ -498,10 +504,11 @@ impl SD15Engine {
             },
         )?;
         if cache_hit {
-            self.progress.cache_hit("control preprocessing");
+            self.base.progress.cache_hit("control preprocessing");
         }
 
-        self.progress
+        self.base
+            .progress
             .stage_done("Preprocessing control image", preprocess_start.elapsed());
 
         tracing::info!(
@@ -527,12 +534,12 @@ impl SD15Engine {
         let (clip_encoder, clip_tokenizer) = self.validate_paths()?;
 
         // Check memory budget
-        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.progress.info(&warning);
+        if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
+            self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.progress)?;
-        let dtype = if device.is_cuda() || device.is_metal() {
+        let device = crate::device::create_device(&self.base.progress)?;
+        let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
             DType::F32
@@ -556,12 +563,13 @@ impl SD15Engine {
             "starting sequential SD1.5 generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Load CLIP-L encoder, encode, then drop ---
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         // Load tokenizer (kept in memory — tiny)
@@ -569,7 +577,7 @@ impl SD15Engine {
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
 
         // Load CLIP-L
-        self.progress.stage_start("Loading CLIP-L encoder");
+        self.base.progress.stage_start("Loading CLIP-L encoder");
         let clip_start = Instant::now();
         let clip = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
@@ -577,7 +585,8 @@ impl SD15Engine {
             &device,
             DType::F32,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
         // Encode prompt
@@ -593,22 +602,23 @@ impl SD15Engine {
 
         // Drop CLIP encoder to free memory
         drop(clip);
-        self.progress.info("Freed CLIP-L encoder");
+        self.base.progress.info("Freed CLIP-L encoder");
         tracing::info!("CLIP encoder dropped (sequential mode)");
 
         // --- Phase 2: Load UNet and denoise ---
-        let unet_size = std::fs::metadata(&self.paths.transformer)
+        let unet_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
         preflight_memory_check("UNet", unet_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
-        self.progress.stage_start("Loading UNet (GPU)");
+        self.base.progress.stage_start("Loading UNet (GPU)");
         let unet_start = Instant::now();
-        let unet = sd_config.build_unet(&self.paths.transformer, &device, 4, false, dtype)?;
-        self.progress
+        let unet = sd_config.build_unet(&self.base.paths.transformer, &device, 4, false, dtype)?;
+        self.base
+            .progress
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
 
         let sched = req.scheduler.unwrap_or(self.scheduler);
@@ -618,14 +628,16 @@ impl SD15Engine {
         let (mut latents, start_step, inpaint_ctx) = if let Some(ref source_bytes) =
             req.source_image
         {
-            self.progress
+            self.base
+                .progress
                 .info("img2img mode: encoding source image before denoising");
 
             // Load VAE first for encoding
-            self.progress.stage_start("Loading VAE (GPU)");
+            self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_start = Instant::now();
-            let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-            self.progress
+            let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
+            self.base
+                .progress
                 .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
             let (latents, start_step, encoded, noise) = self.prepare_img2img_latents(
@@ -654,7 +666,9 @@ impl SD15Engine {
             };
 
             drop(vae);
-            self.progress.info("Freed VAE (will reload for decode)");
+            self.base
+                .progress
+                .info("Freed VAE (will reload for decode)");
             device.synchronize()?;
 
             (latents, start_step, inpaint_ctx)
@@ -699,7 +713,7 @@ impl SD15Engine {
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
-        self.progress.info("Freed UNet");
+        self.base.progress.info("Freed UNet");
         tracing::info!("UNet dropped (sequential mode)");
 
         // --- Phase 3: Load VAE and decode ---
@@ -709,13 +723,14 @@ impl SD15Engine {
         } else {
             "Loading VAE (GPU)"
         };
-        self.progress.stage_start(vae_load_label);
+        self.base.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.paths.vae, &device, dtype)?;
-        self.progress
+        let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
+        self.base
+            .progress
             .stage_done(vae_load_label, vae_start.elapsed());
 
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
@@ -725,7 +740,8 @@ impl SD15Engine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
         let output_metadata = build_output_metadata(req, seed, Some(sched));
@@ -762,12 +778,13 @@ impl SD15Engine {
 impl InferenceEngine for SD15Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         // Sequential mode: load-use-drop each component
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         // Eager mode: use pre-loaded components
         let loaded = self
+            .base
             .loaded
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
@@ -871,7 +888,7 @@ impl InferenceEngine for SD15Engine {
         )?;
 
         // 5. VAE decode
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
@@ -881,7 +898,9 @@ impl InferenceEngine for SD15Engine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.progress.stage_done("VAE decode", vae_start.elapsed());
+        self.base
+            .progress
+            .stage_done("VAE decode", vae_start.elapsed());
 
         // 5. Encode to image format
         let output_metadata = build_output_metadata(req, seed, Some(sched));
@@ -911,12 +930,11 @@ impl InferenceEngine for SD15Engine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
-        // Sequential mode is always "ready" — it loads on demand
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -924,7 +942,7 @@ impl InferenceEngine for SD15Engine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
         clear_cache(&self.source_latent_cache);
         clear_cache(&self.mask_cache);
@@ -932,10 +950,10 @@ impl InferenceEngine for SD15Engine {
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }

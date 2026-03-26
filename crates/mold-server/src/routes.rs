@@ -79,46 +79,9 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Extract a clean, user-facing error message from an anyhow error.
-/// Strips backtrace frames and internal source locations that candle
-/// embeds into its Display output via `Error::bt()`.
+// Re-export for tests — the canonical implementation lives in queue.rs.
 #[cfg(test)]
-fn clean_error_message(e: &anyhow::Error) -> String {
-    let full = format!("{e}");
-    // Candle backtraces start with a frame number like "   0: candle_core::..."
-    // Take only lines before the first backtrace frame.
-    let mut lines: Vec<&str> = Vec::new();
-    for line in full.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("0:") || trimmed.starts_with("1:") {
-            // Check if this looks like a backtrace frame (digit + colon + space + path)
-            if trimmed.len() > 3
-                && trimmed
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|b| b.is_ascii_digit())
-            {
-                break;
-            }
-        }
-        // Also catch higher-numbered frames like "  10: ..."
-        if trimmed.len() > 2
-            && trimmed.as_bytes()[0].is_ascii_digit()
-            && trimmed.contains("::")
-            && trimmed.contains("at ")
-        {
-            break;
-        }
-        lines.push(line);
-    }
-    let msg = lines.join("\n").trim().to_string();
-    if msg.is_empty() {
-        // Fallback: just the root cause
-        format!("{}", e.root_cause())
-    } else {
-        msg
-    }
-}
+use crate::queue::clean_error_message;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -217,6 +180,33 @@ fn save_image_to_dir(
     }
 }
 
+// ── Shared pre-queue validation ───────────────────────────────────────────────
+
+/// Validate a generate request and resolve server-side defaults.
+///
+/// Performs the identical pre-queue checks used by both `generate` and
+/// `generate_stream`: applies the default metadata setting, validates the
+/// request, checks model availability, and resolves the output directory.
+async fn prepare_generation(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Result<Option<std::path::PathBuf>, ApiError> {
+    apply_default_metadata_setting(state, request).await;
+
+    if let Err(e) = validate_generate_request(request) {
+        return Err(ApiError::validation(e));
+    }
+
+    let _ = model_manager::check_model_available(state, &request.model).await?;
+
+    let output_dir = {
+        let config = state.config.read().await;
+        config.resolved_output_dir().map(|p| p.to_path_buf())
+    };
+
+    Ok(output_dir)
+}
+
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -237,7 +227,8 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    apply_default_metadata_setting(&state, &mut req).await;
+    let output_dir = prepare_generation(&state, &mut req).await?;
+
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
@@ -249,20 +240,6 @@ async fn generate(
         format = %req.output_format,
         "generate request"
     );
-
-    // Validate request before touching the engine
-    if let Err(e) = validate_generate_request(&req) {
-        return Err(ApiError::validation(e));
-    }
-
-    // Check model availability (404/400 returned as HTTP errors before queueing)
-    let _ = model_manager::check_model_available(&state, &req.model).await?;
-
-    // Resolve output directory before queueing
-    let output_dir = {
-        let config = state.config.read().await;
-        config.resolved_output_dir().map(|p| p.to_path_buf())
-    };
 
     // Submit to generation queue
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -333,29 +310,16 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    apply_default_metadata_setting(&state, &mut req).await;
+    let output_dir = prepare_generation(&state, &mut req).await?;
+
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
         "generate/stream request"
     );
 
-    // Validate before starting the SSE stream (returns HTTP error, not SSE event)
-    if let Err(e) = validate_generate_request(&req) {
-        return Err(ApiError::validation(e));
-    }
-
-    // Check model availability (404/400 returned as HTTP errors before SSE starts)
-    let _ = model_manager::check_model_available(&state, &req.model).await?;
-
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
-
-    // Resolve output directory now (before the spawn) to avoid lock contention later.
-    let output_dir = {
-        let config = state.config.read().await;
-        config.resolved_output_dir().map(|p| p.to_path_buf())
-    };
 
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let job = GenerationJob {

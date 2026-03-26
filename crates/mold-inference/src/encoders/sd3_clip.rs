@@ -180,7 +180,7 @@ impl SD3TripleEncoder {
             dtype,
         )?;
 
-        let on_gpu = device.is_cuda() || device.is_metal();
+        let on_gpu = crate::device::is_gpu(device);
 
         // T5 encoder
         let t5 = T5Encoder::load(t5_path, t5_tokenizer_path, device, dtype)?;

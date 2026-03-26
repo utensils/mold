@@ -16,7 +16,7 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
 }
 
 /// Strips backtrace frames from candle error messages.
-fn clean_error_message(e: &anyhow::Error) -> String {
+pub(crate) fn clean_error_message(e: &anyhow::Error) -> String {
     let full = format!("{e}");
     let mut lines: Vec<&str> = Vec::new();
     for line in full.lines() {

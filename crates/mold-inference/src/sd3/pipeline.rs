@@ -16,6 +16,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -42,14 +43,10 @@ struct LoadedSD3 {
 /// and SD3.5 Medium (2.5B, depth=24, SLG support).
 /// Both BF16 safetensors and GGUF quantized transformers are supported.
 pub struct SD3Engine {
-    loaded: Option<LoadedSD3>,
-    model_name: String,
-    paths: ModelPaths,
+    base: EngineBase<LoadedSD3>,
     is_turbo: bool,
     is_medium: bool,
-    progress: ProgressReporter,
     t5_variant: Option<String>,
-    load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
 }
 
@@ -64,14 +61,10 @@ impl SD3Engine {
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
+            base: EngineBase::new(model_name, paths, load_strategy),
             is_turbo,
             is_medium,
-            progress: ProgressReporter::default(),
             t5_variant,
-            load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
@@ -122,7 +115,8 @@ impl SD3Engine {
 
     /// Detect if the transformer is quantized (GGUF).
     fn detect_is_quantized(&self) -> bool {
-        self.paths
+        self.base
+            .paths
             .transformer
             .extension()
             .and_then(|e| e.to_str())
@@ -151,36 +145,42 @@ impl SD3Engine {
         std::path::PathBuf, // t5_tokenizer_path
     )> {
         let clip_l_path = self
+            .base
             .paths
             .clip_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP-L encoder path required for SD3 models"))?
             .clone();
         let clip_l_tokenizer = self
+            .base
             .paths
             .clip_tokenizer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP-L tokenizer path required for SD3 models"))?
             .clone();
         let clip_g_path = self
+            .base
             .paths
             .clip_encoder_2
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP-G encoder path required for SD3 models"))?
             .clone();
         let clip_g_tokenizer = self
+            .base
             .paths
             .clip_tokenizer_2
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP-G tokenizer path required for SD3 models"))?
             .clone();
         let t5_encoder_path = self
+            .base
             .paths
             .t5_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for SD3 models"))?
             .clone();
         let t5_tokenizer_path = self
+            .base
             .paths
             .t5_tokenizer
             .as_ref()
@@ -188,8 +188,8 @@ impl SD3Engine {
             .clone();
 
         for (label, path) in [
-            ("transformer", &self.paths.transformer),
-            ("vae", &self.paths.vae),
+            ("transformer", &self.base.paths.transformer),
+            ("vae", &self.base.paths.vae),
             ("clip_encoder (CLIP-L)", &clip_l_path),
             ("clip_tokenizer (CLIP-L)", &clip_l_tokenizer),
             ("clip_encoder_2 (CLIP-G)", &clip_g_path),
@@ -214,20 +214,20 @@ impl SD3Engine {
 
     /// Load all model components into GPU memory (Eager mode).
     ///
-    /// On error, `self.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// On error, `self.base.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
         // Sequential mode defers loading to generate_sequential()
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
-        tracing::info!(model = %self.model_name, "loading SD3 model components...");
+        tracing::info!(model = %self.base.model_name, "loading SD3 model components...");
 
         let (
             clip_l_path,
@@ -238,8 +238,8 @@ impl SD3Engine {
             t5_tokenizer_path,
         ) = self.validate_paths()?;
 
-        let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
+        let device = crate::device::create_device(&self.base.progress)?;
+        let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
             DType::F32
@@ -254,19 +254,21 @@ impl SD3Engine {
         } else {
             "Loading SD3 MMDiT transformer (GPU, FP16)"
         };
-        self.progress.stage_start(xformer_label);
+        self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
         let transformer = if is_quantized {
             // GGUF files from city96 use unprefixed tensor names (no "model.diffusion_model.")
-            let vb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
+            let vb = quantized_var_builder::VarBuilder::from_gguf(
+                &self.base.paths.transformer,
+                &device,
+            )?;
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.transformer),
+                    std::slice::from_ref(&self.base.paths.transformer),
                     gpu_dtype,
                     &device,
                 )?
@@ -277,37 +279,40 @@ impl SD3Engine {
                 vb.pp("model.diffusion_model"),
             )?)
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Decide encoder placement based on remaining VRAM ---
         let free = free_vram_bytes().unwrap_or(0);
         if free > 0 {
-            self.progress
+            self.base
+                .progress
                 .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
         }
 
         // --- Load triple encoder (CLIP-L + CLIP-G + T5) ---
         // For T5, use variant resolution logic
-        self.progress.stage_start("Selecting T5 encoder");
+        self.base.progress.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (resolved_t5_path, t5_on_gpu, t5_device_label) =
             crate::encoders::variant_resolution::resolve_t5_variant(
-                &self.progress,
+                &self.base.progress,
                 t5_preference,
                 &device,
                 free,
                 &t5_encoder_path,
             )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
         let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
         let encoder_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
         let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
-        self.progress.stage_start(&encoder_label);
+        self.base.progress.stage_start(&encoder_label);
         let encoder_stage = Instant::now();
 
         let triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
@@ -321,13 +326,14 @@ impl SD3Engine {
             encoder_dtype,
         )?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
-        self.loaded = Some(LoadedSD3 {
+        self.base.loaded = Some(LoadedSD3 {
             transformer,
             triple_encoder,
-            vae_vb_path: self.paths.vae.clone(),
+            vae_vb_path: self.base.paths.vae.clone(),
             device,
             dtype: gpu_dtype,
             _is_quantized: is_quantized,
@@ -335,7 +341,7 @@ impl SD3Engine {
             is_medium: self.is_medium,
         });
 
-        tracing::info!(model = %self.model_name, "all SD3 model components loaded successfully");
+        tracing::info!(model = %self.base.model_name, "all SD3 model components loaded successfully");
         Ok(())
     }
 
@@ -364,12 +370,12 @@ impl SD3Engine {
             t5_tokenizer_path,
         ) = self.validate_paths()?;
 
-        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.progress.info(&warning);
+        if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
+            self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.progress)?;
-        let gpu_dtype = if device.is_cuda() || device.is_metal() {
+        let device = crate::device::create_device(&self.base.progress)?;
+        let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
             DType::F32
@@ -390,23 +396,25 @@ impl SD3Engine {
             "starting sequential SD3 generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Encode prompt with triple encoder ---
         let free = free_vram_bytes().unwrap_or(0);
-        self.progress.stage_start("Selecting T5 encoder");
+        self.base.progress.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (resolved_t5_path, t5_on_gpu, t5_device_label) =
             crate::encoders::variant_resolution::resolve_t5_variant(
-                &self.progress,
+                &self.base.progress,
                 t5_preference,
                 &device,
                 free,
                 &t5_encoder_path,
             )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
         let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
@@ -417,11 +425,11 @@ impl SD3Engine {
             .unwrap_or(0);
         preflight_memory_check("SD3 triple encoder", t5_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
-        self.progress.stage_start(&encoder_label);
+        self.base.progress.stage_start(&encoder_label);
         let encoder_stage = Instant::now();
         let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
             &clip_l_path,
@@ -433,11 +441,12 @@ impl SD3Engine {
             encoder_device,
             encoder_dtype,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
         let (context, y) = Self::encode_conditioning(
-            &self.progress,
+            &self.base.progress,
             &self.prompt_cache,
             &mut triple_encoder,
             &req.prompt,
@@ -448,17 +457,17 @@ impl SD3Engine {
 
         // Drop encoders to free memory
         drop(triple_encoder);
-        self.progress.info("Freed SD3 triple encoder");
+        self.base.progress.info("Freed SD3 triple encoder");
 
         // --- Phase 2: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
 
-        let xformer_size = std::fs::metadata(&self.paths.transformer)
+        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
         preflight_memory_check("SD3 MMDiT transformer", xformer_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let xformer_label = if is_quantized {
@@ -466,19 +475,21 @@ impl SD3Engine {
         } else {
             "Loading SD3 MMDiT transformer (GPU, FP16)"
         };
-        self.progress.stage_start(xformer_label);
+        self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
         let transformer = if is_quantized {
             // GGUF files from city96 use unprefixed tensor names
-            let vb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, &device)?;
+            let vb = quantized_var_builder::VarBuilder::from_gguf(
+                &self.base.paths.transformer,
+                &device,
+            )?;
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.transformer),
+                    std::slice::from_ref(&self.base.paths.transformer),
                     gpu_dtype,
                     &device,
                 )?
@@ -489,14 +500,15 @@ impl SD3Engine {
                 vb.pp("model.diffusion_model"),
             )?)
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Denoise
         let time_shift = 3.0;
         let slg_config = self.slg_config();
         let denoise_label = format!("Denoising ({} steps)", req.steps);
-        self.progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         let x = sampling::euler_sample(
@@ -511,10 +523,11 @@ impl SD3Engine {
             slg_config.as_ref(),
             is_quantized,
             seed,
-            &self.progress,
+            &self.base.progress,
         )?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer to free memory for VAE
@@ -522,24 +535,25 @@ impl SD3Engine {
         drop(context);
         drop(y);
         device.synchronize()?;
-        self.progress.info("Freed SD3 MMDiT transformer");
+        self.base.progress.info("Freed SD3 MMDiT transformer");
 
         // --- Phase 3: VAE decode ---
-        self.progress.stage_start("Loading VAE (GPU)");
+        self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.vae),
+                std::slice::from_ref(&self.base.paths.vae),
                 gpu_dtype,
                 &device,
             )?
         };
         let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
         let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
 
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
         // SD3 VAE scaling: x / 1.5305 + 0.0609
@@ -550,7 +564,8 @@ impl SD3Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
         let output_metadata = build_output_metadata(req, seed, None);
@@ -597,15 +612,15 @@ impl InferenceEngine for SD3Engine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         // Eager mode: use pre-loaded components
-        let progress = &self.progress;
+        let progress = &self.base.progress;
         let prompt_cache = &self.prompt_cache;
 
-        let mut loaded = OptionRestoreGuard::take(&mut self.loaded)
+        let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
         let loaded_dtype = loaded.dtype;
         let loaded_device = loaded.device.clone();
@@ -734,11 +749,11 @@ impl InferenceEngine for SD3Engine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -746,15 +761,15 @@ impl InferenceEngine for SD3Engine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }

@@ -209,6 +209,45 @@ pub(crate) fn free_vram_bytes() -> Option<u64> {
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
+// ── Device helpers ───────────────────────────────────────────────────────────
+
+/// Check whether a device is a GPU (CUDA or Metal).
+pub(crate) fn is_gpu(device: &candle_core::Device) -> bool {
+    device.is_cuda() || device.is_metal()
+}
+
+/// Select the optimal compute dtype for GPU inference.
+///
+/// - CUDA and Metal: BF16 (well-supported by tensor cores / Apple Neural Engine)
+/// - CPU: F32
+///
+/// Note: this is the default compute dtype for model families that support BF16.
+/// Some model families (SD1.5, SDXL) prefer F16 — they handle dtype selection
+/// in their own pipelines.
+#[allow(dead_code)]
+pub(crate) fn gpu_compute_dtype(device: &candle_core::Device) -> candle_core::DType {
+    if is_gpu(device) {
+        candle_core::DType::BF16
+    } else {
+        candle_core::DType::F32
+    }
+}
+
+/// Select the optimal dtype for GPU inference (CUDA-only BF16 variant).
+///
+/// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)
+/// - Metal/MPS: F32 (BF16 on Metal has precision issues that cause washed-out,
+///   blurry images — matmul accumulation errors compound through denoising loops.
+///   This matches InvokeAI/diffusers which also avoid BF16 on MPS.)
+/// - CPU: F32
+pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
+    if device.is_cuda() {
+        candle_core::DType::BF16
+    } else {
+        candle_core::DType::F32
+    }
+}
+
 /// Format bytes as a human-readable size (e.g. "11.7 GB").
 pub(crate) fn fmt_gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)

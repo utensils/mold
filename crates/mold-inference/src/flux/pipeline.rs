@@ -18,6 +18,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -559,16 +560,11 @@ struct LoadedFlux {
 
 /// FLUX inference engine backed by candle.
 pub struct FluxEngine {
-    loaded: Option<LoadedFlux>,
-    model_name: String,
-    paths: ModelPaths,
+    base: EngineBase<LoadedFlux>,
     /// Optional explicit override for is_schnell; if None, auto-detect from transformer filename.
     is_schnell_override: Option<bool>,
-    progress: ProgressReporter,
     /// T5 variant preference: None/"auto" = auto-select, "fp16" = force FP16, "q8"/"q5"/etc = specific quantized.
     t5_variant: Option<String>,
-    /// How to load model components (Eager = all at once, Sequential = load-use-drop).
-    load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
     /// Cached result of FP8 safetensors probe (None = not yet checked).
     transformer_is_fp8: Option<bool>,
@@ -590,13 +586,9 @@ impl FluxEngine {
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
+            base: EngineBase::new(model_name, paths, load_strategy),
             is_schnell_override,
-            progress: ProgressReporter::default(),
             t5_variant,
-            load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             transformer_is_fp8: None,
             cached_transformer_path: None,
@@ -631,8 +623,9 @@ impl FluxEngine {
     /// Detect is_schnell from override, model name, or transformer filename.
     fn detect_is_schnell(&self) -> bool {
         self.is_schnell_override.unwrap_or_else(|| {
-            self.model_name.contains("schnell")
+            self.base.model_name.contains("schnell")
                 || self
+                    .base
                     .paths
                     .transformer
                     .file_name()
@@ -650,13 +643,14 @@ impl FluxEngine {
             return cached;
         }
         let result = !is_quantized
-            && flux_safetensors_transformer_is_fp8(&self.paths.transformer).unwrap_or(false);
+            && flux_safetensors_transformer_is_fp8(&self.base.paths.transformer).unwrap_or(false);
         self.transformer_is_fp8 = Some(result);
         result
     }
 
     fn detect_is_quantized(&self) -> bool {
-        self.paths
+        self.base
+            .paths
             .transformer
             .extension()
             .and_then(|e| e.to_str())
@@ -674,24 +668,28 @@ impl FluxEngine {
         std::path::PathBuf,
     )> {
         let t5_encoder_path = self
+            .base
             .paths
             .t5_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for FLUX models"))?
             .clone();
         let t5_tokenizer_path = self
+            .base
             .paths
             .t5_tokenizer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("T5 tokenizer path required for FLUX models"))?
             .clone();
         let clip_encoder_path = self
+            .base
             .paths
             .clip_encoder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?
             .clone();
         let clip_tokenizer_path = self
+            .base
             .paths
             .clip_tokenizer
             .as_ref()
@@ -699,8 +697,8 @@ impl FluxEngine {
             .clone();
 
         for (label, path) in [
-            ("transformer", &self.paths.transformer),
-            ("vae", &self.paths.vae),
+            ("transformer", &self.base.paths.transformer),
+            ("vae", &self.base.paths.vae),
             ("t5_encoder", &t5_encoder_path),
             ("clip_encoder", &clip_encoder_path),
             ("t5_tokenizer", &t5_tokenizer_path),
@@ -721,27 +719,27 @@ impl FluxEngine {
 
     /// Load all model components into GPU memory (Eager mode).
     ///
-    /// On error, `self.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// On error, `self.base.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
         // Sequential mode defers loading to generate_sequential()
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
         let is_schnell = self.detect_is_schnell();
-        tracing::info!(model = %self.model_name, "loading FLUX model components...");
+        tracing::info!(model = %self.base.model_name, "loading FLUX model components...");
 
         let (t5_encoder_path, t5_tokenizer_path, clip_encoder_path, clip_tokenizer_path) =
             self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         let mut is_quantized = self.detect_is_quantized();
         let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
 
@@ -749,16 +747,16 @@ impl FluxEngine {
         // expanding to F16 doubles VRAM (OOM on 24 GB). Q8 GGUF keeps the model
         // compact (~12 GB) and uses candle's efficient quantized matmul.
         let transformer_path = if transformer_is_fp8 {
-            let p = ensure_fp8_gguf_cache(&self.paths.transformer, &self.progress)?;
+            let p = ensure_fp8_gguf_cache(&self.base.paths.transformer, &self.base.progress)?;
             is_quantized = true;
             p
         } else {
-            self.paths.transformer.clone()
+            self.base.paths.transformer.clone()
         };
 
         // Patch city96-format GGUFs missing embedding layers (img_in, time_in, etc.)
         let transformer_path = if is_quantized {
-            ensure_gguf_embeddings(&transformer_path, is_schnell, &self.progress, None)?
+            ensure_gguf_embeddings(&transformer_path, is_schnell, &self.base.progress, None)?
         } else {
             transformer_path
         };
@@ -797,7 +795,7 @@ impl FluxEngine {
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
-        self.progress.stage_start(xformer_label);
+        self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
         tracing::info!(
             path = %transformer_path.display(),
@@ -816,17 +814,18 @@ impl FluxEngine {
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
         tracing::info!("FLUX transformer loaded on GPU");
 
         // Load VAE on GPU (small, ~300MB)
-        self.progress.stage_start("Loading VAE (GPU)");
+        self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
-        tracing::info!(path = %self.paths.vae.display(), "loading VAE on GPU...");
+        tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.vae),
+                std::slice::from_ref(&self.base.paths.vae),
                 gpu_dtype,
                 &device,
             )?
@@ -837,14 +836,15 @@ impl FluxEngine {
             flux::autoencoder::Config::dev()
         };
         let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
         tracing::info!("VAE loaded on GPU");
 
         // --- Decide where to place T5 and CLIP based on remaining VRAM ---
         let free = free_vram_bytes().unwrap_or(0);
         if free > 0 {
-            self.progress.info(&format!(
+            self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
                 fmt_gb(free)
             ));
@@ -855,25 +855,26 @@ impl FluxEngine {
         }
 
         // --- T5 encoder: auto-select variant based on VRAM or explicit preference ---
-        self.progress.stage_start("Selecting T5 encoder");
+        self.base.progress.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
         let (resolved_t5_path, t5_on_gpu, t5_device_label) =
             crate::encoders::variant_resolution::resolve_t5_variant(
-                &self.progress,
+                &self.base.progress,
                 t5_preference,
                 &device,
                 free,
                 &t5_encoder_path,
             )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
         let t5_device = if t5_on_gpu { &device } else { &cpu };
         let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
         // Load T5 encoder
         let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
-        self.progress.stage_start(&t5_stage_label);
+        self.base.progress.stage_start(&t5_stage_label);
         let t5_stage = Instant::now();
         tracing::info!(
             path = %resolved_t5_path.display(),
@@ -886,7 +887,8 @@ impl FluxEngine {
             t5_device,
             t5_dtype,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&t5_stage_label, t5_stage.elapsed());
         tracing::info!(device = %t5_device_label, "T5 encoder loaded");
 
@@ -904,7 +906,7 @@ impl FluxEngine {
 
         // Load CLIP encoder
         let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
-        self.progress.stage_start(&clip_stage_label);
+        self.base.progress.stage_start(&clip_stage_label);
         let clip_stage = Instant::now();
         tracing::info!(
             path = %clip_encoder_path.display(),
@@ -917,11 +919,12 @@ impl FluxEngine {
             clip_device,
             clip_dtype,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&clip_stage_label, clip_stage.elapsed());
         tracing::info!(device = clip_device_label, "CLIP encoder loaded");
 
-        self.loaded = Some(LoadedFlux {
+        self.base.loaded = Some(LoadedFlux {
             flux_model: Some(flux_model),
             t5,
             clip,
@@ -934,7 +937,7 @@ impl FluxEngine {
             t5_encoder_path: resolved_t5_path,
         });
 
-        tracing::info!(model = %self.model_name, "all model components loaded successfully");
+        tracing::info!(model = %self.base.model_name, "all model components loaded successfully");
         Ok(())
     }
 
@@ -955,11 +958,11 @@ impl FluxEngine {
             self.validate_paths()?;
 
         // Check memory budget
-        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.progress.info(&warning);
+        if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
+            self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
 
         // Use cached transformer path to avoid file I/O on every sequential call.
         let transformer_path = if let Some(ref cached) = self.cached_transformer_path {
@@ -975,15 +978,15 @@ impl FluxEngine {
         } else {
             let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
             let p = if transformer_is_fp8 {
-                let p = ensure_fp8_gguf_cache(&self.paths.transformer, &self.progress)?;
+                let p = ensure_fp8_gguf_cache(&self.base.paths.transformer, &self.base.progress)?;
                 is_quantized = true;
                 p
             } else {
-                self.paths.transformer.clone()
+                self.base.paths.transformer.clone()
             };
             // Patch city96-format GGUFs missing embedding layers
             let p = if is_quantized {
-                ensure_gguf_embeddings(&p, is_schnell, &self.progress, None)?
+                ensure_gguf_embeddings(&p, is_schnell, &self.base.progress, None)?
             } else {
                 p
             };
@@ -1006,11 +1009,12 @@ impl FluxEngine {
             "starting sequential FLUX generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         let (t5_emb, clip_emb) = if let Some((t5_emb, clip_emb)) = Self::restore_prompt_cache(
-            &self.progress,
+            &self.base.progress,
             &self.prompt_cache,
             &req.prompt,
             &device,
@@ -1020,18 +1024,19 @@ impl FluxEngine {
         } else {
             // --- Phase 1: T5 encoding ---
             let free = free_vram_bytes().unwrap_or(0);
-            self.progress.stage_start("Selecting T5 encoder");
+            self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
             let (resolved_t5_path, t5_on_gpu, t5_device_label) =
                 crate::encoders::variant_resolution::resolve_t5_variant(
-                    &self.progress,
+                    &self.base.progress,
                     t5_preference,
                     &device,
                     free,
                     &t5_encoder_path,
                 )?;
-            self.progress
+            self.base
+                .progress
                 .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
             let t5_device = if t5_on_gpu { &device } else { &Device::Cpu };
@@ -1042,11 +1047,11 @@ impl FluxEngine {
                 .unwrap_or(0);
             preflight_memory_check("T5 encoder", t5_size)?;
             if let Some(status) = memory_status_string() {
-                self.progress.info(&status);
+                self.base.progress.info(&status);
             }
 
             let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
-            self.progress.stage_start(&t5_stage_label);
+            self.base.progress.stage_start(&t5_stage_label);
             let t5_stage = Instant::now();
             let mut t5 = encoders::t5::T5Encoder::load(
                 &resolved_t5_path,
@@ -1054,17 +1059,19 @@ impl FluxEngine {
                 t5_device,
                 t5_dtype,
             )?;
-            self.progress
+            self.base
+                .progress
                 .stage_done(&t5_stage_label, t5_stage.elapsed());
 
-            self.progress.stage_start("Encoding prompt (T5)");
+            self.base.progress.stage_start("Encoding prompt (T5)");
             let encode_t5 = Instant::now();
             let t5_emb = t5.encode(&req.prompt, &device, gpu_dtype)?;
-            self.progress
+            self.base
+                .progress
                 .stage_done("Encoding prompt (T5)", encode_t5.elapsed());
 
             drop(t5);
-            self.progress.info("Freed T5 encoder");
+            self.base.progress.info("Freed T5 encoder");
             tracing::info!("T5 encoder dropped (sequential mode)");
 
             // --- Phase 2: CLIP encoding ---
@@ -1080,7 +1087,7 @@ impl FluxEngine {
             let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
 
             let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
-            self.progress.stage_start(&clip_stage_label);
+            self.base.progress.stage_start(&clip_stage_label);
             let clip_stage = Instant::now();
             let clip = encoders::clip::ClipEncoder::load(
                 &clip_encoder_path,
@@ -1088,19 +1095,21 @@ impl FluxEngine {
                 clip_device,
                 clip_dtype,
             )?;
-            self.progress
+            self.base
+                .progress
                 .stage_done(&clip_stage_label, clip_stage.elapsed());
 
-            self.progress.stage_start("Encoding prompt (CLIP)");
+            self.base.progress.stage_start("Encoding prompt (CLIP)");
             let encode_clip = Instant::now();
             let clip_emb = {
                 let mut clip = clip;
                 clip.encode(&req.prompt, &device, gpu_dtype)?
             };
-            self.progress
+            self.base
+                .progress
                 .stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
 
-            self.progress.info("Freed CLIP encoder");
+            self.base.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
 
             Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
@@ -1115,7 +1124,7 @@ impl FluxEngine {
         let xformer_size = std::fs::metadata(&transformer_path)
             .map(|m| m.len())
             .unwrap_or(0);
-        let vae_file_size = std::fs::metadata(&self.paths.vae)
+        let vae_file_size = std::fs::metadata(&self.base.paths.vae)
             .map(|m| m.len())
             .unwrap_or(0);
 
@@ -1135,7 +1144,7 @@ impl FluxEngine {
 
         preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let flux_cfg = if is_schnell {
@@ -1149,7 +1158,7 @@ impl FluxEngine {
         } else {
             "Loading FLUX transformer (GPU, BF16)"
         };
-        self.progress.stage_start(xformer_label);
+        self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
         let flux_model = if is_quantized {
@@ -1163,7 +1172,8 @@ impl FluxEngine {
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Generate noise and build state
@@ -1210,20 +1220,23 @@ impl FluxEngine {
             let start_t = req.strength;
 
             // Load VAE early for source image encoding
-            self.progress.stage_start("Loading VAE (GPU)");
+            self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
             let vae_vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.vae),
+                    std::slice::from_ref(&self.base.paths.vae),
                     gpu_dtype,
                     &device,
                 )?
             };
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
-            self.progress
+            self.base
+                .progress
                 .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
 
-            self.progress.stage_start("Encoding source image (VAE)");
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();
             let source_tensor = crate::img_utils::decode_source_image(
                 source_bytes,
@@ -1235,7 +1248,8 @@ impl FluxEngine {
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
             let encoded = vae.encode(&source_tensor)?;
-            self.progress
+            self.base
+                .progress
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
             // Flow-matching img2img: interpolate between encoded latents and noise
@@ -1293,7 +1307,7 @@ impl FluxEngine {
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
-        self.progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         let img = flux_model.denoise(
@@ -1304,18 +1318,19 @@ impl FluxEngine {
             &state.vec,
             &timesteps,
             req.guidance,
-            &self.progress,
+            &self.base.progress,
             inpaint_ctx.as_ref(),
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer + state to free memory for VAE decode
         drop(inpaint_ctx);
         drop(flux_model);
-        self.progress.info("Freed FLUX transformer");
+        self.base.progress.info("Freed FLUX transformer");
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
@@ -1330,28 +1345,30 @@ impl FluxEngine {
         let vae = if let Some(vae) = early_vae {
             vae
         } else {
-            self.progress.stage_start("Loading VAE (GPU)");
+            self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
             let vae_vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.paths.vae),
+                    std::slice::from_ref(&self.base.paths.vae),
                     gpu_dtype,
                     &device,
                 )?
             };
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
-            self.progress
+            self.base
+                .progress
                 .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
             vae
         };
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
         let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
         // VAE dropped here
 
@@ -1389,34 +1406,37 @@ impl InferenceEngine for FluxEngine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         // Eager mode: use pre-loaded components
         // Borrow progress reporter separately from loaded state.
-        let progress = &self.progress;
+        let progress = &self.base.progress;
         let prompt_cache = &self.prompt_cache;
 
         // Grab path references before borrowing loaded mutably
         let t5_encoder_path = self
+            .base
             .loaded
             .as_ref()
             .map(|l| l.t5_encoder_path.clone())
-            .or_else(|| self.paths.t5_encoder.clone())
+            .or_else(|| self.base.paths.t5_encoder.clone())
             .ok_or_else(|| anyhow::anyhow!("T5 encoder path required for FLUX models"))?;
         let clip_encoder_path = self
+            .base
             .paths
             .clip_encoder
             .clone()
             .ok_or_else(|| anyhow::anyhow!("CLIP encoder path required for FLUX models"))?;
         let transformer_path = self
+            .base
             .loaded
             .as_ref()
             .map(|l| l.transformer_path.clone())
-            .unwrap_or_else(|| self.paths.transformer.clone());
+            .unwrap_or_else(|| self.base.paths.transformer.clone());
 
-        let mut loaded = OptionRestoreGuard::take(&mut self.loaded)
+        let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
 
         let start = Instant::now();
@@ -1543,12 +1563,12 @@ impl InferenceEngine for FluxEngine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
         // Sequential mode is always "ready" — it loads on demand
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -1556,16 +1576,16 @@ impl InferenceEngine for FluxEngine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }
 
