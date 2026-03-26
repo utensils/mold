@@ -2354,6 +2354,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strsim",
  "thiserror 2.0.18",
  "tokio",
  "toml",

@@ -2112,6 +2112,93 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
     names
 }
 
+/// Check if a string structurally resembles a model name without being a known one.
+///
+/// Returns true if the input contains explicit tag syntax (colon), shares a family
+/// prefix with a known model, or has high string similarity to any known model base name.
+pub fn looks_like_model_name(input: &str, config: &crate::Config) -> bool {
+    // Explicit tag syntax is always model-like
+    if input.contains(':') {
+        return true;
+    }
+
+    // After the colon early-return above, input is guaranteed colon-free
+    let input_base = input;
+
+    // Extract family from input by stripping version suffix (e.g. "ultrareal-v8" → "ultrareal")
+    let input_family = input_base
+        .rfind("-v")
+        .or_else(|| input_base.rfind("-V"))
+        .and_then(|i| {
+            let suffix = &input_base[i + 2..];
+            if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                Some(&input_base[..i])
+            } else {
+                None
+            }
+        });
+
+    // Check if input's family prefix matches any known model family
+    if let Some(family) = input_family {
+        for m in known_manifests() {
+            if m.family == family {
+                return true;
+            }
+        }
+        // Also check config model base names for the same family prefix
+        for key in config.models.keys() {
+            let key_base = key.split(':').next().unwrap_or(key);
+            let key_family = key_base
+                .rfind("-v")
+                .or_else(|| key_base.rfind("-V"))
+                .and_then(|i| {
+                    let s = &key_base[i + 2..];
+                    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                        Some(&key_base[..i])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(key_base);
+            if key_family == family {
+                return true;
+            }
+        }
+    }
+
+    // Fuzzy match: check if any known model base name is very similar.
+    // Note: all_model_names() rebuilds the list each call; this is fine since
+    // looks_like_model_name runs at most once per CLI invocation on the error path.
+    for name in all_model_names(config) {
+        let base = name.split(':').next().unwrap_or(&name);
+        if strsim::jaro_winkler(input_base, base) >= 0.75 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Suggest similar model names for a given input, ranked by similarity.
+/// Returns up to `max` suggestions.
+pub fn suggest_similar_models(input: &str, config: &crate::Config, max: usize) -> Vec<String> {
+    let input_base = input.split(':').next().unwrap_or(input);
+
+    // all_model_names already deduplicates via HashSet, so no explicit dedup needed
+    let mut scored: Vec<(f64, String)> = all_model_names(config)
+        .into_iter()
+        .map(|name| {
+            let base = name.split(':').next().unwrap_or(&name);
+            let sim = strsim::jaro_winkler(input_base, base);
+            (sim, name)
+        })
+        .filter(|(sim, _)| *sim > 0.6)
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(max).map(|(_, name)| name).collect()
+}
+
 /// FP16 T5-XXL model size in bytes.
 pub const T5_FP16_SIZE: u64 = 9_787_841_024;
 
@@ -3325,6 +3412,70 @@ mod tests {
         assert!(
             alts.is_empty() || alts.iter().all(|a| a != "flux-schnell:q4"),
             "should not suggest the same model"
+        );
+    }
+
+    #[test]
+    fn looks_like_model_name_family_match() {
+        let config = crate::Config::default();
+        // ultrareal-v8 shares "ultrareal" family with ultrareal-v2/v3/v4
+        assert!(super::looks_like_model_name("ultrareal-v8", &config));
+        // dreamshaper-v9 shares "dreamshaper" family with dreamshaper-v8
+        assert!(super::looks_like_model_name("dreamshaper-v9", &config));
+    }
+
+    #[test]
+    fn looks_like_model_name_colon_syntax() {
+        let config = crate::Config::default();
+        // Explicit colon tag is always model-like, even if totally unknown
+        assert!(super::looks_like_model_name("foo:q8", &config));
+        assert!(super::looks_like_model_name("flux-dev:q99", &config));
+    }
+
+    #[test]
+    fn looks_like_model_name_fuzzy_match() {
+        let config = crate::Config::default();
+        // Close misspelling of "flux-dev"
+        assert!(super::looks_like_model_name("flx-dev", &config));
+    }
+
+    #[test]
+    fn looks_like_model_name_rejects_natural_language() {
+        let config = crate::Config::default();
+        for word in &[
+            "a",
+            "sunset",
+            "photorealistic",
+            "cat",
+            "beautiful",
+            "oil painting",
+        ] {
+            assert!(
+                !super::looks_like_model_name(word, &config),
+                "'{word}' should not look like a model name"
+            );
+        }
+    }
+
+    #[test]
+    fn suggest_similar_models_for_near_miss() {
+        let config = crate::Config::default();
+        let suggestions = super::suggest_similar_models("ultrareal-v8", &config, 5);
+        assert!(!suggestions.is_empty(), "should have suggestions");
+        // Should include at least one ultrareal variant
+        assert!(
+            suggestions.iter().any(|s| s.starts_with("ultrareal-")),
+            "should suggest ultrareal variants, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_models_empty_for_unrelated() {
+        let config = crate::Config::default();
+        let suggestions = super::suggest_similar_models("zzzzzzzzz", &config, 5);
+        assert!(
+            suggestions.is_empty(),
+            "unrelated string should have no suggestions"
         );
     }
 }
