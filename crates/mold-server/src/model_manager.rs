@@ -100,22 +100,36 @@ pub(crate) async fn ensure_model_ready(
                     drop(guard);
 
                     let model_log = model_name.to_string();
-                    taken = tokio::task::spawn_blocking(move || {
+                    let result = tokio::task::spawn_blocking(move || {
                         tracing::info!(model = %model_log, "loading existing engine...");
-                        taken.load().map_err(|e| {
+                        if let Err(e) = taken.load() {
                             tracing::error!("model load failed: {e:#}");
-                            ApiError::internal(format!("model load error: {e}"))
-                        })?;
-                        Ok::<_, ApiError>(taken)
+                            return Err((
+                                ApiError::internal(format!("model load error: {e}")),
+                                taken,
+                            ));
+                        }
+                        Ok(taken)
                     })
                     .await
-                    .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))??;
+                    .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?;
 
-                    let mut guard = state.engine.lock().await;
-                    *guard = Some(taken);
-                    let mut snapshot = state.engine_snapshot.write().await;
-                    snapshot.model_name = Some(model_name.to_string());
-                    snapshot.is_loaded = true;
+                    match result {
+                        Ok(loaded) => {
+                            let mut guard = state.engine.lock().await;
+                            *guard = Some(loaded);
+                            let mut snapshot = state.engine_snapshot.write().await;
+                            snapshot.model_name = Some(model_name.to_string());
+                            snapshot.is_loaded = true;
+                        }
+                        Err((api_err, unloaded)) => {
+                            // Restore the unloaded engine so the next request
+                            // can retry without recreating from scratch.
+                            let mut guard = state.engine.lock().await;
+                            *guard = Some(unloaded);
+                            return Err(api_err);
+                        }
+                    }
                 }
                 return Ok(());
             }
