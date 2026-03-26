@@ -1,4 +1,5 @@
 pub mod model_manager;
+pub mod queue;
 pub mod routes;
 pub mod state;
 
@@ -14,12 +15,18 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use state::QueueHandle;
+
 pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()> {
     Config::install_runtime_models_dir_override(models_dir.clone());
 
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
     let model_name = config.resolved_default_model();
+
+    // Create the generation queue channel (bounded, 16 slots).
+    let (job_tx, job_rx) = tokio::sync::mpsc::channel(16);
+    let queue_handle = QueueHandle::new(job_tx);
 
     let state = match ModelPaths::resolve(&model_name, &config) {
         Some(paths) => {
@@ -57,13 +64,17 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
                 &config,
                 mold_inference::LoadStrategy::Eager,
             )?;
-            state::AppState::new(engine, config)
+            state::AppState::new(engine, config, queue_handle)
         }
         None => {
             info!("no default model configured — models will be pulled on first request");
-            state::AppState::empty(config)
+            state::AppState::empty(config, queue_handle)
         }
     };
+
+    // Spawn the generation queue worker — processes jobs sequentially (single GPU).
+    let worker_state = state.clone();
+    tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
 
     let cors = build_cors_layer()?;
 

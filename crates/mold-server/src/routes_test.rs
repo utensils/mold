@@ -246,16 +246,24 @@ mod tests {
         }
     }
 
+    /// Create an app with a running queue worker (needed for generate endpoints).
     fn app_with(engine: MockEngine) -> axum::Router {
-        app_with_state(AppState::with_engine(engine))
+        let (state, rx) = AppState::with_engine_and_queue(engine);
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        create_router(state)
     }
 
+    /// Create an app from pre-built state. Caller must ensure queue worker is
+    /// running if generate endpoints will be tested.
     fn app_with_state(state: AppState) -> axum::Router {
         create_router(state)
     }
 
     fn app_empty() -> axum::Router {
-        app_with_state(AppState::empty(mold_core::Config::default()))
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        app_with_state(AppState::empty(mold_core::Config::default(), queue))
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
@@ -362,7 +370,7 @@ mod tests {
         assert_eq!(status["current_generation"], serde_json::Value::Null);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn status_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
         let app = app_with(MockEngine::blocking_generate(blocker.clone()));
@@ -511,7 +519,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(models_dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_models_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
         let app = app_with(MockEngine::blocking_generate(blocker.clone()));
@@ -649,7 +657,7 @@ mod tests {
 
     // ── /api/generate — success path ─────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_valid_request_returns_image_bytes() {
         let app = app_with(MockEngine::ready());
         let body = generate_body("a glowing robot", 768, 768);
@@ -678,7 +686,7 @@ mod tests {
 
     // ── /api/generate — engine error ─────────────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_engine_error_returns_500() {
         let app = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
@@ -700,7 +708,7 @@ mod tests {
             .contains("mock engine error"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_empty_images_returns_500() {
         let app = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
@@ -828,7 +836,7 @@ mod tests {
 
     // ── /api/generate/stream — SSE streaming ────────────────────────────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_valid_request_returns_sse() {
         let app = app_with(MockEngine::ready());
         let body = generate_body("a robot", 768, 768);
@@ -930,7 +938,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(models_dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_engine_error_returns_sse_error() {
         let app = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
@@ -960,7 +968,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_empty_images_returns_sse_error() {
         let app = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
@@ -983,7 +991,7 @@ mod tests {
         assert!(text.contains("returned no images"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reused_engine_clears_progress_callbacks_between_stream_and_generate() {
         let progress_set_count = Arc::new(AtomicUsize::new(0));
         let progress_clear_count = Arc::new(AtomicUsize::new(0));
@@ -1095,7 +1103,9 @@ mod tests {
 
     #[tokio::test]
     async fn unload_no_model_returns_200_with_message() {
-        let app = app_with_state(AppState::empty(mold_core::Config::default()));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let app = app_with_state(AppState::empty(mold_core::Config::default(), queue));
         let resp = app
             .oneshot(
                 Request::delete("/api/models/unload")
@@ -1111,9 +1121,11 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("no model loaded"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_requests_only_load_existing_engine_once() {
         let load_count = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
         let state = AppState {
             engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
                 MockEngine::unloaded(load_count.clone(), Duration::from_millis(50)),
@@ -1127,7 +1139,10 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            queue,
         };
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
         let req1 = Request::post("/api/generate")
             .header("content-type", "application/json")
@@ -1146,8 +1161,10 @@ mod tests {
 
     /// Verify that progress events emitted during model loading (e.g. FP8→Q8
     /// conversion) are delivered through the SSE stream to the client.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_delivers_load_progress_events() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
         let state = AppState {
             engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
                 MockEngine::unloaded_with_progress(),
@@ -1161,7 +1178,10 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            queue,
         };
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
         let resp = app
             .oneshot(
@@ -1194,5 +1214,221 @@ mod tests {
             text.contains("event: complete"),
             "SSE stream should contain complete event, got: {text}"
         );
+    }
+
+    // ── Queue-specific tests ─────────────────────────────────────────────────
+
+    /// Verify that two concurrent streaming requests both complete successfully
+    /// when submitted to the generation queue. The first request blocks on
+    /// generate, the second should queue behind it and complete after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_stream_requests_both_complete() {
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (state, rx) =
+            AppState::with_engine_and_queue(MockEngine::blocking_generate(blocker.clone()));
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        let app = app_with_state(state);
+
+        let resp1_future = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let resp = app
+                    .oneshot(
+                        Request::post("/api/generate/stream")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body("request one", 768, 768)))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&body).to_string()
+            })
+        };
+
+        // Wait for the first request to enter generate (blocked)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Submit second request
+        let resp2_future = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let resp = app
+                    .oneshot(
+                        Request::post("/api/generate/stream")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body("request two", 768, 768)))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&body).to_string()
+            })
+        };
+
+        // Release the blocker after a short delay
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        blocker.release();
+
+        let text1 = resp1_future.await.unwrap();
+        let text2 = resp2_future.await.unwrap();
+
+        assert!(
+            text1.contains("event: complete"),
+            "first request should complete, got: {text1}"
+        );
+        assert!(
+            text2.contains("event: complete"),
+            "second request should complete, got: {text2}"
+        );
+    }
+
+    /// Verify that a queued streaming request receives a position event.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_stream_receives_position_event() {
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (state, rx) =
+            AppState::with_engine_and_queue(MockEngine::blocking_generate(blocker.clone()));
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        let app = app_with_state(state);
+
+        // Submit first request (will block in generate)
+        let _resp1 = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/generate/stream")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("first", 768, 768)))
+                        .unwrap(),
+                )
+                .await
+            })
+        };
+
+        // Wait for first request to enter the queue
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Submit second request — should be queued at position 1
+        let resp2 = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let resp = app
+                    .oneshot(
+                        Request::post("/api/generate/stream")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body("second", 768, 768)))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&body).to_string()
+            })
+        };
+
+        // Release blocker so both requests complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        blocker.release();
+
+        let text2 = resp2.await.unwrap();
+        assert!(
+            text2.contains(r#""type":"queued""#),
+            "second request should receive a queued event, got: {text2}"
+        );
+    }
+
+    /// Verify that both streaming and non-streaming requests are properly
+    /// serialized through the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_streaming_generate_queues_correctly() {
+        let app = app_with(MockEngine::ready());
+
+        // Submit two non-streaming requests concurrently
+        let resp1 = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("request one", 768, 768)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let resp2 = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("request two", 768, 768)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+
+        let (r1, r2) = tokio::join!(resp1, resp2);
+        assert_eq!(r1.unwrap().status(), StatusCode::OK);
+        assert_eq!(r2.unwrap().status(), StatusCode::OK);
+    }
+
+    /// Verify snapshot is consistent after model load through the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshot_consistent_after_queue_load() {
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let state = AppState {
+            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
+                MockEngine::unloaded(load_count, Duration::from_millis(10)),
+            )))),
+            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
+                model_name: Some("mock-model".to_string()),
+                is_loaded: false,
+            })),
+            active_generation: Arc::new(std::sync::RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            start_time: std::time::Instant::now(),
+            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            queue,
+        };
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        let app = app_with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a cat", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // After generation, snapshot should reflect the loaded model
+        let snapshot = state.engine_snapshot.read().await;
+        assert_eq!(
+            snapshot.model_name.as_deref(),
+            Some("mock-model"),
+            "snapshot should reflect the loaded model"
+        );
+        assert!(snapshot.is_loaded, "snapshot should show model as loaded");
     }
 }

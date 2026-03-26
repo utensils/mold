@@ -363,6 +363,10 @@ pub enum SseProgressEvent {
     PullComplete {
         model: String,
     },
+    /// Request is queued behind other generations.
+    Queued {
+        position: usize,
+    },
 }
 
 /// Completion event sent when image generation finishes successfully.
@@ -683,6 +687,16 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: SseErrorEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.message, "something failed");
+    }
+
+    #[test]
+    fn sse_progress_queued_roundtrip() {
+        let event = SseProgressEvent::Queued { position: 3 };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"queued""#));
+        assert!(json.contains(r#""position":3"#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, SseProgressEvent::Queued { position: 3 }));
     }
 
     // ── img2img field tests ────────────────────────────────────────────────

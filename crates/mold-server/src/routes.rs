@@ -8,20 +8,17 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus,
-    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus, SseErrorEvent,
+    SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::convert::Infallible;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::model_manager;
-use crate::state::AppState;
+use crate::state::{AppState, GenerationJob, SseMessage};
 
 // ── ApiError — structured JSON error response ────────────────────────────────
 
@@ -85,6 +82,7 @@ impl IntoResponse for ApiError {
 /// Extract a clean, user-facing error message from an anyhow error.
 /// Strips backtrace frames and internal source locations that candle
 /// embeds into its Display output via `Error::bt()`.
+#[cfg(test)]
 fn clean_error_message(e: &anyhow::Error) -> String {
     let full = format!("{e}");
     // Candle backtraces start with a frame number like "   0: candle_core::..."
@@ -172,18 +170,6 @@ pub fn create_router(state: AppState) -> Router {
 
 // ── Model readiness ──────────────────────────────────────────────────────────
 
-/// Internal SSE message type for the streaming channel.
-enum SseMessage {
-    Progress(SseProgressEvent),
-    Complete(SseCompleteEvent),
-    Error(SseErrorEvent),
-}
-
-/// Convert an inference-crate progress event to an SSE wire event.
-fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
-    event.into()
-}
-
 fn sse_message_to_event(msg: SseMessage) -> SseEvent {
     fn serialize_event<T: Serialize>(event_name: &str, payload: &T) -> SseEvent {
         match serde_json::to_string(payload) {
@@ -204,39 +190,7 @@ fn sse_message_to_event(msg: SseMessage) -> SseEvent {
     }
 }
 
-fn take_generated_image(
-    response: &mut mold_core::GenerateResponse,
-) -> Result<mold_core::ImageData, ApiError> {
-    if response.images.is_empty() {
-        return Err(ApiError::inference(
-            "generation error: engine returned no images",
-        ));
-    }
-    Ok(response.images.remove(0))
-}
-
-/// Save an image to the configured output directory (async version for non-spawned routes).
-/// Non-fatal: logs a warning on failure but never returns an error.
-/// Filesystem I/O is offloaded to a blocking thread to avoid stalling the async runtime.
-/// Fire-and-forget image save — does not block the HTTP response on disk I/O.
-async fn maybe_save_to_output_dir(
-    state: &AppState,
-    img: &mold_core::ImageData,
-    model: &str,
-    batch_size: u32,
-) {
-    let config = state.config.read().await;
-    let Some(dir) = config.resolved_output_dir() else {
-        return;
-    };
-    let dir = dir.to_path_buf();
-    let img = img.clone();
-    let model = model.to_string();
-    tokio::task::spawn_blocking(move || {
-        save_image_to_dir(&dir, &img, &model, batch_size);
-    });
-}
-
+#[cfg(test)]
 fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
@@ -261,33 +215,6 @@ fn save_image_to_dir(
         Ok(()) => tracing::info!("saved image to {}", path.display()),
         Err(e) => tracing::warn!("failed to save image to {}: {e}", path.display()),
     }
-}
-
-fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
-    let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
-    let started_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let mut active = state
-        .active_generation
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    *active = Some(crate::state::ActiveGenerationSnapshot {
-        model: model.to_string(),
-        prompt_sha256,
-        started_at_unix_ms,
-        started_at: Instant::now(),
-    });
-}
-
-fn clear_active_generation(state: &AppState) {
-    let mut active = state
-        .active_generation
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    *active = None;
 }
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
@@ -328,74 +255,51 @@ async fn generate(
         return Err(ApiError::validation(e));
     }
 
-    // Ensure model is ready (handles empty state, hot-swap, lazy load)
-    model_manager::ensure_model_ready(&state, &req.model, None).await?;
+    // Check model availability (404/400 returned as HTTP errors before queueing)
+    let _ = model_manager::check_model_available(&state, &req.model).await?;
 
-    // Run inference in a blocking task — panics caught → 500 with body.
-    let engine = state.engine.clone();
-    let generation_state = state.clone();
-    let req_for_state = req.clone();
-    let save_model = req.model.clone();
-    let save_batch_size = req.batch_size;
-    let result = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut guard = engine.blocking_lock();
-            let engine = guard.as_mut().ok_or_else(|| {
-                anyhow::anyhow!("no engine available after model readiness check")
-            })?;
-            set_active_generation(
-                &generation_state,
-                &req_for_state.model,
-                &req_for_state.prompt,
+    // Resolve output directory before queueing
+    let output_dir = {
+        let config = state.config.read().await;
+        config.resolved_output_dir().map(|p| p.to_path_buf())
+    };
+
+    // Submit to generation queue
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let job = GenerationJob {
+        request: req,
+        progress_tx: None,
+        result_tx,
+        output_dir,
+    };
+
+    let _position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+
+    // Wait for the queue worker to process the job
+    let result = result_rx
+        .await
+        .map_err(|_| ApiError::internal("generation queue worker dropped the job"))?;
+
+    match result {
+        Ok(job_result) => {
+            let img = job_result.image;
+            let response = job_result.response;
+            let content_type = match img.format {
+                OutputFormat::Png => HeaderValue::from_static("image/png"),
+                OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
+            };
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type);
+            headers.insert(
+                "x-mold-seed-used",
+                HeaderValue::from_str(&response.seed_used.to_string()).map_err(|e| {
+                    ApiError::internal(format!("failed to serialize seed header: {e}"))
+                })?,
             );
-            engine.clear_on_progress();
-            let result = engine.generate(&req);
-            clear_active_generation(&generation_state);
-            result
-        }))
-    })
-    .await
-    .map_err(|e| {
-        tracing::error!("inference task join error: {e:?}");
-        ApiError::inference("inference task failed")
-    })?;
-
-    let mut response = match result {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(e)) => {
-            clear_active_generation(&state);
-            tracing::error!("generation error: {e:#}");
-            return Err(ApiError::inference(format!(
-                "generation error: {}",
-                clean_error_message(&e)
-            )));
+            Ok((headers, img.data))
         }
-        Err(panic_payload) => {
-            clear_active_generation(&state);
-            let msg = panic_payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            tracing::error!("inference panicked: {msg}");
-            return Err(ApiError::inference(format!("inference panicked: {msg}")));
-        }
-    };
-
-    let img = take_generated_image(&mut response)?;
-    maybe_save_to_output_dir(&state, &img, &save_model, save_batch_size).await;
-    let content_type = match img.format {
-        OutputFormat::Png => HeaderValue::from_static("image/png"),
-        OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
-    };
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type);
-    headers.insert(
-        "x-mold-seed-used",
-        HeaderValue::from_str(&response.seed_used.to_string())
-            .map_err(|e| ApiError::internal(format!("failed to serialize seed header: {e}")))?,
-    );
-    Ok((headers, img.data))
+        Err(err_msg) => Err(ApiError::inference(err_msg)),
+    }
 }
 
 fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
@@ -450,114 +354,33 @@ async fn generate_stream(
     // Resolve output directory now (before the spawn) to avoid lock contention later.
     let output_dir = {
         let config = state.config.read().await;
-        config.resolved_output_dir()
+        config.resolved_output_dir().map(|p| p.to_path_buf())
     };
 
-    // Spawn background task for model loading + inference
-    let bg_tx = tx;
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let job = GenerationJob {
+        request: req,
+        progress_tx: Some(tx.clone()),
+        result_tx,
+        output_dir,
+    };
+
+    let position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+
+    // Send initial queue position to the client
+    if position > 0 {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));
+    }
+
+    // Hold `tx` alive in a background task until the job completes, so the SSE
+    // stream never closes prematurely even if the queue worker hasn't received
+    // the job yet.
     tokio::spawn(async move {
-        // Load model if needed (with progress events)
-        let progress = std::sync::Arc::new({
-            let bg_tx = bg_tx.clone();
-            move |event| {
-                let _ = bg_tx.send(SseMessage::Progress(progress_to_sse(event)));
-            }
-        });
-
-        if let Err(api_err) =
-            model_manager::ensure_model_ready(&state, &req.model, Some(progress)).await
-        {
-            let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                message: api_err.error,
-            }));
-            return;
-        }
-
-        // Run inference in blocking thread with progress callback
-        let engine = state.engine.clone();
-        let active_gen = state.active_generation.clone();
-        let gen_tx = bg_tx.clone();
-        let gen_req = req.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut guard = engine.blocking_lock();
-                let e = guard.as_mut().ok_or_else(|| {
-                    anyhow::anyhow!("no engine available after model readiness check")
-                })?;
-                set_active_generation(&state, &gen_req.model, &gen_req.prompt);
-                // Install progress callback for the generate phase
-                let progress_tx = gen_tx.clone();
-                e.set_on_progress(Box::new(move |event| {
-                    let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
-                }));
-                let generate_result = e.generate(&gen_req);
-                e.clear_on_progress();
-                clear_active_generation(&state);
-                generate_result
-            }))
-        })
-        .await;
-
-        match result {
-            Ok(Ok(Ok(mut response))) => {
-                let img = match take_generated_image(&mut response) {
-                    Ok(img) => img,
-                    Err(err) => {
-                        let _ = bg_tx.send(SseMessage::Error(SseErrorEvent { message: err.error }));
-                        return;
-                    }
-                };
-                if let Some(ref dir) = output_dir {
-                    let dir = dir.clone();
-                    let img_clone = img.clone();
-                    let model = req.model.clone();
-                    let batch_size = req.batch_size;
-                    // Fire-and-forget: don't block the SSE Complete event on disk I/O
-                    tokio::task::spawn_blocking(move || {
-                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
-                    });
-                }
-                let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
-                    image: base64::engine::general_purpose::STANDARD.encode(&img.data),
-                    format: img.format,
-                    width: img.width,
-                    height: img.height,
-                    seed_used: response.seed_used,
-                    generation_time_ms: response.generation_time_ms,
-                }));
-            }
-            Ok(Ok(Err(e))) => {
-                // clear_active_generation was already called inside spawn_blocking,
-                // but guard against any future code path that might skip it.
-                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
-                tracing::error!("generation error: {e:#}");
-                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                    message: format!("generation error: {}", clean_error_message(&e)),
-                }));
-            }
-            Ok(Err(panic_payload)) => {
-                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
-                let msg = panic_payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("unknown panic");
-                tracing::error!("inference panicked: {msg}");
-                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                    message: format!("inference panicked: {msg}"),
-                }));
-            }
-            Err(join_err) => {
-                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
-                tracing::error!("inference task join error: {join_err:?}");
-                let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
-                    message: "inference task failed".to_string(),
-                }));
-            }
-        }
+        let _ = result_rx.await;
+        drop(tx); // closes the SSE stream
     });
 
-    // Build SSE stream from the channel receiver
+    // Build SSE stream from the channel receiver.
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
         .map(|msg| Ok::<_, Infallible>(sse_message_to_event(msg)));
 
