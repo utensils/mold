@@ -186,6 +186,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --control-model <NAME>  ControlNet model (e.g. controlnet-canny-sd15; requires --control)
         --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
         --no-metadata           Disable PNG metadata embedding
+        --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
 
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL>               Download model from HuggingFace
@@ -225,6 +226,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
 | `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
+| `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.

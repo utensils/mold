@@ -17,6 +17,7 @@ path = "src/main.rs"
 default = []
 cuda = ["mold-server/cuda", "mold-inference/cuda"]
 metal = ["mold-server/metal", "mold-inference/metal"]
+preview = ["viuer"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }
@@ -36,3 +37,4 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+viuer = { version = "0.11", optional = true }
