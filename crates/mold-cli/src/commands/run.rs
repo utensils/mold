@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
-use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
+use mold_core::manifest::{
+    all_model_names, is_known_model, looks_like_model_name, resolve_model_name,
+    suggest_similar_models,
+};
 use mold_core::{Config, OutputFormat, Scheduler};
 use std::io::{IsTerminal, Read};
 
@@ -19,13 +22,14 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 ///
 /// Rules:
 /// - If model_or_prompt matches a known model → (model, prompt_rest joined).
+/// - If model_or_prompt looks like a model name but isn't known → error with suggestions.
 /// - Else → (config default_model, all args joined as prompt).
 /// - Empty prompt → None (error: prompt required).
 fn resolve_run_args(
     model_or_prompt: Option<&str>,
     prompt_rest: &[String],
     config: &Config,
-) -> (String, Option<String>) {
+) -> Result<(String, Option<String>)> {
     if let Some(first) = model_or_prompt {
         if is_known_model(first, config) {
             let prompt = if prompt_rest.is_empty() {
@@ -33,17 +37,32 @@ fn resolve_run_args(
             } else {
                 Some(prompt_rest.join(" "))
             };
-            return (resolve_model_name(first), prompt);
+            return Ok((resolve_model_name(first), prompt));
         }
+
+        // Check if the first arg looks like it was intended as a model name
+        if looks_like_model_name(first, config) {
+            let suggestions = suggest_similar_models(first, config, 5);
+            let mut msg = format!("unknown model '{first}'");
+            if !suggestions.is_empty() {
+                msg.push_str("\n\n  Did you mean one of these?");
+                for s in &suggestions {
+                    msg.push_str(&format!("\n    {s}"));
+                }
+            }
+            msg.push_str("\n\n  hint: Run 'mold list' to see all available models.");
+            anyhow::bail!(msg);
+        }
+
         // First arg is part of the prompt, not a model
         let mut parts = vec![first.to_string()];
         parts.extend(prompt_rest.iter().cloned());
         let model = resolve_model_name(&config.resolved_default_model());
-        return (model, Some(parts.join(" ")));
+        return Ok((model, Some(parts.join(" "))));
     }
 
     // No args at all
-    (resolve_model_name(&config.resolved_default_model()), None)
+    Ok((resolve_model_name(&config.resolved_default_model()), None))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -74,7 +93,7 @@ pub async fn run(
     control_scale: f64,
 ) -> Result<()> {
     let config = Config::load_or_default();
-    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config);
+    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
 
     // Read source image if --image specified
     let source_image = if let Some(ref img_path) = image {
@@ -183,7 +202,8 @@ mod tests {
             Some("flux-dev:q4"),
             &["a".to_string(), "cat".to_string()],
             &config,
-        );
+        )
+        .unwrap();
         assert_eq!(model, "flux-dev:q4");
         assert_eq!(prompt.unwrap(), "a cat");
     }
@@ -191,7 +211,7 @@ mod tests {
     #[test]
     fn model_only_no_prompt() {
         let config = test_config();
-        let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &config);
+        let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &config).unwrap();
         assert_eq!(model, "flux-dev:q4");
         assert!(prompt.is_none());
     }
@@ -207,7 +227,8 @@ mod tests {
                 "mountains".to_string(),
             ],
             &config,
-        );
+        )
+        .unwrap();
         assert_eq!(model, "flux-schnell:q8");
         assert_eq!(prompt.unwrap(), "a sunset over mountains");
     }
@@ -215,7 +236,7 @@ mod tests {
     #[test]
     fn single_prompt_word() {
         let config = test_config();
-        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config);
+        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config).unwrap();
         assert_eq!(model, "flux-schnell:q8");
         assert_eq!(prompt.unwrap(), "sunset");
     }
@@ -223,7 +244,7 @@ mod tests {
     #[test]
     fn no_args_returns_none_prompt() {
         let config = test_config();
-        let (model, prompt) = resolve_run_args(None, &[], &config);
+        let (model, prompt) = resolve_run_args(None, &[], &config).unwrap();
         assert_eq!(model, "flux-schnell:q8");
         assert!(prompt.is_none());
     }
@@ -232,7 +253,7 @@ mod tests {
     fn bare_model_name_resolves() {
         let config = test_config();
         let (model, prompt) =
-            resolve_run_args(Some("flux-dev"), &["a turtle".to_string()], &config);
+            resolve_run_args(Some("flux-dev"), &["a turtle".to_string()], &config).unwrap();
         assert_eq!(model, "flux-dev:q8");
         assert_eq!(prompt.unwrap(), "a turtle");
     }
@@ -241,7 +262,7 @@ mod tests {
     fn sd15_model_name_is_recognized() {
         let config = test_config();
         let (model, prompt) =
-            resolve_run_args(Some("sd15"), &["a".to_string(), "dog".to_string()], &config);
+            resolve_run_args(Some("sd15"), &["a".to_string(), "dog".to_string()], &config).unwrap();
         assert_eq!(model, "sd15:fp16");
         assert_eq!(prompt.unwrap(), "a dog");
     }
@@ -253,9 +274,44 @@ mod tests {
             Some("dreamshaper-v8"),
             &["photorealistic".to_string()],
             &config,
-        );
+        )
+        .unwrap();
         assert_eq!(model, "dreamshaper-v8:fp16");
         assert_eq!(prompt.unwrap(), "photorealistic");
+    }
+
+    #[test]
+    fn unknown_model_with_known_family_errors() {
+        let config = test_config();
+        let err =
+            resolve_run_args(Some("ultrareal-v8"), &["a cat".to_string()], &config).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown model 'ultrareal-v8'"), "got: {msg}");
+        assert!(
+            msg.contains("ultrareal-v4"),
+            "should suggest ultrareal-v4, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_model_with_colon_tag_errors() {
+        let config = test_config();
+        let err =
+            resolve_run_args(Some("flux-dev:q99"), &["a cat".to_string()], &config).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown model 'flux-dev:q99'"), "got: {msg}");
+    }
+
+    #[test]
+    fn natural_language_not_flagged_as_model() {
+        let config = test_config();
+        for word in &["a", "sunset", "photorealistic", "cat", "beautiful"] {
+            let result = resolve_run_args(Some(word), &[], &config);
+            assert!(
+                result.is_ok(),
+                "'{word}' should not be flagged as a model name"
+            );
+        }
     }
 
     #[test]
