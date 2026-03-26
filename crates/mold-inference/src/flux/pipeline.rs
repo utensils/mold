@@ -250,6 +250,273 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     Ok(cache_path)
 }
 
+// ── City96-format GGUF embedding patching ──────────────────────────────────
+
+/// Embedding tensors required by all FLUX models (schnell and dev).
+const FLUX_EMBEDDING_TENSORS: &[&str] = &[
+    "img_in.weight",
+    "img_in.bias",
+    "time_in.in_layer.weight",
+    "time_in.in_layer.bias",
+    "time_in.out_layer.weight",
+    "time_in.out_layer.bias",
+    "vector_in.in_layer.weight",
+    "vector_in.in_layer.bias",
+    "vector_in.out_layer.weight",
+    "vector_in.out_layer.bias",
+];
+
+/// Additional embedding tensors for FLUX-dev (guidance-based) models.
+const FLUX_GUIDANCE_EMBEDDING_TENSORS: &[&str] = &[
+    "guidance_in.in_layer.weight",
+    "guidance_in.in_layer.bias",
+    "guidance_in.out_layer.weight",
+    "guidance_in.out_layer.bias",
+];
+
+/// Lightweight check: does a GGUF file contain the FLUX embedding layers?
+/// Reads only the GGUF header (tensor_infos), not the tensor data.
+fn gguf_has_embeddings(path: &Path) -> Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    Ok(content.tensor_infos.contains_key("img_in.weight"))
+}
+
+/// Search for a downloaded FLUX GGUF that contains complete embeddings.
+///
+/// Prefers dev models (guaranteed `guidance_in`) over schnell, and larger
+/// quantizations (more likely downloaded) first.
+fn find_flux_reference_gguf() -> Option<PathBuf> {
+    let config = mold_core::Config::load_or_default();
+    let models_dir = config.resolved_models_dir();
+
+    // Prioritize dev models (have guidance_in), then schnell as fallback
+    let candidates = [
+        "flux-dev:q8",
+        "flux-dev:q6",
+        "flux-dev:q4",
+        "flux-schnell:q8",
+        "flux-schnell:q4",
+    ];
+
+    for name in candidates {
+        let Some(manifest) = mold_core::manifest::find_manifest(name) else {
+            continue;
+        };
+        // Find the transformer file in the manifest
+        let Some(xformer_file) = manifest
+            .files
+            .iter()
+            .find(|f| f.component == mold_core::manifest::ModelComponent::Transformer)
+        else {
+            continue;
+        };
+        let xformer_path =
+            models_dir.join(mold_core::manifest::storage_path(manifest, xformer_file));
+        if !xformer_path.exists() {
+            continue;
+        }
+        // Verify it actually has the embeddings (don't assume)
+        match gguf_has_embeddings(&xformer_path) {
+            Ok(true) => {
+                tracing::info!(
+                    reference = %xformer_path.display(),
+                    model = name,
+                    "found reference FLUX GGUF with embeddings"
+                );
+                return Some(xformer_path);
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    model = name,
+                    "reference candidate also missing embeddings, skipping"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(model = name, err = %e, "failed to probe reference candidate");
+            }
+        }
+    }
+    None
+}
+
+/// Cache path for a GGUF patched with missing embedding layers.
+/// Same FNV-1a content hashing scheme as `fp8_gguf_cache_path`.
+fn embedding_patched_cache_path(path: &Path) -> PathBuf {
+    use std::io::{Read, Seek, SeekFrom};
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("transformer");
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let sample_offset = size / 4;
+    let content_hash = std::fs::File::open(path)
+        .and_then(|mut f| {
+            f.seek(SeekFrom::Start(sample_offset))?;
+            let mut buf = vec![0u8; 4096];
+            let n = f.read(&mut buf)?;
+            buf.truncate(n);
+            Ok(buf)
+        })
+        .map(|buf| {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for &b in &buf {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            format!("{h:016x}")
+        })
+        .unwrap_or_else(|_| "0".to_string());
+    let cache_root = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| PathBuf::from(".mold"))
+        .join("cache")
+        .join("flux-embeddings");
+    cache_root.join(format!("{stem}-{size}-{content_hash}.patched.gguf"))
+}
+
+/// Ensure a GGUF file has complete FLUX embedding layers.
+///
+/// City96-format GGUFs (used by community fine-tune quantizations like
+/// UltraReal) only include the diffusion blocks but omit input embedding
+/// layers (`img_in`, `time_in`, `vector_in`, `guidance_in`). This function
+/// detects incomplete GGUFs and patches them by sourcing the missing
+/// embeddings from a reference FLUX GGUF (e.g. flux-dev:q8).
+///
+/// Returns the original path if the GGUF is already complete, or the path
+/// to a patched cache file.
+fn ensure_gguf_embeddings(
+    path: &Path,
+    is_schnell: bool,
+    progress: &ProgressReporter,
+) -> Result<PathBuf> {
+    let cache_path = embedding_patched_cache_path(path);
+    if cache_path.exists() {
+        progress.info(&format!(
+            "Using cached embedding-patched GGUF: {}",
+            cache_path.display()
+        ));
+        return Ok(cache_path);
+    }
+
+    // Probe whether embeddings are actually missing
+    if gguf_has_embeddings(path)? {
+        return Ok(path.to_path_buf());
+    }
+
+    progress.info(
+        "GGUF is missing FLUX embedding layers (city96 format) — patching from reference model",
+    );
+    tracing::info!(
+        path = %path.display(),
+        "GGUF missing embedding layers, searching for reference model"
+    );
+
+    let reference_path = find_flux_reference_gguf().ok_or_else(|| {
+        anyhow::anyhow!(
+            "This GGUF is missing FLUX embedding layers (img_in, time_in, vector_in, \
+             guidance_in) which are required for inference.\n\n\
+             To fix this, download a complete FLUX model to use as a reference:\n\
+             \n  mold pull flux-dev:q8\n\n\
+             Then retry — mold will automatically patch the incomplete GGUF."
+        )
+    })?;
+
+    // Determine which embedding tensors we need
+    let mut needed: Vec<&str> = FLUX_EMBEDDING_TENSORS.to_vec();
+    if !is_schnell {
+        needed.extend_from_slice(FLUX_GUIDANCE_EMBEDDING_TENSORS);
+    }
+
+    // Read source (incomplete) GGUF
+    progress.info("Reading source GGUF tensors...");
+    let mut src_file = std::fs::File::open(path)?;
+    let src_content = candle_core::quantized::gguf_file::Content::read(&mut src_file)?;
+
+    // Read only the needed embedding tensors from the reference GGUF
+    progress.info(&format!(
+        "Extracting {} embedding tensors from reference: {}",
+        needed.len(),
+        reference_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+    ));
+    let mut ref_file = std::fs::File::open(&reference_path)?;
+    let ref_content = candle_core::quantized::gguf_file::Content::read(&mut ref_file)?;
+
+    let cpu = Device::Cpu;
+
+    // Load all source tensors
+    let mut qtensors: Vec<(String, candle_core::quantized::QTensor)> = Vec::new();
+    let total = src_content.tensor_infos.len();
+    for (i, name) in src_content.tensor_infos.keys().enumerate() {
+        if (i + 1) % 100 == 0 || i + 1 == total {
+            progress.info(&format!("Loading source tensor {}/{total}", i + 1));
+        }
+        let tensor = src_content.tensor(&mut src_file, name, &cpu)?;
+        qtensors.push((name.clone(), tensor));
+    }
+
+    // Load missing embedding tensors from reference
+    let mut patched_count = 0usize;
+    for name in &needed {
+        if src_content.tensor_infos.contains_key(*name) {
+            continue; // already present in source
+        }
+        if !ref_content.tensor_infos.contains_key(*name) {
+            // guidance_in may be absent from schnell references — skip if target is also schnell
+            if is_schnell && FLUX_GUIDANCE_EMBEDDING_TENSORS.contains(name) {
+                continue;
+            }
+            bail!(
+                "reference GGUF ({}) is also missing required tensor '{}' — \
+                 download a complete FLUX-dev model: mold pull flux-dev:q8",
+                reference_path.display(),
+                name
+            );
+        }
+        let tensor = ref_content.tensor(&mut ref_file, name, &cpu)?;
+        tracing::debug!(tensor = name, "patching embedding tensor from reference");
+        qtensors.push((name.to_string(), tensor));
+        patched_count += 1;
+    }
+
+    progress.info(&format!(
+        "Patched {patched_count} embedding tensors from reference"
+    ));
+
+    // Write patched GGUF
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid cache path: {}", cache_path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+    let write_result = (|| -> Result<()> {
+        let file = std::fs::File::create(&tmp_path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let tensor_refs: Vec<(&str, &candle_core::quantized::QTensor)> =
+            qtensors.iter().map(|(n, q)| (n.as_str(), q)).collect();
+        candle_core::quantized::gguf_file::write(&mut writer, &[], &tensor_refs)?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    std::fs::rename(&tmp_path, &cache_path)?;
+
+    progress.info(&format!(
+        "Embedding-patched GGUF cache created: {}",
+        cache_path.display()
+    ));
+    tracing::info!(
+        cache = %cache_path.display(),
+        patched_count,
+        "embedding-patched GGUF cache created"
+    );
+    Ok(cache_path)
+}
+
 fn flux_safetensors_var_builder<'a>(
     path: &std::path::Path,
     dtype: DType,
@@ -480,6 +747,13 @@ impl FluxEngine {
             self.paths.transformer.clone()
         };
 
+        // Patch city96-format GGUFs missing embedding layers (img_in, time_in, etc.)
+        let transformer_path = if is_quantized {
+            ensure_gguf_embeddings(&transformer_path, is_schnell, &self.progress)?
+        } else {
+            transformer_path
+        };
+
         let gpu_dtype = flux_runtime_dtype(device.is_cuda(), is_quantized, false);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
@@ -697,6 +971,12 @@ impl FluxEngine {
                 p
             } else {
                 self.paths.transformer.clone()
+            };
+            // Patch city96-format GGUFs missing embedding layers
+            let p = if is_quantized {
+                ensure_gguf_embeddings(&p, is_schnell, &self.progress)?
+            } else {
+                p
             };
             self.cached_transformer_path = Some(p.clone());
             p
@@ -1573,5 +1853,255 @@ mod tests {
             cache_str.contains("cache/flux-q8"),
             "cache should be under cache/flux-q8: {cache_str}"
         );
+    }
+
+    // ── Embedding patching tests ────────────────────────────────────────
+
+    /// Helper: write a minimal GGUF file containing the given tensor names.
+    /// Each tensor is a tiny 1-element F32 QTensor.
+    fn write_test_gguf(path: &std::path::Path, tensor_names: &[&str]) {
+        let device = Device::Cpu;
+        let qtensors: Vec<(String, candle_core::quantized::QTensor)> = tensor_names
+            .iter()
+            .map(|name| {
+                let t = Tensor::zeros(1, DType::F32, &device).unwrap();
+                let qt = candle_core::quantized::QTensor::quantize(
+                    &t,
+                    candle_core::quantized::GgmlDType::F32,
+                )
+                .unwrap();
+                (name.to_string(), qt)
+            })
+            .collect();
+        let refs: Vec<(&str, &candle_core::quantized::QTensor)> =
+            qtensors.iter().map(|(n, q)| (n.as_str(), q)).collect();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        candle_core::quantized::gguf_file::write(&mut writer, &[], &refs).unwrap();
+    }
+
+    #[test]
+    fn gguf_has_embeddings_true_for_complete() {
+        let dir =
+            std::env::temp_dir().join(format!("mold-emb-test-complete-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("complete.gguf");
+        write_test_gguf(
+            &path,
+            &[
+                "img_in.weight",
+                "img_in.bias",
+                "double_blocks.0.img_mod.lin.weight",
+            ],
+        );
+        assert!(super::gguf_has_embeddings(&path).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gguf_has_embeddings_false_for_incomplete() {
+        let dir =
+            std::env::temp_dir().join(format!("mold-emb-test-incomplete-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("incomplete.gguf");
+        write_test_gguf(
+            &path,
+            &[
+                "double_blocks.0.img_mod.lin.weight",
+                "single_blocks.0.linear1.weight",
+                "txt_in.weight",
+            ],
+        );
+        assert!(!super::gguf_has_embeddings(&path).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn embedding_patched_cache_path_format() {
+        let dir = std::env::temp_dir().join(format!("mold-emb-cache-fmt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gguf_file = dir.join("ultrareal.gguf");
+        std::fs::write(&gguf_file, vec![0u8; 512]).unwrap();
+
+        let cache_path = super::embedding_patched_cache_path(&gguf_file);
+        let cache_str = cache_path.to_str().unwrap();
+        assert!(
+            cache_str.contains("cache/flux-embeddings"),
+            "should be under cache/flux-embeddings: {cache_str}"
+        );
+        let filename = cache_path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            filename.contains("ultrareal"),
+            "should contain stem: {filename}"
+        );
+        assert!(
+            filename.contains("512"),
+            "should contain file size: {filename}"
+        );
+        assert!(
+            filename.ends_with(".patched.gguf"),
+            "should end with .patched.gguf: {filename}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_gguf_embeddings_noop_for_complete() {
+        let dir = std::env::temp_dir().join(format!("mold-emb-noop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("complete.gguf");
+
+        // Write a GGUF with img_in.weight present
+        write_test_gguf(
+            &path,
+            &["img_in.weight", "double_blocks.0.img_mod.lin.weight"],
+        );
+
+        let progress = crate::progress::ProgressReporter::default();
+        let result = super::ensure_gguf_embeddings(&path, false, &progress).unwrap();
+
+        // Should return the original path unchanged
+        assert_eq!(result, path);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_gguf_embeddings_patches_incomplete_with_reference() {
+        // Test the full patching flow using a synthetic reference GGUF.
+        // We override MOLD_MODELS_DIR to a temp dir containing a fake reference model.
+        let dir = std::env::temp_dir().join(format!("mold-emb-patch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create an incomplete GGUF (city96 format — only diffusion blocks)
+        let incomplete_path = dir.join("ultrareal-test.gguf");
+        write_test_gguf(
+            &incomplete_path,
+            &[
+                "double_blocks.0.img_mod.lin.weight",
+                "single_blocks.0.linear1.weight",
+                "txt_in.weight",
+                "txt_in.bias",
+                "final_layer.linear.weight",
+            ],
+        );
+
+        // Create a fake reference model at the expected manifest path.
+        // flux-dev:q8 transformer lives at <models_dir>/flux-dev-q8/flux1-dev-Q8_0.gguf
+        let ref_model_dir = dir.join("models").join("flux-dev-q8");
+        std::fs::create_dir_all(&ref_model_dir).unwrap();
+        let ref_path = ref_model_dir.join("flux1-dev-Q8_0.gguf");
+
+        // The reference GGUF has all embedding tensors
+        let mut all_tensors: Vec<&str> = super::FLUX_EMBEDDING_TENSORS.to_vec();
+        all_tensors.extend_from_slice(super::FLUX_GUIDANCE_EMBEDDING_TENSORS);
+        all_tensors.extend_from_slice(&[
+            "double_blocks.0.img_mod.lin.weight",
+            "txt_in.weight",
+            "txt_in.bias",
+        ]);
+        write_test_gguf(&ref_path, &all_tensors);
+
+        // Point MOLD_MODELS_DIR at our temp dir so find_flux_reference_gguf finds it
+        let models_dir = dir.join("models");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let progress = crate::progress::ProgressReporter::default();
+        let result = super::ensure_gguf_embeddings(&incomplete_path, false, &progress);
+
+        // Clean up env before asserting (in case of panic)
+        std::env::remove_var("MOLD_MODELS_DIR");
+
+        let patched_path = result.unwrap();
+        assert_ne!(
+            patched_path, incomplete_path,
+            "should return a different cached path"
+        );
+        assert!(patched_path.exists(), "patched GGUF should exist on disk");
+        assert!(
+            patched_path.to_str().unwrap().contains("flux-embeddings"),
+            "patched file should be in flux-embeddings cache"
+        );
+
+        // Verify the patched file contains the embedding tensors
+        assert!(
+            super::gguf_has_embeddings(&patched_path).unwrap(),
+            "patched GGUF should have embeddings"
+        );
+
+        // Clean up
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&patched_path).ok();
+        let _ = std::fs::remove_dir(patched_path.parent().unwrap());
+    }
+
+    #[test]
+    fn ensure_gguf_embeddings_cache_is_reused() {
+        // If a cache file already exists, it should be returned directly
+        let dir = std::env::temp_dir().join(format!("mold-emb-reuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let incomplete_path = dir.join("model-for-cache.gguf");
+        write_test_gguf(&incomplete_path, &["double_blocks.0.img_mod.lin.weight"]);
+
+        // Pre-create the cache file
+        let cache_path = super::embedding_patched_cache_path(&incomplete_path);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        write_test_gguf(
+            &cache_path,
+            &["img_in.weight", "double_blocks.0.img_mod.lin.weight"],
+        );
+
+        let progress = crate::progress::ProgressReporter::default();
+        let result = super::ensure_gguf_embeddings(&incomplete_path, true, &progress).unwrap();
+
+        assert_eq!(result, cache_path, "should return cached file");
+
+        // Clean up
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&cache_path).ok();
+        // Try to clean up cache parent dir (may fail if other tests use it)
+        let _ = std::fs::remove_dir(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn embedding_tensor_names_are_exhaustive() {
+        // Verify the const arrays cover all non-diffusion-block tensors that
+        // Flux::new() in quantized_model.rs expects (lines 378-416).
+        // The model loads: img_in, txt_in, time_in, vector_in, guidance_in (optional),
+        // double_blocks, single_blocks, final_layer, pe_embedder (computed, no tensors).
+        // txt_in is present in city96 GGUFs. double/single/final are the diffusion blocks.
+        // Only the embedding layers (img_in, time_in, vector_in, guidance_in) are missing.
+        let all_embedding_names: Vec<&str> = super::FLUX_EMBEDDING_TENSORS
+            .iter()
+            .chain(super::FLUX_GUIDANCE_EMBEDDING_TENSORS.iter())
+            .copied()
+            .collect();
+
+        // img_in: linear (weight + bias)
+        assert!(all_embedding_names.contains(&"img_in.weight"));
+        assert!(all_embedding_names.contains(&"img_in.bias"));
+
+        // time_in: MlpEmbedder (in_layer + out_layer, each with weight + bias)
+        assert!(all_embedding_names.contains(&"time_in.in_layer.weight"));
+        assert!(all_embedding_names.contains(&"time_in.in_layer.bias"));
+        assert!(all_embedding_names.contains(&"time_in.out_layer.weight"));
+        assert!(all_embedding_names.contains(&"time_in.out_layer.bias"));
+
+        // vector_in: MlpEmbedder
+        assert!(all_embedding_names.contains(&"vector_in.in_layer.weight"));
+        assert!(all_embedding_names.contains(&"vector_in.in_layer.bias"));
+        assert!(all_embedding_names.contains(&"vector_in.out_layer.weight"));
+        assert!(all_embedding_names.contains(&"vector_in.out_layer.bias"));
+
+        // guidance_in: MlpEmbedder (dev only)
+        assert!(all_embedding_names.contains(&"guidance_in.in_layer.weight"));
+        assert!(all_embedding_names.contains(&"guidance_in.in_layer.bias"));
+        assert!(all_embedding_names.contains(&"guidance_in.out_layer.weight"));
+        assert!(all_embedding_names.contains(&"guidance_in.out_layer.bias"));
+
+        // Total: 14 tensors
+        assert_eq!(all_embedding_names.len(), 14);
     }
 }
