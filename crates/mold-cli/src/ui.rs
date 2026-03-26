@@ -176,7 +176,7 @@ impl SmoothedRate {
     fn eta_secs(&self, total: u64) -> f64 {
         let rate = self.rate_bps();
         if rate < 1.0 {
-            return 0.0;
+            return f64::INFINITY;
         }
         let current = self.samples.back().map(|(_, b)| *b).unwrap_or(0);
         total.saturating_sub(current) as f64 / rate
@@ -198,10 +198,10 @@ fn format_speed(bps: f64) -> String {
 }
 
 fn format_eta(secs: f64) -> String {
-    if secs <= 0.0 {
-        "0s".to_string()
-    } else if secs > 359_999.0 {
+    if secs.is_infinite() || secs.is_nan() || secs > 359_999.0 {
         "--".to_string()
+    } else if secs <= 0.0 {
+        "0s".to_string()
     } else {
         let s = secs as u64;
         if s >= 3600 {
@@ -470,10 +470,10 @@ mod tests {
     // ── SmoothedRate tests ───────────────────────────────────────────────
 
     #[test]
-    fn smoothed_rate_empty_returns_zero() {
+    fn smoothed_rate_empty_returns_unknown() {
         let rate = SmoothedRate::new(8);
         assert_eq!(rate.rate_bps(), 0.0);
-        assert_eq!(rate.eta_secs(1000), 0.0);
+        assert!(rate.eta_secs(1000).is_infinite());
     }
 
     #[test]
@@ -508,14 +508,8 @@ mod tests {
     #[test]
     fn smoothed_rate_evicts_old_samples() {
         let mut rate = SmoothedRate::new(4);
-        let now = Instant::now();
         for i in 0..10 {
-            rate.samples
-                .push_back((now + Duration::from_millis(i * 250), i * 100));
-        }
-        // manually evict as record() would
-        while rate.samples.len() > rate.max_samples {
-            rate.samples.pop_front();
+            rate.record(i * 100);
         }
         assert_eq!(rate.samples.len(), 4);
     }
@@ -585,5 +579,15 @@ mod tests {
     #[test]
     fn format_eta_negative() {
         assert_eq!(format_eta(-5.0), "0s");
+    }
+
+    #[test]
+    fn format_eta_infinity() {
+        assert_eq!(format_eta(f64::INFINITY), "--");
+    }
+
+    #[test]
+    fn format_eta_nan() {
+        assert_eq!(format_eta(f64::NAN), "--");
     }
 }
