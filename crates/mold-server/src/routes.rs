@@ -227,6 +227,8 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let output_dir = prepare_generation(&state, &mut req).await?;
+
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
@@ -238,8 +240,6 @@ async fn generate(
         format = %req.output_format,
         "generate request"
     );
-
-    let output_dir = prepare_generation(&state, &mut req).await?;
 
     // Submit to generation queue
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -310,13 +310,13 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let output_dir = prepare_generation(&state, &mut req).await?;
+
     tracing::info!(
         model = %req.model,
         prompt = %req.prompt,
         "generate/stream request"
     );
-
-    let output_dir = prepare_generation(&state, &mut req).await?;
 
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
