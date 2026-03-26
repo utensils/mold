@@ -25,19 +25,10 @@ pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
 }
 
 pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
-    let engine = state.engine.lock().await;
-    let (loaded_name, is_loaded) = match engine.as_ref() {
-        Some(e) => (e.model_name().to_string(), e.is_loaded()),
-        None => (String::new(), false),
-    };
-    drop(engine);
+    let snapshot = state.engine_snapshot.read().await.clone();
 
     let config = refresh_config(state).await;
-    build_model_catalog(
-        &config,
-        (!loaded_name.is_empty()).then_some(loaded_name.as_str()),
-        is_loaded,
-    )
+    build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded)
 }
 
 pub(crate) async fn check_model_available(
@@ -88,8 +79,8 @@ pub(crate) async fn ensure_model_ready(
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
     {
-        let mut engine = state.engine.lock().await;
-        if let Some(engine) = engine.as_mut() {
+        let mut guard = state.engine.lock().await;
+        if let Some(engine) = guard.as_mut() {
             if engine.model_name() == model_name {
                 if let Some(callback) = progress.clone() {
                     engine.set_on_progress(Box::new(move |event| {
@@ -104,6 +95,11 @@ pub(crate) async fn ensure_model_ready(
                         tracing::error!("model load failed: {e:#}");
                         ApiError::internal(format!("model load error: {e}"))
                     })?;
+                    // Update snapshot while holding engine lock to prevent
+                    // unload_model from racing and leaving stale state.
+                    let mut snapshot = state.engine_snapshot.write().await;
+                    snapshot.model_name = Some(model_name.to_string());
+                    snapshot.is_loaded = true;
                 }
                 return Ok(());
             }
@@ -167,6 +163,13 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
         Some(e) if e.is_loaded() => {
             let name = e.model_name().to_string();
             e.unload();
+            // Update snapshot while still holding the engine lock to avoid
+            // a window where engine is unloaded but snapshot still says loaded.
+            let mut snapshot = state.engine_snapshot.write().await;
+            snapshot.model_name = Some(name.clone());
+            snapshot.is_loaded = false;
+            drop(snapshot);
+            drop(engine);
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
@@ -212,6 +215,8 @@ async fn create_and_load_engine(
 
     *engine = Some(new_engine);
 
+    // Update snapshot only after the engine swap — not before the lock is acquired,
+    // otherwise /api/status reports "not loaded" while the old model is still serving.
     if let Some(ref mut e) = *engine {
         if !e.is_loaded() {
             tracing::info!(model = %model_name, "loading model...");
@@ -221,6 +226,15 @@ async fn create_and_load_engine(
             })?;
         }
     }
+
+    // Update snapshot while holding engine lock to prevent unload_model
+    // from racing and leaving snapshot in a stale is_loaded=true state.
+    {
+        let mut snapshot = state.engine_snapshot.write().await;
+        snapshot.model_name = Some(model_name.to_string());
+        snapshot.is_loaded = true;
+    }
+    drop(engine);
 
     Ok(())
 }

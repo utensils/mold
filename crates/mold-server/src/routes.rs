@@ -10,11 +10,13 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -130,6 +132,7 @@ fn clean_error_message(e: &anyhow::Error) -> String {
         mold_core::OutputFormat,
         mold_core::ModelInfo,
         mold_core::ServerStatus,
+        mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
@@ -212,6 +215,81 @@ fn take_generated_image(
     Ok(response.images.remove(0))
 }
 
+/// Save an image to the configured output directory (async version for non-spawned routes).
+/// Non-fatal: logs a warning on failure but never returns an error.
+/// Filesystem I/O is offloaded to a blocking thread to avoid stalling the async runtime.
+/// Fire-and-forget image save — does not block the HTTP response on disk I/O.
+async fn maybe_save_to_output_dir(
+    state: &AppState,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+) {
+    let config = state.config.read().await;
+    let Some(dir) = config.resolved_output_dir() else {
+        return;
+    };
+    let dir = dir.to_path_buf();
+    let img = img.clone();
+    let model = model.to_string();
+    tokio::task::spawn_blocking(move || {
+        save_image_to_dir(&dir, &img, &model, batch_size);
+    });
+}
+
+fn save_image_to_dir(
+    dir: &std::path::Path,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("failed to create output dir {}: {e}", dir.display());
+        return;
+    }
+    // Use milliseconds for server-side filenames to avoid overwrites when
+    // concurrent requests finish in the same second.
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let ext = img.format.to_string();
+    let filename =
+        mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
+    let path = dir.join(&filename);
+    match std::fs::write(&path, &img.data) {
+        Ok(()) => tracing::info!("saved image to {}", path.display()),
+        Err(e) => tracing::warn!("failed to save image to {}: {e}", path.display()),
+    }
+}
+
+fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
+    let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
+    let started_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut active = state
+        .active_generation
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *active = Some(crate::state::ActiveGenerationSnapshot {
+        model: model.to_string(),
+        prompt_sha256,
+        started_at_unix_ms,
+        started_at: Instant::now(),
+    });
+}
+
+fn clear_active_generation(state: &AppState) {
+    let mut active = state
+        .active_generation
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *active = None;
+}
+
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -255,14 +333,25 @@ async fn generate(
 
     // Run inference in a blocking task — panics caught → 500 with body.
     let engine = state.engine.clone();
+    let generation_state = state.clone();
+    let req_for_state = req.clone();
+    let save_model = req.model.clone();
+    let save_batch_size = req.batch_size;
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = engine.blocking_lock();
             let engine = guard.as_mut().ok_or_else(|| {
                 anyhow::anyhow!("no engine available after model readiness check")
             })?;
+            set_active_generation(
+                &generation_state,
+                &req_for_state.model,
+                &req_for_state.prompt,
+            );
             engine.clear_on_progress();
-            engine.generate(&req)
+            let result = engine.generate(&req);
+            clear_active_generation(&generation_state);
+            result
         }))
     })
     .await
@@ -274,6 +363,7 @@ async fn generate(
     let mut response = match result {
         Ok(Ok(resp)) => resp,
         Ok(Err(e)) => {
+            clear_active_generation(&state);
             tracing::error!("generation error: {e:#}");
             return Err(ApiError::inference(format!(
                 "generation error: {}",
@@ -281,6 +371,7 @@ async fn generate(
             )));
         }
         Err(panic_payload) => {
+            clear_active_generation(&state);
             let msg = panic_payload
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
@@ -292,6 +383,7 @@ async fn generate(
     };
 
     let img = take_generated_image(&mut response)?;
+    maybe_save_to_output_dir(&state, &img, &save_model, save_batch_size).await;
     let content_type = match img.format {
         OutputFormat::Png => HeaderValue::from_static("image/png"),
         OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
@@ -355,6 +447,12 @@ async fn generate_stream(
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
 
+    // Resolve output directory now (before the spawn) to avoid lock contention later.
+    let output_dir = {
+        let config = state.config.read().await;
+        config.resolved_output_dir()
+    };
+
     // Spawn background task for model loading + inference
     let bg_tx = tx;
     tokio::spawn(async move {
@@ -377,6 +475,7 @@ async fn generate_stream(
 
         // Run inference in blocking thread with progress callback
         let engine = state.engine.clone();
+        let active_gen = state.active_generation.clone();
         let gen_tx = bg_tx.clone();
         let gen_req = req.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -385,6 +484,7 @@ async fn generate_stream(
                 let e = guard.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("no engine available after model readiness check")
                 })?;
+                set_active_generation(&state, &gen_req.model, &gen_req.prompt);
                 // Install progress callback for the generate phase
                 let progress_tx = gen_tx.clone();
                 e.set_on_progress(Box::new(move |event| {
@@ -392,6 +492,7 @@ async fn generate_stream(
                 }));
                 let generate_result = e.generate(&gen_req);
                 e.clear_on_progress();
+                clear_active_generation(&state);
                 generate_result
             }))
         })
@@ -406,6 +507,16 @@ async fn generate_stream(
                         return;
                     }
                 };
+                if let Some(ref dir) = output_dir {
+                    let dir = dir.clone();
+                    let img_clone = img.clone();
+                    let model = req.model.clone();
+                    let batch_size = req.batch_size;
+                    // Fire-and-forget: don't block the SSE Complete event on disk I/O
+                    tokio::task::spawn_blocking(move || {
+                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
+                    });
+                }
                 let _ = bg_tx.send(SseMessage::Complete(SseCompleteEvent {
                     image: base64::engine::general_purpose::STANDARD.encode(&img.data),
                     format: img.format,
@@ -416,12 +527,16 @@ async fn generate_stream(
                 }));
             }
             Ok(Ok(Err(e))) => {
+                // clear_active_generation was already called inside spawn_blocking,
+                // but guard against any future code path that might skip it.
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::error!("generation error: {e:#}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
                     message: format!("generation error: {}", clean_error_message(&e)),
                 }));
             }
             Ok(Err(panic_payload)) => {
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 let msg = panic_payload
                     .downcast_ref::<String>()
                     .map(|s| s.as_str())
@@ -433,6 +548,7 @@ async fn generate_stream(
                 }));
             }
             Err(join_err) => {
+                *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
                 tracing::error!("inference task join error: {join_err:?}");
                 let _ = bg_tx.send(SseMessage::Error(SseErrorEvent {
                     message: "inference task failed".to_string(),
@@ -663,16 +779,29 @@ async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
-    let engine = state.engine.lock().await;
-    let models_loaded = match engine.as_ref() {
-        Some(e) if e.is_loaded() => vec![e.model_name().to_string()],
+    let snapshot = state.engine_snapshot.read().await.clone();
+    let models_loaded = match (snapshot.model_name, snapshot.is_loaded) {
+        (Some(model_name), true) => vec![model_name],
         _ => vec![],
     };
-    drop(engine);
+    let current_generation = state
+        .active_generation
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|active| ActiveGenerationStatus {
+            model: active.model.clone(),
+            prompt_sha256: active.prompt_sha256.clone(),
+            started_at_unix_ms: active.started_at_unix_ms,
+            elapsed_ms: active.started_at.elapsed().as_millis() as u64,
+        });
+    let busy = current_generation.is_some();
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         models_loaded,
+        busy,
+        current_generation,
         gpu_info: query_gpu_info(),
         uptime_secs: state.start_time.elapsed().as_secs(),
     })
@@ -805,5 +934,96 @@ mod tests {
         let msg = clean_error_message(&err);
         // Should fall back to root_cause since all lines look like backtrace
         assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn save_image_to_dir_creates_directory_and_writes_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-save-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!dir.exists());
+
+        let img = mold_core::ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47], // PNG magic bytes
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+
+        save_image_to_dir(&dir, &img, "test-model:q8", 1);
+
+        assert!(dir.exists(), "directory should be created");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1, "should have exactly one file");
+        let file = files[0].as_ref().unwrap();
+        let filename = file.file_name().to_str().unwrap().to_string();
+        assert!(filename.starts_with("mold-test-model-q8-"), "{filename}");
+        assert!(filename.ends_with(".png"), "{filename}");
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(contents, vec![0x89, 0x50, 0x4E, 0x47]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_image_to_dir_batch_includes_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-save-batch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let img = mold_core::ImageData {
+            data: vec![0xFF, 0xD8], // JPEG magic
+            format: mold_core::OutputFormat::Jpeg,
+            width: 64,
+            height: 64,
+            index: 2,
+        };
+
+        save_image_to_dir(&dir, &img, "flux-dev", 4);
+
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let filename = files[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            filename.contains("-2.jpeg"),
+            "batch index in name: {filename}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_image_to_dir_invalid_path_logs_warning_no_panic() {
+        // Saving to a path that can't be created should not panic
+        let img = mold_core::ImageData {
+            data: vec![0x00],
+            format: mold_core::OutputFormat::Png,
+            width: 1,
+            height: 1,
+            index: 0,
+        };
+        // /dev/null/impossible can't be created as a directory
+        save_image_to_dir(
+            std::path::Path::new("/dev/null/impossible"),
+            &img,
+            "test",
+            1,
+        );
+        // Test passes if no panic occurred
     }
 }

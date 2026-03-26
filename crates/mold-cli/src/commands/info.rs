@@ -128,6 +128,13 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
     if let Some(m) = manifest {
         println!("  {:<16} {}", "Family:".dimmed(), format_family(&m.family));
         println!("  {:<16} {}", "Description:".dimmed(), m.description);
+        if m.is_gated() {
+            println!(
+                "  {:<16} {} — requires HF_TOKEN for download",
+                "Auth:".dimmed(),
+                "Gated".yellow().bold(),
+            );
+        }
 
         // Size info — compute from manifest files, accounting for cache
         let (total_bytes, remaining_bytes) = mold_core::manifest::compute_download_size(m);
@@ -193,11 +200,13 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             } else {
                 "not downloaded".dimmed().to_string()
             };
+            let gated_marker = if file.gated { ", gated" } else { "" };
             println!(
-                "  {:<16} {} ({}, {})",
+                "  {:<16} {} ({}{}, {})",
                 format!("{}:", component_label(&file.component)).dimmed(),
                 url,
                 size_str,
+                gated_marker,
                 status_marker,
             );
         }
@@ -395,7 +404,7 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
             "  {:<16} {} — run {} to download",
             "Status:".dimmed(),
             "Not installed".red(),
-            format!("mold pull {}", canonical).bold()
+            format!("mold pull {canonical}").bold()
         );
     }
 

@@ -28,9 +28,15 @@ in
       description = "Address to bind the server to.";
     };
 
+    homeDir = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/mold";
+      description = "Base mold directory (MOLD_HOME). Config, cache, and default model storage live under this path.";
+    };
+
     modelsDir = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/mold/models";
+      defaultText = lib.literalExpression ''"''${config.services.mold.homeDir}/models"'';
       description = "Directory for storing downloaded models.";
     };
 
@@ -68,6 +74,18 @@ in
       description = "Path to a file containing the HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile.";
     };
 
+    outputDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional directory to persist copies of server-generated images. Null means disabled (default).";
+    };
+
+    defaultModel = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Default model for generation. Null uses built-in default (flux-schnell) with smart fallback to the only downloaded model.";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -76,15 +94,21 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";
+
     users.users.mold = {
       isSystemUser = true;
       group = "mold";
-      home = "/var/lib/mold";
+      home = cfg.homeDir;
     };
     users.groups.mold = { };
 
     systemd.tmpfiles.rules = [
+      "d ${cfg.homeDir} 0755 mold mold -"
       "d ${cfg.modelsDir} 0755 mold mold -"
+    ]
+    ++ lib.optionals (cfg.outputDir != null) [
+      "d ${cfg.outputDir} 0755 mold mold -"
     ];
 
     systemd.services.mold = {
@@ -93,6 +117,7 @@ in
       wantedBy = [ "multi-user.target" ];
 
       environment = {
+        MOLD_HOME = cfg.homeDir;
         MOLD_PORT = toString cfg.port;
         MOLD_MODELS_DIR = cfg.modelsDir;
         MOLD_LOG = cfg.logLevel;
@@ -100,6 +125,12 @@ in
       }
       // lib.optionalAttrs (cfg.corsOrigin != null) {
         MOLD_CORS_ORIGIN = cfg.corsOrigin;
+      }
+      // lib.optionalAttrs (cfg.outputDir != null) {
+        MOLD_OUTPUT_DIR = cfg.outputDir;
+      }
+      // lib.optionalAttrs (cfg.defaultModel != null) {
+        MOLD_DEFAULT_MODEL = cfg.defaultModel;
       }
       // cfg.environment;
 
@@ -119,8 +150,8 @@ in
         RestartSec = 5;
 
         RuntimeDirectory = "mold";
-        StateDirectory = "mold";
-        CacheDirectory = "mold";
+        # StateDirectory and CacheDirectory omitted — homeDir is created
+        # by tmpfiles.rules and may not be under /var/lib/.
       }
       // lib.optionalAttrs (cfg.hfTokenFile != null) {
         EnvironmentFile = "-/run/mold/env";
@@ -133,7 +164,8 @@ in
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = false;
-        ReadWritePaths = [ cfg.modelsDir ];
+        ReadWritePaths = [ cfg.homeDir cfg.modelsDir ]
+          ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ];
 
         # GPU access
         SupplementaryGroups = [

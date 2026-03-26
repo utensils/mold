@@ -4,7 +4,7 @@ mod output;
 mod theme;
 mod ui;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 use mold_core::{OutputFormat, Scheduler};
 
@@ -67,7 +67,7 @@ Examples:
         prompt_rest: Vec<String>,
 
         /// Output file path
-        #[arg(short, long, help_heading = "Output")]
+        #[arg(short, long, help_heading = "Output", value_hint = ValueHint::FilePath)]
         output: Option<String>,
 
         /// Output format
@@ -129,7 +129,7 @@ Examples:
         eager: bool,
 
         /// Source image for img2img (file path or - for stdin)
-        #[arg(short = 'i', long, help_heading = "img2img")]
+        #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Option<String>,
 
         /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
@@ -137,11 +137,11 @@ Examples:
         strength: f64,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
-        #[arg(long, requires = "image", help_heading = "img2img")]
+        #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
         mask: Option<String>,
 
         /// Control image for ControlNet conditioning (file path, e.g. edges.png)
-        #[arg(long, help_heading = "ControlNet")]
+        #[arg(long, help_heading = "ControlNet", value_hint = ValueHint::FilePath)]
         control: Option<String>,
 
         /// ControlNet model name (e.g. controlnet-canny-sd15)
@@ -161,7 +161,10 @@ Examples:
   mold serve --bind 127.0.0.1 --port 9000
   MOLD_PORT=8080 mold serve
 
-Clients connect via MOLD_HOST=http://<addr>:<port>")]
+Clients connect via MOLD_HOST=http://<addr>:<port>
+
+For gated or private Hugging Face repos, export HF_TOKEN in the server
+environment before starting mold serve.")]
     Serve {
         /// Server port
         #[arg(long, env = "MOLD_PORT", default_value_t = 7680)]
@@ -172,7 +175,7 @@ Clients connect via MOLD_HOST=http://<addr>:<port>")]
         bind: String,
 
         /// Models directory
-        #[arg(long, env = "MOLD_MODELS_DIR")]
+        #[arg(long, env = "MOLD_MODELS_DIR", value_hint = ValueHint::DirPath)]
         models_dir: Option<String>,
 
         /// Log output format
@@ -188,6 +191,10 @@ Examples:
 
 If MOLD_HOST is reachable, the download happens on that server.
 If no server is reachable, mold pulls locally.
+
+For gated or private Hugging Face repos, export HF_TOKEN=hf_... before pulling.
+When using a remote server, HF_TOKEN must be set in the server process
+environment.
 
 Run 'mold list' to see all available models.")]
     Pull {
@@ -298,8 +305,54 @@ async fn main() {
         if e.downcast_ref::<AlreadyReported>().is_some() {
             std::process::exit(1);
         }
-        // Print the error chain cleanly without backtraces
-        eprintln!("{} {e}", theme::prefix_error());
+
+        let msg = format!("{e}");
+
+        // Strip candle backtrace frames (numbered lines referencing candle/tokio internals).
+        // Candle's Error::bt() embeds frame numbers in the Display output.
+        let short = msg
+            .lines()
+            .take_while(|line| {
+                let t = line.trim_start();
+                !(t.len() > 2
+                    && t.as_bytes()[0].is_ascii_digit()
+                    && (t.contains("candle") || t.contains("tokio") || t.contains("at /")))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let display = if short.is_empty() { &msg } else { &short };
+
+        // Detect CUDA/Metal OOM and print a friendly message with suggestions.
+        if msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
+            || msg.contains("out of memory")
+            || msg.contains("exceeds available VRAM")
+        {
+            eprintln!("{} {display}", theme::prefix_error());
+            eprintln!();
+            eprintln!("  GPU ran out of memory during generation.");
+            eprintln!("  Try these fixes:");
+            eprintln!();
+            eprintln!("    Reduce resolution:  --width 512 --height 512");
+            eprintln!("    Use a smaller model: mold run <model>:q4 \"...\"");
+            eprintln!();
+            eprintln!("  For img2img, the source image resolution is used by default.");
+            eprintln!("  Override with --width/--height to reduce VRAM usage.");
+            eprintln!("  Run 'mold list' to see available models and sizes.");
+            std::process::exit(1);
+        }
+
+        // Detect missing tensor errors (incompatible GGUF quantization format).
+        if msg.contains("cannot find tensor") {
+            eprintln!("{} {display}", theme::prefix_error());
+            eprintln!();
+            eprintln!("  The model file may be corrupted or uses an incompatible format.");
+            eprintln!("  Try re-downloading: mold rm <model> && mold pull <model>");
+            eprintln!("  Or try a different variant: mold list");
+            std::process::exit(1);
+        }
+
+        // For all other errors, print the stripped message (no candle backtraces).
+        eprintln!("{} {display}", theme::prefix_error());
         for cause in e.chain().skip(1) {
             eprintln!("  {} {cause}", theme::prefix_cause());
         }

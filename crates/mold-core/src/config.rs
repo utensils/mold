@@ -255,6 +255,12 @@ pub struct Config {
     #[serde(default)]
     pub qwen3_variant: Option<String>,
 
+    /// Optional directory to persist copies of generated images (server mode).
+    /// When set, every image produced by /api/generate is saved here.
+    /// Disabled by default (None).
+    #[serde(default)]
+    pub output_dir: Option<String>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -265,7 +271,11 @@ fn default_model() -> String {
 }
 
 fn default_models_dir() -> String {
-    "~/.mold/models".to_string()
+    if let Ok(home) = std::env::var("MOLD_HOME") {
+        format!("{home}/models")
+    } else {
+        "~/.mold/models".to_string()
+    }
 }
 
 fn default_port() -> u16 {
@@ -296,6 +306,7 @@ impl Default for Config {
             embed_metadata: default_embed_metadata(),
             t5_variant: None,
             qwen3_variant: None,
+            output_dir: None,
             models: HashMap::new(),
         }
     }
@@ -343,11 +354,12 @@ impl Config {
         fresh
     }
 
-    /// The root mold directory: `~/.mold/` on all platforms.
-    /// Falls back to `./.mold` (relative to CWD) if the home directory cannot
-    /// be determined (e.g. containers, CI). This preserves write-ability for
-    /// `mold pull` and server-side auto-pull even when `HOME` is unset.
+    /// The root mold directory.
+    /// Resolution: `MOLD_HOME` env var → `~/.mold/` → `./.mold` (if HOME unset).
     pub fn mold_dir() -> Option<PathBuf> {
+        if let Ok(home) = std::env::var("MOLD_HOME") {
+            return Some(PathBuf::from(home));
+        }
         Some(
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -378,6 +390,101 @@ impl Config {
 
     pub fn has_models_dir_override(&self) -> bool {
         RUNTIME_MODELS_DIR_OVERRIDE.get().is_some() || std::env::var_os("MOLD_MODELS_DIR").is_some()
+    }
+
+    /// Resolve the effective default model with idiot-proof fallback chain:
+    /// 1. `MOLD_DEFAULT_MODEL` env var (if set and non-empty)
+    /// 2. Config file `default_model` (if that model has a custom `[models]` entry)
+    /// 3. Config file `default_model` (if that model is a known manifest model that is downloaded)
+    /// 4. Last-used model from `$MOLD_HOME/last-model` (if downloaded)
+    /// 5. If exactly one model is downloaded, use it automatically
+    /// 6. Fall back to config value (will trigger auto-pull on use)
+    pub fn resolved_default_model(&self) -> String {
+        // 1. Env var override
+        if let Ok(m) = std::env::var("MOLD_DEFAULT_MODEL") {
+            if !m.is_empty() {
+                return m;
+            }
+        }
+        // 2. Explicit config entry — honor custom/manual models even when not manifest-backed.
+        let configured = &self.default_model;
+        if self.lookup_model_config(configured).is_some() {
+            return configured.clone();
+        }
+        // 3. Configured manifest model — if downloaded
+        if self.manifest_model_is_downloaded(configured) {
+            return configured.clone();
+        }
+        // 4. Last-used model — if still downloaded
+        if let Some(last) = Self::read_last_model() {
+            if self.manifest_model_is_downloaded(&last) {
+                return last;
+            }
+        }
+        // 5. Single downloaded model
+        let downloaded: Vec<String> = crate::manifest::known_manifests()
+            .iter()
+            .filter(|m| self.manifest_model_is_downloaded(&m.name))
+            .map(|m| m.name.clone())
+            .collect();
+        if downloaded.len() == 1 {
+            return downloaded.into_iter().next().unwrap();
+        }
+        // 6. Config default (will auto-pull)
+        configured.clone()
+    }
+
+    /// Path to the last-model state file: `$MOLD_HOME/last-model`
+    fn last_model_path() -> Option<PathBuf> {
+        Self::mold_dir().map(|d| d.join("last-model"))
+    }
+
+    /// Read the last-used model name from the state file.
+    pub fn read_last_model() -> Option<String> {
+        let path = Self::last_model_path()?;
+        std::fs::read_to_string(path).ok().and_then(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    /// Write the last-used model name to the state file (best-effort, non-fatal).
+    pub fn write_last_model(model: &str) {
+        if let Some(path) = Self::last_model_path() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, model);
+        }
+    }
+
+    /// Resolve the output directory for server-mode image persistence.
+    /// `MOLD_OUTPUT_DIR` env var takes precedence over the config file value.
+    /// Returns `None` when disabled (default).
+    pub fn resolved_output_dir(&self) -> Option<PathBuf> {
+        let raw = if let Ok(env_dir) = std::env::var("MOLD_OUTPUT_DIR") {
+            if env_dir.is_empty() {
+                None
+            } else {
+                Some(env_dir)
+            }
+        } else {
+            self.output_dir.clone().filter(|s| !s.is_empty())
+        };
+        raw.map(|dir| {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            if dir == "~" {
+                home
+            } else if let Some(rest) = dir.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(dir)
+            }
+        })
     }
 
     pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {

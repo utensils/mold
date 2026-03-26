@@ -518,4 +518,336 @@ is_schnell = false
             dir
         );
     }
+
+    // ── resolved_output_dir ───────────────────────────────────────────────
+
+    #[test]
+    fn resolved_output_dir_none_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let cfg = Config::default();
+        assert!(cfg.resolved_output_dir().is_none());
+    }
+
+    #[test]
+    fn resolved_output_dir_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "/tmp/mold-output");
+        let result = Config::default().resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/mold-output"));
+    }
+
+    #[test]
+    fn resolved_output_dir_empty_env_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "");
+        let result = Config::default().resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert!(result.is_none(), "empty env var should disable output_dir");
+    }
+
+    #[test]
+    fn resolved_output_dir_from_config_field() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/images".to_string());
+        assert_eq!(
+            cfg.resolved_output_dir().unwrap(),
+            PathBuf::from("/srv/images")
+        );
+    }
+
+    #[test]
+    fn resolved_output_dir_empty_config_field_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some(String::new());
+        assert!(cfg.resolved_output_dir().is_none());
+    }
+
+    #[test]
+    fn resolved_output_dir_env_overrides_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_OUTPUT_DIR", "/env/path");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/path".to_string());
+        let result = cfg.resolved_output_dir();
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        assert_eq!(result.unwrap(), PathBuf::from("/env/path"));
+    }
+
+    #[test]
+    fn resolved_output_dir_expands_tilde() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("~/mold-output".to_string());
+        let dir = cfg.resolved_output_dir().unwrap();
+        assert!(
+            !dir.to_str().unwrap().contains('~'),
+            "tilde should be expanded: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn resolved_output_dir_does_not_expand_tilde_in_middle() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/mold~backup/output".to_string());
+        let dir = cfg.resolved_output_dir().unwrap();
+        assert_eq!(
+            dir,
+            PathBuf::from("/srv/mold~backup/output"),
+            "tilde in the middle of a path should not be expanded"
+        );
+    }
+
+    // ── mold_dir / MOLD_HOME ─────────────────────────────────────────────
+
+    #[test]
+    fn mold_dir_defaults_to_dot_mold() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_HOME");
+        let dir = Config::mold_dir().unwrap();
+        assert!(
+            dir.ends_with(".mold"),
+            "should end with .mold: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn mold_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_HOME", "/custom/mold");
+        let dir = Config::mold_dir().unwrap();
+        std::env::remove_var("MOLD_HOME");
+        assert_eq!(dir, PathBuf::from("/custom/mold"));
+    }
+
+    #[test]
+    fn default_models_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_HOME", "/custom/mold");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let cfg = Config::default();
+        let dir = cfg.resolved_models_dir();
+        std::env::remove_var("MOLD_HOME");
+        assert_eq!(dir, PathBuf::from("/custom/mold/models"));
+    }
+
+    // ── output_dir deserialization ────────────────────────────────────────
+
+    #[test]
+    fn config_output_dir_absent_in_toml() {
+        let toml = r#"default_model = "flux-schnell""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.output_dir.is_none());
+    }
+
+    #[test]
+    fn config_output_dir_present_in_toml() {
+        let toml = r#"
+            default_model = "flux-schnell"
+            output_dir = "/srv/gallery"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.output_dir.as_deref(), Some("/srv/gallery"));
+    }
+
+    // ── resolved_default_model ────────────────────────────────────────────
+
+    #[test]
+    fn resolved_default_model_returns_config_value() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let cfg = Config::default();
+        assert_eq!(cfg.resolved_default_model(), "flux-schnell");
+    }
+
+    #[test]
+    fn resolved_default_model_env_overrides_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_DEFAULT_MODEL", "sdxl-turbo:fp16");
+        let result = Config::default().resolved_default_model();
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        assert_eq!(result, "sdxl-turbo:fp16");
+    }
+
+    #[test]
+    fn resolved_default_model_empty_env_ignored() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_DEFAULT_MODEL", "");
+        let result = Config::default().resolved_default_model();
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        // Empty env should fall through to config value
+        assert_eq!(result, "flux-schnell");
+    }
+
+    #[test]
+    fn resolved_default_model_prefers_config_only_model_over_manifest_fallbacks() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("default-model-config-only");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mold_home = std::env::temp_dir().join(format!(
+            "mold-home-config-default-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("last-model"), "flux-schnell:q8\n").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let mut models = HashMap::new();
+        models.insert(
+            "custom-model".to_string(),
+            ModelConfig {
+                transformer: Some("/models/custom/transformer.safetensors".to_string()),
+                vae: Some("/models/custom/vae.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            default_model: "custom-model".to_string(),
+            models,
+            ..Config::default()
+        };
+
+        assert_eq!(cfg.resolved_default_model(), "custom-model");
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    #[test]
+    fn resolved_default_model_missing_manifest_falls_back_to_downloaded_last_model() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("default-model-last");
+        populate_manifest_files(&models_dir, "sdxl-turbo:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mold_home = std::env::temp_dir().join(format!(
+            "mold-home-last-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("last-model"), "sdxl-turbo:fp16\n").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = Config {
+            default_model: "flux-dev:q4".to_string(),
+            ..Config::default()
+        };
+
+        assert_eq!(cfg.resolved_default_model(), "sdxl-turbo:fp16");
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    // ── last-model state file ─────────────────────────────────────────────
+
+    #[test]
+    fn write_and_read_last_model_roundtrip() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-last-model-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("MOLD_HOME", &dir);
+
+        Config::write_last_model("flux-dev:q4");
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("flux-dev:q4".to_string()));
+    }
+
+    #[test]
+    fn read_last_model_missing_file_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-no-last-model-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_last_model_empty_file_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-empty-last-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("last-model"), "  \n").unwrap();
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            result.is_none(),
+            "empty/whitespace-only file should be None"
+        );
+    }
+
+    #[test]
+    fn write_last_model_trims_on_read() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "mold-trim-last-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a file with trailing newline
+        std::fs::write(dir.join("last-model"), "sdxl-turbo:fp16\n").unwrap();
+        std::env::set_var("MOLD_HOME", &dir);
+
+        let result = Config::read_last_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("sdxl-turbo:fp16".to_string()));
+    }
 }

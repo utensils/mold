@@ -49,6 +49,12 @@ mold run "a banner" --width 1024 --height 512
 
 # Batch generation (multiple images)
 mold run "abstract art" --batch 4 --seed 100 -o art.png
+
+# JPEG output
+mold run "a sunset" --format jpeg -o sunset.jpg
+
+# Disable PNG metadata embedding
+mold run "a cat" --no-metadata
 ```
 
 ### Model Selection Guide
@@ -61,7 +67,7 @@ Pick the right model for the task:
 | `flux-dev:q4` | Slow (25 steps) | Excellent | Final quality, detailed |
 | `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
-| `z-image-turbo:q8` | Medium (30 steps) | Excellent | High quality, Qwen3 encoder |
+| `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
 
 Default model if none specified: `flux-schnell:q8`
 
@@ -69,18 +75,21 @@ Default model if none specified: `flux-schnell:q8`
 
 | Model | Steps | Guidance | Resolution |
 |-------|-------|----------|------------|
-| `flux-schnell` | 4 | 0.0 | 768x768 |
-| `flux-dev` | 25 | 3.5 | 768x768 |
-| `sdxl-base` / `sdxl-turbo` | 25 / 4 | 7.5 / 0.0 | 1024x1024 |
+| `flux-schnell` | 4 | 0.0 | 1024x1024 |
+| `flux-dev` | 25 | 3.5 | 1024x1024 |
+| `sdxl-base` | 25 | 7.5 | 1024x1024 |
+| `sdxl-turbo` | 4 | 0.0 | 512x512 |
 | `sd15` | 25 | 7.5 | 512x512 |
-| `sd3.5-large` | 30 | 5.0 | 1024x1024 |
-| `z-image-turbo` | 30 | 7.5 | 768x768 |
+| `sd3.5-large` | 28 | 4.0 | 1024x1024 |
+| `z-image-turbo` | 9 | 0.0 | 1024x1024 |
 
 ### Available Models
 
-**FLUX.1**: `flux-schnell:q8`, `flux-schnell:q6`, `flux-schnell:q4`, `flux-dev:q8`, `flux-dev:q6`, `flux-dev:q4`, `flux-krea:q8`, `flux-krea:q6`, `flux-krea:q4`
+**FLUX.1**: `flux-schnell:q8`, `flux-schnell:q6`, `flux-schnell:q4`, `flux-dev:q8`, `flux-dev:q6`, `flux-dev:q4`, `flux-krea:q8`, `flux-krea:q6`, `flux-krea:q4`, `flux-krea:fp8`
 
-**SDXL**: `sdxl-base:fp16`, `sdxl-turbo:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`, `playground-v2.5:fp16`
+**FLUX.1 Fine-tunes**: `jibmix-flux:q4`, `jibmix-flux:q5`, `jibmix-flux:fp8`, `ultrareal-v4:q8`, `ultrareal-v4:q5`, `ultrareal-v4:q4`, `ultrareal-v3:q8`, `ultrareal-v3:q6`, `ultrareal-v3:q4`, `ultrareal-v2:bf16`, `iniverse-mix:fp8`
+
+**SDXL**: `sdxl-base:fp16`, `sdxl-turbo:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`, `playground-v2.5:fp16`, `dreamshaper-xl:fp16`, `pony-v6:fp16`, `cyberrealistic-pony:fp16`
 
 **SD 1.5**: `sd15:fp16`, `dreamshaper-v8:fp16`, `realistic-vision-v5:fp16`
 
@@ -88,13 +97,15 @@ Default model if none specified: `flux-schnell:q8`
 
 **Z-Image**: `z-image-turbo:bf16`, `z-image-turbo:q8`, `z-image-turbo:q6`, `z-image-turbo:q4`
 
-**Other**: `flux2-klein:bf16`, `qwen-image:bf16/:q8/:q6/:q4`, `wuerstchen-v2:fp16`
+**Alpha**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`, `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `wuerstchen-v2:fp16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
 ### Name Resolution
 
 Bare names auto-resolve: `flux-dev` -> `flux-dev:q8`, `sdxl-base` -> `sdxl-base:fp16`, `sd15` -> `sd15:fp16`
+
+FP8 safetensors models are automatically quantized to Q8 GGUF on first use (one-time conversion, cached at `$MOLD_HOME/cache/`).
 
 ## img2img (Image-to-Image)
 
@@ -165,19 +176,28 @@ mold unload                          # Free GPU memory
 
 # Connect from another machine
 MOLD_HOST=http://gpu-host:7680 mold run "a cat"
+
+# Save all generated images to disk (server-side persistence)
+MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 ```
 
 ## Key Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default models |
+| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
-| `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage path |
+| `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
+| `MOLD_OUTPUT_DIR` | unset | Save server-generated images to this directory |
 | `MOLD_PORT` | `7680` | Server port |
 | `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
 | `MOLD_EAGER` | unset | Set `1` to keep all components loaded |
+| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
 | `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
+| `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
 | `MOLD_SCHEDULER` | unset | SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
+| `MOLD_CORS_ORIGIN` | unset | Restrict server CORS to specific origin |
 | `HF_TOKEN` | unset | HuggingFace token for gated models |
 
 ## Inference Modes
@@ -194,6 +214,8 @@ Models auto-pull if not downloaded: `mold run flux-schnell "a cat"` will downloa
 - Use `flux-dev:q4` for final quality images (25 steps)
 - Use `--seed` for reproducibility — same seed + same prompt = same image
 - Quantized models (q4/q6/q8) use less VRAM than fp16/bf16
+- FP8 safetensors models auto-convert to Q8 GGUF on first use (fits 24GB cards)
 - `--eager` trades VRAM for speed (keeps encoders loaded between generations)
 - Dimensions must be multiples of 16; total pixels capped at ~1.1 megapixels
 - For img2img, large source images auto-resize to fit the megapixel limit
+- Set `MOLD_HOME` to relocate all mold data (config, cache, models)

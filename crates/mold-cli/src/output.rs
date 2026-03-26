@@ -28,12 +28,29 @@ pub(crate) use status;
 /// bright yellow bold, rest dimmed. Normal descriptions are fully dimmed.
 pub fn colorize_description(desc: &str) -> String {
     use colored::Colorize;
-    if let Some(rest) = desc.strip_prefix("[alpha] ") {
-        format!("{} {}", "[alpha]".bright_yellow().bold(), rest.dimmed())
-    } else if let Some(rest) = desc.strip_prefix("[beta] ") {
-        format!("{} {}", "[beta]".bright_yellow().bold(), rest.dimmed())
+    // Handle trailing [gated] tag — render slightly lighter than the dimmed description
+    let (desc, gated_suffix) = if let Some(rest) = desc.strip_suffix(" [gated]") {
+        (rest, format!(" {}", "[gated]".bright_black()))
     } else {
-        format!("{}", desc.dimmed())
+        (desc, String::new())
+    };
+
+    if let Some(rest) = desc.strip_prefix("[alpha] ") {
+        format!(
+            "{} {}{}",
+            "[alpha]".bright_yellow().bold(),
+            rest.dimmed(),
+            gated_suffix,
+        )
+    } else if let Some(rest) = desc.strip_prefix("[beta] ") {
+        format!(
+            "{} {}{}",
+            "[beta]".bright_yellow().bold(),
+            rest.dimmed(),
+            gated_suffix,
+        )
+    } else {
+        format!("{}{}", desc.dimmed(), gated_suffix)
     }
 }
 
@@ -57,15 +74,17 @@ mod tests {
     #[test]
     fn test_colorize_description_alpha() {
         let result = colorize_description("[alpha] Experimental model");
-        // Should contain the [alpha] text and the rest of the description.
-        assert!(result.contains("[alpha]"));
+        assert!(
+            result.contains("[alpha]"),
+            "should have alpha tag: {result}"
+        );
         assert!(result.contains("Experimental model"));
     }
 
     #[test]
     fn test_colorize_description_beta() {
         let result = colorize_description("[beta] Experimental model");
-        assert!(result.contains("[beta]"));
+        assert!(result.contains("[beta]"), "should have beta tag: {result}");
         assert!(result.contains("Experimental model"));
     }
 

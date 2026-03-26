@@ -83,7 +83,7 @@ mold run "a cat" --no-metadata
 MOLD_EMBED_METADATA=0 mold run "a cat"
 ```
 
-In `~/.mold/config.toml`:
+In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 
 ```toml
 embed_metadata = false
@@ -147,6 +147,25 @@ mold info flux-dev:q4        # Model details + disk usage
 mold rm dreamshaper-v8       # Remove a model
 ```
 
+### Hugging Face auth
+
+Some model repos on Hugging Face require an authenticated read token. `mold`
+checks `HF_TOKEN` automatically when downloading model files, and falls back to
+the token saved by `huggingface-cli login` if present.
+
+```bash
+# Local pulls / first-run auto-download
+export HF_TOKEN=hf_...
+mold pull flux-dev:q4
+
+# Remote server pulls: set the token where mold serve is running
+HF_TOKEN=hf_... mold serve
+MOLD_HOST=http://gpu-server:7680 mold pull flux-dev:q4
+```
+
+If a gated repo still returns 401/403, make sure you have accepted that model's
+license on Hugging Face and that the token has at least read access.
+
 ### Remote rendering
 
 Run mold on a beefy GPU server, generate from anywhere:
@@ -158,6 +177,42 @@ mold serve
 # From your laptop
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 ```
+
+### Server image persistence
+
+Save a copy of every server-generated image to disk (disabled by default):
+
+```bash
+# Via environment variable
+MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
+
+# Via config file
+# output_dir = "/srv/mold/gallery"
+```
+
+Images are saved alongside the normal HTTP response using the same naming convention as the CLI (`mold-{model}-{timestamp}.{ext}`). Save failures log a warning but never fail the request.
+
+## Configuration
+
+Mold looks for `config.toml` inside the base mold directory (`~/.mold/` by default). Override the base with `MOLD_HOME`:
+
+```bash
+export MOLD_HOME=/data/mold    # config at /data/mold/config.toml, models at /data/mold/models/
+```
+
+Key environment variables (highest precedence, override config file):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default model storage |
+| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
+| `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
+| `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
+| `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
+| `MOLD_LOG` | `warn` / `info` | Log level |
+| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
+
+See [CLAUDE.md](CLAUDE.md) for the full list.
 
 ## Models
 

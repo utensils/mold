@@ -38,12 +38,12 @@ fn resolve_run_args(
         // First arg is part of the prompt, not a model
         let mut parts = vec![first.to_string()];
         parts.extend(prompt_rest.iter().cloned());
-        let model = resolve_model_name(&config.default_model);
+        let model = resolve_model_name(&config.resolved_default_model());
         return (model, Some(parts.join(" ")));
     }
 
     // No args at all
-    (resolve_model_name(&config.default_model), None)
+    (resolve_model_name(&config.resolved_default_model()), None)
 }
 
 #[allow(clippy::too_many_arguments)]

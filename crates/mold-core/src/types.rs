@@ -264,6 +264,10 @@ pub struct ModelInfoExtended {
     pub defaults: ModelDefaults,
     #[serde(default)]
     pub downloaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_usage_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_download_bytes: Option<u64>,
 }
 
 impl std::ops::Deref for ModelInfoExtended {
@@ -275,10 +279,26 @@ impl std::ops::Deref for ModelInfoExtended {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ActiveGenerationStatus {
+    #[schema(example = "flux-schnell:q8")]
+    pub model: String,
+    #[schema(example = "3df0d8c4c7c8f7b7c78dc37f2b5f7dd5f9f2acb95c8f3f873f98f2f0fcb1a9d5")]
+    pub prompt_sha256: String,
+    #[schema(example = 1711305600000_u64)]
+    pub started_at_unix_ms: u64,
+    #[schema(example = 950)]
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerStatus {
     #[schema(example = "0.2.0")]
     pub version: String,
     pub models_loaded: Vec<String>,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_generation: Option<ActiveGenerationStatus>,
     pub gpu_info: Option<GpuInfo>,
     #[schema(example = 3600)]
     pub uptime_secs: u64,
@@ -821,5 +841,73 @@ mod tests {
             r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert!(req.mask_image.is_none());
+    }
+
+    #[test]
+    fn default_output_filename_single() {
+        let name = super::default_output_filename("flux-dev:q8", 1700000000, "png", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000.png");
+    }
+
+    #[test]
+    fn default_output_filename_batch() {
+        let name = super::default_output_filename("flux-dev:q8", 1700000000, "png", 4, 2);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000-2.png");
+    }
+
+    #[test]
+    fn default_output_filename_jpeg() {
+        let name = super::default_output_filename("sdxl-turbo", 12345, "jpeg", 1, 0);
+        assert_eq!(name, "mold-sdxl-turbo-12345.jpeg");
+    }
+
+    #[test]
+    fn default_output_filename_millis_timestamp() {
+        // Server uses milliseconds for uniqueness
+        let name = super::default_output_filename("flux-dev-q8", 1700000000123, "png", 1, 0);
+        assert_eq!(name, "mold-flux-dev-q8-1700000000123.png");
+    }
+
+    #[test]
+    fn server_status_deserialize_without_busy_field() {
+        // Older servers don't send `busy` — #[serde(default)] makes it false
+        let json = r#"{
+            "version": "0.1.0",
+            "models_loaded": ["flux-schnell:q8"],
+            "gpu_info": null,
+            "uptime_secs": 3600
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert!(!status.busy, "missing busy field should default to false");
+        assert_eq!(status.models_loaded, vec!["flux-schnell:q8"]);
+    }
+
+    #[test]
+    fn server_status_deserialize_with_busy_true() {
+        let json = r#"{
+            "version": "0.2.0",
+            "models_loaded": [],
+            "busy": true,
+            "gpu_info": null,
+            "uptime_secs": 100
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert!(status.busy);
+    }
+}
+
+/// Build a default output filename, sanitizing colons from model names.
+pub fn default_output_filename(
+    model: &str,
+    timestamp: u64,
+    ext: &str,
+    batch: u32,
+    index: u32,
+) -> String {
+    let safe_model = model.replace(':', "-");
+    if batch == 1 {
+        format!("mold-{safe_model}-{timestamp}.{ext}")
+    } else {
+        format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
     }
 }

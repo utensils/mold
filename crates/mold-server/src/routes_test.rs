@@ -7,14 +7,27 @@ mod tests {
     use mold_core::{GenerateRequest, GenerateResponse, ImageData};
     use mold_inference::progress::ProgressCallback;
     use mold_inference::InferenceEngine;
+    use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
     };
     use std::time::Duration;
     use tower::ServiceExt;
 
-    use crate::{routes::create_router, state::AppState};
+    use crate::{
+        routes::create_router,
+        state::{AppState, EngineSnapshot},
+    };
+
+    /// Serialize tests that mutate MOLD_MODELS_DIR env var.
+    /// Uses std::sync::Mutex (not tokio) so it works across independent
+    /// tokio runtimes that #[tokio::test] creates per test.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &ENV_LOCK
+    }
 
     /// Parse response body as JSON and return the value.
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
@@ -22,6 +35,21 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[derive(Default)]
+    struct GenerateBlocker {
+        entered: AtomicBool,
+        released: Mutex<bool>,
+        released_cv: Condvar,
+    }
+
+    impl GenerateBlocker {
+        fn release(&self) {
+            let mut released = self.released.lock().unwrap();
+            *released = true;
+            self.released_cv.notify_all();
+        }
     }
 
     /// Minimal mock engine for testing routes without loading models.
@@ -33,6 +61,7 @@ mod tests {
         load_delay: Duration,
         progress_set_count: Arc<AtomicUsize>,
         progress_clear_count: Arc<AtomicUsize>,
+        generate_blocker: Option<Arc<GenerateBlocker>>,
     }
 
     impl MockEngine {
@@ -45,6 +74,7 @@ mod tests {
                 load_delay: Duration::from_millis(0),
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: None,
             }
         }
         fn failing() -> Self {
@@ -56,6 +86,7 @@ mod tests {
                 load_delay: Duration::from_millis(0),
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: None,
             }
         }
         fn empty_images() -> Self {
@@ -67,6 +98,7 @@ mod tests {
                 load_delay: Duration::from_millis(0),
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: None,
             }
         }
         fn unloaded(load_count: Arc<AtomicUsize>, load_delay: Duration) -> Self {
@@ -78,6 +110,7 @@ mod tests {
                 load_delay,
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: None,
             }
         }
 
@@ -93,12 +126,34 @@ mod tests {
                 load_delay: Duration::from_millis(0),
                 progress_set_count,
                 progress_clear_count,
+                generate_blocker: None,
+            }
+        }
+
+        fn blocking_generate(blocker: Arc<GenerateBlocker>) -> Self {
+            Self {
+                loaded: true,
+                fail: false,
+                empty_images: false,
+                load_count: Arc::new(AtomicUsize::new(0)),
+                load_delay: Duration::from_millis(0),
+                progress_set_count: Arc::new(AtomicUsize::new(0)),
+                progress_clear_count: Arc::new(AtomicUsize::new(0)),
+                generate_blocker: Some(blocker),
             }
         }
     }
 
     impl InferenceEngine for MockEngine {
         fn generate(&mut self, req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            if let Some(blocker) = &self.generate_blocker {
+                blocker.entered.store(true, Ordering::SeqCst);
+                let released = blocker.released.lock().unwrap();
+                let _released = blocker
+                    .released_cv
+                    .wait_while(released, |released| !*released)
+                    .unwrap();
+            }
             if self.fail {
                 anyhow::bail!("mock engine error");
             }
@@ -164,6 +219,29 @@ mod tests {
         format!(
             r#"{{"prompt":"{prompt}","model":"mock-model","width":{width},"height":{height},"steps":4,"batch_size":1,"output_format":"png"}}"#
         )
+    }
+
+    fn test_models_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "mold-server-routes-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    fn populate_manifest_files(root: &std::path::Path, model: &str) {
+        let manifest = mold_core::manifest::find_manifest(model).unwrap();
+        for file in &manifest.files {
+            let path = root.join(mold_core::manifest::storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"test").unwrap();
+        }
     }
 
     /// Returns a valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND).
@@ -236,6 +314,63 @@ mod tests {
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status["models_loaded"], serde_json::json!([]));
+        assert_eq!(status["busy"], serde_json::json!(false));
+        assert_eq!(status["current_generation"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn status_does_not_block_during_generation() {
+        let blocker = Arc::new(GenerateBlocker::default());
+        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+
+        let generate_task = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 768, 768)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("generate should enter the mock engine");
+
+        let resp = tokio::time::timeout(
+            Duration::from_millis(200),
+            app.clone()
+                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("/api/status should not block on active generation")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let status = json_body(resp).await;
+        assert_eq!(status["busy"], serde_json::json!(true));
+        assert_eq!(status["current_generation"]["model"], "mock-model");
+        assert_eq!(
+            status["current_generation"]["prompt_sha256"],
+            serde_json::json!(format!("{:x}", Sha256::digest("a cat".as_bytes())))
+        );
+        assert!(
+            status["current_generation"]["started_at_unix_ms"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+
+        blocker.release();
+        let generate_resp = generate_task.await.unwrap();
+        assert_eq!(generate_resp.status(), StatusCode::OK);
     }
 
     // ── /api/models ──────────────────────────────────────────────────────────
@@ -283,6 +418,95 @@ mod tests {
             assert_eq!(schnell["default_height"], 1024);
             assert_eq!(schnell["default_steps"], 4);
         }
+    }
+
+    #[tokio::test]
+    async fn list_models_reports_server_disk_and_remaining_download_bytes() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("remote-catalog");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let resp = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        let downloaded = models
+            .iter()
+            .find(|m| m["name"] == "flux-schnell:q8")
+            .expect("flux-schnell:q8 should be present");
+        assert_eq!(downloaded["downloaded"], serde_json::json!(true));
+        assert!(
+            downloaded["remaining_download_bytes"].is_number(),
+            "downloaded model should expose remaining download bytes"
+        );
+        assert!(
+            downloaded["disk_usage_bytes"].as_u64().unwrap() > 0,
+            "downloaded model should report server disk usage"
+        );
+
+        let available = models
+            .iter()
+            .find(|m| m["name"] == "flux-dev:q8")
+            .expect("flux-dev:q8 should be present");
+        assert_eq!(available["downloaded"], serde_json::json!(false));
+        assert!(
+            available["remaining_download_bytes"].as_u64().unwrap() > 0,
+            "available model should report server-side remaining bytes"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[tokio::test]
+    async fn list_models_does_not_block_during_generation() {
+        let blocker = Arc::new(GenerateBlocker::default());
+        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+
+        let generate_task = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 768, 768)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("generate should enter the mock engine");
+
+        let resp = tokio::time::timeout(
+            Duration::from_millis(200),
+            app.clone()
+                .oneshot(Request::get("/api/models").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("/api/models should not block on active generation")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        blocker.release();
+        let generate_resp = generate_task.await.unwrap();
+        assert_eq!(generate_resp.status(), StatusCode::OK);
     }
 
     // ── /api/generate — validation ───────────────────────────────────────────
@@ -478,6 +702,11 @@ mod tests {
 
     #[tokio::test]
     async fn generate_known_model_not_downloaded_returns_404() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("generate-not-downloaded");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
         let app = app_empty();
         // flux-schnell:q8 is a known manifest model but not configured/downloaded
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
@@ -493,6 +722,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = json_body(resp).await;
         assert_eq!(body["code"], "MODEL_NOT_FOUND");
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     // ── /api/openapi.json ────────────────────────────────────────────────────
@@ -630,6 +862,11 @@ mod tests {
 
     #[tokio::test]
     async fn stream_known_model_not_downloaded_returns_404() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("stream-not-downloaded");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
         let app = app_empty();
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let resp = app
@@ -644,6 +881,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = json_body(resp).await;
         assert_eq!(body["code"], "MODEL_NOT_FOUND");
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[tokio::test]
@@ -766,6 +1006,11 @@ mod tests {
             engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
                 MockEngine::unloaded(load_count.clone(), Duration::from_millis(50)),
             )))),
+            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
+                model_name: Some("mock-model".to_string()),
+                is_loaded: false,
+            })),
+            active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),

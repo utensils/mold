@@ -204,6 +204,8 @@ mold completions <SHELL>        Generate shell completions
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MOLD_HOME` | `~/.mold` | Override base mold directory (config, cache, default models) |
+| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model when none specified (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port |
@@ -221,6 +223,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
+| `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
 
@@ -240,6 +243,7 @@ default_width = 1024
 default_height = 1024
 # t5_variant = "auto"
 # qwen3_variant = "auto"
+# output_dir = "/srv/mold/gallery"
 
 [models."flux-schnell:q8"]
 transformer = "/path/to/flux1-schnell-Q8_0.gguf"
@@ -271,6 +275,10 @@ is_schnell = true
 **Systemd service**: `~/.config/systemd/user/mold-server.service` — configure with `LD_LIBRARY_PATH=/run/opengl-driver/lib` for NixOS CUDA driver access.
 
 **Remote setup**: GPU host runs `mold serve --port 7680`, clients set `MOLD_HOST=http://gpu-host:7680`.
+
+## Maintenance Notes
+
+- **Keep `.claude/skills/mold/SKILL.md` in sync** — This skill file is used by OpenClaw, ClawdBot, and other AI agents. Update it whenever models, CLI flags, env vars, or features change.
 
 ## Key Design Decisions
 
