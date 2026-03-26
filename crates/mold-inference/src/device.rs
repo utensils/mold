@@ -165,6 +165,9 @@ pub fn reclaim_gpu_memory() {
     let _ = result::ctx::synchronize();
 
     // Get the CUdevice handle for GPU 0.
+    // NOTE: This assumes a single-GPU setup — consistent with `create_device`
+    // which also hardcodes device 0. If multi-GPU support is added, this
+    // should iterate over all device indices that held engine allocations.
     let cu_device = match result::device::get(0) {
         Ok(d) => d,
         Err(e) => {

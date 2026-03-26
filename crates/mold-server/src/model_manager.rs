@@ -205,13 +205,15 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
             snapshot.model_name = None;
             snapshot.is_loaded = false;
             drop(snapshot);
-            drop(engine);
 
             // Reset the CUDA primary context to reclaim all GPU memory —
             // cuBLAS workspace caches, compiled kernel modules, memory pools.
             // Safe because the engine (and all its Device references) was
-            // already dropped above.
+            // already dropped above, and we still hold the engine mutex so
+            // no concurrent load can begin creating new CUDA objects.
             mold_inference::reclaim_gpu_memory();
+
+            drop(engine);
 
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
