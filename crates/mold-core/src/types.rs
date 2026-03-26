@@ -294,6 +294,12 @@ pub struct ActiveGenerationStatus {
 pub struct ServerStatus {
     #[schema(example = "0.2.0")]
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "da039e1")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "2026-03-25")]
+    pub build_date: Option<String>,
     pub models_loaded: Vec<String>,
     #[serde(default)]
     pub busy: bool,
