@@ -46,6 +46,17 @@ pub(crate) async fn check_model_available(
         }
     }
 
+    // The engine may be temporarily taken out of the slot during loading
+    // (ensure_model_ready uses .take() to avoid holding the mutex across
+    // spawn_blocking). Check the snapshot as a fallback — it retains the
+    // model name even while the engine is being loaded.
+    {
+        let snapshot = state.engine_snapshot.read().await;
+        if snapshot.model_name.as_deref() == Some(model_name) {
+            return Ok(None);
+        }
+    }
+
     let paths = {
         let config = state.config.read().await;
         ModelPaths::resolve(model_name, &config)
