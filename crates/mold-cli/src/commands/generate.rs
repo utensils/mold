@@ -22,9 +22,15 @@ fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Re
     let orig_h = img.height();
     let (w, h) = fit_to_model_dimensions(orig_w, orig_h, model_w, model_h);
     if w != orig_w || h != orig_h {
+        let is_upscale = w > orig_w || h > orig_h;
+        let icon = if is_upscale {
+            theme::icon_info()
+        } else {
+            theme::icon_warn()
+        };
         status!(
             "{} Source image {}x{} -> {}x{} (fit to {}x{} model bounds, 16px aligned)",
-            theme::icon_warn(),
+            icon,
             orig_w,
             orig_h,
             w,
@@ -557,17 +563,19 @@ async fn prepare_local_engine(
                 let model_cfg = effective_config.resolved_model_config(&model_name);
                 let new_model_w = model_cfg.effective_width(effective_config);
                 let new_model_h = model_cfg.effective_height(effective_config);
-                if req.source_image.is_some() && cli_width.is_none() && cli_height.is_none() {
-                    // img2img with auto-pull: fit source to newly-discovered model defaults
-                    if let Ok(img) = image::load_from_memory(req.source_image.as_ref().unwrap()) {
-                        let (w, h) = fit_to_model_dimensions(
-                            img.width(),
-                            img.height(),
-                            new_model_w,
-                            new_model_h,
-                        );
-                        req.width = w;
-                        req.height = h;
+                if cli_width.is_none() && cli_height.is_none() {
+                    if let Some(src_bytes) = &req.source_image {
+                        // img2img with auto-pull: fit source to newly-discovered model defaults
+                        if let Ok(img) = image::load_from_memory(src_bytes) {
+                            let (w, h) = fit_to_model_dimensions(
+                                img.width(),
+                                img.height(),
+                                new_model_w,
+                                new_model_h,
+                            );
+                            req.width = w;
+                            req.height = h;
+                        }
                     }
                 } else {
                     if cli_width.is_none() {

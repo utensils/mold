@@ -26,8 +26,10 @@ pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
 /// - If the source is wider than the model bounds, width is set to `model_w` and
 ///   height is scaled proportionally.
 /// - If the source is taller, height is set to `model_h` and width is scaled.
-/// - If the source fits entirely within model bounds, the model's native
-///   dimensions are used (upscaling to model native is correct for img2img).
+/// - If the source fits entirely within model bounds (same aspect ratio as the
+///   model), the model's native dimensions are used as the output. For sources
+///   with a different aspect ratio, the output fills the limiting axis at model
+///   scale while keeping the other axis within bounds.
 ///
 /// Output is rounded to 16px alignment and clamped to the megapixel limit.
 pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u32) -> (u32, u32) {
