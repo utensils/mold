@@ -192,17 +192,27 @@ pub(crate) async fn pull_model(
 
 pub(crate) async fn unload_model(state: &AppState) -> String {
     let mut engine = state.engine.lock().await;
-    match engine.as_mut() {
+    match engine.as_ref() {
         Some(e) if e.is_loaded() => {
             let name = e.model_name().to_string();
-            e.unload();
+            // Drop the entire engine (not just its loaded state) so all GPU
+            // resources — tensors, CUDA device handles, cuDNN/cuBLAS workspace
+            // buffers — are fully released back to the system.
+            *engine = None;
             // Update snapshot while still holding the engine lock to avoid
             // a window where engine is unloaded but snapshot still says loaded.
             let mut snapshot = state.engine_snapshot.write().await;
-            snapshot.model_name = Some(name.clone());
+            snapshot.model_name = None;
             snapshot.is_loaded = false;
             drop(snapshot);
             drop(engine);
+
+            // Reset the CUDA primary context to reclaim all GPU memory —
+            // cuBLAS workspace caches, compiled kernel modules, memory pools.
+            // Safe because the engine (and all its Device references) was
+            // already dropped above.
+            mold_inference::reclaim_gpu_memory();
+
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }

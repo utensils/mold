@@ -147,6 +147,46 @@ pub(crate) fn available_system_memory_bytes() -> Option<u64> {
     None
 }
 
+// ── GPU memory reclamation ───────────────────────────────────────────────────
+
+/// Reclaim GPU memory by resetting the CUDA primary context.
+///
+/// **Must only be called when no CUDA objects (tensors, devices, engines) exist.**
+/// This resets all CUDA state on GPU 0: driver context, cuBLAS workspace caches,
+/// compiled kernel modules, and memory pools. After calling this, the next
+/// `Device::new_cuda(0)` will create a fresh context.
+///
+/// On non-CUDA platforms, this is a no-op.
+#[cfg(feature = "cuda")]
+pub fn reclaim_gpu_memory() {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys};
+
+    // Synchronize to ensure all async GPU work completes before reset.
+    let _ = result::ctx::synchronize();
+
+    // Get the CUdevice handle for GPU 0.
+    let cu_device = match result::device::get(0) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("reclaim_gpu_memory: failed to get device: {e}");
+            return;
+        }
+    };
+
+    // Reset the primary context — frees all allocations, destroys cuBLAS/cuDNN
+    // workspace caches, and releases compiled kernel modules.
+    let result = unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) };
+    if result != sys::CUresult::CUDA_SUCCESS {
+        tracing::warn!("reclaim_gpu_memory: cuDevicePrimaryCtxReset returned {result:?}");
+    } else {
+        tracing::info!("CUDA primary context reset, GPU memory reclaimed");
+    }
+}
+
+/// No-op on non-CUDA platforms.
+#[cfg(not(feature = "cuda"))]
+pub fn reclaim_gpu_memory() {}
+
 // ── VRAM query ───────────────────────────────────────────────────────────────
 
 /// Query free VRAM in bytes from the current CUDA context.

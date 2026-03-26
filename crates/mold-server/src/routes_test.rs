@@ -1044,6 +1044,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unload_drops_engine_entirely() {
+        let state = AppState::with_engine(MockEngine::ready());
+        let app = app_with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Engine must be None — fully dropped, not just internally unloaded
+        let engine = state.engine.lock().await;
+        assert!(engine.is_none(), "engine should be dropped after unload");
+    }
+
+    #[tokio::test]
+    async fn unload_clears_snapshot_model_name() {
+        let state = AppState::with_engine(MockEngine::ready());
+        let app = app_with_state(state.clone());
+
+        // Verify snapshot has model_name before unload
+        {
+            let snapshot = state.engine_snapshot.read().await;
+            assert!(snapshot.model_name.is_some());
+            assert!(snapshot.is_loaded);
+        }
+
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Snapshot must be fully cleared after unload
+        let snapshot = state.engine_snapshot.read().await;
+        assert!(
+            snapshot.model_name.is_none(),
+            "snapshot model_name should be None after unload"
+        );
+        assert!(!snapshot.is_loaded);
+    }
+
+    #[tokio::test]
+    async fn unload_no_model_returns_200_with_message() {
+        let app = app_with_state(AppState::empty(mold_core::Config::default()));
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("no model loaded"));
+    }
+
+    #[tokio::test]
     async fn concurrent_requests_only_load_existing_engine_once() {
         let load_count = Arc::new(AtomicUsize::new(0));
         let state = AppState {
