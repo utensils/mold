@@ -138,6 +138,7 @@ in
         Type = "simple";
         User = "mold";
         Group = "mold";
+        UMask = "0002";
         ExecStartPre = lib.optionals (cfg.hfTokenFile != null) [
           "+${pkgs.writeShellScript "mold-env" ''
             echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" > /run/mold/env
