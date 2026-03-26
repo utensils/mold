@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    clamp_to_megapixel_limit, classify_generate_error, Config, GenerateRequest, GenerateResponse,
+    classify_generate_error, fit_to_model_dimensions, Config, GenerateRequest, GenerateResponse,
     GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
@@ -14,27 +14,29 @@ use crate::output::{is_piped, status};
 use crate::theme;
 use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
 
-fn normalize_source_dimensions(width: u32, height: u32) -> (u32, u32) {
-    let (width, height) = clamp_to_megapixel_limit(width, height);
-    let width = width.saturating_sub(width % 16).max(16);
-    let height = height.saturating_sub(height % 16).max(16);
-    (width, height)
-}
-
-fn source_image_default_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+/// Fit source image dimensions to the model's native resolution, preserving aspect ratio.
+fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Result<(u32, u32)> {
     let img = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
     let orig_w = img.width();
     let orig_h = img.height();
-    let (w, h) = normalize_source_dimensions(orig_w, orig_h);
+    let (w, h) = fit_to_model_dimensions(orig_w, orig_h, model_w, model_h);
     if w != orig_w || h != orig_h {
+        let is_upscale = w > orig_w || h > orig_h;
+        let icon = if is_upscale {
+            theme::icon_info()
+        } else {
+            theme::icon_warn()
+        };
         status!(
-            "{} Source image {}x{} resized to {}x{} (megapixel limit / 16px alignment)",
-            theme::icon_warn(),
+            "{} Source image {}x{} -> {}x{} (fit to {}x{} model bounds, 16px aligned)",
+            icon,
             orig_w,
             orig_h,
             w,
-            h
+            h,
+            model_w,
+            model_h
         );
     }
     Ok((w, h))
@@ -51,21 +53,16 @@ fn effective_dimensions(
         (Some(width), Some(height), _) => Ok((width, height)),
         (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
         (None, Some(height), _) => Ok((model_cfg.effective_width(config), height)),
-        (None, None, Some(source_image)) => source_image_default_dimensions(source_image),
+        (None, None, Some(source_image)) => {
+            let model_w = model_cfg.effective_width(config);
+            let model_h = model_cfg.effective_height(config);
+            source_image_model_dimensions(source_image, model_w, model_h)
+        }
         (None, None, None) => Ok((
             model_cfg.effective_width(config),
             model_cfg.effective_height(config),
         )),
     }
-}
-
-#[cfg(any(feature = "cuda", feature = "metal", test))]
-fn preserve_source_dimensions_on_auto_pull(
-    req: &GenerateRequest,
-    cli_width: Option<u32>,
-    cli_height: Option<u32>,
-) -> bool {
-    req.source_image.is_some() && cli_width.is_none() && cli_height.is_none()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -564,13 +561,29 @@ async fn prepare_local_engine(
                 effective_config = &auto_config;
 
                 let model_cfg = effective_config.resolved_model_config(&model_name);
-                let preserve_source_dimensions =
-                    preserve_source_dimensions_on_auto_pull(&req, cli_width, cli_height);
-                if cli_width.is_none() && !preserve_source_dimensions {
-                    req.width = model_cfg.effective_width(effective_config);
-                }
-                if cli_height.is_none() && !preserve_source_dimensions {
-                    req.height = model_cfg.effective_height(effective_config);
+                let new_model_w = model_cfg.effective_width(effective_config);
+                let new_model_h = model_cfg.effective_height(effective_config);
+                if cli_width.is_none() && cli_height.is_none() {
+                    if let Some(src_bytes) = &req.source_image {
+                        // img2img with auto-pull: fit source to newly-discovered model defaults
+                        if let Ok(img) = image::load_from_memory(src_bytes) {
+                            let (w, h) = fit_to_model_dimensions(
+                                img.width(),
+                                img.height(),
+                                new_model_w,
+                                new_model_h,
+                            );
+                            req.width = w;
+                            req.height = h;
+                        }
+                    }
+                } else {
+                    if cli_width.is_none() {
+                        req.width = new_model_w;
+                    }
+                    if cli_height.is_none() {
+                        req.height = new_model_h;
+                    }
                 }
                 if cli_steps.is_none() {
                     req.steps = model_cfg.effective_steps(effective_config);
@@ -924,34 +937,36 @@ mod tests {
     }
 
     #[test]
-    fn effective_dimensions_uses_source_image_defaults_for_img2img() {
+    fn effective_dimensions_fits_wide_source_to_model_bounds() {
         let config = Config::default();
         let model_cfg = ModelConfig {
             default_width: Some(1024),
             default_height: Some(1024),
             ..ModelConfig::default()
         };
+        // 1280x704 is wider than 1:1 model -> width-limited: w=1024, h=1024*(704/1280)=563.2->560
         let source = png_with_dimensions(1280, 704);
 
         assert_eq!(
             effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
-            (1280, 704)
+            (1024, 560)
         );
     }
 
     #[test]
-    fn effective_dimensions_normalizes_source_image_dimensions() {
+    fn effective_dimensions_fits_non_aligned_source_to_model_bounds() {
         let config = Config::default();
         let model_cfg = ModelConfig {
             default_width: Some(1024),
             default_height: Some(1024),
             ..ModelConfig::default()
         };
+        // 1001x777: src_ratio=1.288 > 1.0, width-limited: w=1024, h=1024/1.288=795.0->784
         let source = png_with_dimensions(1001, 777);
 
         assert_eq!(
             effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
-            (992, 768)
+            (1024, 784)
         );
     }
 
@@ -972,37 +987,53 @@ mod tests {
     }
 
     #[test]
-    fn preserve_source_dimensions_on_auto_pull_only_when_both_dimensions_are_implicit() {
-        let req = GenerateRequest {
-            prompt: "test".to_string(),
-            model: "flux-schnell:q8".to_string(),
-            width: 1280,
-            height: 704,
-            steps: 4,
-            guidance: 0.0,
-            seed: None,
-            batch_size: 1,
-            output_format: OutputFormat::Png,
-            embed_metadata: None,
-            scheduler: None,
-            source_image: Some(png_with_dimensions(1280, 704)),
-            strength: 0.75,
-            mask_image: None,
-            control_image: None,
-            control_model: None,
-            control_scale: 1.0,
+    fn effective_dimensions_downscales_to_sd15_model() {
+        // 1024x1024 FLUX output -> 512x512 SD1.5 model
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(512),
+            default_height: Some(512),
+            ..ModelConfig::default()
         };
+        let source = png_with_dimensions(1024, 1024);
 
-        assert!(preserve_source_dimensions_on_auto_pull(&req, None, None));
-        assert!(!preserve_source_dimensions_on_auto_pull(
-            &req,
-            Some(512),
-            None
-        ));
-        assert!(!preserve_source_dimensions_on_auto_pull(
-            &req,
-            None,
-            Some(512)
-        ));
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            (512, 512)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_wide_source_to_sd15() {
+        // 1920x1080 -> 512x512 SD1.5: width-limited, h=512/1.778=287.9->288
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(512),
+            default_height: Some(512),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1920, 1080);
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            (512, 288)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_upscales_small_source_to_model_native() {
+        // 512x512 source -> 1024x1024 FLUX model (upscale to model native)
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(512, 512);
+
+        assert_eq!(
+            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            (1024, 1024)
+        );
     }
 }

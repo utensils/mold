@@ -18,6 +18,37 @@ pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
     (new_w.max(16), new_h.max(16))
 }
 
+/// Fit source image dimensions into a model's native resolution bounding box,
+/// preserving aspect ratio.
+///
+/// The model's default width/height define the bounding box. The source image's
+/// aspect ratio is preserved:
+/// - If the source is wider than the model bounds, width is set to `model_w` and
+///   height is scaled proportionally.
+/// - If the source is taller, height is set to `model_h` and width is scaled.
+/// - If the source fits entirely within model bounds (same aspect ratio as the
+///   model), the model's native dimensions are used as the output. For sources
+///   with a different aspect ratio, the output fills the limiting axis at model
+///   scale while keeping the other axis within bounds.
+///
+/// Output is rounded to 16px alignment and clamped to the megapixel limit.
+pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u32) -> (u32, u32) {
+    let src_ratio = src_w as f64 / src_h as f64;
+    let model_ratio = model_w as f64 / model_h as f64;
+
+    let (w, h) = if src_ratio > model_ratio {
+        // Source is wider: width-limited
+        (model_w as f64, model_w as f64 / src_ratio)
+    } else {
+        // Source is taller or same: height-limited
+        (model_h as f64 * src_ratio, model_h as f64)
+    };
+
+    let w = ((w as u32) / 16 * 16).max(16);
+    let h = ((h as u32) / 16 * 16).max(16);
+    clamp_to_megapixel_limit(w, h)
+}
+
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
 /// Shared between the HTTP server and local CLI inference paths.
 pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
@@ -520,5 +551,81 @@ mod tests {
     fn no_mask_no_source_passes() {
         let req = valid_req();
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    // ── fit_to_model_dimensions tests ────────────────────────────────────
+
+    #[test]
+    fn fit_same_aspect_downscale() {
+        // 1024x1024 source -> 512x512 SD1.5 model
+        assert_eq!(fit_to_model_dimensions(1024, 1024, 512, 512), (512, 512));
+    }
+
+    #[test]
+    fn fit_wide_source_downscale() {
+        // 1920x1080 source -> 512x512 SD1.5 model
+        // width-limited: w=512, h=512/1.778=287.9 -> 288 (16px aligned)
+        assert_eq!(fit_to_model_dimensions(1920, 1080, 512, 512), (512, 288));
+    }
+
+    #[test]
+    fn fit_small_source_upscale_to_model_native() {
+        // 512x512 source -> 1024x1024 FLUX model (upscale to native)
+        assert_eq!(fit_to_model_dimensions(512, 512, 1024, 1024), (1024, 1024));
+    }
+
+    #[test]
+    fn fit_portrait_source() {
+        // 768x1024 source -> 512x512 model
+        // height-limited: h=512, w=512*0.75=384
+        assert_eq!(fit_to_model_dimensions(768, 1024, 512, 512), (384, 512));
+    }
+
+    #[test]
+    fn fit_identity() {
+        assert_eq!(
+            fit_to_model_dimensions(1024, 1024, 1024, 1024),
+            (1024, 1024)
+        );
+    }
+
+    #[test]
+    fn fit_extreme_landscape() {
+        // 3840x720 -> 1024x1024 model
+        // width-limited: w=1024, h=1024/5.333=192
+        assert_eq!(fit_to_model_dimensions(3840, 720, 1024, 1024), (1024, 192));
+    }
+
+    #[test]
+    fn fit_non_square_model_bounds() {
+        // 1920x1080 -> 1024x768 model
+        // src_ratio=1.778, model_ratio=1.333, width-limited: w=1024, h=1024/1.778=575.8 -> 576
+        assert_eq!(fit_to_model_dimensions(1920, 1080, 1024, 768), (1024, 576));
+    }
+
+    #[test]
+    fn fit_dimensions_are_16px_aligned() {
+        let (w, h) = fit_to_model_dimensions(1000, 600, 512, 512);
+        assert!(w % 16 == 0, "width {w} must be 16px aligned");
+        assert!(h % 16 == 0, "height {h} must be 16px aligned");
+    }
+
+    #[test]
+    fn fit_within_megapixel_limit() {
+        let (w, h) = fit_to_model_dimensions(4096, 4096, 2048, 2048);
+        let pixels = w as u64 * h as u64;
+        assert!(
+            pixels <= MAX_PIXELS,
+            "{}x{} = {} pixels exceeds limit",
+            w,
+            h,
+            pixels
+        );
+    }
+
+    #[test]
+    fn fit_tiny_source_gets_model_native() {
+        // 64x64 source -> 1024x1024 model
+        assert_eq!(fit_to_model_dimensions(64, 64, 1024, 1024), (1024, 1024));
     }
 }

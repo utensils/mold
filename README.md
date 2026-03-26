@@ -103,7 +103,7 @@ embed_metadata = false
 
 ### Image-to-image
 
-Transform existing images with a text prompt:
+Transform existing images with a text prompt. Source images auto-resize to fit the target model's native resolution (preserving aspect ratio), so you don't need to worry about dimension mismatches or OOM errors.
 
 ```bash
 # Stylize a photo
@@ -114,6 +114,9 @@ mold run "watercolor" --image photo.png --strength 0.5
 
 # Pipe an image through
 cat photo.png | mold run "sketch style" --image - | viu -
+
+# Override auto-resize with explicit dimensions
+mold run "pencil sketch" --image photo.png --width 768 --height 512
 ```
 
 ### Inpainting
