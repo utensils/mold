@@ -74,17 +74,9 @@ impl<T> Drop for OptionRestoreGuard<'_, T> {
 
 /// Select the optimal dtype for GPU inference.
 ///
-/// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)
-/// - Metal/MPS: F32 (BF16 on Metal has precision issues that cause washed-out,
-///   blurry images — matmul accumulation errors compound through denoising loops.
-///   This matches InvokeAI/diffusers which also avoid BF16 on MPS.)
-/// - CPU: F32
+/// Re-exported from `device::gpu_dtype` for backward compatibility.
 pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
-    if device.is_cuda() {
-        candle_core::DType::BF16
-    } else {
-        candle_core::DType::F32
-    }
+    crate::device::gpu_dtype(device)
 }
 
 /// Generate a random seed from the current system time.

@@ -46,7 +46,7 @@ impl ClipEncoder {
         let model = clip::text_model::ClipTextTransformer::new(vb.pp("text_model"), &config())?;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
-        let on_gpu = device.is_cuda() || device.is_metal();
+        let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {
             model: Some(model),

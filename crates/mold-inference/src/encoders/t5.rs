@@ -95,7 +95,7 @@ impl T5Encoder {
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
-        let on_gpu = device.is_cuda() || device.is_metal();
+        let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {
             model: Some(model),

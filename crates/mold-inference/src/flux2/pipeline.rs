@@ -31,6 +31,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
@@ -54,14 +55,9 @@ struct LoadedFlux2 {
 
 /// Flux.2 Klein-4B inference engine backed by candle.
 pub struct Flux2Engine {
-    loaded: Option<LoadedFlux2>,
-    model_name: String,
-    paths: ModelPaths,
-    progress: ProgressReporter,
+    base: EngineBase<LoadedFlux2>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
-    /// How to load model components (Eager = all at once, Sequential = load-use-drop).
-    load_strategy: LoadStrategy,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
 }
 
@@ -74,12 +70,8 @@ impl Flux2Engine {
         load_strategy: LoadStrategy,
     ) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
-            progress: ProgressReporter::default(),
+            base: EngineBase::new(model_name, paths, load_strategy),
             qwen3_variant,
-            load_strategy,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
@@ -87,6 +79,7 @@ impl Flux2Engine {
     /// Validate that all required paths exist.
     fn validate_paths(&self) -> Result<std::path::PathBuf> {
         let text_tokenizer_path = self
+            .base
             .paths
             .text_tokenizer
             .as_ref()
@@ -108,14 +101,14 @@ impl Flux2Engine {
             }
         }
 
-        if !self.paths.transformer.exists() {
+        if !self.base.paths.transformer.exists() {
             bail!(
                 "transformer file not found: {}",
-                self.paths.transformer.display()
+                self.base.paths.transformer.display()
             );
         }
-        if !self.paths.vae.exists() {
-            bail!("VAE file not found: {}", self.paths.vae.display());
+        if !self.base.paths.vae.exists() {
+            bail!("VAE file not found: {}", self.base.paths.vae.display());
         }
 
         Ok(text_tokenizer_path.clone())
@@ -123,11 +116,12 @@ impl Flux2Engine {
 
     /// Get text encoder file paths (shards or single file).
     fn text_encoder_paths(&self) -> Vec<std::path::PathBuf> {
-        if !self.paths.text_encoder_files.is_empty() {
-            self.paths.text_encoder_files.clone()
+        if !self.base.paths.text_encoder_files.is_empty() {
+            self.base.paths.text_encoder_files.clone()
         } else {
             // Fallback: t5_encoder field is reused as the generic text encoder path
-            self.paths
+            self.base
+                .paths
                 .t5_encoder
                 .as_ref()
                 .map(|p| vec![p.clone()])
@@ -191,88 +185,90 @@ impl Flux2Engine {
 
     /// Load all model components (Eager mode).
     ///
-    /// On error, `self.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// On error, `self.base.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
         // Sequential mode defers loading to generate_sequential()
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
-        tracing::info!(model = %self.model_name, "loading Flux.2 Klein model components...");
+        tracing::info!(model = %self.base.model_name, "loading Flux.2 Klein model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
         // --- Load transformer on GPU first ---
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Flux.2 transformer (GPU, BF16)");
         let xformer_stage = Instant::now();
         tracing::info!(
-            path = %self.paths.transformer.display(),
+            path = %self.base.paths.transformer.display(),
             "loading Flux.2 transformer on GPU..."
         );
 
         let flux2_cfg = Flux2Config::klein();
-        let xformer_paths = if !self.paths.transformer_shards.is_empty() {
-            self.paths.transformer_shards.clone()
+        let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
+            self.base.paths.transformer_shards.clone()
         } else {
-            vec![self.paths.transformer.clone()]
+            vec![self.base.paths.transformer.clone()]
         };
         let flux_vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, &device)? };
         let transformer = Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
             &flux2_cfg, flux_vb,
         )?);
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Flux.2 transformer (GPU, BF16)",
             xformer_stage.elapsed(),
         );
         tracing::info!("Flux.2 transformer loaded on GPU");
 
         // --- Load VAE on GPU ---
-        self.progress.stage_start("Loading VAE (GPU)");
+        self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
-        tracing::info!(path = %self.paths.vae.display(), "loading VAE on GPU...");
+        tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         let vae_cfg = Flux2VaeConfig::klein();
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.vae),
+                std::slice::from_ref(&self.base.paths.vae),
                 gpu_dtype,
                 &device,
             )?
         };
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
         tracing::info!("VAE loaded on GPU");
 
         // --- Resolve and load Qwen3 text encoder ---
         let free = free_vram_bytes().unwrap_or(0);
         if free > 0 {
-            self.progress.info(&format!(
+            self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
                 fmt_gb(free)
             ));
         }
 
-        self.progress.stage_start("Selecting Qwen3 encoder");
+        self.base.progress.stage_start("Selecting Qwen3 encoder");
         let resolve_start = Instant::now();
         let (encoder_paths, is_gguf, on_gpu, device_label) = {
             let bf16_paths = self.text_encoder_paths();
             let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
             crate::encoders::variant_resolution::resolve_qwen3_variant(
-                &self.progress,
+                &self.base.progress,
                 self.qwen3_variant.as_deref(),
                 &device,
                 free,
@@ -281,14 +277,15 @@ impl Flux2Engine {
                 true,
             )?
         };
-        self.progress
+        self.base
+            .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
         let enc_device = if on_gpu { &device } else { &cpu };
         let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
 
         let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
-        self.progress.stage_start(&enc_stage_label);
+        self.base.progress.stage_start(&enc_stage_label);
         let enc_stage = Instant::now();
 
         let text_encoder = if is_gguf {
@@ -305,11 +302,12 @@ impl Flux2Engine {
                 enc_dtype,
             )?
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(&enc_stage_label, enc_stage.elapsed());
         tracing::info!(device = %device_label, "Qwen3 encoder loaded");
 
-        self.loaded = Some(LoadedFlux2 {
+        self.base.loaded = Some(LoadedFlux2 {
             transformer,
             text_encoder,
             vae,
@@ -317,7 +315,7 @@ impl Flux2Engine {
             dtype: gpu_dtype,
         });
 
-        tracing::info!(model = %self.model_name, "all Flux.2 model components loaded successfully");
+        tracing::info!(model = %self.base.model_name, "all Flux.2 model components loaded successfully");
         Ok(())
     }
 
@@ -325,11 +323,11 @@ impl Flux2Engine {
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let text_tokenizer_path = self.validate_paths()?;
 
-        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.progress.info(&warning);
+        if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
+            self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -345,18 +343,19 @@ impl Flux2Engine {
             "starting sequential Flux.2 generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Qwen3 text encoding ---
         let free = free_vram_bytes().unwrap_or(0);
-        self.progress.stage_start("Selecting Qwen3 encoder");
+        self.base.progress.stage_start("Selecting Qwen3 encoder");
         let resolve_start = Instant::now();
         let (encoder_paths, is_gguf, on_gpu, device_label) = {
             let bf16_paths = self.text_encoder_paths();
             let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
             crate::encoders::variant_resolution::resolve_qwen3_variant(
-                &self.progress,
+                &self.base.progress,
                 self.qwen3_variant.as_deref(),
                 &device,
                 free,
@@ -365,7 +364,8 @@ impl Flux2Engine {
                 true,
             )?
         };
-        self.progress
+        self.base
+            .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
         let enc_device = if on_gpu { &device } else { &Device::Cpu };
@@ -378,11 +378,11 @@ impl Flux2Engine {
             .sum();
         preflight_memory_check("Qwen3 encoder", enc_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
-        self.progress.stage_start(&enc_stage_label);
+        self.base.progress.stage_start(&enc_stage_label);
         let enc_stage = Instant::now();
 
         let mut text_encoder = if is_gguf {
@@ -399,11 +399,12 @@ impl Flux2Engine {
                 enc_dtype,
             )?
         };
-        self.progress
+        self.base
+            .progress
             .stage_done(&enc_stage_label, enc_stage.elapsed());
 
         let txt_emb = Self::encode_prompt_cached(
-            &self.progress,
+            &self.base.progress,
             &self.prompt_cache,
             &mut text_encoder,
             &req.prompt,
@@ -413,55 +414,57 @@ impl Flux2Engine {
 
         // Drop text encoder to free memory
         drop(text_encoder);
-        self.progress.info("Freed Qwen3 encoder");
+        self.base.progress.info("Freed Qwen3 encoder");
         tracing::info!("Qwen3 encoder dropped (sequential mode)");
 
         // --- Phase 2: Load transformer + VAE, denoise ---
-        let xformer_size = std::fs::metadata(&self.paths.transformer)
+        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        let vae_file_size = std::fs::metadata(&self.paths.vae)
+        let vae_file_size = std::fs::metadata(&self.base.paths.vae)
             .map(|m| m.len())
             .unwrap_or(0);
         preflight_memory_check("Flux.2 transformer + VAE", xformer_size + vae_file_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let flux2_cfg = Flux2Config::klein();
 
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Flux.2 transformer (GPU, BF16)");
         let xformer_stage = Instant::now();
 
-        let xformer_paths = if !self.paths.transformer_shards.is_empty() {
-            self.paths.transformer_shards.clone()
+        let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
+            self.base.paths.transformer_shards.clone()
         } else {
-            vec![self.paths.transformer.clone()]
+            vec![self.base.paths.transformer.clone()]
         };
         let flux_vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, &device)? };
         let transformer = Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
             &flux2_cfg, flux_vb,
         )?);
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Flux.2 transformer (GPU, BF16)",
             xformer_stage.elapsed(),
         );
 
         // Load VAE
-        self.progress.stage_start("Loading VAE (GPU)");
+        self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_cfg = Flux2VaeConfig::klein();
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.paths.vae),
+                std::slice::from_ref(&self.base.paths.vae),
                 gpu_dtype,
                 &device,
             )?
         };
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
 
         // Generate noise with seed for reproducibility
@@ -476,7 +479,7 @@ impl Flux2Engine {
         let timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
-        self.progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         let img = transformer.denoise(
@@ -487,30 +490,32 @@ impl Flux2Engine {
             &state.vec,
             &timesteps,
             req.guidance,
-            &self.progress,
+            &self.base.progress,
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer + state to free memory for VAE decode
         drop(transformer);
-        self.progress.info("Freed Flux.2 transformer");
+        self.base.progress.info("Freed Flux.2 transformer");
         drop(state);
         drop(txt_emb);
         device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
 
         // --- Phase 3: VAE decode ---
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
         let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
         let output_metadata = build_output_metadata(req, seed, None);
@@ -559,14 +564,15 @@ impl InferenceEngine for Flux2Engine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         // Eager mode: use pre-loaded components
-        let progress = &self.progress;
+        let progress = &self.base.progress;
 
         let loaded = self
+            .base
             .loaded
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
@@ -692,11 +698,11 @@ impl InferenceEngine for Flux2Engine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -704,15 +710,15 @@ impl InferenceEngine for Flux2Engine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }

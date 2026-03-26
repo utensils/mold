@@ -38,6 +38,7 @@ use crate::device::{
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
@@ -115,12 +116,7 @@ impl QwenImageTransformer {
 
 /// Qwen-Image-2512 inference engine.
 pub struct QwenImageEngine {
-    loaded: Option<LoadedQwenImage>,
-    model_name: String,
-    paths: ModelPaths,
-    progress: ProgressReporter,
-    /// How to load model components.
-    load_strategy: LoadStrategy,
+    base: EngineBase<LoadedQwenImage>,
     prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
 }
 
@@ -160,11 +156,7 @@ impl QwenImageEngine {
 
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
-            progress: ProgressReporter::default(),
-            load_strategy,
+            base: EngineBase::new(model_name, paths, load_strategy),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
@@ -208,15 +200,16 @@ impl QwenImageEngine {
 
     /// Resolve transformer shard paths.
     fn transformer_paths(&self) -> Vec<std::path::PathBuf> {
-        if !self.paths.transformer_shards.is_empty() {
-            self.paths.transformer_shards.clone()
+        if !self.base.paths.transformer_shards.is_empty() {
+            self.base.paths.transformer_shards.clone()
         } else {
-            vec![self.paths.transformer.clone()]
+            vec![self.base.paths.transformer.clone()]
         }
     }
 
     fn detect_is_quantized(&self) -> bool {
-        self.paths
+        self.base
+            .paths
             .transformer
             .extension()
             .and_then(|e| e.to_str())
@@ -227,7 +220,7 @@ impl QwenImageEngine {
     /// Validate required paths exist.
     fn validate_paths(&self) -> Result<std::path::PathBuf> {
         let text_tokenizer_path =
-            self.paths.text_tokenizer.as_ref().ok_or_else(|| {
+            self.base.paths.text_tokenizer.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("text tokenizer path required for Qwen-Image models")
             })?;
         if !text_tokenizer_path.exists() {
@@ -243,8 +236,8 @@ impl QwenImageEngine {
                 bail!("transformer file not found: {}", path.display());
             }
         }
-        if !self.paths.vae.exists() {
-            bail!("VAE file not found: {}", self.paths.vae.display());
+        if !self.base.paths.vae.exists() {
+            bail!("VAE file not found: {}", self.base.paths.vae.display());
         }
 
         Ok(text_tokenizer_path.clone())
@@ -258,7 +251,8 @@ impl QwenImageEngine {
         cfg: &QwenImageConfig,
     ) -> Result<QwenImageTransformer> {
         if self.detect_is_quantized() {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(&self.paths.transformer, device)?;
+            let vb =
+                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
             Ok(QwenImageTransformer::Quantized(
                 QuantizedQwenImageTransformer2DModel::new(cfg, vb)?,
             ))
@@ -274,7 +268,7 @@ impl QwenImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<QwenImageVae> {
-        Ok(QwenImageVae::load(&self.paths.vae, device, dtype)?)
+        Ok(QwenImageVae::load(&self.base.paths.vae, device, dtype)?)
     }
 
     /// Load text encoder from disk.
@@ -284,7 +278,7 @@ impl QwenImageEngine {
         device: &Device,
         dtype: DType,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
-        let encoder_paths: Vec<std::path::PathBuf> = self.paths.text_encoder_files.clone();
+        let encoder_paths: Vec<std::path::PathBuf> = self.base.paths.text_encoder_files.clone();
         encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
             &encoder_paths,
             tokenizer_path,
@@ -300,7 +294,7 @@ impl QwenImageEngine {
         let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, QWEN2_FP16_VRAM_THRESHOLD);
         let label = if on_gpu { "GPU" } else { "CPU" };
         if !on_gpu && (is_cuda || is_metal) {
-            self.progress.info(&format!(
+            self.base.progress.info(&format!(
                 "Qwen2.5 text encoder on CPU ({} free < {} threshold)",
                 fmt_gb(free_vram),
                 fmt_gb(QWEN2_FP16_VRAM_THRESHOLD),
@@ -311,23 +305,23 @@ impl QwenImageEngine {
 
     /// Load all model components (Eager mode).
     ///
-    /// On error, `self.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.loaded` on success, so partial loads
+    /// On error, `self.base.loaded` remains `None` — all components are assembled into
+    /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
         // Sequential mode defers loading to generate_sequential()
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
-        tracing::info!(model = %self.model_name, "loading Qwen-Image model components...");
+        tracing::info!(model = %self.base.model_name, "loading Qwen-Image model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
         let transformer_is_quantized = self.detect_is_quantized();
@@ -342,10 +336,11 @@ impl QwenImageEngine {
                 xformer_paths.len()
             )
         };
-        self.progress.stage_start(&xformer_label);
+        self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
         tracing::info!("Qwen-Image transformer loaded");
 
@@ -354,7 +349,8 @@ impl QwenImageEngine {
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
         if free > 0 {
-            self.progress
+            self.base
+                .progress
                 .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
         }
 
@@ -369,10 +365,12 @@ impl QwenImageEngine {
 
         // Load VAE
         let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
-        self.progress.stage_start(&vae_label);
+        self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
-        self.progress.stage_done(&vae_label, vae_start.elapsed());
+        self.base
+            .progress
+            .stage_done(&vae_label, vae_start.elapsed());
 
         // Load text encoder
         let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
@@ -385,16 +383,16 @@ impl QwenImageEngine {
 
         let te_label = format!(
             "Loading Qwen2.5 text encoder ({} shards, {})",
-            self.paths.text_encoder_files.len(),
+            self.base.paths.text_encoder_files.len(),
             te_device_label,
         );
-        self.progress.stage_start(&te_label);
+        self.base.progress.stage_start(&te_label);
         let te_start = Instant::now();
         let text_encoder = self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
-        self.progress.stage_done(&te_label, te_start.elapsed());
+        self.base.progress.stage_done(&te_label, te_start.elapsed());
         tracing::info!(device = %te_device_label, "Qwen2.5 text encoder loaded");
 
-        self.loaded = Some(LoadedQwenImage {
+        self.base.loaded = Some(LoadedQwenImage {
             transformer: Some(transformer),
             text_encoder,
             vae,
@@ -405,7 +403,7 @@ impl QwenImageEngine {
             transformer_is_quantized,
         });
 
-        tracing::info!(model = %self.model_name, "all Qwen-Image components loaded");
+        tracing::info!(model = %self.base.model_name, "all Qwen-Image components loaded");
         Ok(())
     }
 
@@ -422,7 +420,7 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
 
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -439,7 +437,8 @@ impl QwenImageEngine {
             "starting sequential Qwen-Image generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Text encoding ---
@@ -454,10 +453,11 @@ impl QwenImageEngine {
 
         let te_label = format!(
             "Loading Qwen2.5 text encoder ({} shards, {})",
-            self.paths.text_encoder_files.len(),
+            self.base.paths.text_encoder_files.len(),
             te_device_label,
         );
         let te_size: u64 = self
+            .base
             .paths
             .text_encoder_files
             .iter()
@@ -467,17 +467,17 @@ impl QwenImageEngine {
         preflight_memory_check("Qwen2.5 text encoder", te_size)?;
 
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
-        self.progress.stage_start(&te_label);
+        self.base.progress.stage_start(&te_label);
         let te_start = Instant::now();
         let mut text_encoder =
             self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
-        self.progress.stage_done(&te_label, te_start.elapsed());
+        self.base.progress.stage_done(&te_label, te_start.elapsed());
 
         let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
-            &self.progress,
+            &self.base.progress,
             &self.prompt_cache,
             &mut text_encoder,
             &req.prompt,
@@ -487,7 +487,7 @@ impl QwenImageEngine {
 
         // Drop text encoder to free memory
         drop(text_encoder);
-        self.progress.info("Freed Qwen2.5 text encoder");
+        self.base.progress.info("Freed Qwen2.5 text encoder");
 
         // --- Phase 2: Load transformer and denoise ---
         let xformer_paths = self.transformer_paths();
@@ -499,7 +499,7 @@ impl QwenImageEngine {
         preflight_memory_check("Qwen-Image transformer", xformer_size)?;
 
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let xformer_label = if transformer_is_quantized {
@@ -510,10 +510,11 @@ impl QwenImageEngine {
                 xformer_paths.len()
             )
         };
-        self.progress.stage_start(&xformer_label);
+        self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
         let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
-        self.progress
+        self.base
+            .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
 
         // Calculate latent dimensions: image_size / 8 (VAE downsample factor)
@@ -543,7 +544,7 @@ impl QwenImageEngine {
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
-        self.progress.stage_start(&denoise_label);
+        self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         for step in 0..num_steps {
@@ -561,14 +562,15 @@ impl QwenImageEngine {
                 Self::debug_tensor_stats("noise_pred", &noise_pred);
             }
             latents = scheduler.step(&noise_pred, &latents)?;
-            self.progress.emit(ProgressEvent::DenoiseStep {
+            self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.progress
+        self.base
+            .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer and embeddings
@@ -576,11 +578,11 @@ impl QwenImageEngine {
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
         device.synchronize()?;
-        self.progress.info("Freed Qwen-Image transformer");
+        self.base.progress.info("Freed Qwen-Image transformer");
 
         // --- Phase 3: Load VAE and decode ---
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let free_for_vae = free_vram_bytes().unwrap_or(0);
@@ -599,12 +601,14 @@ impl QwenImageEngine {
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
-        self.progress.stage_start(&vae_label);
+        self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
-        self.progress.stage_done(&vae_label, vae_start.elapsed());
+        self.base
+            .progress
+            .stage_done(&vae_label, vae_start.elapsed());
 
-        self.progress.stage_start("VAE decode");
+        self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
         let latents = latents.to_device(&vae_device)?.to_dtype(vae_dtype)?;
@@ -615,7 +619,8 @@ impl QwenImageEngine {
         Self::debug_tensor_stats("image_postprocess", &image);
         let image = image.i(0)?;
 
-        self.progress
+        self.base
+            .progress
             .stage_done("VAE decode", vae_decode_start.elapsed());
 
         let output_metadata = build_output_metadata(req, seed, None);
@@ -664,26 +669,28 @@ impl InferenceEngine for QwenImageEngine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         // Eager mode: use pre-loaded components
-        if self.loaded.is_none() {
+        if self.base.loaded.is_none() {
             bail!("model not loaded -- call load() first");
         }
 
-        let progress = &self.progress;
+        let progress = &self.base.progress;
         let start = Instant::now();
 
         // Reload transformer if it was dropped after previous VAE decode
         let loaded_ref = self
+            .base
             .loaded
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
         let needs_reload = loaded_ref.transformer.is_none();
         if needs_reload {
             let mut loaded_mut = self
+                .base
                 .loaded
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
@@ -691,10 +698,11 @@ impl InferenceEngine for QwenImageEngine {
             let reload_start = Instant::now();
             self.reload_transformer(&mut loaded_mut)?;
             progress.stage_done("Reloading Qwen-Image transformer", reload_start.elapsed());
-            self.loaded = Some(loaded_mut);
+            self.base.loaded = Some(loaded_mut);
         }
 
         let loaded = self
+            .base
             .loaded
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
@@ -861,11 +869,11 @@ impl InferenceEngine for QwenImageEngine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -873,16 +881,16 @@ impl InferenceEngine for QwenImageEngine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }
 

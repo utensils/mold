@@ -15,8 +15,9 @@ use crate::cache::{
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image, update_output_metadata_size};
-use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
+use crate::progress::{ProgressCallback, ProgressEvent};
 
 /// Wuerstchen v2 prior dimensions.
 const PRIOR_C_IN: usize = 16;
@@ -58,22 +59,14 @@ struct LoadedWuerstchen {
 ///
 /// Three-stage cascade: CLIP-G encode -> Prior (Stage C) -> Decoder (Stage B) -> VQ-GAN (Stage A).
 pub struct WuerstchenEngine {
-    loaded: Option<LoadedWuerstchen>,
-    model_name: String,
-    paths: ModelPaths,
-    progress: ProgressReporter,
-    load_strategy: LoadStrategy,
+    base: EngineBase<LoadedWuerstchen>,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
 }
 
 impl WuerstchenEngine {
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
         Self {
-            loaded: None,
-            model_name,
-            paths,
-            progress: ProgressReporter::default(),
-            load_strategy,
+            base: EngineBase::new(model_name, paths, load_strategy),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
@@ -94,7 +87,8 @@ impl WuerstchenEngine {
         let cache_key = prompt_text_key(prompt);
         let ((prior_text_embeddings, decoder_text_embeddings), cache_hit) =
             get_or_insert_cached_tensor_pair(&self.prompt_cache, cache_key, device, dtype, || {
-                self.progress
+                self.base
+                    .progress
                     .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
                 let encode_start = Instant::now();
                 let (prior_tokens, prior_tokens_len) = Self::tokenize(
@@ -106,12 +100,13 @@ impl WuerstchenEngine {
                 let prior_text_embeddings = prior_clip
                     .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
                     .to_dtype(dtype)?;
-                self.progress.stage_done(
+                self.base.progress.stage_done(
                     "Encoding prompt (Prior CLIP-G, 1280-dim)",
                     encode_start.elapsed(),
                 );
 
-                self.progress
+                self.base
+                    .progress
                     .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
                 let dec_encode_start = Instant::now();
                 let (dec_tokens, dec_tokens_len) = Self::tokenize(
@@ -123,14 +118,14 @@ impl WuerstchenEngine {
                 let decoder_text_embeddings = decoder_clip
                     .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
                     .to_dtype(dtype)?;
-                self.progress.stage_done(
+                self.base.progress.stage_done(
                     "Encoding prompt (Decoder CLIP, 1024-dim)",
                     dec_encode_start.elapsed(),
                 );
                 Ok((prior_text_embeddings, decoder_text_embeddings))
             })?;
         if cache_hit {
-            self.progress.cache_hit("prompt conditioning");
+            self.base.progress.cache_hit("prompt conditioning");
         }
         Ok((prior_text_embeddings, decoder_text_embeddings))
     }
@@ -147,6 +142,7 @@ impl WuerstchenEngine {
         std::path::PathBuf,
     )> {
         let decoder = self
+            .base
             .paths
             .decoder
             .as_ref()
@@ -154,12 +150,14 @@ impl WuerstchenEngine {
             .clone();
         // Prior CLIP-G (1280-dim) — stored in clip_encoder_2
         let prior_clip_encoder = self
+            .base
             .paths
             .clip_encoder_2
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Prior CLIP-G encoder path required for Wuerstchen"))?
             .clone();
         let prior_clip_tokenizer = self
+            .base
             .paths
             .clip_tokenizer_2
             .as_ref()
@@ -168,7 +166,7 @@ impl WuerstchenEngine {
         // Decoder CLIP (1024-dim) — stored in clip_encoder.
         // Fall back to Prior CLIP if decoder CLIP not available (old configs from
         // before the dual-CLIP change). Quality will be degraded but won't crash.
-        let decoder_clip_encoder = self.paths.clip_encoder.clone().unwrap_or_else(|| {
+        let decoder_clip_encoder = self.base.paths.clip_encoder.clone().unwrap_or_else(|| {
             tracing::warn!(
                 "Decoder CLIP encoder path not configured — falling back to Prior CLIP. \
                      Run `mold rm wuerstchen-v2:fp16 && mold pull wuerstchen-v2:fp16` to fix."
@@ -176,15 +174,16 @@ impl WuerstchenEngine {
             prior_clip_encoder.clone()
         });
         let decoder_clip_tokenizer = self
+            .base
             .paths
             .clip_tokenizer
             .clone()
             .unwrap_or_else(|| prior_clip_tokenizer.clone());
 
         for (label, path) in [
-            ("prior (Stage C)", &self.paths.transformer),
+            ("prior (Stage C)", &self.base.paths.transformer),
             ("decoder (Stage B)", &decoder),
-            ("vqgan (Stage A)", &self.paths.vae),
+            ("vqgan (Stage A)", &self.base.paths.vae),
             ("prior clip_encoder", &prior_clip_encoder),
             ("prior clip_tokenizer", &prior_clip_tokenizer),
             ("decoder clip_encoder", &decoder_clip_encoder),
@@ -206,31 +205,31 @@ impl WuerstchenEngine {
 
     /// Load all Wuerstchen model components (Eager mode).
     pub fn load(&mut self) -> Result<()> {
-        if self.loaded.is_some() {
+        if self.base.loaded.is_some() {
             return Ok(());
         }
 
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return Ok(());
         }
 
         let (decoder_path, prior_clip_path, prior_clip_tok_path, dec_clip_path, dec_clip_tok_path) =
             self.validate_paths()?;
 
-        tracing::info!(model = %self.model_name, "loading Wuerstchen model components...");
+        tracing::info!(model = %self.base.model_name, "loading Wuerstchen model components...");
 
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
         // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
         // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
         let dtype = DType::F32;
 
         // Load Prior (Stage C)
-        self.progress.stage_start("Loading Prior (Stage C)");
+        self.base.progress.stage_start("Loading Prior (Stage C)");
         let prior_start = Instant::now();
         let prior_vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[&self.paths.transformer],
+                &[&self.base.paths.transformer],
                 dtype,
                 &device,
             )?
@@ -245,11 +244,12 @@ impl WuerstchenEngine {
             false,
             prior_vb,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
 
         // Load Decoder (Stage B)
-        self.progress.stage_start("Loading Decoder (Stage B)");
+        self.base.progress.stage_start("Loading Decoder (Stage B)");
         let decoder_start = Instant::now();
         let decoder_vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(&[&decoder_path], dtype, &device)?
@@ -264,21 +264,24 @@ impl WuerstchenEngine {
             false,
             decoder_vb,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading Decoder (Stage B)", decoder_start.elapsed());
 
         // Load VQ-GAN (Stage A)
-        self.progress.stage_start("Loading VQ-GAN (Stage A)");
+        self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
         let vqgan_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.paths.vae], dtype, &device)?
+            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.base.paths.vae], dtype, &device)?
         };
         let vqgan = PaellaVQ::new(vqgan_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
 
         // Load Prior CLIP-G encoder (1280-dim, 32 layers)
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
         let prior_clip_start = Instant::now();
         let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
@@ -288,13 +291,14 @@ impl WuerstchenEngine {
             &device,
             DType::F32,
         )?;
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Prior CLIP-G encoder (1280-dim)",
             prior_clip_start.elapsed(),
         );
 
         // Load Decoder CLIP encoder (1024-dim, 24 layers)
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Decoder CLIP encoder (1024-dim)");
         let dec_clip_start = Instant::now();
         let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
@@ -304,7 +308,7 @@ impl WuerstchenEngine {
             &device,
             DType::F32,
         )?;
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Decoder CLIP encoder (1024-dim)",
             dec_clip_start.elapsed(),
         );
@@ -315,7 +319,7 @@ impl WuerstchenEngine {
         let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
             .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
-        self.loaded = Some(LoadedWuerstchen {
+        self.base.loaded = Some(LoadedWuerstchen {
             prior,
             decoder,
             vqgan,
@@ -327,7 +331,7 @@ impl WuerstchenEngine {
             dtype,
         });
 
-        tracing::info!(model = %self.model_name, "all Wuerstchen components loaded successfully");
+        tracing::info!(model = %self.base.model_name, "all Wuerstchen components loaded successfully");
         Ok(())
     }
 
@@ -368,7 +372,7 @@ impl WuerstchenEngine {
         let timesteps = scheduler.timesteps().to_vec();
 
         let label = format!("Stage C Prior ({} steps)", timesteps.len() - 1);
-        self.progress.stage_start(&label);
+        self.base.progress.stage_start(&label);
         let start = Instant::now();
 
         for (step_idx, &t) in timesteps.iter().enumerate() {
@@ -395,14 +399,14 @@ impl WuerstchenEngine {
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
 
-            self.progress.emit(ProgressEvent::DenoiseStep {
+            self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: timesteps.len() - 1,
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.progress.stage_done(&label, start.elapsed());
+        self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
 
@@ -424,7 +428,7 @@ impl WuerstchenEngine {
         let timesteps = scheduler.timesteps().to_vec();
 
         let label = format!("Stage B Decoder ({} steps)", timesteps.len() - 1);
-        self.progress.stage_start(&label);
+        self.base.progress.stage_start(&label);
         let start = Instant::now();
 
         for (step_idx, &t) in timesteps.iter().enumerate() {
@@ -439,14 +443,14 @@ impl WuerstchenEngine {
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
 
-            self.progress.emit(ProgressEvent::DenoiseStep {
+            self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
                 total: timesteps.len() - 1,
                 elapsed: step_start.elapsed(),
             });
         }
 
-        self.progress.stage_done(&label, start.elapsed());
+        self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
 
@@ -455,11 +459,11 @@ impl WuerstchenEngine {
         let (decoder_path, prior_clip_path, prior_clip_tok_path, dec_clip_path, dec_clip_tok_path) =
             self.validate_paths()?;
 
-        if let Some(warning) = check_memory_budget(&self.paths, LoadStrategy::Sequential) {
-            self.progress.info(&warning);
+        if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
+            self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.progress)?;
+        let device = crate::device::create_device(&self.base.progress)?;
         // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
         // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
         // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
@@ -482,18 +486,20 @@ impl WuerstchenEngine {
             "starting sequential Wuerstchen generation"
         );
 
-        self.progress
+        self.base
+            .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Prior CLIP-G encode (1280-dim) ---
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
         let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
             .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
 
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
         let clip_start = Instant::now();
         let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
@@ -503,7 +509,7 @@ impl WuerstchenEngine {
             &device,
             DType::F32,
         )?;
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Prior CLIP-G encoder (1280-dim)",
             clip_start.elapsed(),
         );
@@ -511,7 +517,8 @@ impl WuerstchenEngine {
         let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
             .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
-        self.progress
+        self.base
+            .progress
             .stage_start("Loading Decoder CLIP encoder (1024-dim)");
         let dec_clip_start = Instant::now();
         let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
@@ -521,7 +528,7 @@ impl WuerstchenEngine {
             &device,
             DType::F32,
         )?;
-        self.progress.stage_done(
+        self.base.progress.stage_done(
             "Loading Decoder CLIP encoder (1024-dim)",
             dec_clip_start.elapsed(),
         );
@@ -538,28 +545,28 @@ impl WuerstchenEngine {
 
         drop(prior_clip);
         drop(prior_tokenizer);
-        self.progress.info("Freed Prior CLIP-G encoder");
+        self.base.progress.info("Freed Prior CLIP-G encoder");
         tracing::info!("Prior CLIP-G encoder dropped (sequential mode)");
 
         drop(decoder_clip);
         drop(decoder_tokenizer);
-        self.progress.info("Freed Decoder CLIP encoder");
+        self.base.progress.info("Freed Decoder CLIP encoder");
         tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
 
         // --- Phase 2: Prior (Stage C) ---
-        let prior_size = std::fs::metadata(&self.paths.transformer)
+        let prior_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
         preflight_memory_check("Prior (Stage C)", prior_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
-        self.progress.stage_start("Loading Prior (Stage C)");
+        self.base.progress.stage_start("Loading Prior (Stage C)");
         let prior_start = Instant::now();
         let prior_vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[&self.paths.transformer],
+                &[&self.base.paths.transformer],
                 dtype,
                 &device,
             )?
@@ -574,7 +581,8 @@ impl WuerstchenEngine {
             false,
             prior_vb,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
 
         // Stage C latent dimensions: 42x compression
@@ -602,7 +610,7 @@ impl WuerstchenEngine {
         drop(prior);
         drop(prior_text_embeddings);
         device.synchronize()?;
-        self.progress.info("Freed Prior (Stage C)");
+        self.base.progress.info("Freed Prior (Stage C)");
 
         // --- Phase 3: Decoder (Stage B) ---
         // 3b. Load Decoder (Stage B) model and denoise
@@ -611,10 +619,10 @@ impl WuerstchenEngine {
             .unwrap_or(0);
         preflight_memory_check("Decoder (Stage B)", decoder_size)?;
         if let Some(status) = memory_status_string() {
-            self.progress.info(&status);
+            self.base.progress.info(&status);
         }
 
-        self.progress.stage_start("Loading Decoder (Stage B)");
+        self.base.progress.stage_start("Loading Decoder (Stage B)");
         let dec_start = Instant::now();
         let decoder_vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(&[&decoder_path], dtype, &device)?
@@ -629,7 +637,8 @@ impl WuerstchenEngine {
             false,
             decoder_vb,
         )?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading Decoder (Stage B)", dec_start.elapsed());
 
         // Decoder latent dims derived from prior output spatial dims
@@ -651,25 +660,27 @@ impl WuerstchenEngine {
         drop(prior_latents);
         drop(decoder_text_embeddings);
         device.synchronize()?;
-        self.progress.info("Freed Decoder (Stage B)");
+        self.base.progress.info("Freed Decoder (Stage B)");
 
         // --- Phase 4: VQ-GAN decode (Stage A) ---
-        self.progress.stage_start("Loading VQ-GAN (Stage A)");
+        self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
         let vqgan_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.paths.vae], dtype, &device)?
+            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.base.paths.vae], dtype, &device)?
         };
         let vqgan = PaellaVQ::new(vqgan_vb)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
 
-        self.progress.stage_start("VQ-GAN decode");
+        self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         let img = vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         let img = img.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("VQ-GAN decode", decode_start.elapsed());
 
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
@@ -719,11 +730,12 @@ impl InferenceEngine for WuerstchenEngine {
             tracing::warn!("inpainting not yet supported for Wuerstchen -- ignoring mask");
         }
 
-        if self.load_strategy == LoadStrategy::Sequential {
+        if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
         }
 
         let loaded = self
+            .base
             .loaded
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
@@ -799,13 +811,14 @@ impl InferenceEngine for WuerstchenEngine {
         )?;
 
         // 5. Stage A (VQ-GAN): decode to pixel space
-        self.progress.stage_start("VQ-GAN decode");
+        self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         let img = loaded.vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         let img = img.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.progress
+        self.base
+            .progress
             .stage_done("VQ-GAN decode", decode_start.elapsed());
 
         // 6. Encode to image format
@@ -840,11 +853,11 @@ impl InferenceEngine for WuerstchenEngine {
     }
 
     fn model_name(&self) -> &str {
-        &self.model_name
+        self.base.model_name()
     }
 
     fn is_loaded(&self) -> bool {
-        self.load_strategy == LoadStrategy::Sequential || self.loaded.is_some()
+        self.base.is_loaded()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -852,15 +865,15 @@ impl InferenceEngine for WuerstchenEngine {
     }
 
     fn unload(&mut self) {
-        self.loaded = None;
+        self.base.unload();
         clear_cache(&self.prompt_cache);
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
-        self.progress.set_callback(callback);
+        self.base.set_on_progress(callback);
     }
 
     fn clear_on_progress(&mut self) {
-        self.progress.clear_callback();
+        self.base.clear_on_progress();
     }
 }

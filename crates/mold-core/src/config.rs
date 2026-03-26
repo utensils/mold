@@ -107,6 +107,20 @@ impl ModelConfig {
         paths
     }
 
+    /// Total disk usage of all model files: `(bytes, gigabytes)`.
+    ///
+    /// Sums the file sizes of all paths referenced by this config entry.
+    /// Missing files are silently skipped.
+    pub fn disk_usage(&self) -> (u64, f64) {
+        let total: u64 = self
+            .all_file_paths()
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        (total, total as f64 / 1_073_741_824.0)
+    }
+
     /// Effective steps: model default → global fallback → hardcoded default.
     pub fn effective_steps(&self, global_cfg: &Config) -> u32 {
         self.default_steps.unwrap_or(global_cfg.default_steps)

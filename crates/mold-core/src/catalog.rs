@@ -14,12 +14,8 @@ pub fn build_model_catalog(
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
         let disk_usage_bytes = downloaded.then(|| {
-            model_cfg
-                .all_file_paths()
-                .iter()
-                .filter_map(|path| std::fs::metadata(path).ok())
-                .map(|meta| meta.len())
-                .sum()
+            let (bytes, _gb) = model_cfg.disk_usage();
+            bytes
         });
 
         models.push(ModelInfoExtended {
@@ -60,18 +56,8 @@ pub fn build_model_catalog(
     config_only.sort_by(|(left, _), (right, _)| left.cmp(right));
 
     for (name, model_cfg) in config_only {
-        let disk_usage_bytes: u64 = model_cfg
-            .all_file_paths()
-            .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.len())
-            .sum();
-        let size_gb = model_cfg
-            .all_file_paths()
-            .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.len() as f32 / 1_073_741_824.0)
-            .sum::<f32>();
+        let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
+        let size_gb = size_gb_f64 as f32;
 
         models.push(ModelInfoExtended {
             downloaded: true,

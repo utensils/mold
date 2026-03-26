@@ -49,6 +49,13 @@ pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u3
     clamp_to_megapixel_limit(w, h)
 }
 
+/// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
+fn is_valid_image_format(data: &[u8]) -> bool {
+    let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
+    let is_jpeg = data.len() >= 2 && data[..2] == [0xFF, 0xD8];
+    is_png || is_jpeg
+}
+
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
 /// Shared between the HTTP server and local CLI inference paths.
 pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
@@ -108,10 +115,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
                 req.strength
             ));
         }
-        // Quick format check: PNG magic or JPEG magic
-        let is_png = img.len() >= 4 && img[..4] == [0x89, 0x50, 0x4E, 0x47];
-        let is_jpeg = img.len() >= 2 && img[..2] == [0xFF, 0xD8];
-        if !is_png && !is_jpeg {
+        if !is_valid_image_format(img) {
             return Err("source_image must be a PNG or JPEG image".to_string());
         }
     }
@@ -120,9 +124,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
         if req.control_model.is_none() {
             return Err("control_image requires control_model to also be provided".to_string());
         }
-        let is_png = ctrl.len() >= 4 && ctrl[..4] == [0x89, 0x50, 0x4E, 0x47];
-        let is_jpeg = ctrl.len() >= 2 && ctrl[..2] == [0xFF, 0xD8];
-        if !is_png && !is_jpeg {
+        if !is_valid_image_format(ctrl) {
             return Err("control_image must be a PNG or JPEG image".to_string());
         }
         if req.control_scale < 0.0 {
@@ -140,9 +142,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
         if req.source_image.is_none() {
             return Err("mask_image requires source_image to also be provided".to_string());
         }
-        let is_png = mask.len() >= 4 && mask[..4] == [0x89, 0x50, 0x4E, 0x47];
-        let is_jpeg = mask.len() >= 2 && mask[..2] == [0xFF, 0xD8];
-        if !is_png && !is_jpeg {
+        if !is_valid_image_format(mask) {
             return Err("mask_image must be a PNG or JPEG image".to_string());
         }
     }

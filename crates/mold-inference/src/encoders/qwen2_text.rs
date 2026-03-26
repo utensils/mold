@@ -433,7 +433,7 @@ impl Qwen2TextEncoder {
         let model = Qwen2TextModel::new(&config, vb)?;
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
-        let on_gpu = device.is_cuda() || device.is_metal();
+        let on_gpu = crate::device::is_gpu(device);
         Ok(Self {
             model: Some(model),
             tokenizer,

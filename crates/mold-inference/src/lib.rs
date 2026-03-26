@@ -3,6 +3,7 @@ pub mod controlnet;
 pub mod device;
 mod encoders;
 pub mod engine;
+pub(crate) mod engine_base;
 pub mod error;
 mod factory;
 pub mod flux;
