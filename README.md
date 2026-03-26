@@ -95,6 +95,12 @@ mold run "a cat" --preview
 export MOLD_PREVIEW=1
 ```
 
+<p align="center">
+  <img src="docs/terminal-preview-example.png" alt="Generating the mold logo with --preview in Ghostty" width="720" />
+  <br/>
+  <em>Generating the mold logo with <code>--preview</code> in Ghostty</em>
+</p>
+
 In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 
 ```toml
