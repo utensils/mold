@@ -104,11 +104,11 @@ in
     users.groups.mold = { };
 
     systemd.tmpfiles.rules = [
-      "d ${cfg.homeDir} 0755 mold mold -"
-      "d ${cfg.modelsDir} 0755 mold mold -"
+      "d ${cfg.homeDir} 0775 mold mold -"
+      "d ${cfg.modelsDir} 0775 mold mold -"
     ]
     ++ lib.optionals (cfg.outputDir != null) [
-      "d ${cfg.outputDir} 0755 mold mold -"
+      "d ${cfg.outputDir} 0775 mold mold -"
     ];
 
     systemd.services.mold = {
