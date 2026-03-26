@@ -164,6 +164,7 @@ Force stdout in interactive mode: `mold run "a cat" --output -`
 ```bash
 mold list                    # List downloaded + available models
 mold pull flux-dev:q4        # Download a model
+mold info                    # Installation overview (paths, models, server status)
 mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation

@@ -155,6 +155,7 @@ mold run "a sunset" --batch 4    # Generates 4 images: seed, seed+1, seed+2, see
 ```bash
 mold pull flux-schnell:q8    # Download a model
 mold list                    # See what you have
+mold info                    # Installation overview
 mold info flux-dev:q4        # Model details + disk usage
 mold rm dreamshaper-v8       # Remove a model
 ```
