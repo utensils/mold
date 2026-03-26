@@ -805,7 +805,15 @@ fn preview_image(data: &[u8]) {
 }
 
 #[cfg(not(feature = "preview"))]
-fn preview_image(_data: &[u8]) {}
+fn preview_image(_data: &[u8]) {
+    use std::sync::OnceLock;
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        eprintln!(
+            "warning: --preview has no effect — rebuild with `--features preview` to enable inline image display"
+        );
+    });
+}
 
 /// Build a default output filename, sanitizing colons from model names.
 fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u32) -> String {
