@@ -82,6 +82,7 @@ pub async fn run(
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
+    preview: bool,
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -321,6 +322,9 @@ pub async fn run(
             }
             std::fs::write(&filename, &img.data)?;
             status!("{} Saved: {}", theme::icon_done(), filename.bold());
+            if preview {
+                preview_image(&img.data);
+            }
         }
     }
 
@@ -785,6 +789,23 @@ async fn generate_local_batch(
          Either start a server with `mold serve` or rebuild with --features cuda"
     )
 }
+
+/// Display an image inline in the terminal using viuer.
+/// Silently skipped if the `preview` feature is not compiled or if decoding fails.
+#[cfg(feature = "preview")]
+fn preview_image(data: &[u8]) {
+    let Ok(img) = image::load_from_memory(data) else {
+        return;
+    };
+    let conf = viuer::Config {
+        absolute_offset: false,
+        ..Default::default()
+    };
+    let _ = viuer::print(&img, &conf);
+}
+
+#[cfg(not(feature = "preview"))]
+fn preview_image(_data: &[u8]) {}
 
 /// Build a default output filename, sanitizing colons from model names.
 fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u32) -> String {

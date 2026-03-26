@@ -78,6 +78,10 @@ Examples:
         #[arg(long, help_heading = "Output")]
         no_metadata: bool,
 
+        /// Display generated image(s) inline in the terminal after generation
+        #[arg(long, env = "MOLD_PREVIEW", help_heading = "Output")]
+        preview: bool,
+
         /// Image width — defaults to model config value
         #[arg(long, help_heading = "Image")]
         width: Option<u32>,
@@ -407,6 +411,7 @@ async fn run() -> anyhow::Result<()> {
             host,
             format,
             no_metadata,
+            preview,
             local,
             t5_variant,
             qwen3_variant,
@@ -432,6 +437,7 @@ async fn run() -> anyhow::Result<()> {
                 host,
                 format,
                 no_metadata,
+                preview,
                 local,
                 t5_variant,
                 qwen3_variant,
@@ -807,6 +813,24 @@ mod tests {
         let cli = parse(&["run", "model", "test", "--no-metadata"]);
         match cli.command {
             Commands::Run { no_metadata, .. } => assert!(no_metadata),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_preview_flag() {
+        let cli = parse(&["run", "model", "test", "--preview"]);
+        match cli.command {
+            Commands::Run { preview, .. } => assert!(preview),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_preview_default_false() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run { preview, .. } => assert!(!preview),
             _ => panic!("expected Run"),
         }
     }
