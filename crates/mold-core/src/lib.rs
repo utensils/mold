@@ -15,7 +15,7 @@ mod test_support;
 
 pub use catalog::build_model_catalog;
 pub use client::MoldClient;
-pub use config::{Config, ModelConfig, ModelPaths};
+pub use config::{Config, DefaultModelResolution, DefaultModelSource, ModelConfig, ModelPaths};
 pub use control::{
     classify_generate_error, classify_server_error, GenerateServerAction, ServerAvailability,
 };

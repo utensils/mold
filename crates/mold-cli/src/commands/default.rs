@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
-use mold_core::config::Config;
+use mold_core::config::{Config, DefaultModelSource};
 use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
 
 use crate::theme;
@@ -21,25 +21,31 @@ pub fn run(model: Option<&str>) -> Result<()> {
 }
 
 fn show_default(config: &Config) -> Result<()> {
-    let resolved = config.resolved_default_model();
+    let resolution = config.resolve_default_model();
 
-    // Determine the source of the resolved default.
-    let source = if let Ok(env_val) = std::env::var("MOLD_DEFAULT_MODEL") {
-        if !env_val.is_empty() {
-            "MOLD_DEFAULT_MODEL env var".dimmed()
-        } else {
-            resolve_source(config)
-        }
-    } else {
-        resolve_source(config)
+    let source_label = match resolution.source {
+        DefaultModelSource::EnvVar => "MOLD_DEFAULT_MODEL env var",
+        DefaultModelSource::ConfigCustomEntry => "config file (custom model entry)",
+        DefaultModelSource::Config => "config file",
+        DefaultModelSource::LastUsed => "last-used model",
+        DefaultModelSource::OnlyDownloaded => "only downloaded model",
+        DefaultModelSource::ConfigDefault => "config file (default)",
     };
 
-    println!("{} Default model: {}", theme::icon_ok(), resolved.bold());
-    println!("  {} source: {source}", theme::icon_bullet());
+    println!(
+        "{} Default model: {}",
+        theme::icon_ok(),
+        resolution.model.bold()
+    );
+    println!(
+        "  {} source: {}",
+        theme::icon_bullet(),
+        source_label.dimmed()
+    );
 
     // Warn if not downloaded.
-    if !config.manifest_model_is_downloaded(&resolved)
-        && config.lookup_model_config(&resolved).is_none()
+    if !config.manifest_model_is_downloaded(&resolution.model)
+        && config.lookup_model_config(&resolution.model).is_none()
     {
         println!(
             "  {} not downloaded — will auto-pull on first use",
@@ -48,39 +54,6 @@ fn show_default(config: &Config) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Figure out which fallback step resolved the default.
-fn resolve_source(config: &Config) -> colored::ColoredString {
-    let configured = &config.default_model;
-
-    // Check if config entry has a custom [models] section.
-    if config.lookup_model_config(configured).is_some() {
-        return "config file (custom model entry)".dimmed();
-    }
-
-    // Check if configured manifest model is downloaded.
-    if config.manifest_model_is_downloaded(configured) {
-        return "config file".dimmed();
-    }
-
-    // Check last-used model.
-    if let Some(last) = Config::read_last_model() {
-        if config.manifest_model_is_downloaded(&last) {
-            return "last-used model".dimmed();
-        }
-    }
-
-    // Check single downloaded model.
-    let downloaded: Vec<_> = mold_core::manifest::known_manifests()
-        .iter()
-        .filter(|m| config.manifest_model_is_downloaded(&m.name))
-        .collect();
-    if downloaded.len() == 1 {
-        return "only downloaded model".dimmed();
-    }
-
-    "config file (default)".dimmed()
 }
 
 fn set_default(name: &str, config: &Config) -> Result<()> {
@@ -94,10 +67,6 @@ fn set_default(name: &str, config: &Config) -> Result<()> {
         return Err(AlreadyReported.into());
     }
 
-    // Warn (not error) if not downloaded yet.
-    let downloaded = config.manifest_model_is_downloaded(&canonical)
-        || config.lookup_model_config(&canonical).is_some();
-
     // Check if env var would override what we're about to set.
     if let Ok(env_val) = std::env::var("MOLD_DEFAULT_MODEL") {
         if !env_val.is_empty() && env_val != canonical {
@@ -109,10 +78,14 @@ fn set_default(name: &str, config: &Config) -> Result<()> {
         }
     }
 
-    // Load fresh config and update.
+    // Load fresh config, update, and save.
     let mut config = Config::load_or_default();
     config.default_model = canonical.clone();
     config.save()?;
+
+    // Check download status against the freshly loaded config.
+    let downloaded = config.manifest_model_is_downloaded(&canonical)
+        || config.lookup_model_config(&canonical).is_some();
 
     println!(
         "{} Default model set to {}",
@@ -170,10 +143,7 @@ mod tests {
 
     #[test]
     fn set_default_accepts_known_manifest_model() {
-        // This will try to save, which requires a valid home dir.
-        // We test just the validation part by checking it doesn't reject a known model.
         let config = empty_config();
-        // Validate manually — the full set_default would write to disk.
         let canonical = resolve_model_name("flux-schnell");
         assert!(is_known_model(&canonical, &config));
     }
@@ -197,7 +167,6 @@ mod tests {
 
     #[test]
     fn show_default_returns_ok() {
-        // show_default prints to stdout but should not error.
         let config = empty_config();
         let result = show_default(&config);
         assert!(result.is_ok());
@@ -206,8 +175,8 @@ mod tests {
     #[test]
     fn resolve_source_default_config() {
         let config = empty_config();
-        let source = resolve_source(&config);
-        assert!(source.to_string().contains("default"));
+        let resolution = config.resolve_default_model();
+        assert_eq!(resolution.source, DefaultModelSource::ConfigDefault);
     }
 
     #[test]
@@ -217,8 +186,8 @@ mod tests {
             "flux-schnell".to_string(),
             mold_core::config::ModelConfig::default(),
         );
-        let source = resolve_source(&config);
-        assert!(source.to_string().contains("custom model entry"));
+        let resolution = config.resolve_default_model();
+        assert_eq!(resolution.source, DefaultModelSource::ConfigCustomEntry);
     }
 
     #[test]
@@ -240,7 +209,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // Point MOLD_HOME to temp dir so Config::save() writes there.
+        // Note: env mutation is process-wide. Uses a unique temp dir name to
+        // minimise interference with concurrent tests that read MOLD_HOME.
         let prev_home = std::env::var("MOLD_HOME").ok();
         std::env::set_var("MOLD_HOME", &tmp);
 
