@@ -1345,6 +1345,11 @@ mod tests {
             text2.contains(r#""type":"queued""#),
             "second request should receive a queued event, got: {text2}"
         );
+        // The second request should report position > 0 (queued behind the first)
+        assert!(
+            text2.contains(r#""position":1"#),
+            "second request should be at position 1, got: {text2}"
+        );
     }
 
     /// Verify that both streaming and non-streaming requests are properly

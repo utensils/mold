@@ -368,9 +368,7 @@ async fn generate_stream(
     let position = state.queue.submit(job).await.map_err(ApiError::internal)?;
 
     // Send initial queue position to the client
-    if position > 0 {
-        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));
-    }
+    let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));
 
     // Hold `tx` alive in a background task until the job completes, so the SSE
     // stream never closes prematurely even if the queue worker hasn't received

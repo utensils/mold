@@ -106,8 +106,8 @@ pub async fn run_queue_worker(
 ) {
     tracing::debug!("generation queue worker started");
     while let Some(job) = job_rx.recv().await {
-        state.queue.decrement();
         process_job(&state, job).await;
+        state.queue.decrement();
     }
     tracing::info!("generation queue worker shutting down");
 }
