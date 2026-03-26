@@ -38,7 +38,9 @@ pub(crate) async fn check_model_available(
     {
         let engine = state.engine.lock().await;
         if let Some(ref e) = *engine {
-            if e.model_name() == model_name && e.is_loaded() {
+            if e.model_name() == model_name {
+                // Engine exists for this model (loaded or unloaded) —
+                // ensure_model_ready will handle loading if needed.
                 return Ok(None);
             }
         }
@@ -90,13 +92,27 @@ pub(crate) async fn ensure_model_ready(
                     engine.clear_on_progress();
                 }
                 if !engine.is_loaded() {
-                    tracing::info!(model = %model_name, "loading existing engine...");
-                    engine.load().map_err(|e| {
-                        tracing::error!("model load failed: {e:#}");
-                        ApiError::internal(format!("model load error: {e}"))
-                    })?;
-                    // Update snapshot while holding engine lock to prevent
-                    // unload_model from racing and leaving stale state.
+                    // Take the engine out so we can load it in spawn_blocking
+                    // without holding the tokio mutex across a blocking call.
+                    // This keeps the runtime responsive for SSE event delivery
+                    // during long operations like FP8→Q8 conversion.
+                    let mut taken = guard.take().unwrap();
+                    drop(guard);
+
+                    let model_log = model_name.to_string();
+                    taken = tokio::task::spawn_blocking(move || {
+                        tracing::info!(model = %model_log, "loading existing engine...");
+                        taken.load().map_err(|e| {
+                            tracing::error!("model load failed: {e:#}");
+                            ApiError::internal(format!("model load error: {e}"))
+                        })?;
+                        Ok::<_, ApiError>(taken)
+                    })
+                    .await
+                    .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))??;
+
+                    let mut guard = state.engine.lock().await;
+                    *guard = Some(taken);
                     let mut snapshot = state.engine_snapshot.write().await;
                     snapshot.model_name = Some(model_name.to_string());
                     snapshot.is_loaded = true;
@@ -204,6 +220,25 @@ async fn create_and_load_engine(
         new_engine.clear_on_progress();
     }
 
+    // Load model weights in a blocking thread to avoid starving the tokio
+    // runtime. This is critical for long-running operations like FP8→Q8
+    // GGUF conversion (can take minutes) — without spawn_blocking, the
+    // blocked worker thread prevents SSE progress events from reaching
+    // the client, causing the CLI to show a spinner with no status.
+    let model_log = model_name.to_string();
+    new_engine = tokio::task::spawn_blocking(move || {
+        tracing::info!(model = %model_log, "loading model...");
+        new_engine.load().map_err(|e| {
+            tracing::error!("model load failed: {e:#}");
+            ApiError::internal(format!("model load error: {e}"))
+        })?;
+        Ok::<_, ApiError>(new_engine)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))??;
+
+    // Place the loaded engine into shared state and update the snapshot
+    // while holding the engine lock to prevent unload_model from racing.
     let mut engine = state.engine.lock().await;
 
     if let Some(ref old) = *engine {
@@ -218,20 +253,6 @@ async fn create_and_load_engine(
 
     *engine = Some(new_engine);
 
-    // Update snapshot only after the engine swap — not before the lock is acquired,
-    // otherwise /api/status reports "not loaded" while the old model is still serving.
-    if let Some(ref mut e) = *engine {
-        if !e.is_loaded() {
-            tracing::info!(model = %model_name, "loading model...");
-            e.load().map_err(|e| {
-                tracing::error!("model load failed: {e:#}");
-                ApiError::internal(format!("model load error: {e}"))
-            })?;
-        }
-    }
-
-    // Update snapshot while holding engine lock to prevent unload_model
-    // from racing and leaving snapshot in a stale is_loaded=true state.
     {
         let mut snapshot = state.engine_snapshot.write().await;
         snapshot.model_name = Some(model_name.to_string());
