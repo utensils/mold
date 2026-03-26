@@ -2122,7 +2122,8 @@ pub fn looks_like_model_name(input: &str, config: &crate::Config) -> bool {
         return true;
     }
 
-    let input_base = input.split(':').next().unwrap_or(input);
+    // After the colon early-return above, input is guaranteed colon-free
+    let input_base = input;
 
     // Extract family from input by stripping version suffix (e.g. "ultrareal-v8" → "ultrareal")
     let input_family = input_base
@@ -2165,7 +2166,9 @@ pub fn looks_like_model_name(input: &str, config: &crate::Config) -> bool {
         }
     }
 
-    // Fuzzy match: check if any known model base name is very similar
+    // Fuzzy match: check if any known model base name is very similar.
+    // Note: all_model_names() rebuilds the list each call; this is fine since
+    // looks_like_model_name runs at most once per CLI invocation on the error path.
     for name in all_model_names(config) {
         let base = name.split(':').next().unwrap_or(&name);
         if strsim::jaro_winkler(input_base, base) >= 0.75 {
@@ -2181,6 +2184,7 @@ pub fn looks_like_model_name(input: &str, config: &crate::Config) -> bool {
 pub fn suggest_similar_models(input: &str, config: &crate::Config, max: usize) -> Vec<String> {
     let input_base = input.split(':').next().unwrap_or(input);
 
+    // all_model_names already deduplicates via HashSet, so no explicit dedup needed
     let mut scored: Vec<(f64, String)> = all_model_names(config)
         .into_iter()
         .map(|name| {
@@ -2192,7 +2196,6 @@ pub fn suggest_similar_models(input: &str, config: &crate::Config, max: usize) -
         .collect();
 
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.dedup_by(|a, b| a.1 == b.1);
     scored.into_iter().take(max).map(|(_, name)| name).collect()
 }
 
