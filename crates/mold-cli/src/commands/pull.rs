@@ -12,7 +12,10 @@ use crate::ui::print_server_fallback;
 use crate::AlreadyReported;
 
 /// Download a model and write its config. Returns the updated Config.
-pub async fn pull_and_configure(model: &str) -> Result<Config> {
+pub async fn pull_and_configure(
+    model: &str,
+    opts: &mold_core::download::PullOptions,
+) -> Result<Config> {
     let canonical = resolve_model_name(model);
 
     // Pre-flight: print status and validate manifest exists (for CLI-specific error formatting)
@@ -51,7 +54,7 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
     status!("");
 
     // Delegate to core pull_and_configure
-    let (config, _paths) = mold_core::download::pull_and_configure(model)
+    let (config, _paths) = mold_core::download::pull_and_configure(model, opts)
         .await
         .map_err(|e| -> anyhow::Error {
             match e {
@@ -96,6 +99,27 @@ pub async fn pull_and_configure(model: &str) -> Result<Config> {
                     eprintln!("  4. Set: export HF_TOKEN=hf_...");
                     eprintln!("  5. Retry: mold pull {}", canonical);
                 }
+                DownloadError::Sha256Mismatch {
+                    filename,
+                    expected,
+                    actual,
+                    ..
+                } => {
+                    eprintln!();
+                    eprintln!(
+                        "{} SHA-256 mismatch for {}",
+                        theme::icon_fail(),
+                        filename.bold()
+                    );
+                    eprintln!("  Expected: {expected}");
+                    eprintln!("  Got:      {actual}");
+                    eprintln!();
+                    eprintln!("The corrupted file has been removed.");
+                    eprintln!("  Re-run: mold pull {}", canonical);
+                    eprintln!();
+                    eprintln!("If the file was intentionally updated on HuggingFace, use:");
+                    eprintln!("  mold pull {} --skip-verify", canonical);
+                }
                 other => {
                     eprintln!();
                     eprintln!("{} Download failed: {other}", theme::icon_fail());
@@ -131,7 +155,7 @@ fn print_unknown_model_error(model: &str) {
     eprintln!("Usage: mold pull <model>");
 }
 
-pub async fn run(model: &str) -> Result<()> {
+pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result<()> {
     let canonical = resolve_model_name(model);
     let manifest = match find_manifest(&canonical) {
         Some(m) => m,
@@ -147,7 +171,7 @@ pub async fn run(model: &str) -> Result<()> {
         Err(e) => match classify_server_error(&e) {
             ServerAvailability::FallbackLocal => {
                 print_server_fallback(ctx.client().host(), "pulling locally");
-                pull_and_configure(model).await?;
+                pull_and_configure(model, opts).await?;
             }
             ServerAvailability::SurfaceError => return Err(e),
         },

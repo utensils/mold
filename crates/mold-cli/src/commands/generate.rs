@@ -549,7 +549,11 @@ async fn prepare_local_engine(
                     theme::icon_info(),
                     model_name.bold(),
                 );
-                let updated_config = super::pull::pull_and_configure(&model_name).await?;
+                let updated_config = super::pull::pull_and_configure(
+                    &model_name,
+                    &mold_core::download::PullOptions::default(),
+                )
+                .await?;
                 paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
                     anyhow::anyhow!(
                         "model '{}' was pulled but paths could not be resolved",

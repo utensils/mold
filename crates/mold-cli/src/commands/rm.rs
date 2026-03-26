@@ -143,8 +143,9 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
             }
         }
 
-        // Remove from config
+        // Remove from config and clean up pull marker
         config.remove_model(&canonical);
+        mold_core::download::remove_pulling_marker(&canonical);
 
         // Handle default_model update
         if config.default_model == canonical {

@@ -39,6 +39,13 @@ pub enum DownloadProgressEvent {
 /// Callback type for download progress reporting.
 pub type DownloadProgressCallback = Arc<dyn Fn(DownloadProgressEvent) + Send + Sync>;
 
+/// Options controlling model pull behavior.
+#[derive(Debug, Clone, Default)]
+pub struct PullOptions {
+    /// Skip SHA-256 verification after download (use when HF updated a file).
+    pub skip_verify: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum DownloadError {
     #[error(
@@ -56,6 +63,14 @@ pub enum DownloadError {
         repo: String,
         filename: String,
         source: ApiError,
+    },
+
+    #[error("SHA-256 mismatch for {filename}\n  Expected: {expected}\n  Got:      {actual}\n\nThe corrupted file has been removed. Re-run: mold pull {model}\nIf the file was intentionally updated on HuggingFace, use: mold pull {model} --skip-verify")]
+    Sha256Mismatch {
+        filename: String,
+        expected: String,
+        actual: String,
+        model: String,
     },
 
     #[error("Failed to build HuggingFace API client: {0}")]
@@ -190,18 +205,97 @@ fn hardlink_or_copy(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
-/// Verify the SHA-256 digest of a file against an expected hex string.
-///
-/// Returns `Ok(true)` when the digest matches, `Ok(false)` on mismatch.
-/// Errors only on I/O failures (e.g. file not found).
-pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<bool> {
+/// Compute the SHA-256 hex digest of a file.
+pub fn compute_sha256(path: &std::path::Path) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
-    let digest = format!("{:x}", hasher.finalize());
-    Ok(digest == expected)
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Verify the SHA-256 digest of a file against an expected hex string.
+///
+/// Returns `Ok(true)` when the digest matches, `Ok(false)` on mismatch.
+/// Errors only on I/O failures (e.g. file not found).
+pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<bool> {
+    Ok(compute_sha256(path)? == expected)
+}
+
+// ── Pull marker file (.pulling) ──────────────────────────────────────────────
+
+/// Path to the `.pulling` marker for a model: `<models_dir>/<sanitized-name>/.pulling`.
+fn pulling_marker_path(model_name: &str) -> PathBuf {
+    let sanitized = model_name.replace(':', "-");
+    models_dir().join(sanitized).join(".pulling")
+}
+
+/// Write a `.pulling` marker to signal an in-progress download.
+fn write_pulling_marker(model_name: &str) -> Result<(), DownloadError> {
+    let path = pulling_marker_path(model_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            DownloadError::FilePlacement(format!(
+                "failed to create directory for pull marker {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    std::fs::write(&path, model_name).map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "failed to write pull marker {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Remove the `.pulling` marker (best-effort, ignores errors).
+pub fn remove_pulling_marker(model_name: &str) {
+    let path = pulling_marker_path(model_name);
+    let _ = std::fs::remove_file(path);
+}
+
+/// Check whether a model has an active `.pulling` marker (incomplete download).
+pub fn has_pulling_marker(model_name: &str) -> bool {
+    let canonical = crate::manifest::resolve_model_name(model_name);
+    pulling_marker_path(&canonical).exists()
+}
+
+/// Verify SHA-256 integrity of a downloaded file. On mismatch, deletes the
+/// corrupted file and returns `Sha256Mismatch`. Respects `skip_verify`.
+fn verify_file_integrity(
+    clean_path: &std::path::Path,
+    file: &ModelFile,
+    model_name: &str,
+    skip_verify: bool,
+) -> Result<(), DownloadError> {
+    let expected = match file.sha256 {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    if skip_verify {
+        return Ok(());
+    }
+    match compute_sha256(clean_path) {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(actual) => {
+            let _ = std::fs::remove_file(clean_path);
+            Err(DownloadError::Sha256Mismatch {
+                filename: file.hf_filename.clone(),
+                expected: expected.to_string(),
+                actual,
+                model: model_name.to_string(),
+            })
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: failed to verify SHA-256 for {}: {e}",
+                file.hf_filename
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -327,7 +421,15 @@ impl Progress for CallbackProgress {
 /// then files are hardlinked to clean paths:
 /// - Transformers → `<model-name>/<filename>`
 /// - Shared components → `shared/<family>/<filename>`
-pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, DownloadError> {
+///
+/// A `.pulling` marker file is written before downloads begin and removed on
+/// success. If the pull is interrupted, the marker signals an incomplete state.
+pub async fn pull_model(
+    manifest: &ModelManifest,
+    opts: &PullOptions,
+) -> Result<ModelPaths, DownloadError> {
+    write_pulling_marker(&manifest.name)?;
+
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
@@ -363,28 +465,12 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
         let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
-        // Verify SHA-256 when expected digest is known
-        if let Some(expected) = file.sha256 {
-            match verify_sha256(&clean_path, expected) {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!(
-                        "warning: SHA-256 mismatch for {} (file may have been updated on HuggingFace)",
-                        file.hf_filename
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to verify SHA-256 for {}: {e}",
-                        file.hf_filename
-                    );
-                }
-            }
-        }
+        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
 
         downloads.push((file.component, clean_path));
     }
 
+    remove_pulling_marker(&manifest.name);
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
 }
 
@@ -395,7 +481,10 @@ pub async fn pull_model(manifest: &ModelManifest) -> Result<ModelPaths, Download
 pub async fn pull_model_with_callback(
     manifest: &ModelManifest,
     callback: DownloadProgressCallback,
+    opts: &PullOptions,
 ) -> Result<ModelPaths, DownloadError> {
+    write_pulling_marker(&manifest.name)?;
+
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
@@ -415,28 +504,12 @@ pub async fn pull_model_with_callback(
         let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
-        // Verify SHA-256 when expected digest is known
-        if let Some(expected) = file.sha256 {
-            match verify_sha256(&clean_path, expected) {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!(
-                        "warning: SHA-256 mismatch for {} (file may have been updated on HuggingFace)",
-                        file.hf_filename
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to verify SHA-256 for {}: {e}",
-                        file.hf_filename
-                    );
-                }
-            }
-        }
+        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
 
         downloads.push((file.component, clean_path));
     }
 
+    remove_pulling_marker(&manifest.name);
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
 }
 
@@ -595,7 +668,10 @@ pub fn cached_file_path(
 /// Download a model and save its paths to config. Returns the updated config
 /// and resolved model paths. Used by both the CLI `pull` command and the
 /// server's auto-pull logic.
-pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPaths), DownloadError> {
+pub async fn pull_and_configure(
+    model: &str,
+    opts: &PullOptions,
+) -> Result<(crate::Config, ModelPaths), DownloadError> {
     use crate::config::Config;
     use crate::manifest::{find_manifest, resolve_model_name};
 
@@ -605,7 +681,7 @@ pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPath
         model: model.to_string(),
     })?;
 
-    let paths = pull_model(manifest).await?;
+    let paths = pull_model(manifest, opts).await?;
 
     let mut config = Config::load_or_default();
     let model_config = manifest.to_model_config(&paths);
@@ -628,6 +704,7 @@ pub async fn pull_and_configure(model: &str) -> Result<(crate::Config, ModelPath
 pub async fn pull_and_configure_with_callback(
     model: &str,
     callback: DownloadProgressCallback,
+    opts: &PullOptions,
 ) -> Result<(crate::Config, ModelPaths), DownloadError> {
     use crate::config::Config;
     use crate::manifest::{find_manifest, resolve_model_name};
@@ -638,7 +715,7 @@ pub async fn pull_and_configure_with_callback(
         model: model.to_string(),
     })?;
 
-    let paths = pull_model_with_callback(manifest, callback).await?;
+    let paths = pull_model_with_callback(manifest, callback, opts).await?;
 
     let mut config = Config::load_or_default();
     let model_config = manifest.to_model_config(&paths);
@@ -745,6 +822,20 @@ mod tests {
     }
 
     #[test]
+    fn compute_sha256_correct_digest() {
+        let dir = std::env::temp_dir().join("mold_test_sha256_compute");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let digest = compute_sha256(&path).unwrap();
+        assert_eq!(
+            digest,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn verify_sha256_matches() {
         let dir = std::env::temp_dir().join("mold_test_sha256_match");
         let _ = std::fs::create_dir_all(&dir);
@@ -765,5 +856,110 @@ mod tests {
         let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
         assert!(!verify_sha256(&path, wrong).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_deletes_on_mismatch() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_mismatch");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("corrupted.bin");
+        std::fs::write(&path, b"corrupted data").unwrap();
+
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "corrupted.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 14,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+
+        let result = verify_file_integrity(&path, &file, "test-model:q8", false);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DownloadError::Sha256Mismatch { .. }
+        ),);
+        // File should be deleted
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_skip_verify_ignores_mismatch() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_skip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"some data").unwrap();
+
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "file.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+
+        let result = verify_file_integrity(&path, &file, "test-model:q8", true);
+        assert!(result.is_ok());
+        // File should still exist
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_no_hash_is_ok() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_nohash");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"data").unwrap();
+
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "file.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 4,
+            gated: false,
+            sha256: None,
+        };
+
+        assert!(verify_file_integrity(&path, &file, "test:q8", false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pulling_marker_roundtrip() {
+        let dir = std::env::temp_dir().join("mold_test_marker_roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let marker = dir.join(".pulling");
+
+        // Write
+        std::fs::write(&marker, "test-model:q8").unwrap();
+        assert!(marker.exists());
+
+        // Remove
+        let _ = std::fs::remove_file(&marker);
+        assert!(!marker.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sha256_mismatch_error_message() {
+        let err = DownloadError::Sha256Mismatch {
+            filename: "transformer.gguf".to_string(),
+            expected: "aaa".to_string(),
+            actual: "bbb".to_string(),
+            model: "flux-dev:q8".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("SHA-256 mismatch"));
+        assert!(msg.contains("transformer.gguf"));
+        assert!(msg.contains("mold pull flux-dev:q8"));
+        assert!(msg.contains("--skip-verify"));
     }
 }
