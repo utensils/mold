@@ -24,7 +24,7 @@ mold run "watercolor" --image photo.png --strength 0.7  # img2img
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `serve`, `info`, `ps`, `rm`, `unload`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `serve`, `info`, `ps`, `rm`, `unload`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -165,6 +165,8 @@ Force stdout in interactive mode: `mold run "a cat" --output -`
 mold list                    # List downloaded + available models
 mold pull flux-dev:q4        # Download a model
 mold pull flux-dev:q4 --skip-verify  # Download, skip SHA-256 check
+mold default                 # Show current default model and how it was resolved
+mold default flux-dev:q4     # Set default model (validates name, warns if not downloaded)
 mold info                    # Installation overview (paths, models, server status)
 mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model

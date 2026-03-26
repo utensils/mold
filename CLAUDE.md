@@ -188,6 +188,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --no-metadata           Disable PNG metadata embedding
         --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
 
+mold default [MODEL]               Get or set the default model
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
 mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models

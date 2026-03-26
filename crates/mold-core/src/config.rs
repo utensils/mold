@@ -611,7 +611,9 @@ impl Config {
         Self::config_path().is_some_and(|p| p.exists())
     }
 
-    fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
+    /// Look up a model config entry by name (exact or canonical `name:tag` form).
+    /// Public so CLI commands can check whether a model has a custom config entry.
+    pub fn lookup_model_config(&self, name: &str) -> Option<ModelConfig> {
         if let Some(cfg) = self.models.get(name) {
             return Some(cfg.clone());
         }
