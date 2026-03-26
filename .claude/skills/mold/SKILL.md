@@ -55,6 +55,9 @@ mold run "a sunset" --format jpeg -o sunset.jpg
 
 # Disable PNG metadata embedding
 mold run "a cat" --no-metadata
+
+# Display image inline in terminal after generation (requires `preview` feature)
+mold run "a cat" --preview
 ```
 
 ### Model Selection Guide
@@ -161,6 +164,7 @@ Force stdout in interactive mode: `mold run "a cat" --output -`
 ```bash
 mold list                    # List downloaded + available models
 mold pull flux-dev:q4        # Download a model
+mold info                    # Installation overview (paths, models, server status)
 mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
@@ -194,6 +198,7 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
 | `MOLD_EAGER` | unset | Set `1` to keep all components loaded |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
+| `MOLD_PREVIEW` | unset | Set `1` to display generated images inline in the terminal |
 | `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
 | `MOLD_SCHEDULER` | unset | SD1.5/SDXL: ddim/euler-ancestral/uni-pc |

@@ -78,6 +78,10 @@ Examples:
         #[arg(long, help_heading = "Output")]
         no_metadata: bool,
 
+        /// Display generated image(s) inline in the terminal after generation
+        #[arg(long, env = "MOLD_PREVIEW", help_heading = "Output")]
+        preview: bool,
+
         /// Image width — defaults to model config value
         #[arg(long, help_heading = "Image")]
         width: Option<u32>,
@@ -228,17 +232,18 @@ Files shared between models (e.g. VAE, CLIP) are kept until no model references 
     #[command(alias = "ls")]
     List,
 
-    /// Show detailed model information
+    /// Show detailed model information, or installation overview when no model is given
     #[command(after_long_help = "\
 Examples:
-  mold info flux-dev:q4
-  mold info sdxl-turbo:fp16 --verify")]
+  mold info                          Installation overview
+  mold info flux-dev:q4              Model details
+  mold info sdxl-turbo:fp16 --verify Verify file integrity")]
     Info {
-        /// Model name (e.g. flux-dev:q4, sdxl-turbo:fp16)
+        /// Model name (e.g. flux-dev:q4). Omit for installation overview.
         #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
-        model: String,
+        model: Option<String>,
 
-        /// Verify file integrity via SHA-256 checksums
+        /// Verify file integrity via SHA-256 checksums (requires a model name)
         #[arg(long)]
         verify: bool,
     },
@@ -407,6 +412,7 @@ async fn run() -> anyhow::Result<()> {
             host,
             format,
             no_metadata,
+            preview,
             local,
             t5_variant,
             qwen3_variant,
@@ -432,6 +438,7 @@ async fn run() -> anyhow::Result<()> {
                 host,
                 format,
                 no_metadata,
+                preview,
                 local,
                 t5_variant,
                 qwen3_variant,
@@ -464,7 +471,15 @@ async fn run() -> anyhow::Result<()> {
             commands::list::run().await?;
         }
         Commands::Info { model, verify } => {
-            commands::info::run(&model, verify)?;
+            if let Some(model) = model {
+                commands::info::run(&model, verify)?;
+            } else {
+                if verify {
+                    eprintln!("{} --verify requires a model name", theme::prefix_error());
+                    return Err(AlreadyReported.into());
+                }
+                commands::info::run_overview().await?;
+            }
         }
         Commands::Unload => {
             commands::unload::run().await?;
@@ -812,6 +827,24 @@ mod tests {
     }
 
     #[test]
+    fn run_preview_flag() {
+        let cli = parse(&["run", "model", "test", "--preview"]);
+        match cli.command {
+            Commands::Run { preview, .. } => assert!(preview),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_preview_default_false() {
+        let cli = parse(&["run", "model", "test"]);
+        match cli.command {
+            Commands::Run { preview, .. } => assert!(!preview),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
     fn run_image_flag() {
         let cli = parse(&["run", "model", "test", "--image", "photo.png"]);
         match cli.command {
@@ -862,6 +895,42 @@ mod tests {
         match cli.command {
             Commands::Run { image, .. } => assert!(image.is_none()),
             _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn info_no_args_parses() {
+        let cli = parse(&["info"]);
+        match cli.command {
+            Commands::Info { model, verify } => {
+                assert!(model.is_none());
+                assert!(!verify);
+            }
+            _ => panic!("expected Info"),
+        }
+    }
+
+    #[test]
+    fn info_with_model_parses() {
+        let cli = parse(&["info", "flux-schnell"]);
+        match cli.command {
+            Commands::Info { model, verify } => {
+                assert_eq!(model.as_deref(), Some("flux-schnell"));
+                assert!(!verify);
+            }
+            _ => panic!("expected Info"),
+        }
+    }
+
+    #[test]
+    fn info_verify_with_model_parses() {
+        let cli = parse(&["info", "flux-schnell", "--verify"]);
+        match cli.command {
+            Commands::Info { model, verify } => {
+                assert_eq!(model.as_deref(), Some("flux-schnell"));
+                assert!(verify);
+            }
+            _ => panic!("expected Info"),
         }
     }
 }

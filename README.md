@@ -83,6 +83,18 @@ mold run "a cat" --no-metadata
 MOLD_EMBED_METADATA=0 mold run "a cat"
 ```
 
+### Inline preview
+
+Display generated images directly in the terminal after generation (requires building with `--features preview`). Auto-detects the best terminal protocol: Kitty graphics, iTerm2, Sixel, or Unicode half-block fallback.
+
+```bash
+# Preview after generation
+mold run "a cat" --preview
+
+# Enable preview permanently via environment
+export MOLD_PREVIEW=1
+```
+
 In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 
 ```toml
@@ -143,6 +155,7 @@ mold run "a sunset" --batch 4    # Generates 4 images: seed, seed+1, seed+2, see
 ```bash
 mold pull flux-schnell:q8    # Download a model
 mold list                    # See what you have
+mold info                    # Installation overview
 mold info flux-dev:q4        # Model details + disk usage
 mold rm dreamshaper-v8       # Remove a model
 ```
@@ -211,6 +224,7 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
 | `MOLD_LOG` | `warn` / `info` | Log level |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
+| `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 
 See [CLAUDE.md](CLAUDE.md) for the full list.
 
