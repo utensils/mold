@@ -272,6 +272,20 @@ pub(crate) fn should_use_gpu(
     is_cuda && _free_vram > _threshold
 }
 
+/// Check if block-level offloading should be auto-enabled.
+///
+/// Returns true when the transformer + activation headroom won't fit in VRAM
+/// but there's enough for a single block + activations (~4GB). This allows
+/// streaming blocks one at a time between CPU and GPU.
+pub(crate) fn should_offload(transformer_size: u64, free_vram: u64) -> bool {
+    /// Headroom needed beyond the transformer for activations, noise, VAE workspace.
+    const INFERENCE_HEADROOM: u64 = 3_000_000_000; // 3 GB
+    /// Minimum VRAM needed for one block + activations during offloaded inference.
+    const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
+    let needed = transformer_size.saturating_add(INFERENCE_HEADROOM);
+    free_vram > 0 && needed > free_vram && free_vram >= MIN_OFFLOAD_VRAM
+}
+
 /// Check whether a model component fits comfortably in memory.
 ///
 /// On CUDA, checks discrete VRAM (same as should_use_gpu).
@@ -814,5 +828,39 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("19.0 GB"), "should show needed size");
         assert!(msg.contains("20.0 GB"), "should show available size");
+    }
+
+    // ── should_offload tests ─────────────────────────────────────────────
+
+    #[test]
+    fn offload_when_transformer_exceeds_vram() {
+        // 24GB transformer, 16GB free → needs offloading
+        assert!(should_offload(24 * GB, 16 * GB));
+    }
+
+    #[test]
+    fn offload_when_transformer_fits_but_no_headroom() {
+        // 23.8GB transformer on 24.7GB free: file fits but 23.8+3.0 headroom > 24.7
+        let xformer = 23_800_000_000;
+        let free = 24_700_000_000;
+        assert!(should_offload(xformer, free));
+    }
+
+    #[test]
+    fn no_offload_when_plenty_of_vram() {
+        // 12GB transformer on 24GB free → plenty of room
+        assert!(!should_offload(12 * GB, 24 * GB));
+    }
+
+    #[test]
+    fn no_offload_when_vram_unknown() {
+        // free = 0 means we couldn't query VRAM
+        assert!(!should_offload(24 * GB, 0));
+    }
+
+    #[test]
+    fn no_offload_when_vram_too_small_for_single_block() {
+        // 24GB transformer but only 2GB free — not enough for even one block
+        assert!(!should_offload(24 * GB, 2 * GB));
     }
 }

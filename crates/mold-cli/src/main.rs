@@ -132,6 +132,12 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         eager: bool,
 
+        /// Stream transformer blocks between CPU and GPU one at a time.
+        /// Reduces VRAM from ~24GB to ~2-4GB for large models (3-5x slower).
+        /// Auto-enabled when VRAM is insufficient. Force with MOLD_OFFLOAD=1.
+        #[arg(long, help_heading = "Advanced")]
+        offload: bool,
+
         /// Source image for img2img (file path or - for stdin)
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Option<String>,
@@ -449,6 +455,7 @@ async fn run() -> anyhow::Result<()> {
             qwen3_variant,
             scheduler,
             eager,
+            offload,
             image,
             strength,
             mask,
@@ -475,6 +482,7 @@ async fn run() -> anyhow::Result<()> {
                 qwen3_variant,
                 scheduler,
                 eager,
+                offload,
                 image,
                 strength,
                 mask,
@@ -742,6 +750,15 @@ mod tests {
         let cli = parse(&["run", "model", "test", "--eager"]);
         match cli.command {
             Commands::Run { eager, .. } => assert!(eager),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_offload_flag() {
+        let cli = parse(&["run", "model", "test", "--offload"]);
+        match cli.command {
+            Commands::Run { offload, .. } => assert!(offload),
             _ => panic!("expected Run"),
         }
     }

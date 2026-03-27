@@ -245,6 +245,7 @@ async fn create_and_load_engine(
         paths,
         &config,
         mold_inference::LoadStrategy::Eager,
+        false,
     )
     .map_err(|e| ApiError::internal(format!("failed to create engine for '{model_name}': {e}")))?;
     drop(config);

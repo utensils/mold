@@ -33,6 +33,7 @@ pub fn create_engine(
     paths: ModelPaths,
     config: &Config,
     load_strategy: LoadStrategy,
+    offload: bool,
 ) -> Result<Box<dyn InferenceEngine>> {
     let family = resolve_family(&model_name, config);
     let model_cfg = config.resolved_model_config(&model_name);
@@ -49,6 +50,7 @@ pub fn create_engine(
                 is_schnell,
                 t5_variant,
                 load_strategy,
+                offload,
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
@@ -197,6 +199,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "sd15:fp16");
@@ -218,6 +221,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-model");
@@ -245,6 +249,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "flux2-klein:bf16");
@@ -266,6 +271,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-flux2");
@@ -292,6 +298,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-qwen-image");
@@ -312,6 +319,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         );
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
@@ -339,6 +347,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-wuerstchen");
@@ -359,6 +368,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            false,
         )
         .unwrap();
         assert_eq!(engine.model_name(), "my-wurst");

@@ -63,6 +63,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
                 paths,
                 &config,
                 mold_inference::LoadStrategy::Eager,
+                false,
             )?;
             state::AppState::new(engine, config, queue_handle)
         }
