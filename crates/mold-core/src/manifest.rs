@@ -3659,4 +3659,89 @@ mod tests {
             "unrelated string should have no suggestions"
         );
     }
+
+    // ── Utility model (qwen3-expand) tests ───────────────────────────────
+
+    #[test]
+    fn qwen3_expand_is_utility() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert!(manifest.is_utility());
+    }
+
+    #[test]
+    fn qwen3_expand_small_is_utility() {
+        let manifest = find_manifest("qwen3-expand-small:q8").unwrap();
+        assert!(manifest.is_utility());
+    }
+
+    #[test]
+    fn diffusion_models_are_not_utility() {
+        for name in &["flux-schnell:q8", "sd3.5-large:q8", "sdxl-base:fp16"] {
+            let manifest = find_manifest(name).unwrap();
+            assert!(
+                !manifest.is_utility(),
+                "{name} should not be marked as utility"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_expand_manifest_has_transformer_and_tokenizer() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
+        assert!(components.contains(&ModelComponent::Transformer));
+        assert!(components.contains(&ModelComponent::TextTokenizer));
+        assert!(!components.contains(&ModelComponent::Vae));
+    }
+
+    #[test]
+    fn qwen3_expand_manifest_ungated() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert!(!manifest.is_gated());
+        let small = find_manifest("qwen3-expand-small:q8").unwrap();
+        assert!(!small.is_gated());
+    }
+
+    #[test]
+    fn qwen3_expand_family() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert_eq!(manifest.family, "qwen3-expand");
+    }
+
+    #[test]
+    fn qwen3_expand_resolve_bare_name() {
+        // "qwen3-expand" should resolve to "qwen3-expand:q8"
+        let resolved = resolve_model_name("qwen3-expand");
+        assert_eq!(resolved, "qwen3-expand:q8");
+    }
+
+    #[test]
+    fn qwen3_expand_storage_paths() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = storage_path(manifest, transformer);
+        // Transformer is model-specific: qwen3-expand-q8/<filename>
+        assert!(
+            path.starts_with("qwen3-expand-q8"),
+            "got: {}",
+            path.display()
+        );
+
+        let tokenizer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextTokenizer)
+            .unwrap();
+        let tok_path = storage_path(manifest, tokenizer);
+        // Tokenizer is shared: shared/qwen3-expand/<filename>
+        assert!(
+            tok_path.starts_with("shared/qwen3-expand"),
+            "got: {}",
+            tok_path.display()
+        );
+    }
 }

@@ -112,6 +112,68 @@ pub fn format_chatml(messages: &[(String, String)], thinking: bool) -> String {
 mod tests {
     use super::*;
 
+    // ── family_config ────────────────────────────────────────────────────
+
+    #[test]
+    fn family_config_sd15_variants() {
+        // All SD 1.5 aliases should resolve to the same config
+        for family in &["sd15", "sd1.5", "stable-diffusion-1.5"] {
+            let (limit, notes) = family_config(family);
+            assert_eq!(limit, 50);
+            assert!(notes.contains("keyword"));
+        }
+    }
+
+    #[test]
+    fn family_config_sdxl() {
+        let (limit, notes) = family_config("sdxl");
+        assert_eq!(limit, 60);
+        assert!(notes.contains("CLIP-L + CLIP-G"));
+    }
+
+    #[test]
+    fn family_config_wuerstchen_variants() {
+        for family in &["wuerstchen", "wuerstchen-v2"] {
+            let (limit, _) = family_config(family);
+            assert_eq!(limit, 50);
+        }
+    }
+
+    #[test]
+    fn family_config_flux_uses_long_default() {
+        let (limit, notes) = family_config("flux");
+        assert_eq!(limit, 150);
+        assert!(notes.contains("natural language"));
+    }
+
+    #[test]
+    fn family_config_sd3_uses_long_default() {
+        let (limit, _) = family_config("sd3");
+        assert_eq!(limit, 150);
+    }
+
+    #[test]
+    fn family_config_zimage_uses_long_default() {
+        let (limit, _) = family_config("z-image");
+        assert_eq!(limit, 150);
+    }
+
+    #[test]
+    fn family_config_unknown_uses_long_default() {
+        let (limit, _) = family_config("some-future-model");
+        assert_eq!(limit, 150);
+    }
+
+    #[test]
+    fn family_config_case_insensitive() {
+        let (limit, _) = family_config("SD15");
+        assert_eq!(limit, 50);
+        let (limit, _) = family_config("SDXL");
+        assert_eq!(limit, 60);
+    }
+
+    // ── build_single_messages ────────────────────────────────────────────
+
     #[test]
     fn single_messages_flux() {
         let msgs = build_single_messages("a cat", "flux");
@@ -131,6 +193,15 @@ mod tests {
     }
 
     #[test]
+    fn single_messages_preserves_user_prompt() {
+        let prompt = "a cyberpunk city at night with neon reflections";
+        let msgs = build_single_messages(prompt, "flux");
+        assert_eq!(msgs[1].1, prompt);
+    }
+
+    // ── build_batch_messages ─────────────────────────────────────────────
+
+    #[test]
     fn batch_messages_sdxl() {
         let msgs = build_batch_messages("sunset", "sdxl", 3);
         assert_eq!(msgs.len(), 2);
@@ -138,6 +209,26 @@ mod tests {
         assert!(msgs[0].1.contains("JSON array"));
         assert!(msgs[0].1.contains("60 words"));
     }
+
+    #[test]
+    fn batch_messages_count_substitution() {
+        for n in [2, 5, 10] {
+            let msgs = build_batch_messages("test", "flux", n);
+            assert!(
+                msgs[0].1.contains(&format!("{n} distinct")),
+                "should contain '{n} distinct' for variations={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_messages_preserves_user_prompt() {
+        let prompt = "a dragon in a crystal cave";
+        let msgs = build_batch_messages(prompt, "sdxl", 4);
+        assert_eq!(msgs[1].1, prompt);
+    }
+
+    // ── format_chatml ────────────────────────────────────────────────────
 
     #[test]
     fn chatml_without_thinking() {
@@ -157,5 +248,25 @@ mod tests {
         let result = format_chatml(&msgs, true);
         assert!(result.contains("<|im_start|>assistant\n"));
         assert!(!result.contains("<think>"));
+    }
+
+    #[test]
+    fn chatml_ends_with_assistant_prefix() {
+        let msgs = vec![("user".to_string(), "test".to_string())];
+        for thinking in [true, false] {
+            let result = format_chatml(&msgs, thinking);
+            assert!(
+                result.contains("<|im_start|>assistant\n"),
+                "should end with assistant prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn chatml_empty_messages() {
+        let msgs: Vec<(String, String)> = vec![];
+        let result = format_chatml(&msgs, false);
+        // Should still have assistant prefix + thinking disable
+        assert!(result.starts_with("<|im_start|>assistant\n"));
     }
 }

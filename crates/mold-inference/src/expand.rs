@@ -13,7 +13,8 @@ use tokenizers::Tokenizer;
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
 
-use crate::device::{create_device, fits_in_memory};
+use crate::device::{create_device, fits_in_memory, free_vram_bytes};
+use crate::progress::ProgressReporter;
 
 /// VRAM threshold for placing the expand LLM on GPU (Q4 1.7B ~1.3GB + headroom).
 const EXPAND_LLM_VRAM_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
@@ -95,10 +96,13 @@ impl LocalExpander {
     /// Load model, generate text, drop model.
     fn generate_text(&self, prompt_text: &str, config: &ExpandConfig) -> Result<String> {
         // Determine device: GPU if enough VRAM, else CPU
-        let gpu_device = create_device()?;
-        let device = if gpu_device.is_cuda() || gpu_device.is_metal() {
-            let free_vram = crate::device::free_vram()?;
-            if fits_in_memory(free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
+        let progress = ProgressReporter::default();
+        let gpu_device = create_device(&progress)?;
+        let is_cuda = gpu_device.is_cuda();
+        let is_metal = gpu_device.is_metal();
+        let device = if is_cuda || is_metal {
+            let free_vram = free_vram_bytes().unwrap_or(0);
+            if fits_in_memory(is_cuda, is_metal, free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
                 tracing::info!("Loading expand LLM on GPU");
                 gpu_device
             } else {
@@ -139,15 +143,14 @@ impl LocalExpander {
         let end_think_token = tokenizer.token_to_id("</think>");
 
         let max_new_tokens = config.max_tokens as usize;
-        let mut offset = 0;
         let mut in_thinking = false;
 
         // Process the prompt through the model first
-        {
+        let mut offset = {
             let input = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
             let _logits = model.forward(&input, 0)?;
-            offset = input_ids.len();
-        }
+            input_ids.len()
+        };
 
         // Generate new tokens one at a time
         let mut last_token = *input_ids.last().unwrap_or(&0);
