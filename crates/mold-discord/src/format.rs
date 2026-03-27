@@ -169,27 +169,20 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
         };
 
         let mut lines = vec![header];
-        let mut not_downloaded = 0usize;
         for m in members {
             if m.info.is_loaded {
                 lines.push(format!(
-                    "{} — `{:.1}GB` [loaded]",
+                    "**{}** — `{:.1}GB` [loaded]",
                     m.info.name, m.info.size_gb
                 ));
             } else if m.downloaded {
                 lines.push(format!(
-                    "{} — `{:.1}GB` [ready]",
+                    "**{}** — `{:.1}GB` [ready]",
                     m.info.name, m.info.size_gb
                 ));
             } else {
-                not_downloaded += 1;
+                lines.push(format!("{} — `{:.1}GB`", m.info.name, m.info.size_gb));
             }
-        }
-        if not_downloaded > 0 {
-            lines.push(format!(
-                "+{not_downloaded} more variant{} available",
-                if not_downloaded == 1 { "" } else { "s" }
-            ));
         }
         sections.push(lines.join("\n"));
     }
@@ -490,13 +483,13 @@ mod tests {
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
-        assert!(embed.description.contains("flux-schnell:q8"));
+        assert!(embed.description.contains("**flux-schnell:q8**"));
         assert!(embed.description.contains("[loaded]"));
         assert!(embed.description.contains("4.5GB"));
     }
 
     #[test]
-    fn model_list_groups_families_and_collapses_undownloaded() {
+    fn model_list_groups_families_and_shows_all_variants() {
         let models = vec![
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -560,16 +553,15 @@ mod tests {
             },
         ];
         let embed = format_model_list(&models);
-        // FLUX section shows loaded model and collapses undownloaded
+        // FLUX section: loaded model is bold, undownloaded is plain
         assert!(embed.description.contains("**FLUX**"));
-        assert!(embed.description.contains("flux-schnell:q8"));
-        assert!(embed.description.contains("+1 more variant available"));
-        // Wuerstchen section tagged as alpha
+        assert!(embed.description.contains("**flux-schnell:q8**"));
+        assert!(embed.description.contains("flux-dev:q4"));
+        assert!(!embed.description.contains("**flux-dev:q4**"));
+        // Wuerstchen section tagged as alpha, variant name visible
         assert!(embed.description.contains("**WUERSTCHEN** (alpha)"));
-        assert!(embed.description.contains("+1 more variant available"));
-        // Undownloaded models are NOT listed by name
-        assert!(!embed.description.contains("flux-dev:q4"));
-        assert!(!embed.description.contains("wuerstchen-v2:fp16"));
+        assert!(embed.description.contains("wuerstchen-v2:fp16"));
+        assert!(!embed.description.contains("**wuerstchen-v2:fp16**"));
     }
 
     #[test]
