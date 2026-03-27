@@ -186,8 +186,8 @@ pub(crate) fn resolve_t5_gguf_path(
 /// - `bf16_paths`: BF16 shard paths (may be empty if not available).
 /// - `have_bf16`: whether BF16 shards exist on disk.
 /// - `prefer_gguf`: if true, auto mode prefers GGUF over BF16 even when BF16 fits.
-///   Flux.2 sets this to true because multi-layer extraction (layers 9, 18, 27)
-///   only works with the GGUF encoder.
+///   Flux.2 sets this to true because GGUF is smaller and faster to load.
+///   Both GGUF and BF16 encoders support multi-layer extraction (layers 9, 18, 27).
 pub(crate) fn resolve_qwen3_variant(
     progress: &ProgressReporter,
     preference: Option<&str>,

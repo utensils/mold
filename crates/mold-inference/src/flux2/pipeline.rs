@@ -114,6 +114,54 @@ impl Flux2Engine {
         Ok(text_tokenizer_path.clone())
     }
 
+    /// Check if the transformer file is a GGUF (quantized) file.
+    fn is_gguf_transformer(&self) -> bool {
+        self.base
+            .paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false)
+    }
+
+    /// Load the transformer from either GGUF or BF16 safetensors.
+    fn load_transformer(
+        &self,
+        cfg: &Flux2Config,
+        gpu_dtype: DType,
+        device: &Device,
+    ) -> Result<(Flux2TransformerWrapper, &'static str)> {
+        if self.is_gguf_transformer() {
+            let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
+                &self.base.paths.transformer,
+                device,
+            )?;
+            Ok((
+                Flux2TransformerWrapper::Quantized(
+                    super::quantized_transformer::QuantizedFlux2Transformer::new(
+                        cfg, gguf_vb, gpu_dtype, device,
+                    )?,
+                ),
+                "Loading Flux.2 transformer (GPU, GGUF)",
+            ))
+        } else {
+            let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
+                self.base.paths.transformer_shards.clone()
+            } else {
+                vec![self.base.paths.transformer.clone()]
+            };
+            let flux_vb =
+                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, device)? };
+            Ok((
+                Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
+                    cfg, flux_vb,
+                )?),
+                "Loading Flux.2 transformer (GPU, BF16)",
+            ))
+        }
+    }
+
     /// Get text encoder file paths (shards or single file).
     fn text_encoder_paths(&self) -> Vec<std::path::PathBuf> {
         if !self.base.paths.text_encoder_files.is_empty() {
@@ -209,31 +257,12 @@ impl Flux2Engine {
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
         // --- Load transformer on GPU first ---
+        let flux2_cfg = Flux2Config::klein();
+        let xformer_stage = Instant::now();
+        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
         self.base
             .progress
-            .stage_start("Loading Flux.2 transformer (GPU, BF16)");
-        let xformer_stage = Instant::now();
-        tracing::info!(
-            path = %self.base.paths.transformer.display(),
-            "loading Flux.2 transformer on GPU..."
-        );
-
-        let flux2_cfg = Flux2Config::klein();
-        let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
-            self.base.paths.transformer_shards.clone()
-        } else {
-            vec![self.base.paths.transformer.clone()]
-        };
-        let flux_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, &device)? };
-        let transformer = Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
-            &flux2_cfg, flux_vb,
-        )?);
-        self.base.progress.stage_done(
-            "Loading Flux.2 transformer (GPU, BF16)",
-            xformer_stage.elapsed(),
-        );
-        tracing::info!("Flux.2 transformer loaded on GPU");
+            .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Load VAE on GPU ---
         self.base.progress.stage_start("Loading VAE (GPU)");
@@ -430,26 +459,11 @@ impl Flux2Engine {
         }
 
         let flux2_cfg = Flux2Config::klein();
-
+        let xformer_stage = Instant::now();
+        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
         self.base
             .progress
-            .stage_start("Loading Flux.2 transformer (GPU, BF16)");
-        let xformer_stage = Instant::now();
-
-        let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
-            self.base.paths.transformer_shards.clone()
-        } else {
-            vec![self.base.paths.transformer.clone()]
-        };
-        let flux_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, &device)? };
-        let transformer = Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
-            &flux2_cfg, flux_vb,
-        )?);
-        self.base.progress.stage_done(
-            "Loading Flux.2 transformer (GPU, BF16)",
-            xformer_stage.elapsed(),
-        );
+            .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Load VAE
         self.base.progress.stage_start("Loading VAE (GPU)");
@@ -494,6 +508,7 @@ impl Flux2Engine {
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
+
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -554,6 +569,12 @@ impl InferenceEngine for Flux2Engine {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Flux.2 (flow-matching), ignoring"
+            );
+        }
+        if req.guidance != 0.0 {
+            tracing::debug!(
+                guidance = req.guidance,
+                "Flux.2 Klein is distilled — guidance value is ignored (no guidance embedding)"
             );
         }
         if req.source_image.is_some() {

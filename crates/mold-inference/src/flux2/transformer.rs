@@ -62,7 +62,7 @@ fn layer_norm(dim: usize, vb: &VarBuilder) -> Result<LayerNorm> {
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
-fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+pub(crate) fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let dim = q.dim(D::Minus1)?;
     let scale_factor = 1.0 / (dim as f64).sqrt();
     let mut batch_dims = q.dims().to_vec();
@@ -78,7 +78,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     attn_scores.reshape(batch_dims)
 }
 
-fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
+pub(crate) fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
     if dim % 2 == 1 {
         candle_core::bail!("dim {dim} is odd")
     }
@@ -99,7 +99,7 @@ fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
     out.reshape((b, n, d, 2, 2))
 }
 
-fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
+pub(crate) fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
     let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
@@ -110,14 +110,14 @@ fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     (fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())
 }
 
-fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
+pub(crate) fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
     let q = apply_rope(q, pe)?.contiguous()?;
     let k = apply_rope(k, pe)?.contiguous()?;
     let x = scaled_dot_product_attention(&q, &k, v)?;
     x.transpose(1, 2)?.flatten_from(2)
 }
 
-fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
+pub(crate) fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     const TIME_FACTOR: f64 = 1000.;
     const MAX_PERIOD: f64 = 10000.;
     if dim % 2 == 1 {
@@ -140,13 +140,13 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-struct EmbedNd {
+pub(crate) struct EmbedNd {
     theta: usize,
     axes_dim: Vec<usize>,
 }
 
 impl EmbedNd {
-    fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
+    pub(crate) fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
         Self { theta, axes_dim }
     }
 }
@@ -681,12 +681,13 @@ impl Flux2Transformer {
 }
 
 // ---------------------------------------------------------------------------
-// Wrapper enum for BF16 (future: GGUF quantized)
+// Wrapper enum for BF16 and GGUF quantized
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Flux2TransformerWrapper {
     BF16(Flux2Transformer),
+    Quantized(super::quantized_transformer::QuantizedFlux2Transformer),
 }
 
 impl Flux2TransformerWrapper {
@@ -721,6 +722,15 @@ impl Flux2TransformerWrapper {
 
             let pred = match self {
                 Self::BF16(m) => m.forward(
+                    &img,
+                    img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    Some(&guidance_tensor),
+                )?,
+                Self::Quantized(m) => m.forward(
                     &img,
                     img_ids,
                     txt,

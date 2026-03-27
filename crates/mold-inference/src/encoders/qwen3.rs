@@ -1,27 +1,27 @@
-//! Qwen3 text encoder wrapper for Z-Image.
+//! Qwen3 text encoder wrapper.
 //!
-//! Wraps either the BF16 `ZImageTextEncoder` (from candle) or the quantized
-//! `GgufQwen3Encoder` (from this crate), providing a unified load/encode/drop/reload
+//! Wraps either the native BF16 `Bf16Qwen3Encoder` (with multi-layer extraction)
+//! or the quantized `GgufQwen3Encoder`, providing a unified load/encode/drop/reload
 //! interface that mirrors `T5Encoder`.
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::z_image::{TextEncoderConfig, ZImageTextEncoder};
 use std::path::{Path, PathBuf};
 
+use super::qwen3_bf16::Bf16Qwen3Encoder;
 use super::qwen3_gguf::GgufQwen3Encoder;
 
 /// BF16 (safetensors) or quantized (GGUF) Qwen3 text encoder.
 pub(crate) enum Qwen3Model {
-    BF16(ZImageTextEncoder),
+    BF16(Bf16Qwen3Encoder),
     Quantized(GgufQwen3Encoder),
 }
 
 impl Qwen3Model {
     pub fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
         match self {
-            Self::BF16(m) => Ok(m.forward(input_ids)?),
+            Self::BF16(m) => m.forward(input_ids),
             Self::Quantized(m) => m.forward(input_ids),
         }
     }
@@ -35,14 +35,7 @@ impl Qwen3Model {
         layer_indices: &[usize],
     ) -> Result<Tensor> {
         match self {
-            Self::BF16(m) => {
-                // BF16 ZImageTextEncoder only returns penultimate layer.
-                // For multi-layer extraction, fall back to repeating the single output.
-                // TODO: Add forward_with_layers to ZImageTextEncoder upstream.
-                let emb = m.forward(input_ids)?;
-                let copies: Vec<&Tensor> = (0..layer_indices.len()).map(|_| &emb).collect();
-                Ok(Tensor::cat(&copies, 2)?)
-            }
+            Self::BF16(m) => m.forward_with_layers(input_ids, layer_indices),
             Self::Quantized(m) => m.forward_with_layers(input_ids, layer_indices),
         }
     }
@@ -88,13 +81,12 @@ impl Qwen3Encoder {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        let te_cfg = TextEncoderConfig::z_image();
         let path_strs: Vec<&str> = encoder_paths
             .iter()
             .map(|p| p.to_str().expect("non-UTF8 path"))
             .collect();
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&path_strs, dtype, device)? };
-        let model = Qwen3Model::BF16(ZImageTextEncoder::new(&te_cfg, vb)?);
+        let model = Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?);
 
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
@@ -207,7 +199,6 @@ impl Qwen3Encoder {
                 &self.device,
             )?));
         } else {
-            let te_cfg = TextEncoderConfig::z_image();
             let path_strs: Vec<&str> = self
                 .encoder_paths
                 .iter()
@@ -216,7 +207,7 @@ impl Qwen3Encoder {
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(&path_strs, self.dtype, &self.device)?
             };
-            self.model = Some(Qwen3Model::BF16(ZImageTextEncoder::new(&te_cfg, vb)?));
+            self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?));
         }
         Ok(())
     }
