@@ -18,7 +18,16 @@ That's it. Mold auto-downloads the model on first run and saves the image to you
 
 ## Install
 
-### Nix (recommended)
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
+```
+
+This downloads the latest pre-built binary to `~/.local/bin/mold`. Linux builds include CUDA support; macOS builds include Metal support.
+
+<details>
+<summary>Other install methods</summary>
+
+### Nix
 
 ```bash
 # Run directly — no install needed
@@ -31,9 +40,20 @@ nix profile install github:utensils/mold
 ### From source
 
 ```bash
-cargo build --release -p mold-cli --features cuda    # Linux (NVIDIA)
-cargo build --release -p mold-cli --features metal   # macOS (Apple Silicon)
+cargo build --release -p mold-ai --features cuda    # Linux (NVIDIA)
+cargo build --release -p mold-ai --features metal   # macOS (Apple Silicon)
 ```
+
+### Manual download
+
+Pre-built binaries are available on the [releases page](https://github.com/utensils/mold/releases).
+
+| Platform | File |
+|----------|------|
+| macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+
+</details>
 
 ## Usage
 
@@ -341,13 +361,15 @@ mold completions fish | source     # fish
 
 ## Discord Bot
 
-Mold includes an optional Discord bot (`mold-discord`) that connects to a running `mold serve` instance, allowing users to generate images via slash commands in Discord.
+Mold includes a built-in Discord bot that connects to `mold serve`, allowing users to generate images via slash commands.
 
-```
-Discord <-> mold-discord (poise bot) <-> mold-server (HTTP/SSE) <-> GPU
-```
+```bash
+# Run server + bot in one process
+MOLD_DISCORD_TOKEN="your-token" mold serve --discord
 
-The bot is a lightweight HTTP client — it depends only on `mold-core`, not the inference engine, and can run on any machine without a GPU.
+# Or run the bot separately (connects to a remote server)
+MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
+```
 
 ### Setup
 
@@ -355,22 +377,6 @@ The bot is a lightweight HTTP client — it depends only on `mold-core`, not the
 2. Create a bot user and copy the token
 3. Invite with: `https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=51200&scope=bot` (Send Messages, Attach Files, Embed Links)
 4. No privileged intents are needed (slash commands only)
-
-### Running
-
-```bash
-# Set the Discord bot token (required)
-export MOLD_DISCORD_TOKEN="your-bot-token"
-
-# Optional: point at a remote mold server (default: http://localhost:7680)
-export MOLD_HOST="http://gpu-host:7680"
-
-# Run the bot
-mold-discord
-
-# Or from the devshell
-discord-bot
-```
 
 ### Slash Commands
 
@@ -387,26 +393,20 @@ discord-bot
 | `MOLD_DISCORD_TOKEN` | — | Discord bot token (required; falls back to `DISCORD_TOKEN`) |
 | `MOLD_HOST` | `http://localhost:7680` | mold server URL |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown in seconds |
-| `MOLD_LOG` | `info` | Log level |
 
-### NixOS Deployment
+<details>
+<summary>NixOS deployment</summary>
 
 ```nix
 services.mold.discord = {
   enable = true;
-  package = inputs.mold.packages.${system}.mold-discord;
   tokenFile = config.age.secrets.discord-token.path; # agenix secret
   moldHost = "http://localhost:7680";
   cooldownSeconds = 10;
 };
 ```
 
-### Building
-
-```bash
-nix build .#mold-discord    # Nix
-cargo build -p mold-ai-discord    # Cargo
-```
+</details>
 
 ## Requirements
 
