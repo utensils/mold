@@ -122,16 +122,18 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
         description: truncated_prompt,
         fields: vec![
             ("Model".to_string(), resp.model.clone(), true),
-            ("Seed".to_string(), resp.seed_used.to_string(), true),
             ("Size".to_string(), dims, true),
             ("Time".to_string(), format!("{time_secs:.1}s"), true),
+            ("Seed".to_string(), resp.seed_used.to_string(), false),
         ],
         color: COLOR_SUCCESS,
     }
 }
 
-/// Format the model list into embed data.
-/// Returns one embed per chunk of models (Discord embeds have field limits).
+/// Format the model list into embed data, grouped by family.
+/// Downloaded/loaded models are shown in bold; undownloaded models are shown in
+/// plain text. All models in every family are listed individually.
+/// Alpha families are tagged with `(alpha)` in the section header.
 pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
     if models.is_empty() {
         return EmbedData {
@@ -142,23 +144,51 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
         };
     }
 
-    let mut lines = Vec::new();
+    // Group models by family, preserving insertion order
+    let mut families: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<&ModelInfoExtended>> =
+        std::collections::HashMap::new();
     for m in models {
-        let status = if m.info.is_loaded {
-            "loaded"
-        } else if m.downloaded {
-            "ready"
-        } else {
-            "not downloaded"
-        };
-        let size = format!("{:.1}GB", m.info.size_gb);
-        lines.push(format!(
-            "**{}** — {} `{}` [{}]",
-            m.info.name, m.info.family, size, status
-        ));
+        let family = m.info.family.clone();
+        groups.entry(family.clone()).or_default().push(m);
+        if !families.contains(&family) {
+            families.push(family);
+        }
     }
 
-    let description = lines.join("\n");
+    let mut sections = Vec::new();
+    for family in &families {
+        let members = &groups[family];
+        let is_alpha = members
+            .iter()
+            .any(|m| m.defaults.description.starts_with("[alpha]"));
+
+        let header = if is_alpha {
+            format!("**{}** (alpha)", family.to_uppercase())
+        } else {
+            format!("**{}**", family.to_uppercase())
+        };
+
+        let mut lines = vec![header];
+        for m in members {
+            if m.info.is_loaded {
+                lines.push(format!(
+                    "**{}** — `{:.1}GB` [loaded]",
+                    m.info.name, m.info.size_gb
+                ));
+            } else if m.downloaded {
+                lines.push(format!(
+                    "**{}** — `{:.1}GB` [ready]",
+                    m.info.name, m.info.size_gb
+                ));
+            } else {
+                lines.push(format!("{} — `{:.1}GB`", m.info.name, m.info.size_gb));
+            }
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    let description = sections.join("\n\n");
     // Truncate if too long for Discord (4096 char limit)
     let description = if description.chars().count() > 4000 {
         let truncated: String = description.chars().take(3997).collect();
@@ -363,22 +393,23 @@ mod tests {
         assert_eq!(embed.title, "Image Generated");
         assert_eq!(embed.description, "a cat on mars");
         assert_eq!(embed.color, COLOR_SUCCESS);
-        assert!(embed
-            .fields
-            .iter()
-            .any(|(k, v, _)| k == "Model" && v == "flux-schnell:q8"));
-        assert!(embed
-            .fields
-            .iter()
-            .any(|(k, v, _)| k == "Seed" && v == "42"));
-        assert!(embed
-            .fields
-            .iter()
-            .any(|(k, v, _)| k == "Size" && v == "1024x1024"));
-        assert!(embed
-            .fields
-            .iter()
-            .any(|(k, v, _)| k == "Time" && v == "5.5s"));
+        assert_eq!(
+            embed.fields[0],
+            ("Model".to_string(), "flux-schnell:q8".to_string(), true)
+        );
+        assert_eq!(
+            embed.fields[1],
+            ("Size".to_string(), "1024x1024".to_string(), true)
+        );
+        assert_eq!(
+            embed.fields[2],
+            ("Time".to_string(), "5.5s".to_string(), true)
+        );
+        // Seed is full-width (inline=false) to prevent word-wrap on long values
+        assert_eq!(
+            embed.fields[3],
+            ("Seed".to_string(), "42".to_string(), false)
+        );
     }
 
     #[test]
@@ -452,9 +483,86 @@ mod tests {
             remaining_download_bytes: None,
         }];
         let embed = format_model_list(&models);
-        assert!(embed.description.contains("flux-schnell:q8"));
-        assert!(embed.description.contains("loaded"));
+        assert!(embed.description.contains("**FLUX**"));
+        assert!(embed.description.contains("**flux-schnell:q8**"));
+        assert!(embed.description.contains("[loaded]"));
         assert!(embed.description.contains("4.5GB"));
+    }
+
+    #[test]
+    fn model_list_groups_families_and_shows_all_variants() {
+        let models = vec![
+            ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-schnell:q8".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 11.8,
+                    is_loaded: true,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "FLUX Schnell Q8".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+            ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-dev:q4".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 7.0,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 20,
+                    default_guidance: 3.5,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "FLUX Dev Q4".to_string(),
+                },
+                downloaded: false,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+            ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "wuerstchen-v2:fp16".to_string(),
+                    family: "wuerstchen".to_string(),
+                    size_gb: 5.0,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 30,
+                    default_guidance: 4.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "[alpha] Wuerstchen v2".to_string(),
+                },
+                downloaded: false,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+        ];
+        let embed = format_model_list(&models);
+        // FLUX section: loaded model is bold, undownloaded is plain
+        assert!(embed.description.contains("**FLUX**"));
+        assert!(embed.description.contains("**flux-schnell:q8**"));
+        assert!(embed.description.contains("flux-dev:q4"));
+        assert!(!embed.description.contains("**flux-dev:q4**"));
+        // Wuerstchen section tagged as alpha, variant name visible
+        assert!(embed.description.contains("**WUERSTCHEN** (alpha)"));
+        assert!(embed.description.contains("wuerstchen-v2:fp16"));
+        assert!(!embed.description.contains("**wuerstchen-v2:fp16**"));
     }
 
     #[test]
