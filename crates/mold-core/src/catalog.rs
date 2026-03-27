@@ -1,4 +1,4 @@
-use crate::manifest::known_manifests;
+use crate::manifest::{known_manifests, model_base_name, variant_quality_rank};
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended};
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
@@ -87,7 +87,36 @@ pub fn build_model_catalog(
         });
     }
 
+    // Sort variants within each model family by quality (bf16 > fp16 > fp8 > q8 > q6 > q5 > q4 > q3).
+    // Preserve the manifest-defined order for different base model names.
+    sort_models_by_variant_quality(&mut models);
+
     models
+}
+
+/// Sort models so variants of the same base name are grouped together,
+/// ordered by quality rank (best first). Different base names keep their
+/// original relative order (stable sort).
+fn sort_models_by_variant_quality(models: &mut [ModelInfoExtended]) {
+    // Assign each base name a sequence number based on its first appearance.
+    let mut base_order: Vec<String> = Vec::new();
+    for m in models.iter() {
+        let base = model_base_name(&m.name).to_string();
+        if !base_order.contains(&base) {
+            base_order.push(base);
+        }
+    }
+
+    models.sort_by(|a, b| {
+        let base_a = model_base_name(&a.name);
+        let base_b = model_base_name(&b.name);
+        let ord_a = base_order.iter().position(|s| s == base_a).unwrap_or(usize::MAX);
+        let ord_b = base_order.iter().position(|s| s == base_b).unwrap_or(usize::MAX);
+
+        ord_a
+            .cmp(&ord_b)
+            .then_with(|| variant_quality_rank(&a.name).cmp(&variant_quality_rank(&b.name)))
+    });
 }
 
 #[cfg(test)]
@@ -190,5 +219,59 @@ mod tests {
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn sort_models_by_variant_quality_groups_and_orders() {
+        use super::sort_models_by_variant_quality;
+
+        fn stub(name: &str) -> ModelInfoExtended {
+            ModelInfoExtended {
+                info: ModelInfo {
+                    name: name.to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 0.0,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: String::new(),
+                },
+                defaults: ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: String::new(),
+                },
+                downloaded: false,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            }
+        }
+
+        let mut models = vec![
+            stub("flux-schnell:q4"),
+            stub("flux-dev:q4"),
+            stub("flux-schnell:bf16"),
+            stub("flux-dev:bf16"),
+            stub("flux-schnell:q8"),
+            stub("flux-dev:q8"),
+        ];
+
+        sort_models_by_variant_quality(&mut models);
+
+        let names: Vec<&str> = models.iter().map(|m| m.name.as_str()).collect();
+        // flux-schnell appeared first, so all its variants come first (bf16 > q8 > q4)
+        // then flux-dev variants (bf16 > q8 > q4)
+        assert_eq!(
+            names,
+            vec![
+                "flux-schnell:bf16",
+                "flux-schnell:q8",
+                "flux-schnell:q4",
+                "flux-dev:bf16",
+                "flux-dev:q8",
+                "flux-dev:q4",
+            ]
+        );
     }
 }

@@ -154,6 +154,37 @@ impl ModelManifest {
     }
 }
 
+/// Return a numeric quality rank for a model variant tag.
+///
+/// Lower numbers mean higher quality. Used to sort model variants within
+/// a family so that full-precision appears first and smaller quantizations
+/// appear last.
+///
+/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7)
+///
+/// Unknown tags get rank 100 (sorted last).
+pub fn variant_quality_rank(model_name: &str) -> u32 {
+    let tag = model_name.rsplit(':').next().unwrap_or("");
+    match tag {
+        "bf16" => 0,
+        "fp16" => 1,
+        "fp8" => 2,
+        "q8" => 3,
+        "q6" => 4,
+        "q5" => 5,
+        "q4" => 6,
+        "q3" => 7,
+        _ => 100,
+    }
+}
+
+/// Return the base name of a model (everything before the colon tag).
+///
+/// `"flux-dev:q4"` → `"flux-dev"`, `"sd15:fp16"` → `"sd15"`.
+pub fn model_base_name(model_name: &str) -> &str {
+    model_name.split(':').next().unwrap_or(model_name)
+}
+
 fn is_model_specific_component(component: ModelComponent) -> bool {
     matches!(
         component,
@@ -2806,6 +2837,32 @@ mod tests {
         // bare "flux2-klein" resolves to :q8 (tried first, matches existing installs)
         let name = resolve_model_name("flux2-klein");
         assert_eq!(name, "flux2-klein:q8");
+    }
+
+    #[test]
+    fn variant_quality_rank_ordering() {
+        use super::variant_quality_rank;
+        assert!(variant_quality_rank("flux-dev:bf16") < variant_quality_rank("flux-dev:fp16"));
+        assert!(variant_quality_rank("flux-dev:fp16") < variant_quality_rank("flux-dev:fp8"));
+        assert!(variant_quality_rank("flux-dev:fp8") < variant_quality_rank("flux-dev:q8"));
+        assert!(variant_quality_rank("flux-dev:q8") < variant_quality_rank("flux-dev:q6"));
+        assert!(variant_quality_rank("flux-dev:q6") < variant_quality_rank("flux-dev:q5"));
+        assert!(variant_quality_rank("flux-dev:q5") < variant_quality_rank("flux-dev:q4"));
+        assert!(variant_quality_rank("flux-dev:q4") < variant_quality_rank("flux-dev:q3"));
+    }
+
+    #[test]
+    fn variant_quality_rank_unknown_tag_sorts_last() {
+        use super::variant_quality_rank;
+        assert!(variant_quality_rank("custom-model") > variant_quality_rank("flux-dev:q3"));
+    }
+
+    #[test]
+    fn model_base_name_extracts_prefix() {
+        use super::model_base_name;
+        assert_eq!(model_base_name("flux-dev:q4"), "flux-dev");
+        assert_eq!(model_base_name("sd15:fp16"), "sd15");
+        assert_eq!(model_base_name("custom-model"), "custom-model");
     }
 
     #[test]
