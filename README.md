@@ -339,6 +339,75 @@ source <(mold completions zsh)     # zsh
 mold completions fish | source     # fish
 ```
 
+## Discord Bot
+
+Mold includes an optional Discord bot (`mold-discord`) that connects to a running `mold serve` instance, allowing users to generate images via slash commands in Discord.
+
+```
+Discord <-> mold-discord (poise bot) <-> mold-server (HTTP/SSE) <-> GPU
+```
+
+The bot is a lightweight HTTP client — it depends only on `mold-core`, not the inference engine, and can run on any machine without a GPU.
+
+### Setup
+
+1. Create a Discord application at the [Developer Portal](https://discord.com/developers/applications)
+2. Create a bot user and copy the token
+3. Invite with: `https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=51200&scope=bot` (Send Messages, Attach Files, Embed Links)
+4. No privileged intents are needed (slash commands only)
+
+### Running
+
+```bash
+# Set the Discord bot token (required)
+export MOLD_DISCORD_TOKEN="your-bot-token"
+
+# Optional: point at a remote mold server (default: http://localhost:7680)
+export MOLD_HOST="http://gpu-host:7680"
+
+# Run the bot
+mold-discord
+
+# Or from the devshell
+discord-bot
+```
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/generate <prompt> [model] [width] [height] [steps] [guidance] [seed]` | Generate an image |
+| `/models` | List available models with download/loaded status |
+| `/status` | Show server health, GPU info, uptime |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOLD_DISCORD_TOKEN` | — | Discord bot token (required; falls back to `DISCORD_TOKEN`) |
+| `MOLD_HOST` | `http://localhost:7680` | mold server URL |
+| `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown in seconds |
+| `MOLD_LOG` | `info` | Log level |
+
+### NixOS Deployment
+
+```nix
+services.mold.discord = {
+  enable = true;
+  package = inputs.mold.packages.${system}.mold-discord;
+  tokenFile = config.age.secrets.discord-token.path; # agenix secret
+  moldHost = "http://localhost:7680";
+  cooldownSeconds = 10;
+};
+```
+
+### Building
+
+```bash
+nix build .#mold-discord    # Nix
+cargo build -p mold-ai-discord    # Cargo
+```
+
 ## Requirements
 
 - **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal

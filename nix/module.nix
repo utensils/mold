@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.services.mold;
+  discordCfg = cfg.discord;
 in
 {
   options.services.mold = {
@@ -90,6 +91,44 @@ in
       type = lib.types.bool;
       default = false;
       description = "Whether to open the firewall port for the mold server.";
+    };
+
+    discord = {
+      enable = lib.mkEnableOption "mold Discord bot";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        description = "The mold-discord package to use.";
+      };
+
+      tokenFile = lib.mkOption {
+        type = lib.types.path;
+        description = "Path to a file containing the Discord bot token (e.g. an agenix secret). Loaded via EnvironmentFile as MOLD_DISCORD_TOKEN.";
+      };
+
+      moldHost = lib.mkOption {
+        type = lib.types.str;
+        default = "http://localhost:${toString cfg.port}";
+        description = "URL of the mold server to connect to.";
+      };
+
+      cooldownSeconds = lib.mkOption {
+        type = lib.types.int;
+        default = 10;
+        description = "Per-user cooldown between generation requests, in seconds.";
+      };
+
+      logLevel = lib.mkOption {
+        type = lib.types.enum [
+          "trace"
+          "debug"
+          "info"
+          "warn"
+          "error"
+        ];
+        default = "info";
+        description = "Log level for the Discord bot.";
+      };
     };
   };
 
@@ -180,5 +219,39 @@ in
     };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+
+    # ── Discord bot service ─────────────────────────────────────────────
+    systemd.services.mold-discord = lib.mkIf discordCfg.enable {
+      description = "mold Discord bot";
+      after = [
+        "network.target"
+      ]
+      ++ lib.optionals cfg.enable [ "mold.service" ];
+      wants = lib.optionals cfg.enable [ "mold.service" ];
+      wantedBy = [ "multi-user.target" ];
+
+      environment = {
+        MOLD_HOST = discordCfg.moldHost;
+        MOLD_DISCORD_COOLDOWN = toString discordCfg.cooldownSeconds;
+        MOLD_LOG = discordCfg.logLevel;
+      };
+
+      serviceConfig = {
+        Type = "simple";
+        User = "mold";
+        Group = "mold";
+        EnvironmentFile = discordCfg.tokenFile;
+        ExecStart = "${lib.getExe discordCfg.package}";
+        Restart = "on-failure";
+        RestartSec = 10;
+
+        # Hardening — no GPU access needed
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+      };
+    };
   };
 }

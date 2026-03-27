@@ -166,12 +166,29 @@
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.installShellFiles ];
             }
           );
+
+          moldDiscord = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              pname = "mold-discord";
+              cargoExtraArgs = "-p mold-ai-discord";
+              meta = with lib; {
+                description = "Discord bot for mold — AI image generation via slash commands";
+                homepage = "https://github.com/utensils/mold";
+                license = licenses.mit;
+                mainProgram = "mold-discord";
+                maintainers = [ ];
+              };
+            }
+          );
         in
         {
           _module.args.pkgs = pkgs;
 
           packages = {
             inherit mold;
+            mold-discord = moldDiscord;
             default = mold;
           };
 
@@ -282,6 +299,12 @@
                 command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
               }
               {
+                category = "build";
+                name = "build-discord";
+                help = "cargo build -p mold-ai-discord (Discord bot)";
+                command = "cargo build -p mold-ai-discord \"$@\"";
+              }
+              {
                 category = "check";
                 name = "check";
                 help = "cargo check";
@@ -344,6 +367,12 @@
                 name = "generate";
                 help = "generate an image from a prompt";
                 command = "cargo run -p mold-ai --features ${devFeatures} -- run \"$@\"";
+              }
+              {
+                category = "run";
+                name = "discord-bot";
+                help = "start the mold Discord bot";
+                command = "cargo run -p mold-ai-discord -- \"$@\"";
               }
             ];
           };
