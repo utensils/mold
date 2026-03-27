@@ -185,6 +185,11 @@ environment before starting mold serve.")]
         /// Log output format
         #[arg(long, default_value = "json")]
         log_format: LogFormat,
+
+        /// Also start the Discord bot in this process
+        #[cfg(feature = "discord")]
+        #[arg(long)]
+        discord: bool,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -282,6 +287,10 @@ The MOLD_DEFAULT_MODEL env var takes precedence over the config file.")]
 
     /// Show version information
     Version,
+
+    /// Start the Discord bot (connects to a running mold server via MOLD_HOST)
+    #[cfg(feature = "discord")]
+    Discord,
 
     /// Generate shell completions (sources dynamic model-name completion)
     #[command(after_long_help = "\
@@ -479,9 +488,16 @@ async fn run() -> anyhow::Result<()> {
             port,
             bind,
             models_dir,
+            #[cfg(feature = "discord")]
+            discord,
             ..
         } => {
-            commands::serve::run(port, &bind, models_dir).await?;
+            #[cfg(feature = "discord")]
+            let discord_enabled = discord;
+            #[cfg(not(feature = "discord"))]
+            let discord_enabled = false;
+
+            commands::serve::run(port, &bind, models_dir, discord_enabled).await?;
         }
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };
@@ -515,6 +531,10 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Version => {
             println!("mold {}", mold_core::build_info::version_string());
+        }
+        #[cfg(feature = "discord")]
+        Commands::Discord => {
+            commands::discord::run().await?;
         }
         Commands::Completions { shell } => {
             generate_completions(&shell)?;

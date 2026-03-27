@@ -2496,6 +2496,7 @@ dependencies = [
  "indicatif 0.17.11",
  "libc",
  "mold-ai-core",
+ "mold-ai-discord",
  "mold-ai-inference",
  "mold-ai-server",
  "rand 0.8.5",
