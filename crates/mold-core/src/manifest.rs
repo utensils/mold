@@ -154,6 +154,37 @@ impl ModelManifest {
     }
 }
 
+/// Return a numeric quality rank for a model variant tag.
+///
+/// Lower numbers mean higher quality. Used to sort model variants within
+/// a family so that full-precision appears first and smaller quantizations
+/// appear last.
+///
+/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7)
+///
+/// Unknown tags get rank 100 (sorted last).
+pub fn variant_quality_rank(model_name: &str) -> u32 {
+    let tag = model_name.rsplit(':').next().unwrap_or("");
+    match tag {
+        "bf16" => 0,
+        "fp16" => 1,
+        "fp8" => 2,
+        "q8" => 3,
+        "q6" => 4,
+        "q5" => 5,
+        "q4" => 6,
+        "q3" => 7,
+        _ => 100,
+    }
+}
+
+/// Return the base name of a model (everything before the colon tag).
+///
+/// `"flux-dev:q4"` → `"flux-dev"`, `"sd15:fp16"` → `"sd15"`.
+pub fn model_base_name(model_name: &str) -> &str {
+    model_name.split(':').next().unwrap_or(model_name)
+}
+
 fn is_model_specific_component(component: ModelComponent) -> bool {
     matches!(
         component,
@@ -366,6 +397,58 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "flux-dev:bf16".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Dev BF16 — full quality, full precision (23.8GB transformer)"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.1-dev".to_string(),
+                    hf_filename: "flux1-dev.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 23_802_932_552,
+                    gated: true,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "flux-schnell:bf16".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Schnell BF16 — fast 4-step, full precision (23.8GB transformer)"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.1-schnell".to_string(),
+                    hf_filename: "flux1-schnell.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 23_782_506_688,
+                    gated: true,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: true,
                 scheduler: None,
             },
         },
@@ -2757,9 +2840,35 @@ mod tests {
     }
 
     #[test]
+    fn variant_quality_rank_ordering() {
+        use super::variant_quality_rank;
+        assert!(variant_quality_rank("flux-dev:bf16") < variant_quality_rank("flux-dev:fp16"));
+        assert!(variant_quality_rank("flux-dev:fp16") < variant_quality_rank("flux-dev:fp8"));
+        assert!(variant_quality_rank("flux-dev:fp8") < variant_quality_rank("flux-dev:q8"));
+        assert!(variant_quality_rank("flux-dev:q8") < variant_quality_rank("flux-dev:q6"));
+        assert!(variant_quality_rank("flux-dev:q6") < variant_quality_rank("flux-dev:q5"));
+        assert!(variant_quality_rank("flux-dev:q5") < variant_quality_rank("flux-dev:q4"));
+        assert!(variant_quality_rank("flux-dev:q4") < variant_quality_rank("flux-dev:q3"));
+    }
+
+    #[test]
+    fn variant_quality_rank_unknown_tag_sorts_last() {
+        use super::variant_quality_rank;
+        assert!(variant_quality_rank("custom-model") > variant_quality_rank("flux-dev:q3"));
+    }
+
+    #[test]
+    fn model_base_name_extracts_prefix() {
+        use super::model_base_name;
+        assert_eq!(model_base_name("flux-dev:q4"), "flux-dev");
+        assert_eq!(model_base_name("sd15:fp16"), "sd15");
+        assert_eq!(model_base_name("custom-model"), "custom-model");
+    }
+
+    #[test]
     fn known_manifests_count() {
-        // 22 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 53
-        assert_eq!(known_manifests().len(), 53);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 55
+        assert_eq!(known_manifests().len(), 55);
     }
 
     #[test]

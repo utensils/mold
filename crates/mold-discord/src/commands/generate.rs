@@ -61,14 +61,24 @@ pub fn build_generate_request(
 }
 
 /// Resolve the default model name from the cached model list.
-/// Prefers: loaded model > first downloaded model > "flux-schnell:q8" fallback.
+/// Prefers: loaded model > smallest downloaded model > "flux-schnell:q8" fallback.
 fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
     // Prefer the currently loaded model
     if let Some(loaded) = models.iter().find(|m| m.info.is_loaded) {
         return loaded.info.name.clone();
     }
-    // Fall back to first downloaded model
-    if let Some(downloaded) = models.iter().find(|m| m.downloaded) {
+    // Fall back to the smallest downloaded generative model (avoids accidentally
+    // picking a 23GB BF16 variant or a ControlNet auxiliary model).
+    if let Some(downloaded) = models
+        .iter()
+        .filter(|m| m.downloaded && m.info.family != "controlnet")
+        .min_by(|a, b| {
+            a.info
+                .size_gb
+                .partial_cmp(&b.info.size_gb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
         return downloaded.info.name.clone();
     }
     // Last resort
@@ -329,5 +339,101 @@ mod tests {
     #[test]
     fn resolve_default_empty_list() {
         assert_eq!(resolve_default_model(&[]), "flux-schnell:q8");
+    }
+
+    #[test]
+    fn resolve_default_picks_smallest_when_multiple_downloaded() {
+        let models = vec![
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-schnell:bf16".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 22.1,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-schnell:q8".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 4.5,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+        ];
+        // Should pick q8 (4.5GB) over bf16 (22.1GB)
+        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+    }
+
+    #[test]
+    fn resolve_default_skips_controlnet() {
+        let models = vec![
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "controlnet-canny-sd15:fp16".to_string(),
+                    family: "controlnet".to_string(),
+                    size_gb: 0.7,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 25,
+                    default_guidance: 7.5,
+                    default_width: 512,
+                    default_height: 512,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-schnell:q8".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 4.5,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+        ];
+        // Should pick flux-schnell:q8, not the smaller controlnet
+        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
     }
 }
