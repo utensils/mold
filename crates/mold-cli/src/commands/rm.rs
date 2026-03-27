@@ -108,6 +108,108 @@ fn collect_hf_cache_blob_paths(
     blobs
 }
 
+/// Remove orphaned files from `shared/` subdirectories that are not referenced
+/// by any remaining model config entry, then clean up empty directories.
+///
+/// Auto-downloaded quantized encoders (T5 GGUF, Qwen3 GGUF) are placed in
+/// `shared/t5-gguf/` and `shared/qwen3-gguf/` by variant_resolution at runtime
+/// but never registered in config.toml. After the last model referencing them is
+/// removed, these files become invisible orphans. This function scans and deletes them.
+fn clean_orphaned_shared_files(config: &Config) {
+    let models_dir = config.resolved_models_dir();
+    let shared_dir = models_dir.join("shared");
+    if !shared_dir.is_dir() {
+        return;
+    }
+
+    // Build set of all file paths still referenced by remaining models.
+    // Note: paths in config are absolute canonical paths written by `mold pull`,
+    // and the filesystem walk also produces absolute paths, so string comparison
+    // is reliable here.
+    let referenced: std::collections::HashSet<String> = config
+        .models
+        .values()
+        .flat_map(|mc| mc.all_file_paths())
+        .collect();
+
+    // Walk shared/ recursively and delete unreferenced files.
+    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced);
+
+    if count > 0 {
+        eprintln!(
+            "{} cleaned up {} orphaned shared file{} (freed {})",
+            theme::prefix_note(),
+            count,
+            if count == 1 { "" } else { "s" },
+            format_bytes(bytes),
+        );
+    }
+
+    // Clean up empty directories bottom-up.
+    remove_empty_dirs_recursive(&shared_dir);
+
+    // Remove shared/ itself if empty.
+    let _ = std::fs::remove_dir(&shared_dir);
+}
+
+/// Recursively remove files under `dir` that are not in `referenced`.
+/// Returns `(files_deleted, bytes_freed)`.
+fn remove_orphaned_files_recursive(
+    dir: &std::path::Path,
+    referenced: &std::collections::HashSet<String>,
+) -> (u64, u64) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
+    };
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_symlink() && path.is_dir() {
+            let (c, b) = remove_orphaned_files_recursive(&path, referenced);
+            count += c;
+            bytes += b;
+        } else if path.is_file() {
+            let path_str = path.to_string_lossy().to_string();
+            if !referenced.contains(&path_str) {
+                let size = file_size(&path_str);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        count += 1;
+                        bytes += size;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to clean up orphaned file {}: {}",
+                            theme::prefix_warning(),
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+    (count, bytes)
+}
+
+/// Recursively remove empty directories under `dir` (bottom-up).
+fn remove_empty_dirs_recursive(dir: &std::path::Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_dirs_recursive(&path);
+            // Try removing — only succeeds if empty.
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
+}
+
 /// Remove dangling symlinks and empty directories from the hf-hub cache.
 ///
 /// After deleting blob files, the hf-cache may contain:
@@ -367,6 +469,10 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         );
     }
 
+    // Clean up orphaned shared files (auto-downloaded quantized encoders
+    // not tracked in config) and empty shared directories.
+    clean_orphaned_shared_files(&config);
+
     // Clean up dangling hf-cache entries (symlinks to deleted blobs,
     // empty snapshot dirs, empty repo dirs) once after all removals.
     clean_hf_cache();
@@ -487,5 +593,165 @@ mod tests {
         assert!(!snap_link.exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn make_tmp_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "mold-rm-{}-{}",
+            label,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn orphaned_shared_files_deleted_when_unreferenced() {
+        // Simulate shared/ with an orphaned T5 GGUF and a referenced VAE.
+        let tmp = make_tmp_dir("orphan");
+        let shared = tmp.join("shared");
+        let t5_gguf_dir = shared.join("t5-gguf");
+        let flux_dir = shared.join("flux");
+        std::fs::create_dir_all(&t5_gguf_dir).unwrap();
+        std::fs::create_dir_all(&flux_dir).unwrap();
+
+        // Orphaned file — not referenced by any config entry
+        let orphan = t5_gguf_dir.join("t5-v1_1-xxl-encoder-Q8_0.gguf");
+        std::fs::write(&orphan, b"orphaned encoder data").unwrap();
+
+        // Referenced file — still used by another model
+        let referenced_vae = flux_dir.join("ae.safetensors");
+        std::fs::write(&referenced_vae, b"vae data").unwrap();
+
+        // Build referenced set manually (simulates what clean_orphaned_shared_files
+        // builds from config.models — we test the helpers directly here)
+        let referenced_set: std::collections::HashSet<String> =
+            [referenced_vae.to_string_lossy().to_string()]
+                .into_iter()
+                .collect();
+
+        assert!(!referenced_set.contains(&orphan.to_string_lossy().to_string()));
+        assert!(referenced_set.contains(&referenced_vae.to_string_lossy().to_string()));
+
+        // Run the orphan removal logic directly
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced_set);
+        assert_eq!(count, 1, "should delete exactly 1 orphaned file");
+        assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
+        remove_empty_dirs_recursive(&shared);
+
+        // Orphaned file should be deleted
+        assert!(!orphan.exists(), "orphaned T5 GGUF should be deleted");
+        // Empty t5-gguf dir should be cleaned up
+        assert!(!t5_gguf_dir.exists(), "empty t5-gguf dir should be removed");
+        // Referenced file should survive
+        assert!(referenced_vae.exists(), "referenced VAE should survive");
+        // flux/ dir should still exist (has the VAE)
+        assert!(
+            flux_dir.exists(),
+            "flux dir with referenced file should remain"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn empty_shared_dirs_cleaned_after_all_files_removed() {
+        let tmp = make_tmp_dir("empty-dirs");
+        let shared = tmp.join("shared");
+        let t5_dir = shared.join("t5-gguf");
+        let qwen3_dir = shared.join("qwen3-gguf");
+        let nested = shared.join("flux").join("subdir");
+        std::fs::create_dir_all(&t5_dir).unwrap();
+        std::fs::create_dir_all(&qwen3_dir).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // All empty — simulate post-deletion state
+        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        remove_orphaned_files_recursive(&shared, &referenced);
+        remove_empty_dirs_recursive(&shared);
+        let _ = std::fs::remove_dir(&shared);
+
+        assert!(!t5_dir.exists(), "empty t5-gguf should be removed");
+        assert!(!qwen3_dir.exists(), "empty qwen3-gguf should be removed");
+        assert!(!nested.exists(), "nested empty dir should be removed");
+        assert!(
+            !shared.exists(),
+            "shared/ itself should be removed when empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn orphan_cleanup_with_multiple_orphaned_files() {
+        // Multiple orphaned files across different shared subdirectories
+        let tmp = make_tmp_dir("multi-orphan");
+        let shared = tmp.join("shared");
+        let t5_dir = shared.join("t5-gguf");
+        let qwen3_dir = shared.join("qwen3-gguf");
+        std::fs::create_dir_all(&t5_dir).unwrap();
+        std::fs::create_dir_all(&qwen3_dir).unwrap();
+
+        let orphan_t5 = t5_dir.join("t5-v1_1-xxl-encoder-Q4_0.gguf");
+        let orphan_qwen = qwen3_dir.join("Qwen_3_4b-Q8_0.gguf");
+        std::fs::write(&orphan_t5, b"t5 data").unwrap();
+        std::fs::write(&orphan_qwen, b"qwen data").unwrap();
+
+        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        assert_eq!(count, 2, "should delete both orphaned files");
+        assert_eq!(bytes, 16, "should report correct total bytes"); // "t5 data"(7) + "qwen data"(9)
+        remove_empty_dirs_recursive(&shared);
+        let _ = std::fs::remove_dir(&shared);
+
+        assert!(!orphan_t5.exists(), "orphaned T5 should be deleted");
+        assert!(!orphan_qwen.exists(), "orphaned Qwen3 should be deleted");
+        assert!(
+            !shared.exists(),
+            "shared/ should be removed when all orphans deleted"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn orphan_cleanup_preserves_files_shared_across_models() {
+        // File referenced by model-b should survive even when model-a is removed
+        let tmp = make_tmp_dir("shared-survive");
+        let shared = tmp.join("shared");
+        let flux_dir = shared.join("flux");
+        std::fs::create_dir_all(&flux_dir).unwrap();
+
+        let shared_vae = flux_dir.join("ae.safetensors");
+        let shared_t5 = flux_dir.join("t5xxl_fp16.safetensors");
+        std::fs::write(&shared_vae, b"vae").unwrap();
+        std::fs::write(&shared_t5, b"t5").unwrap();
+
+        // model-b still references both files
+        let referenced: std::collections::HashSet<String> = [
+            shared_vae.to_string_lossy().to_string(),
+            shared_t5.to_string_lossy().to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        assert_eq!(count, 0, "no files should be deleted");
+        assert_eq!(bytes, 0, "no bytes should be freed");
+        remove_empty_dirs_recursive(&shared);
+
+        assert!(shared_vae.exists(), "shared VAE should survive");
+        assert!(shared_t5.exists(), "shared T5 should survive");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn clean_orphaned_shared_files_noop_when_no_shared_dir() {
+        // Should not panic when shared/ doesn't exist
+        let config = Config::default();
+        // This should be a no-op, not a crash
+        clean_orphaned_shared_files(&config);
     }
 }
