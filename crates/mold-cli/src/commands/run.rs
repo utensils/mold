@@ -167,7 +167,7 @@ pub async fn run(
         expand || expand_settings.enabled
     };
 
-    let (final_prompt, _original_prompt) = if should_expand {
+    let (final_prompt, original_prompt) = if should_expand {
         use colored::Colorize;
 
         let mut settings = expand_settings;
@@ -256,6 +256,7 @@ pub async fn run(
         control_image,
         control_model,
         control_scale,
+        original_prompt,
     )
     .await
 }

@@ -306,7 +306,7 @@ Examples:
         prompt: String,
 
         /// Target diffusion model (used for model-aware prompt style)
-        #[arg(short, long)]
+        #[arg(short, long, add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: Option<String>,
 
         /// Number of prompt variations to generate

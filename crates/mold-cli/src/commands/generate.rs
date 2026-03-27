@@ -91,6 +91,7 @@ pub async fn run(
     control_image: Option<Vec<u8>>,
     control_model: Option<String>,
     control_scale: f64,
+    original_prompt: Option<String>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -141,7 +142,7 @@ pub async fn run(
         control_model: control_model.clone(),
         control_scale,
         expand: None,
-        original_prompt: None,
+        original_prompt,
     };
 
     if let Some(desc) = &model_cfg.description {

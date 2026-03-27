@@ -72,6 +72,39 @@ impl std::str::FromStr for Scheduler {
     }
 }
 
+/// Request to expand a short prompt into detailed image generation prompts.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ExpandRequest {
+    /// Short prompt to expand
+    #[schema(example = "a cat")]
+    pub prompt: String,
+    /// Model family for prompt style (flux, sdxl, sd15, sd3, etc.)
+    #[serde(default = "default_expand_model_family")]
+    #[schema(example = "flux")]
+    pub model_family: String,
+    /// Number of prompt variations to generate
+    #[serde(default = "default_expand_variations")]
+    #[schema(example = 1)]
+    pub variations: usize,
+}
+
+fn default_expand_model_family() -> String {
+    "flux".to_string()
+}
+
+fn default_expand_variations() -> usize {
+    1
+}
+
+/// Response from prompt expansion.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ExpandResponse {
+    /// The original short prompt
+    pub original: String,
+    /// Expanded prompt(s)
+    pub expanded: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]

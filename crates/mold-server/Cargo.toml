@@ -20,6 +20,7 @@ path = "src/main.rs"
 default = []
 cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
+expand = ["mold-inference/expand"]
 
 
 [dependencies]

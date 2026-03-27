@@ -82,6 +82,9 @@ fn write_png(
         if let Some(scheduler) = metadata.scheduler {
             encoder.add_text_chunk("mold:scheduler".to_string(), scheduler.to_string())?;
         }
+        if let Some(ref original) = metadata.original_prompt {
+            encoder.add_itxt_chunk("mold:original_prompt".to_string(), original.clone())?;
+        }
         encoder.add_itxt_chunk("mold:version".to_string(), metadata.version.clone())?;
         encoder.add_itxt_chunk(
             "mold:parameters".to_string(),
@@ -180,6 +183,13 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
     }
     if let Some(scheduler) = metadata.scheduler {
         let _ = write!(xmp, "<mold:scheduler>{scheduler}</mold:scheduler>");
+    }
+    if let Some(ref original) = metadata.original_prompt {
+        let _ = write!(
+            xmp,
+            "<mold:originalPrompt>{}</mold:originalPrompt>",
+            xml_escape(original)
+        );
     }
     let _ = write!(
         xmp,
