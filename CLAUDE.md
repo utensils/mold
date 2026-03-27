@@ -27,6 +27,7 @@ nix flake check                                      # Validate formatting + fla
 | build | `build` | `cargo build` (debug, all crates) |
 | build | `build-release` | `cargo build --release` |
 | build | `build-server` | `cargo build -p mold-cli --features {cuda\|metal}` (single binary with GPU) |
+| build | `build-discord` | `cargo build -p mold-ai-discord` (Discord bot) |
 | check | `check` | `cargo check` |
 | check | `clippy` | `cargo clippy` |
 | check | `run-tests` | `cargo test` |
@@ -36,6 +37,7 @@ nix flake check                                      # Validate formatting + fla
 | run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
 | run | `serve` | Start the mold server |
 | run | `generate` | Generate an image from a prompt |
+| run | `discord-bot` | Start the mold Discord bot |
 
 ### Cargo (direct)
 
@@ -78,7 +80,8 @@ crates/
 ├── mold-core/                # Shared types, API protocol, HTTP client, config, model manifests
 ├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
 ├── mold-server/              # Axum HTTP inference server (lib + binary)
-└── mold-cli/                 # Main binary — CLI (clap)
+├── mold-cli/                 # Main binary — CLI (clap)
+└── mold-discord/             # Discord bot — slash commands bridging Discord to mold-server (poise + serenity)
 ```
 
 ### mold-core
@@ -159,6 +162,14 @@ State managed via `AppState` with `tokio::sync::Mutex` around the engine.
 
 Main binary. Feature flags `cuda` and `metal` forward through `mold-server` → `mold-inference` for GPU support in both `mold serve` and `mold run --local`.
 
+### mold-discord
+
+Discord bot using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/models`, and `/status` slash commands. Runs as a standalone binary (`mold-discord`).
+
+Key modules: `commands/` (slash command handlers), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions), `cooldown.rs` (per-user rate limiting), `state.rs` (shared bot state).
+
+Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
+
 ## CLI Command Reference
 
 ```
@@ -229,6 +240,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
+| `MOLD_DISCORD_TOKEN` | — | Discord bot token (preferred; falls back to `DISCORD_TOKEN`) |
+| `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 

@@ -227,3 +227,39 @@ Models auto-pull if not downloaded: `mold run flux-schnell "a cat"` will downloa
 - Dimensions must be multiples of 16; total pixels capped at ~1.1 megapixels
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
+
+## Discord Bot
+
+Mold includes an optional Discord bot (`mold-discord`) that bridges Discord slash commands to a running `mold serve` instance. The bot depends only on `mold-core` (HTTP client) — no GPU needed on the bot host.
+
+### Running
+
+```bash
+export MOLD_DISCORD_TOKEN="your-bot-token"
+export MOLD_HOST="http://gpu-host:7680"  # optional, defaults to localhost
+mold-discord
+```
+
+### Slash Commands
+
+- `/generate <prompt> [model] [width] [height] [steps] [guidance] [seed]` — generate an image
+- `/models` — list available models with status
+- `/status` — show server health, GPU info, uptime
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOLD_DISCORD_TOKEN` | — | Bot token (falls back to `DISCORD_TOKEN`) |
+| `MOLD_HOST` | `http://localhost:7680` | mold server URL |
+| `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown (seconds) |
+
+### NixOS
+
+```nix
+services.mold.discord = {
+  enable = true;
+  package = inputs.mold.packages.${system}.mold-discord;
+  tokenFile = config.age.secrets.discord-token.path;
+};
+```

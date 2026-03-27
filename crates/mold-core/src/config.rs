@@ -559,8 +559,7 @@ impl Config {
                 "0" | "false" | "no" | "off" => false,
                 _ => {
                     eprintln!(
-                        "warning: invalid MOLD_EMBED_METADATA value '{}' — using config/default",
-                        value
+                        "warning: invalid MOLD_EMBED_METADATA value '{value}' — using config/default"
                     );
                     self.embed_metadata
                 }

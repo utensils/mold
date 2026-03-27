@@ -4,6 +4,7 @@ members = [
     "crates/mold-inference",
     "crates/mold-server",
     "crates/mold-cli",
+    "crates/mold-discord",
 ]
 resolver = "2"
 
