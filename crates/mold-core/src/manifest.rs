@@ -1672,9 +1672,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:bf16".to_string(),
             family: "flux2".to_string(),
-            description:
-                "[alpha] Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
-                    .to_string(),
+            description: "Flux.2 Klein-4B BF16 — Apache 2.0, 4B param distilled flow-matching"
+                .to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1689,7 +1688,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             defaults: ManifestDefaults {
                 steps: 4,
-                guidance: 0.0, // Klein is distilled, no CFG needed
+                guidance: 0.0, // Klein is distilled — no guidance embedding, value is ignored
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -1700,7 +1699,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q8".to_string(),
             family: "flux2".to_string(),
-            description: "[alpha] Flux.2 Klein-4B Q8 — best GGUF quality".to_string(),
+            description: "Flux.2 Klein-4B Q8 GGUF — smaller download, reduced quality".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1725,7 +1724,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q6".to_string(),
             family: "flux2".to_string(),
-            description: "[alpha] Flux.2 Klein-4B Q6 — good quality/size trade-off".to_string(),
+            description: "Flux.2 Klein-4B Q6 GGUF — smaller download, reduced quality".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -1750,7 +1749,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein:q4".to_string(),
             family: "flux2".to_string(),
-            description: "[alpha] Flux.2 Klein-4B Q4 — smaller footprint".to_string(),
+            description: "Flux.2 Klein-4B Q4 GGUF — smallest download, reduced quality".to_string(),
             files: {
                 let mut files = shared_flux2_files();
                 files.push(ModelFile {
@@ -2035,7 +2034,7 @@ pub fn resolve_model_name(input: &str) -> String {
             return format!("{base}:{suffix}");
         }
     }
-    // Try default tags in preference order: :q8 (FLUX/GGUF), :fp16 (SDXL), :bf16 (Z-Image), :fp8 (community fine-tunes)
+    // Try default tags in preference order: :q8 (GGUF, smaller), :fp16 (SDXL), :bf16, :fp8 (community)
     for tag in ["q8", "fp16", "bf16", "fp8"] {
         let candidate = format!("{input}:{tag}");
         if find_manifest_exact(&candidate).is_some() {
@@ -2752,8 +2751,7 @@ mod tests {
 
     #[test]
     fn flux2_klein_resolves_to_q8() {
-        // bare "flux2-klein" should resolve to :q8 (not :bf16) since q8 is tried first
-        // Actually, it tries :q8 first in resolve_model_name
+        // bare "flux2-klein" resolves to :q8 (tried first, matches existing installs)
         let name = resolve_model_name("flux2-klein");
         assert_eq!(name, "flux2-klein:q8");
     }

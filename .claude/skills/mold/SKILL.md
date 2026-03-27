@@ -100,13 +100,15 @@ Default model if none specified: `flux-schnell:q8`
 
 **Z-Image**: `z-image-turbo:bf16`, `z-image-turbo:q8`, `z-image-turbo:q6`, `z-image-turbo:q4`
 
-**Alpha**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`, `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `wuerstchen-v2:fp16`
+**Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
+
+**Alpha**: `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `wuerstchen-v2:fp16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
 ### Name Resolution
 
-Bare names auto-resolve: `flux-dev` -> `flux-dev:q8`, `sdxl-base` -> `sdxl-base:fp16`, `sd15` -> `sd15:fp16`
+Bare names auto-resolve: `flux2-klein` -> `flux2-klein:q8`, `flux-dev` -> `flux-dev:q8`, `sdxl-base` -> `sdxl-base:fp16`, `sd15` -> `sd15:fp16`
 
 FP8 safetensors models are automatically quantized to Q8 GGUF on first use (one-time conversion, cached at `$MOLD_HOME/cache/`).
 

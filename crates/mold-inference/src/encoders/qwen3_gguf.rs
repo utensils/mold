@@ -356,13 +356,23 @@ impl GgufQwen3Encoder {
         input_ids: &Tensor,
         layer_indices: &[usize],
     ) -> Result<Tensor> {
+        if layer_indices.is_empty() {
+            anyhow::bail!("layer_indices must not be empty");
+        }
+        let max_layer = layer_indices.iter().copied().max().unwrap_or(0);
+        if max_layer >= self.blocks.len() {
+            anyhow::bail!(
+                "layer index {max_layer} out of bounds (model has {} layers)",
+                self.blocks.len()
+            );
+        }
+
         let (_batch, seq_len) = input_ids.dims2()?;
         let mut xs = self.embedding.forward(input_ids)?;
         let (cos, sin) = compute_rope(seq_len, xs.device())?;
         let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
 
-        let max_layer = layer_indices.iter().copied().max().unwrap_or(0);
-        let n_run = (max_layer + 1).min(self.blocks.len());
+        let n_run = max_layer + 1;
         let mut collected: Vec<Tensor> = Vec::with_capacity(layer_indices.len());
 
         for (i, block) in self.blocks[..n_run].iter_mut().enumerate() {
