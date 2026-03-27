@@ -277,11 +277,12 @@ pub(crate) fn should_use_gpu(
 /// Returns true when the transformer + activation headroom won't fit in VRAM
 /// but there's enough for a single block + activations (~4GB). This allows
 /// streaming blocks one at a time between CPU and GPU.
+/// Minimum VRAM needed for one block + activations during offloaded inference.
+pub(crate) const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
+
 pub(crate) fn should_offload(transformer_size: u64, free_vram: u64) -> bool {
     /// Headroom needed beyond the transformer for activations, noise, VAE workspace.
     const INFERENCE_HEADROOM: u64 = 3_000_000_000; // 3 GB
-    /// Minimum VRAM needed for one block + activations during offloaded inference.
-    const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
     let needed = transformer_size.saturating_add(INFERENCE_HEADROOM);
     free_vram > 0 && needed > free_vram && free_vram >= MIN_OFFLOAD_VRAM
 }

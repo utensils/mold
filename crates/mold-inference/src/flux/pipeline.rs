@@ -14,7 +14,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD,
+    should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -1136,6 +1136,14 @@ impl FluxEngine {
         let use_offload = if !is_quantized {
             let free = free_vram_bytes().unwrap_or(0);
             if self.offload || should_offload(xformer_size, free) {
+                if free > 0 && free < MIN_OFFLOAD_VRAM {
+                    bail!(
+                        "GPU only has {:.1} GB free — at least {:.1} GB is required \
+                         for block-level offloading",
+                        free as f64 / 1e9,
+                        MIN_OFFLOAD_VRAM as f64 / 1e9,
+                    );
+                }
                 true
             } else if free > 0 && xformer_size > free {
                 bail!(
@@ -1148,7 +1156,13 @@ impl FluxEngine {
                 false
             }
         } else {
-            false // GGUF models fit in VRAM; offloading not supported for quantized
+            if self.offload {
+                tracing::warn!(
+                    "block-level offloading is not supported for quantized models; \
+                     --offload / MOLD_OFFLOAD=1 will be ignored"
+                );
+            }
+            false
         };
 
         // Even when offloading, blocks must still fit in system RAM on unified-memory

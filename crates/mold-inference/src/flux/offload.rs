@@ -53,28 +53,6 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     Ok(attn_scores.reshape(batch_dims)?)
 }
 
-#[allow(dead_code)]
-fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
-    if dim % 2 == 1 {
-        anyhow::bail!("dim {dim} is odd");
-    }
-    let dev = pos.device();
-    let theta = theta as f64;
-    let inv_freq: Vec<_> = (0..dim)
-        .step_by(2)
-        .map(|i| 1f32 / theta.powf(i as f64 / dim as f64) as f32)
-        .collect();
-    let inv_freq_len = inv_freq.len();
-    let inv_freq = Tensor::from_vec(inv_freq, (1, 1, inv_freq_len), dev)?;
-    let inv_freq = inv_freq.to_dtype(pos.dtype())?;
-    let freqs = pos.unsqueeze(2)?.broadcast_mul(&inv_freq)?;
-    let cos = freqs.cos()?;
-    let sin = freqs.sin()?;
-    let out = Tensor::stack(&[&cos, &sin.neg()?, &sin, &cos], 3)?;
-    let (b, n, d, _ij) = out.dims4()?;
-    Ok(out.reshape((b, n, d, 2, 2))?)
-}
-
 fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
