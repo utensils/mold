@@ -2,7 +2,6 @@ use crate::format;
 use crate::handler;
 use crate::state::Context;
 use anyhow::Result;
-use poise::serenity_prelude::CreateEmbed;
 
 /// Show mold server health and status.
 #[poise::command(slash_command)]
@@ -12,7 +11,7 @@ pub async fn status(ctx: Context<'_>) -> Result<()> {
     match ctx.data().client.server_status().await {
         Ok(server_status) => {
             let embed_data = format::format_server_status(&server_status);
-            let embed = embed_data_to_create_embed(&embed_data);
+            let embed = handler::embed_data_to_create_embed(&embed_data);
 
             ctx.send(poise::CreateReply::default().embed(embed)).await?;
         }
@@ -27,18 +26,4 @@ pub async fn status(ctx: Context<'_>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn embed_data_to_create_embed(data: &format::EmbedData) -> CreateEmbed {
-    let mut embed = CreateEmbed::new().title(&data.title).color(data.color);
-
-    if !data.description.is_empty() {
-        embed = embed.description(&data.description);
-    }
-
-    for (name, value, inline) in &data.fields {
-        embed = embed.field(name, value, *inline);
-    }
-
-    embed
 }

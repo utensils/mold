@@ -110,8 +110,9 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
         .map(|img| format!("{}x{}", img.width, img.height))
         .unwrap_or_default();
 
-    let truncated_prompt = if prompt.len() > 256 {
-        format!("{}...", &prompt[..253])
+    let truncated_prompt = if prompt.chars().count() > 256 {
+        let truncated: String = prompt.chars().take(253).collect();
+        format!("{truncated}...")
     } else {
         prompt.to_string()
     };
@@ -159,8 +160,9 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
 
     let description = lines.join("\n");
     // Truncate if too long for Discord (4096 char limit)
-    let description = if description.len() > 4000 {
-        format!("{}...", &description[..3997])
+    let description = if description.chars().count() > 4000 {
+        let truncated: String = description.chars().take(3997).collect();
+        format!("{truncated}...")
     } else {
         description
     };
@@ -395,7 +397,28 @@ mod tests {
             seed_used: 1,
         };
         let embed = format_generation_result(&resp, &long_prompt);
-        assert!(embed.description.len() <= 260);
+        assert!(embed.description.chars().count() <= 260);
+        assert!(embed.description.ends_with("..."));
+    }
+
+    #[test]
+    fn generation_result_truncates_non_ascii_prompt_safely() {
+        // Multi-byte characters: each is 4 bytes in UTF-8
+        let long_prompt = "\u{1F600}".repeat(300); // 300 emoji characters
+        let resp = GenerateResponse {
+            images: vec![ImageData {
+                data: vec![],
+                format: OutputFormat::Png,
+                width: 512,
+                height: 512,
+                index: 0,
+            }],
+            generation_time_ms: 1000,
+            model: "test".to_string(),
+            seed_used: 1,
+        };
+        let embed = format_generation_result(&resp, &long_prompt);
+        assert!(embed.description.chars().count() <= 260);
         assert!(embed.description.ends_with("..."));
     }
 

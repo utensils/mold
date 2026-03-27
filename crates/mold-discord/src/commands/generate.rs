@@ -60,6 +60,21 @@ pub fn build_generate_request(
     }
 }
 
+/// Resolve the default model name from the cached model list.
+/// Prefers: loaded model > first downloaded model > "flux-schnell:q8" fallback.
+fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
+    // Prefer the currently loaded model
+    if let Some(loaded) = models.iter().find(|m| m.info.is_loaded) {
+        return loaded.info.name.clone();
+    }
+    // Fall back to first downloaded model
+    if let Some(downloaded) = models.iter().find(|m| m.downloaded) {
+        return downloaded.info.name.clone();
+    }
+    // Last resort
+    "flux-schnell:q8".to_string()
+}
+
 /// Generate an AI image from a text prompt.
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
@@ -75,6 +90,17 @@ pub async fn generate(
     #[description = "Guidance scale (0.0 for schnell, ~3.5 for dev)"] guidance: Option<f64>,
     #[description = "Random seed for reproducibility"] seed: Option<u64>,
 ) -> Result<()> {
+    // Validate prompt before deferring (avoids wasting the interaction)
+    if prompt.trim().is_empty() {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("Prompt cannot be empty.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
     // Check cooldown
     let user_id = ctx.author().id.get();
     let cooldown = Duration::from_secs(ctx.data().config.cooldown_seconds);
@@ -94,11 +120,11 @@ pub async fn generate(
     // Defer the response (shows "Bot is thinking...")
     ctx.defer().await?;
 
-    // Resolve model name
-    let model_name = model.unwrap_or_else(|| "flux-schnell:q8".to_string());
+    // Resolve model name — use server's loaded/downloaded model if none specified
+    let models = ctx.data().cached_models().await;
+    let model_name = model.unwrap_or_else(|| resolve_default_model(&models));
 
     // Look up model defaults from cache
-    let models = ctx.data().cached_models().await;
     let model_defaults = models
         .iter()
         .find(|m| m.info.name == model_name)
@@ -114,12 +140,6 @@ pub async fn generate(
         seed,
         model_defaults,
     );
-
-    // Validate prompt
-    if prompt.trim().is_empty() {
-        handler::send_error(ctx, "Prompt cannot be empty.").await?;
-        return Ok(());
-    }
 
     match handler::run_generation(ctx, req).await {
         Ok(()) => {
@@ -232,5 +252,82 @@ mod tests {
         assert_eq!(req.width, 768);
         assert_eq!(req.height, 512); // from defaults
         assert_eq!(req.steps, 4); // from defaults
+    }
+
+    #[test]
+    fn resolve_default_prefers_loaded() {
+        let models = vec![
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-dev:q4".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 4.0,
+                    is_loaded: false,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 25,
+                    default_guidance: 3.5,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+            mold_core::ModelInfoExtended {
+                info: mold_core::ModelInfo {
+                    name: "flux-schnell:q8".to_string(),
+                    family: "flux".to_string(),
+                    size_gb: 4.5,
+                    is_loaded: true,
+                    last_used: None,
+                    hf_repo: "test/repo".to_string(),
+                },
+                defaults: mold_core::ModelDefaults {
+                    default_steps: 4,
+                    default_guidance: 0.0,
+                    default_width: 1024,
+                    default_height: 1024,
+                    description: "test".to_string(),
+                },
+                downloaded: true,
+                disk_usage_bytes: None,
+                remaining_download_bytes: None,
+            },
+        ];
+        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+    }
+
+    #[test]
+    fn resolve_default_falls_back_to_downloaded() {
+        let models = vec![mold_core::ModelInfoExtended {
+            info: mold_core::ModelInfo {
+                name: "flux-dev:q4".to_string(),
+                family: "flux".to_string(),
+                size_gb: 4.0,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: "test/repo".to_string(),
+            },
+            defaults: mold_core::ModelDefaults {
+                default_steps: 25,
+                default_guidance: 3.5,
+                default_width: 1024,
+                default_height: 1024,
+                description: "test".to_string(),
+            },
+            downloaded: true,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+        }];
+        assert_eq!(resolve_default_model(&models), "flux-dev:q4");
+    }
+
+    #[test]
+    fn resolve_default_empty_list() {
+        assert_eq!(resolve_default_model(&[]), "flux-schnell:q8");
     }
 }
