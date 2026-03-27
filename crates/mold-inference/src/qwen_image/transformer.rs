@@ -20,6 +20,41 @@ use candle_transformers::models::z_image::transformer::{
     apply_rotary_emb, create_coordinate_grid, patchify, unpatchify, FeedForward, RopeEmbedder,
 };
 
+// ==================== Layer Norm (No Params) ====================
+
+/// Standard LayerNorm without learnable parameters.
+///
+/// Matches `nn.LayerNorm(dim, elementwise_affine=False)` in PyTorch.
+/// The Qwen-Image model uses this for block-level normalization, with
+/// scale/shift provided externally via AdaLN modulation.
+#[derive(Debug, Clone)]
+struct LayerNormNoParams {
+    eps: f64,
+}
+
+impl LayerNormNoParams {
+    fn new(eps: f64) -> Self {
+        Self { eps }
+    }
+}
+
+impl Module for LayerNormNoParams {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        let x_dtype = x.dtype();
+        let internal_dtype = match x_dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            d => d,
+        };
+        let hidden_size = x.dim(D::Minus1)?;
+        let x = x.to_dtype(internal_dtype)?;
+        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
+        x_normed.to_dtype(x_dtype)
+    }
+}
+
 /// Qwen-Image transformer configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct QwenImageConfig {
@@ -334,24 +369,24 @@ impl JointAttention {
 /// A single dual-stream transformer block for Qwen-Image.
 ///
 /// Each block has:
-/// - Separate AdaLN norms for image and text streams
+/// - Separate AdaLN norms for image and text streams (parameterless LayerNorm)
 /// - Joint attention across both streams
 /// - Separate feedforward networks for image and text
-/// - AdaLN modulation from timestep embedding (image stream only)
+/// - AdaLN modulation from timestep embedding: 6 params per stream (shift, scale, gate × 2)
 #[derive(Debug, Clone)]
 struct QwenImageTransformerBlock {
-    // Image stream norms
-    norm1: RmsNorm,
-    norm1_context: RmsNorm,
+    // Image stream norms (no learnable params — scale/shift from AdaLN modulation)
+    norm1: LayerNormNoParams,
+    norm1_context: LayerNormNoParams,
     // Joint attention
     attn: JointAttention,
     // Feedforward
     ff: FeedForward,
     ff_context: FeedForward,
-    // Post-attention norms
-    norm2: RmsNorm,
-    norm2_context: RmsNorm,
-    // AdaLN modulation for image stream (scale_msa, gate_msa, scale_mlp, gate_mlp)
+    // Post-attention norms (no learnable params)
+    norm2: LayerNormNoParams,
+    norm2_context: LayerNormNoParams,
+    // AdaLN modulation: 6 values (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
     adaln_modulation: candle_nn::Linear,
     // AdaLN modulation for text stream
     adaln_context_modulation: candle_nn::Linear,
@@ -363,22 +398,22 @@ impl QwenImageTransformerBlock {
         let text_dim = cfg.joint_attention_dim;
         let hidden_dim = cfg.hidden_dim();
 
-        let norm1 = RmsNorm::new(dim, cfg.norm_eps, vb.pp("norm1"))?;
-        let norm1_context = RmsNorm::new(text_dim, cfg.norm_eps, vb.pp("norm1_context"))?;
+        // Block norms: parameterless LayerNorm (scale/shift come from AdaLN modulation)
+        let norm1 = LayerNormNoParams::new(cfg.norm_eps);
+        let norm1_context = LayerNormNoParams::new(cfg.norm_eps);
 
         let attn = JointAttention::new(cfg, vb.pp("attn"))?;
 
         let ff = FeedForward::new(dim, hidden_dim, vb.pp("ff"))?;
         let ff_context = FeedForward::new(text_dim, text_dim * 4, vb.pp("ff_context"))?;
 
-        let norm2 = RmsNorm::new(dim, cfg.norm_eps, vb.pp("norm2"))?;
-        let norm2_context = RmsNorm::new(text_dim, cfg.norm_eps, vb.pp("norm2_context"))?;
+        let norm2 = LayerNormNoParams::new(cfg.norm_eps);
+        let norm2_context = LayerNormNoParams::new(cfg.norm_eps);
 
-        // AdaLN: 6 modulation values (scale_msa, gate_msa, shift_msa, scale_mlp, gate_mlp, shift_mlp)
-        // but we use 4 (scale + gate for attention and FFN)
-        let adaln_modulation = linear(dim, 4 * dim, vb.pp("norm1").pp("linear"))?;
+        // AdaLN: 6 modulation values per stream (shift, scale, gate for attention + MLP)
+        let adaln_modulation = linear(dim, 6 * dim, vb.pp("norm1").pp("linear"))?;
         let adaln_context_modulation =
-            linear(dim, 4 * text_dim, vb.pp("norm1_context").pp("linear"))?;
+            linear(dim, 6 * text_dim, vb.pp("norm1_context").pp("linear"))?;
 
         Ok(Self {
             norm1,
@@ -415,38 +450,65 @@ impl QwenImageTransformerBlock {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
 
-        // --- AdaLN modulation ---
-        let img_mod = temb.apply(&self.adaln_modulation)?.unsqueeze(1)?;
-        let img_chunks = img_mod.chunk(4, D::Minus1)?;
-        let (scale_msa, gate_msa, scale_mlp, gate_mlp) = (
+        // --- AdaLN modulation (6 params: shift, scale, gate for attention + MLP) ---
+        let img_mod = temb.silu()?.apply(&self.adaln_modulation)?.unsqueeze(1)?;
+        let img_chunks = img_mod.chunk(6, D::Minus1)?;
+        let (
+            img_shift_msa,
+            img_scale_msa,
+            img_gate_msa,
+            img_shift_mlp,
+            img_scale_mlp,
+            img_gate_mlp,
+        ) = (
             &img_chunks[0],
             &img_chunks[1],
             &img_chunks[2],
             &img_chunks[3],
+            &img_chunks[4],
+            &img_chunks[5],
         );
 
-        let txt_mod = temb.apply(&self.adaln_context_modulation)?.unsqueeze(1)?;
-        let txt_chunks = txt_mod.chunk(4, D::Minus1)?;
-        let (c_scale_msa, c_gate_msa, c_scale_mlp, c_gate_mlp) = (
+        let txt_mod = temb
+            .silu()?
+            .apply(&self.adaln_context_modulation)?
+            .unsqueeze(1)?;
+        let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
+        let (
+            txt_shift_msa,
+            txt_scale_msa,
+            txt_gate_msa,
+            txt_shift_mlp,
+            txt_scale_mlp,
+            txt_gate_mlp,
+        ) = (
             &txt_chunks[0],
             &txt_chunks[1],
             &txt_chunks[2],
             &txt_chunks[3],
+            &txt_chunks[4],
+            &txt_chunks[5],
         );
 
         // --- Attention ---
-        // Image: norm + scale
-        let img_normed = self.norm1.forward(img_hidden)?;
-        let img_scaled = img_normed.broadcast_mul(&(scale_msa + 1.0)?)?;
+        // Image: norm + scale + shift
+        let img_attn_in = self
+            .norm1
+            .forward(img_hidden)?
+            .broadcast_mul(&(img_scale_msa + 1.0)?)?
+            .broadcast_add(img_shift_msa)?;
 
-        // Text: norm + scale
-        let txt_normed = self.norm1_context.forward(txt_hidden)?;
-        let txt_scaled = txt_normed.broadcast_mul(&(c_scale_msa + 1.0)?)?;
+        // Text: norm + scale + shift
+        let txt_attn_in = self
+            .norm1_context
+            .forward(txt_hidden)?
+            .broadcast_mul(&(txt_scale_msa + 1.0)?)?
+            .broadcast_add(txt_shift_msa)?;
 
         // Joint attention
         let (img_attn, txt_attn) = self.attn.forward(
-            &img_scaled,
-            &txt_scaled,
+            &img_attn_in,
+            &txt_attn_in,
             txt_mask,
             img_cos,
             img_sin,
@@ -455,25 +517,31 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
-        // Gate + residual
-        let img_hidden = (img_hidden + gate_msa.tanh()?.broadcast_mul(&img_attn)?)?;
+        // Gate + residual (no tanh on gate)
+        let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + c_gate_msa.tanh()?.broadcast_mul(&txt_attn)?)?
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
             .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         // --- Feedforward ---
-        // Image: norm + scale + FF + gate + residual
-        let img_normed = self.norm2.forward(&img_hidden)?;
-        let img_scaled = img_normed.broadcast_mul(&(scale_mlp + 1.0)?)?;
-        let img_ff = self.ff.forward(&img_scaled)?;
-        let img_hidden = (img_hidden + gate_mlp.tanh()?.broadcast_mul(&img_ff)?)?;
+        // Image: norm + scale + shift + FF + gate + residual
+        let img_mlp_in = self
+            .norm2
+            .forward(&img_hidden)?
+            .broadcast_mul(&(img_scale_mlp + 1.0)?)?
+            .broadcast_add(img_shift_mlp)?;
+        let img_ff = self.ff.forward(&img_mlp_in)?;
+        let img_hidden = (img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
 
-        // Text: norm + scale + FF + gate + residual
-        let txt_normed = self.norm2_context.forward(&txt_hidden)?;
-        let txt_scaled = txt_normed.broadcast_mul(&(c_scale_mlp + 1.0)?)?;
-        let txt_ff = self.ff_context.forward(&txt_scaled)?;
+        // Text: norm + scale + shift + FF + gate + residual
+        let txt_mlp_in = self
+            .norm2_context
+            .forward(&txt_hidden)?
+            .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
+            .broadcast_add(txt_shift_mlp)?;
+        let txt_ff = self.ff_context.forward(&txt_mlp_in)?;
         let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + c_gate_mlp.tanh()?.broadcast_mul(&txt_ff)?)?
+        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&txt_ff)?)?
             .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
 
         Ok((img_hidden, txt_hidden))
@@ -482,10 +550,10 @@ impl QwenImageTransformerBlock {
 
 // ==================== Output Layer ====================
 
-/// Final output layer: AdaLN normalization + linear projection.
+/// Final output layer: AdaLN normalization (shift + scale) + linear projection.
 #[derive(Debug, Clone)]
 struct OutputLayer {
-    norm_final: RmsNorm,
+    norm_final: LayerNormNoParams,
     linear: candle_nn::Linear,
     adaln_linear: candle_nn::Linear,
 }
@@ -498,9 +566,9 @@ impl OutputLayer {
         vb: VarBuilder,
     ) -> candle_core::Result<Self> {
         let output_dim = patch_size * patch_size * out_channels;
-        let norm_final = RmsNorm::new(inner_dim, 1e-6, vb.pp("norm_out"))?;
+        let norm_final = LayerNormNoParams::new(1e-6);
         let proj_out = linear(inner_dim, output_dim, vb.pp("proj_out"))?;
-        let adaln_linear = linear(inner_dim, inner_dim, vb.pp("norm_out").pp("linear"))?;
+        let adaln_linear = linear(inner_dim, 2 * inner_dim, vb.pp("norm_out").pp("linear"))?;
 
         Ok(Self {
             norm_final,
@@ -510,9 +578,15 @@ impl OutputLayer {
     }
 
     fn forward(&self, x: &Tensor, temb: &Tensor) -> candle_core::Result<Tensor> {
-        let scale = temb.silu()?.apply(&self.adaln_linear)?;
-        let scale = (scale + 1.0)?.unsqueeze(1)?;
-        let x = self.norm_final.forward(x)?.broadcast_mul(&scale)?;
+        let mod_params = temb.silu()?.apply(&self.adaln_linear)?;
+        let chunks = mod_params.chunk(2, D::Minus1)?;
+        let shift = chunks[0].unsqueeze(1)?;
+        let scale = chunks[1].unsqueeze(1)?;
+        let x = self
+            .norm_final
+            .forward(x)?
+            .broadcast_mul(&(scale + 1.0)?)?
+            .broadcast_add(&shift)?;
         x.apply(&self.linear)
     }
 }

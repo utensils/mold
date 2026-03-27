@@ -247,6 +247,7 @@ impl JointAttention {
         let k = k.transpose(1, 2)?.contiguous()?;
         let v = v.transpose(1, 2)?.contiguous()?;
 
+        // Attention with key masking for text padding (matches ComfyUI/diffusers)
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
         let img_mask = Tensor::ones((b, img_seq_len), DType::U8, img_hidden.device())?;
@@ -267,11 +268,7 @@ impl JointAttention {
         let img_attn = attn.narrow(1, 0, img_seq_len)?;
         let txt_attn = attn.narrow(1, img_seq_len, txt_seq_len)?;
 
-        let txt_out = txt_attn.apply(&self.add_out_proj)?.broadcast_mul(
-            &txt_mask
-                .unsqueeze(D::Minus1)?
-                .to_dtype(img_hidden.dtype())?,
-        )?;
+        let txt_out = txt_attn.apply(&self.add_out_proj)?;
 
         Ok((img_attn.apply(&self.to_out)?, txt_out))
     }
@@ -375,9 +372,7 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -391,10 +386,8 @@ impl QwenImageTransformerBlock {
             .broadcast_add(txt_shift_mlp)?;
         let img_hidden =
             (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden
-            + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-        .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden =
+            (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -428,6 +421,8 @@ impl OutputLayer {
     fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
         let mod_params = temb.silu()?.apply(&self.adaln_linear)?;
         let chunks = mod_params.chunk(2, D::Minus1)?;
+        // GGUF stores shift first, scale second — opposite of diffusers Python convention
+        // because the GGUF conversion preserves the original Wan weight layout.
         let shift = chunks[0].unsqueeze(1)?;
         let scale = chunks[1].unsqueeze(1)?;
         let x = self
@@ -503,12 +498,14 @@ impl QuantizedQwenImageTransformer2DModel {
         let x_5d = x.unsqueeze(2)?;
         let (x_patches, orig_size) = patchify(&x_5d, patch_size, 1)?;
         let mut img = x_patches.apply(&self.img_in)?;
-        let txt_mask = encoder_attention_mask.to_dtype(DType::F32)?;
+        // Note: we do NOT mask padding text tokens here. The diffusers reference
+        // passes encoder_hidden_states_mask=None to transformer blocks, meaning
+        // padding tokens participate in attention and modulation. The model was
+        // trained this way and expects to see all 1024 text tokens (valid + padding).
         let mut txt = self
             .txt_norm
             .forward(&encoder_hidden_states)?
-            .apply(&self.txt_in)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?)?;
+            .apply(&self.txt_in)?;
 
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;

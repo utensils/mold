@@ -64,6 +64,7 @@ struct LoadedQwenImage {
     transformer_is_quantized: bool,
 }
 
+#[allow(clippy::large_enum_variant)] // both variants heap-allocate (Vec<Block>)
 enum QwenImageTransformer {
     BF16(QwenImageTransformer2DModel),
     Quantized(QuantizedQwenImageTransformer2DModel),
@@ -495,6 +496,22 @@ impl QwenImageEngine {
             dtype,
         )?;
 
+        // Encode unconditional (empty) prompt for classifier-free guidance
+        let use_cfg = req.guidance > 1.0;
+        let (uncond_hs, uncond_mask) = if use_cfg {
+            let (hs, mask) = Self::encode_prompt_cached(
+                &self.base.progress,
+                &self.prompt_cache,
+                &mut text_encoder,
+                "",
+                &device,
+                dtype,
+            )?;
+            (Some(hs), Some(mask))
+        } else {
+            (None, None)
+        };
+
         // Drop text encoder to free memory
         drop(text_encoder);
         self.base.progress.info("Freed Qwen2.5 text encoder");
@@ -557,19 +574,47 @@ impl QwenImageEngine {
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
+        if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
+            eprintln!(
+                "[qwen-debug] cfg={} guidance={:.1} mu={:.4} sigmas[0]={:.4} sigmas[last]={:.4}",
+                use_cfg, req.guidance, mu, scheduler.sigmas[0], scheduler.sigmas[num_steps],
+            );
+        }
+
         for step in 0..num_steps {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let t_tensor =
                 Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(latent_dtype)?;
-            let noise_pred = transformer.forward(
-                &latents,
-                &t_tensor,
-                &encoder_hidden_states,
-                &encoder_attention_mask,
-            )?;
-            if step == 0 {
-                Self::debug_tensor_stats("noise_pred", &noise_pred);
+            let noise_pred = if use_cfg {
+                let cond_pred = transformer.forward(
+                    &latents,
+                    &t_tensor,
+                    &encoder_hidden_states,
+                    &encoder_attention_mask,
+                )?;
+                let uncond_pred = transformer.forward(
+                    &latents,
+                    &t_tensor,
+                    uncond_hs.as_ref().unwrap(),
+                    uncond_mask.as_ref().unwrap(),
+                )?;
+                if step == 0 {
+                    Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
+                    Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
+                }
+                (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
+            } else {
+                transformer.forward(
+                    &latents,
+                    &t_tensor,
+                    &encoder_hidden_states,
+                    &encoder_attention_mask,
+                )?
+            };
+            if step == 0 || step == num_steps / 2 || step == num_steps - 1 {
+                Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
+                Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
             }
             latents = scheduler.step(&noise_pred, &latents)?;
             self.base.progress.emit(ProgressEvent::DenoiseStep {
@@ -587,6 +632,8 @@ impl QwenImageEngine {
         drop(transformer);
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
+        drop(uncond_hs);
+        drop(uncond_mask);
         device.synchronize()?;
         self.base.progress.info("Freed Qwen-Image transformer");
 
@@ -746,6 +793,22 @@ impl InferenceEngine for QwenImageEngine {
             loaded.dtype,
         )?;
 
+        // Encode unconditional (empty) prompt for classifier-free guidance
+        let use_cfg = req.guidance > 1.0;
+        let (uncond_hs, uncond_mask) = if use_cfg {
+            let (hs, mask) = Self::encode_prompt_cached(
+                progress,
+                &self.prompt_cache,
+                &mut loaded.text_encoder,
+                "",
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (Some(hs), Some(mask))
+        } else {
+            (None, None)
+        };
+
         // Drop text encoder from GPU to free VRAM for denoising
         if loaded.text_encoder.on_gpu {
             loaded.text_encoder.drop_weights();
@@ -801,12 +864,28 @@ impl InferenceEngine for QwenImageEngine {
                 let t = scheduler.current_timestep();
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                     .to_dtype(latent_dtype)?;
-                let noise_pred = transformer.forward(
-                    &latents,
-                    &t_tensor,
-                    &encoder_hidden_states,
-                    &encoder_attention_mask,
-                )?;
+                let noise_pred = if use_cfg {
+                    let cond_pred = transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        &encoder_hidden_states,
+                        &encoder_attention_mask,
+                    )?;
+                    let uncond_pred = transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        uncond_hs.as_ref().unwrap(),
+                        uncond_mask.as_ref().unwrap(),
+                    )?;
+                    (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
+                } else {
+                    transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        &encoder_hidden_states,
+                        &encoder_attention_mask,
+                    )?
+                };
                 if step == 0 {
                     Self::debug_tensor_stats("noise_pred", &noise_pred);
                 }
@@ -824,6 +903,8 @@ impl InferenceEngine for QwenImageEngine {
         // Free text embeddings and transformer
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
+        drop(uncond_hs);
+        drop(uncond_mask);
         loaded.transformer = None;
         // Synchronize to ensure CUDA's caching allocator reclaims the freed memory
         // before VAE decode allocates workspace buffers.

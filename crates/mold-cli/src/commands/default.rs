@@ -176,7 +176,10 @@ mod tests {
 
     #[test]
     fn resolve_source_default_config() {
-        let config = empty_config();
+        let mut config = empty_config();
+        // Use a model name that won't be downloaded locally, so resolution
+        // falls through to the ConfigDefault step.
+        config.default_model = "wuerstchen:bf16".to_string();
         let resolution = config.resolve_default_model();
         assert_eq!(resolution.source, DefaultModelSource::ConfigDefault);
     }

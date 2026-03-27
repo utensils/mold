@@ -1987,7 +1987,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
 fn qwen_image_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 30,
-        guidance: 0.0,
+        guidance: 4.0,
         width: 1024,
         height: 1024,
         is_schnell: false,
@@ -2000,8 +2000,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
-            description: "[alpha] Qwen-Image-2512 BF16 — 60-block flow-matching transformer"
-                .to_string(),
+            description: "Qwen-Image-2512 BF16 — 60-block flow-matching transformer".to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -2030,8 +2029,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: "[alpha] Qwen-Image-2512 Q8 — quantized transformer, best quality"
-                .to_string(),
+            description: "Qwen-Image-2512 Q8 — quantized transformer, best quality".to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -2049,8 +2047,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q6".to_string(),
             family: "qwen-image".to_string(),
-            description: "[alpha] Qwen-Image-2512 Q6 — quantized, best quality/size trade-off"
-                .to_string(),
+            description: "Qwen-Image-2512 Q6 — quantized, best quality/size trade-off".to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
@@ -2068,8 +2065,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image:q4".to_string(),
             family: "qwen-image".to_string(),
-            description: "[alpha] Qwen-Image-2512 Q4 — quantized, smallest practical footprint"
-                .to_string(),
+            description: "Qwen-Image-2512 Q4 — quantized, smallest practical footprint".to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
                 files.push(ModelFile {
