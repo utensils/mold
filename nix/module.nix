@@ -96,6 +96,13 @@ in
     discord = {
       enable = lib.mkEnableOption "mold Discord bot (uses the main mold package with discord feature)";
 
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = cfg.package;
+        defaultText = lib.literalExpression "config.services.mold.package";
+        description = "The mold package to use for the Discord bot. Defaults to the main mold package (which includes the discord subcommand).";
+      };
+
       tokenFile = lib.mkOption {
         type = lib.types.path;
         description = "Path to a file containing the Discord bot token (e.g. an agenix secret). Loaded via EnvironmentFile as MOLD_DISCORD_TOKEN.";
@@ -236,7 +243,7 @@ in
         User = "mold";
         Group = "mold";
         EnvironmentFile = discordCfg.tokenFile;
-        ExecStart = "${lib.getExe cfg.package} discord";
+        ExecStart = "${lib.getExe discordCfg.package} discord";
         Restart = "on-failure";
         RestartSec = 10;
 
