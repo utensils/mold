@@ -16,6 +16,7 @@ name = "mold_inference"
 default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+expand = []
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }

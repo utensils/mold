@@ -120,6 +120,12 @@ pub struct GenerateRequest {
     /// ControlNet conditioning scale (0.0 = no effect, 1.0 = full conditioning).
     #[serde(default = "default_control_scale")]
     pub control_scale: f64,
+    /// Request server-side prompt expansion before generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand: Option<bool>,
+    /// Original user prompt before expansion (set by client when expanding locally).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_prompt: Option<String>,
 }
 
 fn default_guidance() -> f64 {
@@ -164,6 +170,8 @@ pub struct ImageData {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
     pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_prompt: Option<String>,
     pub model: String,
     pub seed: u64,
     pub steps: u32,
@@ -186,6 +194,7 @@ impl OutputMetadata {
     ) -> Self {
         Self {
             prompt: req.prompt.clone(),
+            original_prompt: req.original_prompt.clone(),
             model: req.model.clone(),
             seed,
             steps: req.steps,
@@ -450,6 +459,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -580,6 +591,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -607,6 +620,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
 
         let metadata =
@@ -723,6 +738,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -769,6 +786,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -798,6 +817,8 @@ mod tests {
             control_image: Some(control_bytes.clone()),
             control_model: Some("controlnet-canny-sd15".to_string()),
             control_scale: 0.8,
+            expand: None,
+            original_prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -848,6 +869,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

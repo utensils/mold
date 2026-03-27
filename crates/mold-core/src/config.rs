@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::expand::ExpandSettings;
 use crate::manifest::resolve_model_name;
 use crate::types::Scheduler;
 
@@ -299,6 +300,10 @@ pub struct Config {
     #[serde(default)]
     pub output_dir: Option<String>,
 
+    /// Prompt expansion settings.
+    #[serde(default)]
+    pub expand: ExpandSettings,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -345,6 +350,7 @@ impl Default for Config {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            expand: ExpandSettings::default(),
             models: HashMap::new(),
         }
     }

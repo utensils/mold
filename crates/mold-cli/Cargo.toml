@@ -19,6 +19,7 @@ cuda = ["mold-server/cuda", "mold-inference/cuda"]
 metal = ["mold-server/metal", "mold-inference/metal"]
 preview = ["viuer"]
 discord = ["mold-discord"]
+expand = ["mold-inference/expand"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }

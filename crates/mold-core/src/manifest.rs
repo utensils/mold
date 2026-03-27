@@ -67,6 +67,17 @@ impl ModelManifest {
         self.model_size_bytes() as f32 / 1_073_741_824.0
     }
 
+    /// True if this is a utility model (e.g., prompt expansion LLM) that has no VAE.
+    ///
+    /// Utility models are downloaded and stored like regular models, but they don't
+    /// produce a `ModelPaths` or get written into the config `[models]` section.
+    pub fn is_utility(&self) -> bool {
+        !self
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::Vae)
+    }
+
     /// True if any file in this model requires HuggingFace authentication.
     pub fn is_gated(&self) -> bool {
         self.files.iter().any(|f| f.gated)
@@ -941,6 +952,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(qwen_image_manifests());
     manifests.extend(wuerstchen_manifests());
     manifests.extend(controlnet_manifests());
+    manifests.extend(qwen3_expand_manifests());
     manifests
 }
 
@@ -2521,6 +2533,68 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+fn qwen3_expand_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 0,
+        guidance: 0.0,
+        width: 0,
+        height: 0,
+        is_schnell: false,
+        scheduler: None,
+    };
+
+    vec![
+        ModelManifest {
+            name: "qwen3-expand:q8".to_string(),
+            family: "qwen3-expand".to_string(),
+            description: "Qwen3-1.7B Q8 — prompt expansion LLM (1.8GB)".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B-GGUF".to_string(),
+                    hf_filename: "Qwen3-1.7B-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_834_426_016,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen3-expand-small:q8".to_string(),
+            family: "qwen3-expand".to_string(),
+            description: "Qwen3-0.6B Q8 — lightweight prompt expansion LLM (0.6GB)".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-0.6B-GGUF".to_string(),
+                    hf_filename: "Qwen3-0.6B-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 639_446_688,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2867,16 +2941,16 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 55
-        assert_eq!(known_manifests().len(), 55);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 57
+        assert_eq!(known_manifests().len(), 57);
     }
 
     #[test]
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All models need VAE (except ControlNet, which uses the base model's VAE)
-            if manifest.family != "controlnet" {
+            // All diffusion models need VAE (except ControlNet and utility models like qwen3-expand)
+            if !manifest.is_utility() && manifest.family != "controlnet" {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",

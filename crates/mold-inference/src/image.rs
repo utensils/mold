@@ -311,6 +311,7 @@ mod tests {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
             prompt: "hello \u{2603}".to_string(),
+            original_prompt: None,
             model: "flux-schnell:q8".to_string(),
             seed: 42,
             steps: 4,
@@ -378,6 +379,8 @@ mod tests {
             control_image: None,
             control_model: None,
             control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -387,6 +390,7 @@ mod tests {
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
             prompt: "a cat".to_string(),
+            original_prompt: None,
             model: "wuerstchen-v2:fp16".to_string(),
             seed: 42,
             steps: 30,
@@ -410,6 +414,7 @@ mod tests {
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
             prompt: "hello world".to_string(),
+            original_prompt: None,
             model: "flux-schnell:q8".to_string(),
             seed: 42,
             steps: 4,
@@ -526,6 +531,7 @@ mod tests {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
             prompt: "a cat & a dog <br>".to_string(),
+            original_prompt: None,
             model: "sdxl-turbo:fp16".to_string(),
             seed: 99999,
             steps: 25,

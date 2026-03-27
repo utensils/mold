@@ -140,6 +140,8 @@ pub async fn run(
         control_image: control_image.clone(),
         control_model: control_model.clone(),
         control_scale,
+        expand: None,
+        original_prompt: None,
     };
 
     if let Some(desc) = &model_cfg.description {

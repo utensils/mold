@@ -28,4 +28,5 @@ toml = "0.8"
 base64 = "0.22"
 strsim = "0.11"
 utoipa = { version = "5", features = ["preserve_order"] }
+ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }

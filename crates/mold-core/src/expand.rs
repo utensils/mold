@@ -1,0 +1,463 @@
+//! LLM-powered prompt expansion.
+//!
+//! Provides a `PromptExpander` trait with two backends:
+//! - `ApiExpander`: calls any OpenAI-compatible `/v1/chat/completions` endpoint
+//! - Local GGUF inference (in `mold-inference`, behind the `expand` feature flag)
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::expand_prompts::{build_batch_messages, build_single_messages};
+
+/// Configuration for a prompt expansion request.
+#[derive(Debug, Clone)]
+pub struct ExpandConfig {
+    /// Diffusion model family (e.g. "flux", "sd15", "sdxl").
+    pub model_family: String,
+    /// Number of prompt variations to generate (1 = single expansion).
+    pub variations: usize,
+    /// Sampling temperature (0.0-2.0). Higher = more creative.
+    pub temperature: f64,
+    /// Nucleus sampling threshold.
+    pub top_p: f64,
+    /// Maximum tokens for the LLM response.
+    pub max_tokens: u32,
+    /// Enable Qwen3 thinking mode for higher quality (slower).
+    pub thinking: bool,
+}
+
+impl Default for ExpandConfig {
+    fn default() -> Self {
+        Self {
+            model_family: "flux".to_string(),
+            variations: 1,
+            temperature: 0.7,
+            top_p: 0.9,
+            max_tokens: 300,
+            thinking: false,
+        }
+    }
+}
+
+/// Result of a prompt expansion.
+#[derive(Debug, Clone)]
+pub struct ExpandResult {
+    /// The original user prompt.
+    pub original: String,
+    /// Expanded prompt(s). Length equals `ExpandConfig::variations`.
+    pub expanded: Vec<String>,
+}
+
+/// Trait for prompt expansion backends.
+pub trait PromptExpander: Send + Sync {
+    /// Expand a user prompt into one or more detailed image generation prompts.
+    fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult>;
+}
+
+// ── API expander ─────────────────────────────────────────────────────────────
+
+/// OpenAI-compatible chat completion message.
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Request body for `/v1/chat/completions`.
+#[derive(Debug, Serialize)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f64,
+    top_p: f64,
+    max_tokens: u32,
+}
+
+/// Response from `/v1/chat/completions`.
+#[derive(Debug, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatMessageResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessageResponse {
+    content: String,
+}
+
+/// Expander that calls an OpenAI-compatible API endpoint.
+pub struct ApiExpander {
+    endpoint: String,
+    model: String,
+    client: reqwest::Client,
+}
+
+impl ApiExpander {
+    pub fn new(endpoint: &str, model: &str) -> Self {
+        // Strip trailing slash for consistent URL building
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        Self {
+            endpoint,
+            model: model.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl PromptExpander for ApiExpander {
+    fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
+        let messages = if config.variations > 1 {
+            build_batch_messages(prompt, &config.model_family, config.variations)
+        } else {
+            build_single_messages(prompt, &config.model_family)
+        };
+
+        let chat_messages: Vec<ChatMessage> = messages
+            .into_iter()
+            .map(|(role, content)| ChatMessage { role, content })
+            .collect();
+
+        let req_body = ChatCompletionRequest {
+            model: self.model.clone(),
+            messages: chat_messages,
+            temperature: config.temperature,
+            top_p: config.top_p,
+            max_tokens: config.max_tokens,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.endpoint);
+
+        // Use blocking reqwest since this may be called from sync context
+        let rt = tokio::runtime::Handle::try_current();
+        let response_text = if let Ok(handle) = rt {
+            // We're inside a tokio runtime — use spawn_blocking to avoid
+            // blocking the async executor, then run the request inside it.
+            let client = self.client.clone();
+            let url = url.clone();
+            let body = serde_json::to_string(&req_body)?;
+            std::thread::scope(|_| {
+                handle.block_on(async {
+                    let resp = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?;
+                    let status = resp.status();
+                    let text = resp
+                        .text()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
+                    if !status.is_success() {
+                        anyhow::bail!("expand API returned {status}: {text}");
+                    }
+                    Ok::<String, anyhow::Error>(text)
+                })
+            })?
+        } else {
+            // No tokio runtime — use ureq for simplicity
+            let body = serde_json::to_string(&req_body)?;
+            let resp: String = ureq::post(&url)
+                .header("Content-Type", "application/json")
+                .send(body.as_str())
+                .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
+            resp
+        };
+
+        let completion: ChatCompletionResponse = serde_json::from_str(&response_text)
+            .map_err(|e| anyhow::anyhow!("failed to parse expand API response: {e}"))?;
+
+        let content = completion
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        let expanded = if config.variations > 1 {
+            parse_variations(&content, config.variations)
+        } else {
+            vec![clean_expanded_prompt(&content)]
+        };
+
+        Ok(ExpandResult {
+            original: prompt.to_string(),
+            expanded,
+        })
+    }
+}
+
+/// Public wrapper for `parse_variations` (used by mold-inference local expander).
+pub fn parse_variations_public(text: &str, expected: usize) -> Vec<String> {
+    parse_variations(text, expected)
+}
+
+/// Public wrapper for `clean_expanded_prompt` (used by mold-inference local expander).
+pub fn clean_expanded_prompt_public(text: &str) -> String {
+    clean_expanded_prompt(text)
+}
+
+/// Parse multiple variations from LLM output.
+/// Tries JSON array first, then numbered list, then line-separated.
+fn parse_variations(text: &str, expected: usize) -> Vec<String> {
+    let trimmed = text.trim();
+
+    // Try JSON array
+    if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
+        if !arr.is_empty() {
+            return arr.into_iter().map(|s| clean_expanded_prompt(&s)).collect();
+        }
+    }
+
+    // Try to find a JSON array embedded in the text (LLM may include preamble)
+    if let Some(start) = trimmed.find('[') {
+        if let Some(end) = trimmed.rfind(']') {
+            if start < end {
+                let json_slice = &trimmed[start..=end];
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(json_slice) {
+                    if !arr.is_empty() {
+                        return arr.into_iter().map(|s| clean_expanded_prompt(&s)).collect();
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to numbered list parsing (1. ... 2. ... etc.)
+    let lines: Vec<String> = trimmed
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            // Strip numbered prefix: "1. ", "2) ", etc.
+            let stripped = l
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim_start_matches(['.', ')', ':', '-'])
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .trim();
+            clean_expanded_prompt(stripped)
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if lines.len() >= expected {
+        return lines;
+    }
+
+    // Last resort: split on double newlines
+    let paragraphs: Vec<String> = trimmed
+        .split("\n\n")
+        .map(|p| clean_expanded_prompt(p.trim()))
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if !paragraphs.is_empty() {
+        return paragraphs;
+    }
+
+    // Ultimate fallback: return the whole text as a single variation
+    vec![clean_expanded_prompt(trimmed)]
+}
+
+/// Clean up an expanded prompt: trim whitespace, remove quotes, collapse whitespace.
+fn clean_expanded_prompt(text: &str) -> String {
+    let trimmed = text.trim().trim_matches('"').trim_matches('\'').trim();
+
+    // Strip any thinking block if present
+    let cleaned = if let Some(end_idx) = trimmed.find("</think>") {
+        trimmed[end_idx + "</think>".len()..].trim()
+    } else {
+        trimmed
+    };
+
+    // Collapse multiple whitespace/newlines into single spaces
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Expand configuration from the mold config file.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExpandSettings {
+    /// Enable prompt expansion by default (overridden by --expand/--no-expand).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Backend: "local" for built-in GGUF inference, or a URL for OpenAI-compatible API.
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Model name for local GGUF expansion.
+    #[serde(default = "default_expand_model")]
+    pub model: String,
+    /// Model name when using API backend (e.g. "qwen2.5:3b" for Ollama).
+    #[serde(default = "default_api_model")]
+    pub api_model: String,
+    /// Sampling temperature.
+    #[serde(default = "default_temperature")]
+    pub temperature: f64,
+    /// Nucleus sampling threshold.
+    #[serde(default = "default_top_p")]
+    pub top_p: f64,
+    /// Maximum tokens for the LLM response.
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    /// Enable thinking mode for Qwen3 (higher quality, slower).
+    #[serde(default)]
+    pub thinking: bool,
+}
+
+fn default_backend() -> String {
+    "local".to_string()
+}
+
+fn default_expand_model() -> String {
+    "qwen3-expand:q4".to_string()
+}
+
+fn default_api_model() -> String {
+    "qwen2.5:3b".to_string()
+}
+
+fn default_temperature() -> f64 {
+    0.7
+}
+
+fn default_top_p() -> f64 {
+    0.9
+}
+
+fn default_max_tokens() -> u32 {
+    300
+}
+
+impl Default for ExpandSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_backend(),
+            model: default_expand_model(),
+            api_model: default_api_model(),
+            temperature: default_temperature(),
+            top_p: default_top_p(),
+            max_tokens: default_max_tokens(),
+            thinking: false,
+        }
+    }
+}
+
+impl ExpandSettings {
+    /// Load from environment variables, falling back to provided defaults.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("MOLD_EXPAND") {
+            self.enabled = matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_BACKEND") {
+            if !v.is_empty() {
+                self.backend = v;
+            }
+        }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_MODEL") {
+            if !v.is_empty() {
+                self.model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_TEMPERATURE") {
+            if let Ok(t) = v.parse::<f64>() {
+                self.temperature = t;
+            }
+        }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_THINKING") {
+            self.thinking = matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        self
+    }
+
+    /// Build an `ExpandConfig` for a specific request.
+    pub fn to_expand_config(&self, model_family: &str, variations: usize) -> ExpandConfig {
+        ExpandConfig {
+            model_family: model_family.to_string(),
+            variations,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            max_tokens: self.max_tokens,
+            thinking: self.thinking,
+        }
+    }
+
+    /// Create the appropriate expander backend.
+    /// Returns `None` if the backend is "local" (handled by mold-inference).
+    pub fn create_api_expander(&self) -> Option<ApiExpander> {
+        if self.backend == "local" {
+            None
+        } else {
+            Some(ApiExpander::new(&self.backend, &self.api_model))
+        }
+    }
+
+    /// Check if this is configured for local (GGUF) expansion.
+    pub fn is_local(&self) -> bool {
+        self.backend == "local"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_prompt_strips_quotes() {
+        assert_eq!(clean_expanded_prompt("\"a cat on mars\""), "a cat on mars");
+    }
+
+    #[test]
+    fn clean_prompt_strips_thinking() {
+        let input = "<think>hmm let me think</think>\n\na cat on mars";
+        assert_eq!(clean_expanded_prompt(input), "a cat on mars");
+    }
+
+    #[test]
+    fn clean_prompt_collapses_whitespace() {
+        assert_eq!(
+            clean_expanded_prompt("a  cat\n\non   mars"),
+            "a cat on mars"
+        );
+    }
+
+    #[test]
+    fn parse_variations_json_array() {
+        let input = r#"["a cat", "a dog", "a bird"]"#;
+        let result = parse_variations(input, 3);
+        assert_eq!(result, vec!["a cat", "a dog", "a bird"]);
+    }
+
+    #[test]
+    fn parse_variations_embedded_json() {
+        let input = "Here are 3 prompts:\n[\"a cat\", \"a dog\", \"a bird\"]";
+        let result = parse_variations(input, 3);
+        assert_eq!(result, vec!["a cat", "a dog", "a bird"]);
+    }
+
+    #[test]
+    fn parse_variations_numbered_list() {
+        let input = "1. a cat on mars\n2. a dog in space\n3. a bird underwater";
+        let result = parse_variations(input, 3);
+        assert_eq!(result.len(), 3);
+        assert!(result[0].contains("cat"));
+        assert!(result[1].contains("dog"));
+        assert!(result[2].contains("bird"));
+    }
+
+    #[test]
+    fn expand_settings_defaults() {
+        let settings = ExpandSettings::default();
+        assert!(!settings.enabled);
+        assert_eq!(settings.backend, "local");
+        assert_eq!(settings.model, "qwen3-expand:q4");
+        assert!(!settings.thinking);
+    }
+}

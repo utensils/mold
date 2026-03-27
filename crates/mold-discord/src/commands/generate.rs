@@ -57,6 +57,8 @@ pub fn build_generate_request(
         control_image: None,
         control_model: None,
         control_scale: 1.0,
+        expand: None,
+        original_prompt: None,
     }
 }
 

@@ -5,6 +5,8 @@ mod encoders;
 pub mod engine;
 pub(crate) mod engine_base;
 pub mod error;
+#[cfg(feature = "expand")]
+pub mod expand;
 mod factory;
 pub mod flux;
 pub mod flux2;

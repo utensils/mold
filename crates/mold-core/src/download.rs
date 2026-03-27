@@ -513,6 +513,89 @@ pub async fn pull_model_with_callback(
     paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
 }
 
+/// Download all files for a utility model (no ModelPaths, no config writing).
+///
+/// Used for models like qwen3-expand that are not diffusion models and don't
+/// have a VAE. Files are downloaded and placed at their standard storage paths.
+async fn pull_model_files_only(
+    manifest: &ModelManifest,
+    opts: &PullOptions,
+) -> Result<(), DownloadError> {
+    write_pulling_marker(&manifest.name)?;
+
+    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    if let Some(token) = resolve_hf_token() {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder.build()?;
+
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
+    let msg_width = filename_column_width();
+    let bar_style = ProgressStyle::with_template(&format!(
+        "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
+    ))
+    .unwrap()
+    .progress_chars("━╸─");
+
+    let mdir = models_dir();
+
+    for file in &manifest.files {
+        let bar = multi.add(ProgressBar::new(file.size_bytes));
+        bar.set_style(bar_style.clone());
+        bar.set_message(truncate_filename(&file.hf_filename, msg_width));
+
+        let hf_path = download_file(
+            &api,
+            file,
+            DownloadProgress::new(bar, msg_width),
+            &manifest.name,
+        )
+        .await?;
+
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        hardlink_or_copy(&hf_path, &clean_path)?;
+
+        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+    }
+
+    remove_pulling_marker(&manifest.name);
+    Ok(())
+}
+
+/// Download all files for a utility model, reporting progress via callback.
+async fn pull_model_files_only_with_callback(
+    manifest: &ModelManifest,
+    callback: DownloadProgressCallback,
+    opts: &PullOptions,
+) -> Result<(), DownloadError> {
+    write_pulling_marker(&manifest.name)?;
+
+    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    if let Some(token) = resolve_hf_token() {
+        builder = builder.with_token(Some(token));
+    }
+    let api = builder.build()?;
+
+    let mdir = models_dir();
+    let total_files = manifest.files.len();
+
+    for (idx, file) in manifest.files.iter().enumerate() {
+        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+
+        let hf_path = download_file(&api, file, progress, &manifest.name).await?;
+
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        hardlink_or_copy(&hf_path, &clean_path)?;
+
+        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+    }
+
+    remove_pulling_marker(&manifest.name);
+    Ok(())
+}
+
 /// Extract HTTP status code from an async `ApiError`, if available.
 fn extract_http_status(err: &ApiError) -> Option<u16> {
     if let ApiError::RequestError(reqwest_err) = err {
@@ -671,7 +754,7 @@ pub fn cached_file_path(
 pub async fn pull_and_configure(
     model: &str,
     opts: &PullOptions,
-) -> Result<(crate::Config, ModelPaths), DownloadError> {
+) -> Result<(crate::Config, Option<ModelPaths>), DownloadError> {
     use crate::config::Config;
     use crate::manifest::{find_manifest, resolve_model_name};
 
@@ -680,6 +763,13 @@ pub async fn pull_and_configure(
     let manifest = find_manifest(&canonical).ok_or_else(|| DownloadError::UnknownModel {
         model: model.to_string(),
     })?;
+
+    // Utility models (e.g., qwen3-expand) have no VAE and don't need config entries.
+    if manifest.is_utility() {
+        pull_model_files_only(manifest, opts).await?;
+        let config = Config::load_or_default();
+        return Ok((config, None));
+    }
 
     let paths = pull_model(manifest, opts).await?;
 
@@ -696,7 +786,7 @@ pub async fn pull_and_configure(
         .save()
         .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
 
-    Ok((config, paths))
+    Ok((config, Some(paths)))
 }
 
 /// Download a model and save its paths to config, reporting progress via callback.
@@ -705,7 +795,7 @@ pub async fn pull_and_configure_with_callback(
     model: &str,
     callback: DownloadProgressCallback,
     opts: &PullOptions,
-) -> Result<(crate::Config, ModelPaths), DownloadError> {
+) -> Result<(crate::Config, Option<ModelPaths>), DownloadError> {
     use crate::config::Config;
     use crate::manifest::{find_manifest, resolve_model_name};
 
@@ -714,6 +804,13 @@ pub async fn pull_and_configure_with_callback(
     let manifest = find_manifest(&canonical).ok_or_else(|| DownloadError::UnknownModel {
         model: model.to_string(),
     })?;
+
+    // Utility models (e.g., qwen3-expand) have no VAE and don't need config entries.
+    if manifest.is_utility() {
+        pull_model_files_only_with_callback(manifest, callback, opts).await?;
+        let config = Config::load_or_default();
+        return Ok((config, None));
+    }
 
     let paths = pull_model_with_callback(manifest, callback, opts).await?;
 
@@ -729,7 +826,7 @@ pub async fn pull_and_configure_with_callback(
         .save()
         .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
 
-    Ok((config, paths))
+    Ok((config, Some(paths)))
 }
 
 #[cfg(test)]
