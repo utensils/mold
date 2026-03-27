@@ -41,21 +41,41 @@ fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
 /// are then hardlinked from these blobs. This function walks the hf-cache
 /// snapshot dirs looking for files whose names match the manifest's
 /// `hf_filename` entries, then resolves their symlinks to find the blob paths.
-fn collect_hf_cache_blob_paths(model_name: &str) -> Vec<std::path::PathBuf> {
+fn collect_hf_cache_blob_paths(
+    model_name: &str,
+    unique_clean_paths: &[(String, u64)],
+) -> Vec<std::path::PathBuf> {
     let manifest = match mold_core::manifest::find_manifest(model_name) {
         Some(m) => m,
         None => return Vec::new(),
     };
 
     let config = Config::load_or_default();
-    let cache_dir = config.resolved_models_dir().join(".hf-cache");
+    let models_dir = config.resolved_models_dir();
+    let cache_dir = models_dir.join(".hf-cache");
     if !cache_dir.is_dir() {
         return Vec::new();
     }
 
+    // Build a set of unique clean paths to restrict which manifest files we
+    // collect cache blobs for. Shared components (VAE, T5, CLIP) that are
+    // still referenced by other models must NOT have their blobs deleted.
+    let unique_set: std::collections::HashSet<String> = unique_clean_paths
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
+
     let mut blobs = Vec::new();
 
     for file in &manifest.files {
+        // Only collect blobs for files whose clean paths are being deleted.
+        let clean_path = models_dir
+            .join(mold_core::manifest::storage_path(manifest, file))
+            .to_string_lossy()
+            .to_string();
+        if !unique_set.contains(&clean_path) {
+            continue;
+        }
         // hf-hub stores repos as models--<org>--<repo>
         let repo_dir_name = format!("models--{}", file.hf_repo.replace('/', "--"));
         let repo_dir = cache_dir.join(&repo_dir_name);
@@ -258,11 +278,11 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         // We use the manifest to locate the corresponding hf-cache blob
         // paths and delete those too.
         let mut freed: u64 = 0;
-        let hf_cache_blobs = collect_hf_cache_blob_paths(&canonical);
+        let hf_cache_blobs = collect_hf_cache_blob_paths(&canonical, &unique_files);
 
-        for (path, size) in &unique_files {
+        for (path, _size) in &unique_files {
             match std::fs::remove_file(path) {
-                Ok(()) => freed += size,
+                Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     eprintln!("{} {} already deleted", theme::prefix_warning(), path);
                 }
@@ -278,10 +298,29 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         }
 
         // Delete hf-cache blobs that were hardlinked to the clean paths.
+        // Space is only actually freed when the last hardlink (the blob) is removed,
+        // so we count freed bytes here rather than at clean-path deletion.
         for blob_path in &hf_cache_blobs {
             if blob_path.exists() {
-                let _ = std::fs::remove_file(blob_path);
+                let size = file_size(&blob_path.to_string_lossy());
+                match std::fs::remove_file(blob_path) {
+                    Ok(()) => freed += size,
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to clean up cache file {}: {}",
+                            theme::prefix_warning(),
+                            blob_path.display(),
+                            e
+                        );
+                    }
+                }
             }
+        }
+
+        // For non-manifest models (no hf-cache blobs), the clean path deletion
+        // itself freed the space, so use the pre-computed total.
+        if hf_cache_blobs.is_empty() {
+            freed = total_freed;
         }
 
         // Clean up empty model-specific directories left behind.
@@ -292,10 +331,6 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                 }
             }
         }
-
-        // Clean up dangling hf-cache entries (symlinks to deleted blobs,
-        // empty snapshot dirs, empty repo dirs).
-        clean_hf_cache();
 
         // Remove from config and clean up pull marker
         config.remove_model(&canonical);
@@ -333,6 +368,10 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
             format_bytes(freed)
         );
     }
+
+    // Clean up dangling hf-cache entries (symlinks to deleted blobs,
+    // empty snapshot dirs, empty repo dirs) once after all removals.
+    clean_hf_cache();
 
     if any_error {
         return Err(AlreadyReported.into());
