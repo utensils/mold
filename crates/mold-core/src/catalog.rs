@@ -110,8 +110,14 @@ fn sort_models_by_variant_quality(models: &mut [ModelInfoExtended]) {
     models.sort_by(|a, b| {
         let base_a = model_base_name(&a.name);
         let base_b = model_base_name(&b.name);
-        let ord_a = base_order.iter().position(|s| s == base_a).unwrap_or(usize::MAX);
-        let ord_b = base_order.iter().position(|s| s == base_b).unwrap_or(usize::MAX);
+        let ord_a = base_order
+            .iter()
+            .position(|s| s == base_a)
+            .unwrap_or(usize::MAX);
+        let ord_b = base_order
+            .iter()
+            .position(|s| s == base_b)
+            .unwrap_or(usize::MAX);
 
         ord_a
             .cmp(&ord_b)
