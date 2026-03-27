@@ -108,13 +108,22 @@ fn collect_hf_cache_blob_paths(
     blobs
 }
 
-/// Remove orphaned files from `shared/` subdirectories that are not referenced
-/// by any remaining model config entry, then clean up empty directories.
+/// Runtime GGUF cache subdirectories under `shared/` that may contain
+/// auto-downloaded quantized encoders not tracked in config.toml.
+const RUNTIME_GGUF_CACHE_DIRS: &[&str] = &["t5-gguf", "qwen3-gguf"];
+
+/// Remove orphaned files from runtime GGUF cache directories under `shared/`
+/// that are not referenced by any remaining model config entry, then clean up
+/// empty directories under `shared/`.
 ///
 /// Auto-downloaded quantized encoders (T5 GGUF, Qwen3 GGUF) are placed in
 /// `shared/t5-gguf/` and `shared/qwen3-gguf/` by variant_resolution at runtime
 /// but never registered in config.toml. After the last model referencing them is
 /// removed, these files become invisible orphans. This function scans and deletes them.
+///
+/// Only the known runtime cache directories are scanned — other shared dirs
+/// (e.g. `shared/flux/`, `shared/sdxl/`) are left alone because manifest-discovered
+/// models may reference those files without having an explicit config entry.
 fn clean_orphaned_shared_files(config: &Config) {
     let models_dir = config.resolved_models_dir();
     let shared_dir = models_dir.join("shared");
@@ -132,20 +141,29 @@ fn clean_orphaned_shared_files(config: &Config) {
         .flat_map(|mc| mc.all_file_paths())
         .collect();
 
-    // Walk shared/ recursively and delete unreferenced files.
-    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced);
+    // Only scan known runtime GGUF cache directories, not all of shared/.
+    let mut total_count = 0u64;
+    let mut total_bytes = 0u64;
+    for subdir in RUNTIME_GGUF_CACHE_DIRS {
+        let cache_dir = shared_dir.join(subdir);
+        if cache_dir.is_dir() {
+            let (count, bytes) = remove_orphaned_files_recursive(&cache_dir, &referenced);
+            total_count += count;
+            total_bytes += bytes;
+        }
+    }
 
-    if count > 0 {
+    if total_count > 0 {
         eprintln!(
             "{} cleaned up {} orphaned shared file{} (freed {})",
             theme::prefix_note(),
-            count,
-            if count == 1 { "" } else { "s" },
-            format_bytes(bytes),
+            total_count,
+            if total_count == 1 { "" } else { "s" },
+            format_bytes(total_bytes),
         );
     }
 
-    // Clean up empty directories bottom-up.
+    // Clean up empty directories bottom-up under shared/.
     remove_empty_dirs_recursive(&shared_dir);
 
     // Remove shared/ itself if empty.
@@ -607,49 +625,66 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_shared_files_deleted_when_unreferenced() {
-        // Simulate shared/ with an orphaned T5 GGUF and a referenced VAE.
+    fn orphaned_gguf_cache_files_deleted_when_unreferenced() {
+        // Simulate shared/t5-gguf/ with an orphaned GGUF encoder.
         let tmp = make_tmp_dir("orphan");
         let shared = tmp.join("shared");
         let t5_gguf_dir = shared.join("t5-gguf");
-        let flux_dir = shared.join("flux");
         std::fs::create_dir_all(&t5_gguf_dir).unwrap();
-        std::fs::create_dir_all(&flux_dir).unwrap();
 
         // Orphaned file — not referenced by any config entry
         let orphan = t5_gguf_dir.join("t5-v1_1-xxl-encoder-Q8_0.gguf");
         std::fs::write(&orphan, b"orphaned encoder data").unwrap();
 
-        // Referenced file — still used by another model
-        let referenced_vae = flux_dir.join("ae.safetensors");
-        std::fs::write(&referenced_vae, b"vae data").unwrap();
+        let referenced_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Build referenced set manually (simulates what clean_orphaned_shared_files
-        // builds from config.models — we test the helpers directly here)
-        let referenced_set: std::collections::HashSet<String> =
-            [referenced_vae.to_string_lossy().to_string()]
-                .into_iter()
-                .collect();
-
-        assert!(!referenced_set.contains(&orphan.to_string_lossy().to_string()));
-        assert!(referenced_set.contains(&referenced_vae.to_string_lossy().to_string()));
-
-        // Run the orphan removal logic directly
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced_set);
+        // Run the orphan removal logic on the scoped cache dir
+        let (count, bytes) = remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set);
         assert_eq!(count, 1, "should delete exactly 1 orphaned file");
         assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
+
+        assert!(!orphan.exists(), "orphaned T5 GGUF should be deleted");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scoped_cleanup_does_not_touch_non_cache_shared_dirs() {
+        // Files in shared/flux/ should NOT be scanned — only t5-gguf and qwen3-gguf.
+        // This protects manifest-discovered models without config entries.
+        let tmp = make_tmp_dir("scope-safety");
+        let shared = tmp.join("shared");
+        let flux_dir = shared.join("flux");
+        let t5_gguf_dir = shared.join("t5-gguf");
+        std::fs::create_dir_all(&flux_dir).unwrap();
+        std::fs::create_dir_all(&t5_gguf_dir).unwrap();
+
+        // Unreferenced file in flux/ — should survive (not a cache dir)
+        let flux_vae = flux_dir.join("ae.safetensors");
+        std::fs::write(&flux_vae, b"vae data").unwrap();
+
+        // Unreferenced file in t5-gguf/ — should be deleted (cache dir)
+        let orphan_t5 = t5_gguf_dir.join("t5-v1_1-xxl-encoder-Q8_0.gguf");
+        std::fs::write(&orphan_t5, b"orphan").unwrap();
+
+        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Only scan RUNTIME_GGUF_CACHE_DIRS, not all of shared/
+        for subdir in RUNTIME_GGUF_CACHE_DIRS {
+            let cache_dir = shared.join(subdir);
+            if cache_dir.is_dir() {
+                remove_orphaned_files_recursive(&cache_dir, &referenced);
+            }
+        }
         remove_empty_dirs_recursive(&shared);
 
-        // Orphaned file should be deleted
-        assert!(!orphan.exists(), "orphaned T5 GGUF should be deleted");
-        // Empty t5-gguf dir should be cleaned up
-        assert!(!t5_gguf_dir.exists(), "empty t5-gguf dir should be removed");
-        // Referenced file should survive
-        assert!(referenced_vae.exists(), "referenced VAE should survive");
-        // flux/ dir should still exist (has the VAE)
         assert!(
-            flux_dir.exists(),
-            "flux dir with referenced file should remain"
+            !orphan_t5.exists(),
+            "orphaned T5 GGUF in cache dir should be deleted"
+        );
+        assert!(
+            flux_vae.exists(),
+            "unreferenced file in shared/flux/ must survive — not a cache dir"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
