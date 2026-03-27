@@ -69,15 +69,11 @@ fn collect_hf_cache_blob_paths(model_name: &str) -> Vec<std::path::PathBuf> {
             continue;
         }
 
-        let filename = std::path::Path::new(&file.hf_filename)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
+        // Use the full relative hf_filename (e.g. "text_encoder/model.safetensors")
+        // because hf-hub preserves nested paths in snapshot directories.
         if let Ok(revisions) = std::fs::read_dir(&snapshots_dir) {
             for rev in revisions.flatten() {
-                let snap_file = rev.path().join(&filename);
+                let snap_file = rev.path().join(&file.hf_filename);
                 // The snapshot entry is a symlink to ../../blobs/<sha>.
                 // Resolve it to get the blob path.
                 if snap_file.symlink_metadata().is_ok() {
