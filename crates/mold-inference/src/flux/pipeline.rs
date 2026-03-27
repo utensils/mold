@@ -1151,7 +1151,9 @@ impl FluxEngine {
             false // GGUF models fit in VRAM; offloading not supported for quantized
         };
 
-        if !use_offload {
+        // Even when offloading, blocks must still fit in system RAM on unified-memory
+        // (Metal) hosts — preflight catches machines with insufficient total memory.
+        if !use_offload || device.is_metal() {
             preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
         }
         if let Some(status) = memory_status_string() {

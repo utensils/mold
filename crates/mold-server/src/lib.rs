@@ -58,12 +58,13 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
                 info!(text_tok = %text_tok.display());
             }
 
+            let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
             let engine = mold_inference::create_engine(
                 model_name,
                 paths,
                 &config,
                 mold_inference::LoadStrategy::Eager,
-                false,
+                offload,
             )?;
             state::AppState::new(engine, config, queue_handle)
         }
