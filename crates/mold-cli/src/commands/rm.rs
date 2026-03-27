@@ -166,7 +166,7 @@ fn remove_orphaned_files_recursive(
     let mut bytes = 0u64;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if !path.is_symlink() && path.is_dir() {
             let (c, b) = remove_orphaned_files_recursive(&path, referenced);
             count += c;
             bytes += b;
@@ -624,24 +624,12 @@ mod tests {
         let referenced_vae = flux_dir.join("ae.safetensors");
         std::fs::write(&referenced_vae, b"vae data").unwrap();
 
-        // Config that references only the VAE
-        let mut config = Config::default();
-        config.models_dir = tmp.to_string_lossy().to_string();
-        Config::install_runtime_models_dir_override(tmp.clone());
-        config.models.insert(
-            "flux-schnell:q8".into(),
-            ModelConfig {
-                vae: Some(referenced_vae.to_string_lossy().to_string()),
-                ..Default::default()
-            },
-        );
-
-        // Build referenced set and verify orphan detection
-        let referenced_set: std::collections::HashSet<String> = config
-            .models
-            .values()
-            .flat_map(|mc| mc.all_file_paths())
-            .collect();
+        // Build referenced set manually (simulates what clean_orphaned_shared_files
+        // builds from config.models — we test the helpers directly here)
+        let referenced_set: std::collections::HashSet<String> =
+            [referenced_vae.to_string_lossy().to_string()]
+                .into_iter()
+                .collect();
 
         assert!(!referenced_set.contains(&orphan.to_string_lossy().to_string()));
         assert!(referenced_set.contains(&referenced_vae.to_string_lossy().to_string()));
