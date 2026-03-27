@@ -131,8 +131,9 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
 }
 
 /// Format the model list into embed data, grouped by family.
-/// Downloaded/loaded models are shown inline; undownloaded models are collapsed
-/// into a count per family so all families (including alpha) remain visible.
+/// Downloaded/loaded models are shown in bold; undownloaded models are shown in
+/// plain text. All models in every family are listed individually.
+/// Alpha families are tagged with `(alpha)` in the section header.
 pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
     if models.is_empty() {
         return EmbedData {
