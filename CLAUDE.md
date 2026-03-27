@@ -27,7 +27,7 @@ nix flake check                                      # Validate formatting + fla
 | build | `build` | `cargo build` (debug, all crates) |
 | build | `build-release` | `cargo build --release` |
 | build | `build-server` | `cargo build -p mold-cli --features {cuda\|metal}` (single binary with GPU) |
-| build | `build-discord` | `cargo build -p mold-ai-discord` (Discord bot) |
+| build | `build-discord` | `cargo build -p mold-ai --features discord` |
 | check | `check` | `cargo check` |
 | check | `clippy` | `cargo clippy` |
 | check | `run-tests` | `cargo test` |
@@ -37,7 +37,7 @@ nix flake check                                      # Validate formatting + fla
 | run | `mold` | Run mold CLI (e.g. `mold list`, `mold ps`) |
 | run | `serve` | Start the mold server |
 | run | `generate` | Generate an image from a prompt |
-| run | `discord-bot` | Start the mold Discord bot |
+| run | `discord-bot` | Start the mold Discord bot (`mold discord`) |
 
 ### Cargo (direct)
 
@@ -79,10 +79,12 @@ CI runs on every push and PR (`.github/workflows/ci.yml`): `cargo check`, `cargo
 crates/
 ├── mold-core/                # Shared types, API protocol, HTTP client, config, model manifests
 ├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
-├── mold-server/              # Axum HTTP inference server (lib + binary)
-├── mold-cli/                 # Main binary — CLI (clap)
-└── mold-discord/             # Discord bot — slash commands bridging Discord to mold-server (poise + serenity)
+├── mold-server/              # Axum HTTP inference server (library, consumed by mold-cli)
+├── mold-cli/                 # Main binary — CLI (clap), single `mold` binary with feature flags
+└── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
 ```
+
+**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`).
 
 ### mold-core
 
@@ -164,7 +166,7 @@ Main binary. Feature flags `cuda` and `metal` forward through `mold-server` → 
 
 ### mold-discord
 
-Discord bot using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/models`, and `/status` slash commands. Runs as a standalone binary (`mold-discord`).
+Discord bot library using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/models`, and `/status` slash commands. Consumed by `mold-cli` behind the `discord` feature flag — invoked via `mold discord` (standalone bot) or `mold serve --discord` (server + bot in one process).
 
 Key modules: `commands/` (slash command handlers), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions), `cooldown.rs` (per-user rate limiting), `state.rs` (shared bot state).
 

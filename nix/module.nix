@@ -94,11 +94,13 @@ in
     };
 
     discord = {
-      enable = lib.mkEnableOption "mold Discord bot";
+      enable = lib.mkEnableOption "mold Discord bot (uses the main mold package with discord feature)";
 
       package = lib.mkOption {
         type = lib.types.package;
-        description = "The mold-discord package to use.";
+        default = cfg.package;
+        defaultText = lib.literalExpression "config.services.mold.package";
+        description = "The mold package to use for the Discord bot. Defaults to the main mold package (which includes the discord subcommand).";
       };
 
       tokenFile = lib.mkOption {
@@ -241,7 +243,7 @@ in
         User = "mold";
         Group = "mold";
         EnvironmentFile = discordCfg.tokenFile;
-        ExecStart = "${lib.getExe discordCfg.package}";
+        ExecStart = "${lib.getExe discordCfg.package} discord";
         Restart = "on-failure";
         RestartSec = 10;
 
