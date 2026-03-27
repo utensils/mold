@@ -60,10 +60,8 @@ fn collect_hf_cache_blob_paths(
     // Build a set of unique clean paths to restrict which manifest files we
     // collect cache blobs for. Shared components (VAE, T5, CLIP) that are
     // still referenced by other models must NOT have their blobs deleted.
-    let unique_set: std::collections::HashSet<String> = unique_clean_paths
-        .iter()
-        .map(|(p, _)| p.clone())
-        .collect();
+    let unique_set: std::collections::HashSet<String> =
+        unique_clean_paths.iter().map(|(p, _)| p.clone()).collect();
 
     let mut blobs = Vec::new();
 
