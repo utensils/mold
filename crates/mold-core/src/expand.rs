@@ -93,7 +93,6 @@ struct ChatMessageResponse {
 pub struct ApiExpander {
     endpoint: String,
     model: String,
-    client: reqwest::Client,
 }
 
 impl ApiExpander {
@@ -103,7 +102,6 @@ impl ApiExpander {
         Self {
             endpoint,
             model: model.to_string(),
-            client: reqwest::Client::new(),
         }
     }
 }
@@ -131,46 +129,17 @@ impl PromptExpander for ApiExpander {
 
         let url = format!("{}/v1/chat/completions", self.endpoint);
 
-        // Use blocking reqwest since this may be called from sync context
-        let rt = tokio::runtime::Handle::try_current();
-        let response_text = if let Ok(handle) = rt {
-            // We're inside a tokio runtime — use spawn_blocking to avoid
-            // blocking the async executor, then run the request inside it.
-            let client = self.client.clone();
-            let url = url.clone();
-            let body = serde_json::to_string(&req_body)?;
-            std::thread::scope(|_| {
-                handle.block_on(async {
-                    let resp = client
-                        .post(&url)
-                        .header("Content-Type", "application/json")
-                        .body(body)
-                        .send()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?;
-                    let status = resp.status();
-                    let text = resp
-                        .text()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
-                    if !status.is_success() {
-                        anyhow::bail!("expand API returned {status}: {text}");
-                    }
-                    Ok::<String, anyhow::Error>(text)
-                })
-            })?
-        } else {
-            // No tokio runtime — use ureq for simplicity
-            let body = serde_json::to_string(&req_body)?;
-            let resp: String = ureq::post(&url)
-                .header("Content-Type", "application/json")
-                .send(body.as_str())
-                .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
-            resp
-        };
+        // Use ureq (blocking HTTP) — this trait method is sync and may be
+        // called from within a tokio runtime via spawn_blocking, so we cannot
+        // use async reqwest or Handle::block_on (which panics inside a runtime).
+        let body = serde_json::to_string(&req_body)?;
+        let response_text: String = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .send(body.as_str())
+            .map_err(|e| anyhow::anyhow!("expand API request failed: {e}"))?
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| anyhow::anyhow!("failed to read expand API response: {e}"))?;
 
         let completion: ChatCompletionResponse = serde_json::from_str(&response_text)
             .map_err(|e| anyhow::anyhow!("failed to parse expand API response: {e}"))?;
@@ -316,7 +285,7 @@ fn default_backend() -> String {
 }
 
 fn default_expand_model() -> String {
-    "qwen3-expand:q4".to_string()
+    "qwen3-expand:q8".to_string()
 }
 
 fn default_api_model() -> String {
@@ -363,7 +332,11 @@ impl ExpandSettings {
         }
         if let Ok(v) = std::env::var("MOLD_EXPAND_MODEL") {
             if !v.is_empty() {
-                self.model = v;
+                if self.is_local() {
+                    self.model = v;
+                } else {
+                    self.api_model = v;
+                }
             }
         }
         if let Ok(v) = std::env::var("MOLD_EXPAND_TEMPERATURE") {
@@ -457,7 +430,7 @@ mod tests {
         let settings = ExpandSettings::default();
         assert!(!settings.enabled);
         assert_eq!(settings.backend, "local");
-        assert_eq!(settings.model, "qwen3-expand:q4");
+        assert_eq!(settings.model, "qwen3-expand:q8");
         assert!(!settings.thinking);
     }
 }

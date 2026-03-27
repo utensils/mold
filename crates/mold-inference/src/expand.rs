@@ -38,10 +38,15 @@ impl LocalExpander {
     /// Searches the standard mold models directory for the expand model's
     /// GGUF and tokenizer files, checking both manifest storage paths
     /// (e.g., `qwen3-expand-q8/`) and the shared tokenizer location.
+    ///
+    /// `expand_model` overrides the model spec from config (e.g., from
+    /// `--expand-model` or `MOLD_EXPAND_MODEL`). Pass `None` to use
+    /// `config.expand.model`.
+    ///
     /// Returns `None` if the model hasn't been pulled yet.
-    pub fn from_config(config: &mold_core::Config) -> Option<Self> {
+    pub fn from_config(config: &mold_core::Config, expand_model: Option<&str>) -> Option<Self> {
         let models_dir = config.resolved_models_dir();
-        let expand_model = &config.expand.model;
+        let expand_model = expand_model.unwrap_or(&config.expand.model);
 
         // Determine the tag from the model spec (e.g., "qwen3-expand:q4" → "q4")
         let tag = expand_model.split(':').nth(1).unwrap_or("q8");

@@ -99,7 +99,9 @@ pub(crate) fn create_expander(
     // Local expander
     #[cfg(feature = "expand")]
     {
-        if let Some(local) = mold_inference::expand::LocalExpander::from_config(config) {
+        if let Some(local) =
+            mold_inference::expand::LocalExpander::from_config(config, Some(&settings.model))
+        {
             return Ok(Box::new(local));
         }
         anyhow::bail!(
