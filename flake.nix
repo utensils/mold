@@ -257,14 +257,18 @@
               {
                 name = "LIBRARY_PATH";
                 value =
-                  lib.makeLibraryPath [
+                  # /run/opengl-driver/lib MUST come before cuda_cudart/lib/stubs
+                  # so the real libcuda.so (NVIDIA driver) is found before the
+                  # stub placeholder. Without this, debug builds link against
+                  # the stub and fail at runtime with CUDA_ERROR_STUB_LIBRARY.
+                  "/run/opengl-driver/lib:"
+                  + lib.makeLibraryPath [
                     pkgs.cudaPackages.cuda_cudart
                     pkgs.cudaPackages.libcublas.lib
                     pkgs.cudaPackages.cuda_nvrtc.lib
                     pkgs.cudaPackages.libcurand.lib
                   ]
-                  + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs"
-                  + ":/run/opengl-driver/lib";
+                  + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
               }
               {
                 name = "LD_LIBRARY_PATH";
