@@ -123,6 +123,9 @@ fn clean_orphaned_shared_files(config: &Config) {
     }
 
     // Build set of all file paths still referenced by remaining models.
+    // Note: paths in config are absolute canonical paths written by `mold pull`,
+    // and the filesystem walk also produces absolute paths, so string comparison
+    // is reliable here.
     let referenced: std::collections::HashSet<String> = config
         .models
         .values()
@@ -130,7 +133,17 @@ fn clean_orphaned_shared_files(config: &Config) {
         .collect();
 
     // Walk shared/ recursively and delete unreferenced files.
-    remove_orphaned_files_recursive(&shared_dir, &referenced);
+    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced);
+
+    if count > 0 {
+        eprintln!(
+            "{} cleaned up {} orphaned shared file{} (freed {})",
+            theme::prefix_note(),
+            count,
+            if count == 1 { "" } else { "s" },
+            format_bytes(bytes),
+        );
+    }
 
     // Clean up empty directories bottom-up.
     remove_empty_dirs_recursive(&shared_dir);
@@ -140,25 +153,45 @@ fn clean_orphaned_shared_files(config: &Config) {
 }
 
 /// Recursively remove files under `dir` that are not in `referenced`.
+/// Returns `(files_deleted, bytes_freed)`.
 fn remove_orphaned_files_recursive(
     dir: &std::path::Path,
     referenced: &std::collections::HashSet<String>,
-) {
+) -> (u64, u64) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return (0, 0),
     };
+    let mut count = 0u64;
+    let mut bytes = 0u64;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            remove_orphaned_files_recursive(&path, referenced);
+            let (c, b) = remove_orphaned_files_recursive(&path, referenced);
+            count += c;
+            bytes += b;
         } else if path.is_file() {
             let path_str = path.to_string_lossy().to_string();
             if !referenced.contains(&path_str) {
-                let _ = std::fs::remove_file(&path);
+                let size = file_size(&path_str);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        count += 1;
+                        bytes += size;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to clean up orphaned file {}: {}",
+                            theme::prefix_warning(),
+                            path.display(),
+                            e
+                        );
+                    }
+                }
             }
         }
     }
+    (count, bytes)
 }
 
 /// Recursively remove empty directories under `dir` (bottom-up).
@@ -614,7 +647,9 @@ mod tests {
         assert!(referenced_set.contains(&referenced_vae.to_string_lossy().to_string()));
 
         // Run the orphan removal logic directly
-        remove_orphaned_files_recursive(&shared, &referenced_set);
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced_set);
+        assert_eq!(count, 1, "should delete exactly 1 orphaned file");
+        assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
         remove_empty_dirs_recursive(&shared);
 
         // Orphaned file should be deleted
@@ -676,7 +711,9 @@ mod tests {
         std::fs::write(&orphan_qwen, b"qwen data").unwrap();
 
         let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        remove_orphaned_files_recursive(&shared, &referenced);
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        assert_eq!(count, 2, "should delete both orphaned files");
+        assert_eq!(bytes, 16, "should report correct total bytes"); // "t5 data"(7) + "qwen data"(9)
         remove_empty_dirs_recursive(&shared);
         let _ = std::fs::remove_dir(&shared);
 
@@ -711,7 +748,9 @@ mod tests {
         .into_iter()
         .collect();
 
-        remove_orphaned_files_recursive(&shared, &referenced);
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        assert_eq!(count, 0, "no files should be deleted");
+        assert_eq!(bytes, 0, "no bytes should be freed");
         remove_empty_dirs_recursive(&shared);
 
         assert!(shared_vae.exists(), "shared VAE should survive");
