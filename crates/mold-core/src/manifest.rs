@@ -370,6 +370,58 @@ fn build_known_manifests() -> Vec<ModelManifest> {
             },
         },
         ModelManifest {
+            name: "flux-dev:bf16".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Dev BF16 — full quality, full precision (23.8GB transformer)"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.1-dev".to_string(),
+                    hf_filename: "flux1-dev.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 23_802_932_552,
+                    gated: true,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
+            name: "flux-schnell:bf16".to_string(),
+            family: "flux".to_string(),
+            description: "FLUX.1 Schnell BF16 — fast 4-step, full precision (23.8GB transformer)"
+                .to_string(),
+            files: {
+                let mut files = shared_flux_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.1-schnell".to_string(),
+                    hf_filename: "flux1-schnell.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 23_782_506_688,
+                    gated: true,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 0.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: true,
+                scheduler: None,
+            },
+        },
+        ModelManifest {
             name: "flux-schnell:q4".to_string(),
             family: "flux".to_string(),
             description: "FLUX.1 Schnell Q4 — fast 4-step, smaller footprint".to_string(),
@@ -2758,8 +2810,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 22 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 53
-        assert_eq!(known_manifests().len(), 53);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 55
+        assert_eq!(known_manifests().len(), 55);
     }
 
     #[test]

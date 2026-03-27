@@ -264,8 +264,10 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
 | `flux-schnell:q8` | 4 | 12GB | Fast, general purpose |
+| `flux-schnell:bf16` | 4 | 23.8GB | Fast, full precision (needs >24GB VRAM) |
 | `flux-schnell:q4` | 4 | 7.5GB | Same but lighter |
 | `flux-dev:q8` | 25 | 12GB | Full quality |
+| `flux-dev:bf16` | 25 | 23.8GB | Full quality, full precision (needs >24GB VRAM) |
 | `flux-dev:q4` | 25 | 7GB | Full quality, less VRAM |
 | `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography |
 | `flux-krea:fp8` | 25 | 11.9GB | Aesthetic photography, FP8 |
