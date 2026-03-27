@@ -108,6 +108,10 @@ fn collect_hf_cache_blob_paths(
     blobs
 }
 
+/// Runtime GGUF cache subdirectories under `shared/` that may contain
+/// auto-downloaded quantized encoders not tracked in config.toml.
+const RUNTIME_GGUF_CACHE_DIRS: &[&str] = &["t5-gguf", "qwen3-gguf"];
+
 /// Remove orphaned files from runtime GGUF cache directories under `shared/`
 /// that are not referenced by any remaining model config entry, then clean up
 /// empty directories under `shared/`.
@@ -120,8 +124,6 @@ fn collect_hf_cache_blob_paths(
 /// Only the known runtime cache directories are scanned — other shared dirs
 /// (e.g. `shared/flux/`, `shared/sdxl/`) are left alone because manifest-discovered
 /// models may reference those files without having an explicit config entry.
-const RUNTIME_GGUF_CACHE_DIRS: &[&str] = &["t5-gguf", "qwen3-gguf"];
-
 fn clean_orphaned_shared_files(config: &Config) {
     let models_dir = config.resolved_models_dir();
     let shared_dir = models_dir.join("shared");
