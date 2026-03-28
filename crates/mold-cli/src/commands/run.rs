@@ -167,7 +167,7 @@ pub async fn run(
         expand || expand_settings.enabled
     };
 
-    let (final_prompt, original_prompt) = if should_expand {
+    let (final_prompt, original_prompt, batch_prompts) = if should_expand {
         use colored::Colorize;
 
         let mut settings = expand_settings;
@@ -204,12 +204,9 @@ pub async fn run(
                 crate::theme::icon_ok(),
                 display.dimmed()
             );
-            (expanded.clone(), Some(prompt.clone()))
+            (expanded.clone(), Some(prompt.clone()), None)
         } else {
             // Multiple variations: each batch image gets a different prompt.
-            // For now, use the first variation as the main prompt.
-            // The batch expansion with per-image prompts will be handled
-            // in a follow-up (requires changes to generate loop).
             crate::output::status!(
                 "{} Generated {} prompt variations",
                 crate::theme::icon_ok(),
@@ -224,11 +221,11 @@ pub async fn run(
                 };
                 crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
             }
-            // Use first variation for single generation, will expand per-batch later
-            (result.expanded[0].clone(), Some(prompt.clone()))
+            let first = result.expanded[0].clone();
+            (first, Some(prompt.clone()), Some(result.expanded))
         }
     } else {
-        (prompt, None)
+        (prompt, None, None)
     };
 
     generate::run(
@@ -257,6 +254,7 @@ pub async fn run(
         control_model,
         control_scale,
         original_prompt,
+        batch_prompts,
     )
     .await
 }

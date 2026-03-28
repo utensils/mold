@@ -92,6 +92,7 @@ pub async fn run(
     control_model: Option<String>,
     control_scale: f64,
     original_prompt: Option<String>,
+    batch_prompts: Option<Vec<String>>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -231,6 +232,13 @@ pub async fn run(
             let mut iter_req = req.clone();
             iter_req.seed = Some(base_seed.wrapping_add(i as u64));
             iter_req.batch_size = 1;
+
+            // Use per-batch expanded prompt if available
+            if let Some(ref prompts) = batch_prompts {
+                if let Some(p) = prompts.get(i as usize) {
+                    iter_req.prompt = p.clone();
+                }
+            }
 
             if batch > 1 {
                 status!(
@@ -723,6 +731,13 @@ async fn generate_local_batch(
         let mut iter_req = base_req.clone();
         iter_req.seed = Some(base_seed.wrapping_add(i as u64));
         iter_req.batch_size = 1;
+
+        // Use per-batch expanded prompt if available
+        if let Some(ref prompts) = batch_prompts {
+            if let Some(p) = prompts.get(i as usize) {
+                iter_req.prompt = p.clone();
+            }
+        }
 
         if batch > 1 {
             status!(

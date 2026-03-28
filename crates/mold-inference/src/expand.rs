@@ -64,11 +64,22 @@ impl LocalExpander {
         // Search model-specific directories for GGUF files.
         // Manifest storage places transformers under <model-name>/ with colons
         // replaced by dashes, e.g., "qwen3-expand-q8/" or "qwen3-expand-small-q8/".
-        let candidate_dirs = [
-            format!("qwen3-expand-{tag}"),
-            format!("qwen3-expand-small-{tag}"),
-            "qwen3-expand".to_string(),
-        ];
+        // Order candidates so the explicitly requested variant is checked first —
+        // otherwise if both qwen3-expand and qwen3-expand-small are installed,
+        // the larger model would always win regardless of user's choice.
+        let candidate_dirs = if expand_model.contains("small") {
+            vec![
+                format!("qwen3-expand-small-{tag}"),
+                format!("qwen3-expand-{tag}"),
+                "qwen3-expand".to_string(),
+            ]
+        } else {
+            vec![
+                format!("qwen3-expand-{tag}"),
+                format!("qwen3-expand-small-{tag}"),
+                "qwen3-expand".to_string(),
+            ]
+        };
 
         let mut gguf_path = None;
         for dir_name in &candidate_dirs {

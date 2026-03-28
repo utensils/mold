@@ -2500,6 +2500,7 @@ dependencies = [
  "mold-ai-inference",
  "mold-ai-server",
  "rand 0.8.5",
+ "serde_json",
  "sha2",
  "tokio",
  "toml",

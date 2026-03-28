@@ -82,17 +82,8 @@ pub async fn run(
     let result = expander.expand(prompt, &expand_config)?;
 
     if json_output {
-        // Manual JSON output to avoid serde_json dependency in CLI crate
-        let mut json = String::from("[\n");
-        for (i, expanded) in result.expanded.iter().enumerate() {
-            let escaped = expanded.replace('\\', "\\\\").replace('"', "\\\"");
-            json.push_str(&format!("  \"{escaped}\""));
-            if i < result.expanded.len() - 1 {
-                json.push(',');
-            }
-            json.push('\n');
-        }
-        json.push(']');
+        let json =
+            serde_json::to_string_pretty(&result.expanded).unwrap_or_else(|_| "[]".to_string());
         println!("{json}");
     } else {
         if variations == 1 {
