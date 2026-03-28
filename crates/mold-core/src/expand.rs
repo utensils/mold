@@ -100,6 +100,9 @@ struct ChatCompletionRequest {
     top_p: f64,
     max_tokens: u32,
     /// Qwen3/vLLM thinking mode — only serialized when `true`.
+    /// NOTE: this is a non-standard extension; strict OpenAI-compatible
+    /// endpoints may reject it. Only enable when the backend supports it
+    /// (e.g. Ollama, vLLM with Qwen3 models).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     enable_thinking: bool,
 }
