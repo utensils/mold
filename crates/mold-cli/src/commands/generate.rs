@@ -220,6 +220,7 @@ pub async fn run(
             guidance,
             batch,
             base_seed,
+            batch_prompts.as_deref(),
         )
         .await?
     } else {
@@ -699,6 +700,7 @@ async fn generate_local_batch(
     cli_guidance: Option<f64>,
     batch: u32,
     base_seed: u64,
+    batch_prompts: Option<&[String]>,
 ) -> Result<GenerateResponse> {
     let (base_req, mut engine) = prepare_local_engine(
         req,
@@ -818,6 +820,7 @@ async fn generate_local_batch(
     _cli_guidance: Option<f64>,
     _batch: u32,
     _base_seed: u64,
+    _batch_prompts: Option<&[String]>,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\
