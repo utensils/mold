@@ -14,7 +14,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    should_use_gpu, CLIP_VRAM_THRESHOLD,
+    should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -571,6 +571,8 @@ pub struct FluxEngine {
     /// Cached resolved transformer path (GGUF cache for FP8, or original path).
     /// Avoids re-computing the cache key (file I/O) on every sequential generation.
     cached_transformer_path: Option<PathBuf>,
+    /// Force block-level offloading (--offload / MOLD_OFFLOAD=1).
+    offload: bool,
 }
 
 impl FluxEngine {
@@ -584,6 +586,7 @@ impl FluxEngine {
         is_schnell_override: Option<bool>,
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
+        offload: bool,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
@@ -592,6 +595,7 @@ impl FluxEngine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             transformer_is_fp8: None,
             cached_transformer_path: None,
+            offload,
         }
     }
 
@@ -1128,21 +1132,44 @@ impl FluxEngine {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // For non-quantized (BF16/F16) safetensors, check if the transformer
-        // will fit in VRAM before spending time loading it.
-        if !is_quantized {
+        // Determine if block-level offloading should be used.
+        let use_offload = if !is_quantized {
             let free = free_vram_bytes().unwrap_or(0);
-            if free > 0 && xformer_size > free {
+            if self.offload || should_offload(xformer_size, free) {
+                if free > 0 && free < MIN_OFFLOAD_VRAM {
+                    bail!(
+                        "GPU only has {:.1} GB free — at least {:.1} GB is required \
+                         for block-level offloading",
+                        free as f64 / 1e9,
+                        MIN_OFFLOAD_VRAM as f64 / 1e9,
+                    );
+                }
+                true
+            } else if free > 0 && xformer_size > free {
                 bail!(
                     "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
-                     use a quantized model (q8/q4) instead of full-precision for this GPU",
+                     use a quantized model (q8/q4) or --offload for block-level streaming",
                     xformer_size as f64 / 1e9,
                     free as f64 / 1e9,
                 );
+            } else {
+                false
             }
-        }
+        } else {
+            if self.offload {
+                tracing::warn!(
+                    "block-level offloading is not supported for quantized models; \
+                     --offload / MOLD_OFFLOAD=1 will be ignored"
+                );
+            }
+            false
+        };
 
-        preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
+        // Even when offloading, blocks must still fit in system RAM on unified-memory
+        // (Metal) hosts — preflight catches machines with insufficient total memory.
+        if !use_offload || device.is_metal() {
+            preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
+        }
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
@@ -1153,7 +1180,9 @@ impl FluxEngine {
             flux::model::Config::dev()
         };
 
-        let xformer_label = if is_quantized {
+        let xformer_label = if use_offload {
+            "Loading FLUX transformer (offloaded, blocks on CPU)"
+        } else if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
         } else {
             "Loading FLUX transformer (GPU, BF16)"
@@ -1161,7 +1190,20 @@ impl FluxEngine {
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
-        let flux_model = if is_quantized {
+        let flux_model = if use_offload {
+            // Load transformer on CPU, move stem to GPU, keep blocks on CPU
+            let cpu_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
+                &transformer_path,
+                gpu_dtype,
+                &Device::Cpu,
+            )?);
+            FluxTransformer::Offloaded(crate::flux::offload::OffloadedFluxTransformer::load(
+                cpu_vb,
+                &flux_cfg,
+                &device,
+                &self.base.progress,
+            )?)
+        } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {

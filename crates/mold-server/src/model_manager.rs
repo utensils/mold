@@ -240,11 +240,13 @@ async fn create_and_load_engine(
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
     let config = state.config.read().await;
+    let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let mut new_engine = mold_inference::create_engine(
         model_name.to_string(),
         paths,
         &config,
         mold_inference::LoadStrategy::Eager,
+        offload,
     )
     .map_err(|e| ApiError::internal(format!("failed to create engine for '{model_name}': {e}")))?;
     drop(config);
