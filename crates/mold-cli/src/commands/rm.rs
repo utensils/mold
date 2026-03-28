@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
-use mold_core::manifest::resolve_model_name;
+use mold_core::manifest::{known_manifests, resolve_model_name};
 use mold_core::Config;
 
 use crate::theme;
 use crate::ui::format_bytes;
 use crate::AlreadyReported;
+
+const STALE_PULL_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Provide completions for installed (configured) model names only.
 pub fn complete_installed_model_name() -> Vec<CompletionCandidate> {
@@ -44,7 +48,7 @@ fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
 fn collect_hf_cache_blob_paths(
     model_name: &str,
     unique_clean_paths: &[(String, u64)],
-) -> Vec<std::path::PathBuf> {
+) -> Vec<PathBuf> {
     let manifest = match mold_core::manifest::find_manifest(model_name) {
         Some(m) => m,
         None => return Vec::new(),
@@ -108,22 +112,235 @@ fn collect_hf_cache_blob_paths(
     blobs
 }
 
-/// Runtime GGUF cache subdirectories under `shared/` that may contain
-/// auto-downloaded quantized encoders not tracked in config.toml.
-const RUNTIME_GGUF_CACHE_DIRS: &[&str] = &["t5-gguf", "qwen3-gguf"];
+/// Collect all file paths still referenced by remaining models.
+///
+/// This includes:
+/// - explicit config entries
+/// - manifest-discovered local installs
+/// - manifest paths for models with an active `.pulling` marker
+///
+/// The latter two matter because manifest-backed models can exist without a
+/// config entry, and incomplete pulls should prevent us from racing cleanup
+/// against files that are still being written.
+fn collect_referenced_paths(config: &Config) -> std::collections::HashSet<String> {
+    let mut referenced: std::collections::HashSet<String> = config
+        .models
+        .values()
+        .flat_map(|mc| mc.all_file_paths())
+        .collect();
 
-/// Remove orphaned files from runtime GGUF cache directories under `shared/`
-/// that are not referenced by any remaining model config entry, then clean up
-/// empty directories under `shared/`.
+    let models_dir = config.resolved_models_dir();
+
+    for manifest in known_manifests() {
+        if mold_core::download::has_pulling_marker(&manifest.name) {
+            for file in &manifest.files {
+                referenced.insert(
+                    models_dir
+                        .join(mold_core::manifest::storage_path(manifest, file))
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+            continue;
+        }
+
+        if config.manifest_model_is_downloaded(&manifest.name) {
+            referenced.extend(config.model_config(&manifest.name).all_file_paths());
+        }
+    }
+
+    referenced
+}
+
+/// Resolve the hf-cache blob and snapshot symlink corresponding to a clean path.
 ///
-/// Auto-downloaded quantized encoders (T5 GGUF, Qwen3 GGUF) are placed in
-/// `shared/t5-gguf/` and `shared/qwen3-gguf/` by variant_resolution at runtime
-/// but never registered in config.toml. After the last model referencing them is
-/// removed, these files become invisible orphans. This function scans and deletes them.
+/// `mold pull` hardlinks hf-hub blobs into the clean models dir, so removing only
+/// the clean path doesn't necessarily reclaim disk. This finds the matching
+/// snapshot symlink and its target blob for a single clean path.
+fn collect_hf_cache_paths_for_clean_path(clean_path: &Path, config: &Config) -> Vec<PathBuf> {
+    let models_dir = config.resolved_models_dir();
+    let cache_dir = models_dir.join(".hf-cache");
+    if !cache_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let canonical_clean = clean_path
+        .canonicalize()
+        .unwrap_or_else(|_| clean_path.to_path_buf());
+    let Some(clean_leaf) = clean_path.file_name() else {
+        return Vec::new();
+    };
+
+    let mut matches = Vec::new();
+
+    let repos = match std::fs::read_dir(&cache_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    for repo in repos.flatten() {
+        let snapshots_dir = repo.path().join("snapshots");
+        if !snapshots_dir.is_dir() {
+            continue;
+        }
+        let revisions = match std::fs::read_dir(&snapshots_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for rev in revisions.flatten() {
+            let rev_dir = rev.path();
+            if !rev_dir.is_dir() {
+                continue;
+            }
+            let files = match walk_files_recursive(&rev_dir) {
+                Ok(files) => files,
+                Err(_) => continue,
+            };
+            for snapshot_path in files {
+                if snapshot_path.file_name() != Some(clean_leaf) {
+                    continue;
+                }
+                let Ok(blob) = snapshot_path.canonicalize() else {
+                    continue;
+                };
+                if same_file_identity(&blob, &canonical_clean) {
+                    matches.push(blob.clone());
+                    matches.push(snapshot_path);
+                }
+            }
+        }
+    }
+
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(left_meta) = std::fs::metadata(left) else {
+            return false;
+        };
+        let Ok(right_meta) = std::fs::metadata(right) else {
+            return false;
+        };
+        left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino()
+    }
+
+    #[cfg(not(unix))]
+    {
+        left == right
+    }
+}
+
+fn walk_files_recursive(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            files.extend(walk_files_recursive(&path)?);
+        } else if path.is_file() || path.is_symlink() {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+fn is_path_older_than(path: &Path, age: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return false;
+    };
+    elapsed >= age
+}
+
+fn pull_marker_path_for_model(config: &Config, model_name: &str) -> PathBuf {
+    config
+        .resolved_models_dir()
+        .join(model_name.replace(':', "-"))
+        .join(".pulling")
+}
+
+fn is_stale_pull_marker(config: &Config, model_name: &str) -> bool {
+    let marker = pull_marker_path_for_model(config, model_name);
+    marker.exists() && is_path_older_than(&marker, STALE_PULL_MAX_AGE)
+}
+
+fn active_pull_models(config: &Config) -> std::collections::HashSet<String> {
+    known_manifests()
+        .iter()
+        .filter_map(|manifest| {
+            let name = &manifest.name;
+            let marker_exists = mold_core::download::has_pulling_marker(name);
+            (marker_exists && !is_stale_pull_marker(config, name)).then(|| name.clone())
+        })
+        .collect()
+}
+
+fn active_pull_repos(config: &Config) -> std::collections::HashSet<String> {
+    let active_models = active_pull_models(config);
+    let mut repos = std::collections::HashSet::new();
+
+    for manifest in known_manifests() {
+        if active_models.contains(&manifest.name) {
+            repos.extend(manifest.files.iter().map(|file| file.hf_repo.clone()));
+        }
+    }
+
+    repos
+}
+
+fn clean_stale_pull_markers(config: &Config) {
+    let mut removed = 0u64;
+
+    for manifest in known_manifests() {
+        if !is_stale_pull_marker(config, &manifest.name) {
+            continue;
+        }
+
+        let marker = pull_marker_path_for_model(config, &manifest.name);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {
+                removed += 1;
+                if let Some(parent) = marker.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} failed to remove stale pull marker {}: {}",
+                    theme::prefix_warning(),
+                    marker.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    if removed > 0 {
+        eprintln!(
+            "{} removed {} stale pull marker{}",
+            theme::prefix_note(),
+            removed,
+            if removed == 1 { "" } else { "s" }
+        );
+    }
+}
+
+/// Remove orphaned files from `shared/` that are not referenced by any
+/// remaining model, then clean up empty directories under `shared/`.
 ///
-/// Only the known runtime cache directories are scanned — other shared dirs
-/// (e.g. `shared/flux/`, `shared/sdxl/`) are left alone because manifest-discovered
-/// models may reference those files without having an explicit config entry.
+/// This covers both runtime caches such as `shared/t5-gguf/` and normal
+/// manifest-managed shared directories such as `shared/flux/` or `shared/sd15/`.
+///
 fn clean_orphaned_shared_files(config: &Config) {
     let models_dir = config.resolved_models_dir();
     let shared_dir = models_dir.join("shared");
@@ -131,27 +348,13 @@ fn clean_orphaned_shared_files(config: &Config) {
         return;
     }
 
-    // Build set of all file paths still referenced by remaining models.
-    // Note: paths in config are absolute canonical paths written by `mold pull`,
-    // and the filesystem walk also produces absolute paths, so string comparison
-    // is reliable here.
-    let referenced: std::collections::HashSet<String> = config
-        .models
-        .values()
-        .flat_map(|mc| mc.all_file_paths())
-        .collect();
+    let referenced = collect_referenced_paths(config);
 
-    // Only scan known runtime GGUF cache directories, not all of shared/.
     let mut total_count = 0u64;
     let mut total_bytes = 0u64;
-    for subdir in RUNTIME_GGUF_CACHE_DIRS {
-        let cache_dir = shared_dir.join(subdir);
-        if cache_dir.is_dir() {
-            let (count, bytes) = remove_orphaned_files_recursive(&cache_dir, &referenced);
-            total_count += count;
-            total_bytes += bytes;
-        }
-    }
+    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced, config);
+    total_count += count;
+    total_bytes += bytes;
 
     if total_count > 0 {
         eprintln!(
@@ -173,8 +376,9 @@ fn clean_orphaned_shared_files(config: &Config) {
 /// Recursively remove files under `dir` that are not in `referenced`.
 /// Returns `(files_deleted, bytes_freed)`.
 fn remove_orphaned_files_recursive(
-    dir: &std::path::Path,
+    dir: &Path,
     referenced: &std::collections::HashSet<String>,
+    config: &Config,
 ) -> (u64, u64) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -185,26 +389,59 @@ fn remove_orphaned_files_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_symlink() && path.is_dir() {
-            let (c, b) = remove_orphaned_files_recursive(&path, referenced);
+            let (c, b) = remove_orphaned_files_recursive(&path, referenced, config);
             count += c;
             bytes += b;
         } else if path.is_file() {
             let path_str = path.to_string_lossy().to_string();
             if !referenced.contains(&path_str) {
-                let size = file_size(&path_str);
-                match std::fs::remove_file(&path) {
-                    Ok(()) => {
-                        count += 1;
-                        bytes += size;
+                let mut removed_any = false;
+                let mut removed_bytes = 0u64;
+                let cache_targets = collect_hf_cache_paths_for_clean_path(&path, config);
+
+                for target in &cache_targets {
+                    if target.exists() {
+                        let size = file_size(&target.to_string_lossy());
+                        match std::fs::remove_file(target) {
+                            Ok(()) => {
+                                removed_any = true;
+                                removed_bytes += size;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} failed to clean up cache file {}: {}",
+                                    theme::prefix_warning(),
+                                    target.display(),
+                                    e
+                                );
+                            }
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "{} failed to clean up orphaned file {}: {}",
-                            theme::prefix_warning(),
-                            path.display(),
-                            e
-                        );
+                }
+
+                if path.exists() {
+                    let clean_size = file_size(&path_str);
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            removed_any = true;
+                            if cache_targets.is_empty() {
+                                removed_bytes += clean_size;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{} failed to clean up orphaned file {}: {}",
+                                theme::prefix_warning(),
+                                path.display(),
+                                e
+                            );
+                        }
                     }
+                }
+
+                if removed_any {
+                    count += 1;
+                    bytes += removed_bytes;
                 }
             }
         }
@@ -235,12 +472,13 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
 /// - Empty snapshot revision directories
 /// - Empty blob directories
 /// - Empty repo directories (`models--org--repo/`)
-fn clean_hf_cache() {
-    let config = Config::load_or_default();
+fn clean_hf_cache(config: &Config) {
     let cache_dir = config.resolved_models_dir().join(".hf-cache");
     if !cache_dir.is_dir() {
         return;
     }
+
+    let active_repos = active_pull_repos(config);
 
     // Walk repo directories
     let entries = match std::fs::read_dir(&cache_dir) {
@@ -253,6 +491,14 @@ fn clean_hf_cache() {
         if !repo_dir.is_dir() {
             continue;
         }
+        let repo_name = repo_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|name| name.strip_prefix("models--"))
+            .map(|rest| rest.replace("--", "/"));
+        let repo_is_active = repo_name
+            .as_ref()
+            .is_some_and(|repo| active_repos.contains(repo));
 
         // Clean dangling symlinks in snapshots/*/
         let snapshots_dir = repo_dir.join("snapshots");
@@ -284,6 +530,21 @@ fn clean_hf_cache() {
         // Remove empty blobs dir
         let blobs_dir = repo_dir.join("blobs");
         if blobs_dir.is_dir() {
+            if !repo_is_active {
+                if let Ok(files) = std::fs::read_dir(&blobs_dir) {
+                    for file in files.flatten() {
+                        let path = file.path();
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default();
+                        let is_transient = name.ends_with(".lock") || name.ends_with(".sync.part");
+                        if is_transient {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
             let _ = std::fs::remove_dir(&blobs_dir);
         }
 
@@ -487,13 +748,17 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         );
     }
 
-    // Clean up orphaned shared files (auto-downloaded quantized encoders
-    // not tracked in config) and empty shared directories.
+    // Remove abandoned download markers before scanning for live references or
+    // cleaning hf-cache transient files.
+    clean_stale_pull_markers(&config);
+
+    // Clean up orphaned shared files and empty shared directories.
     clean_orphaned_shared_files(&config);
 
     // Clean up dangling hf-cache entries (symlinks to deleted blobs,
-    // empty snapshot dirs, empty repo dirs) once after all removals.
-    clean_hf_cache();
+    // transient lock/partial files in inactive repos, empty snapshot dirs,
+    // empty repo dirs) once after all removals.
+    clean_hf_cache(&config);
 
     if any_error {
         return Err(AlreadyReported.into());
@@ -639,7 +904,8 @@ mod tests {
         let referenced_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Run the orphan removal logic on the scoped cache dir
-        let (count, bytes) = remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set);
+        let cfg = Config::default();
+        let (count, bytes) = remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set, &cfg);
         assert_eq!(count, 1, "should delete exactly 1 orphaned file");
         assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
 
@@ -649,42 +915,23 @@ mod tests {
     }
 
     #[test]
-    fn scoped_cleanup_does_not_touch_non_cache_shared_dirs() {
-        // Files in shared/flux/ should NOT be scanned — only t5-gguf and qwen3-gguf.
-        // This protects manifest-discovered models without config entries.
-        let tmp = make_tmp_dir("scope-safety");
+    fn shared_cleanup_removes_unreferenced_manifest_shared_dirs() {
+        let tmp = make_tmp_dir("shared-scope");
         let shared = tmp.join("shared");
         let flux_dir = shared.join("flux");
-        let t5_gguf_dir = shared.join("t5-gguf");
         std::fs::create_dir_all(&flux_dir).unwrap();
-        std::fs::create_dir_all(&t5_gguf_dir).unwrap();
 
-        // Unreferenced file in flux/ — should survive (not a cache dir)
         let flux_vae = flux_dir.join("ae.safetensors");
         std::fs::write(&flux_vae, b"vae data").unwrap();
 
-        // Unreferenced file in t5-gguf/ — should be deleted (cache dir)
-        let orphan_t5 = t5_gguf_dir.join("t5-v1_1-xxl-encoder-Q8_0.gguf");
-        std::fs::write(&orphan_t5, b"orphan").unwrap();
-
         let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // Only scan RUNTIME_GGUF_CACHE_DIRS, not all of shared/
-        for subdir in RUNTIME_GGUF_CACHE_DIRS {
-            let cache_dir = shared.join(subdir);
-            if cache_dir.is_dir() {
-                remove_orphaned_files_recursive(&cache_dir, &referenced);
-            }
-        }
+        let cfg = Config::default();
+        remove_orphaned_files_recursive(&shared, &referenced, &cfg);
         remove_empty_dirs_recursive(&shared);
 
         assert!(
-            !orphan_t5.exists(),
-            "orphaned T5 GGUF in cache dir should be deleted"
-        );
-        assert!(
-            flux_vae.exists(),
-            "unreferenced file in shared/flux/ must survive — not a cache dir"
+            !flux_vae.exists(),
+            "unreferenced file in shared/flux/ should be deleted"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -703,7 +950,8 @@ mod tests {
 
         // All empty — simulate post-deletion state
         let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        remove_orphaned_files_recursive(&shared, &referenced);
+        let cfg = Config::default();
+        remove_orphaned_files_recursive(&shared, &referenced, &cfg);
         remove_empty_dirs_recursive(&shared);
         let _ = std::fs::remove_dir(&shared);
 
@@ -734,7 +982,8 @@ mod tests {
         std::fs::write(&orphan_qwen, b"qwen data").unwrap();
 
         let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        let cfg = Config::default();
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &cfg);
         assert_eq!(count, 2, "should delete both orphaned files");
         assert_eq!(bytes, 16, "should report correct total bytes"); // "t5 data"(7) + "qwen data"(9)
         remove_empty_dirs_recursive(&shared);
@@ -771,7 +1020,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced);
+        let cfg = Config::default();
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &cfg);
         assert_eq!(count, 0, "no files should be deleted");
         assert_eq!(bytes, 0, "no bytes should be freed");
         remove_empty_dirs_recursive(&shared);
@@ -788,5 +1038,99 @@ mod tests {
         let config = Config::default();
         // This should be a no-op, not a crash
         clean_orphaned_shared_files(&config);
+    }
+
+    #[test]
+    fn stale_pull_marker_is_removed_when_old() {
+        let tmp = make_tmp_dir("stale-marker");
+        let marker_dir = tmp.join("flux-dev-q6");
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        let marker = marker_dir.join(".pulling");
+        std::fs::write(&marker, b"flux-dev:q6").unwrap();
+
+        let old = filetime::FileTime::from_unix_time(1, 0);
+        filetime::set_file_mtime(&marker, old).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.models_dir = tmp.to_string_lossy().to_string();
+
+        clean_stale_pull_markers(&cfg);
+
+        assert!(!marker.exists(), "stale pull marker should be removed");
+        assert!(
+            !marker_dir.exists(),
+            "empty model dir should be removed too"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hf_cache_cleanup_removes_inactive_repo_transient_files() {
+        let tmp = make_tmp_dir("inactive-repo");
+        let blobs_dir = tmp
+            .join(".hf-cache")
+            .join("models--city96--FLUX.1-dev-gguf")
+            .join("blobs");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+
+        let lock = blobs_dir.join("deadbeef.lock");
+        let part = blobs_dir.join("deadbeef.sync.part");
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::write(&part, b"partial").unwrap();
+
+        let mut cfg = Config::default();
+        cfg.models_dir = tmp.to_string_lossy().to_string();
+
+        clean_hf_cache(&cfg);
+
+        assert!(!lock.exists(), "inactive repo lock file should be removed");
+        assert!(
+            !part.exists(),
+            "inactive repo sync.part file should be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_shared_file_cleanup_removes_hf_blob_and_snapshot_symlink() {
+        let tmp = make_tmp_dir("shared-hf");
+        let shared_flux = tmp.join("shared").join("flux");
+        let repo = tmp
+            .join(".hf-cache")
+            .join("models--comfyanonymous--flux_text_encoders");
+        let blobs_dir = repo.join("blobs");
+        let snapshot_dir = repo.join("snapshots").join("rev1");
+
+        std::fs::create_dir_all(&shared_flux).unwrap();
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+        let blob = blobs_dir.join("deadbeef");
+        std::fs::write(&blob, b"shared t5 weights").unwrap();
+
+        let snapshot_path = snapshot_dir.join("t5xxl_fp16.safetensors");
+        std::os::unix::fs::symlink(&blob, &snapshot_path).unwrap();
+
+        let clean_path = shared_flux.join("t5xxl_fp16.safetensors");
+        std::fs::hard_link(&blob, &clean_path).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.models_dir = tmp.to_string_lossy().to_string();
+
+        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let (count, _bytes) = remove_orphaned_files_recursive(&shared_flux, &referenced, &cfg);
+
+        assert_eq!(count, 1, "should count the orphaned shared file once");
+        assert!(!clean_path.exists(), "clean shared path should be removed");
+        assert!(!blob.exists(), "hf-cache blob should be removed");
+        assert!(
+            !snapshot_path.exists(),
+            "snapshot symlink should be removed alongside the blob"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
