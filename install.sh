@@ -53,7 +53,9 @@ detect_cuda_arch() {
                 echo "sm89"
                 return
             elif [ "${MAJOR}" -ge 9 ] 2>/dev/null; then
-                # Hopper (9.0) or other post-Ada — use sm89 with JIT
+                # Hopper (9.0) or other post-Ada pre-Blackwell — use sm89 with JIT
+                echo "Warning: GPU compute capability ${CC} (Hopper/post-Ada) — using sm89 binary." >&2
+                echo "  Core inference works via PTX JIT. A native sm90 binary is not available." >&2
                 echo "sm89"
                 return
             else

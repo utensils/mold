@@ -195,7 +195,7 @@ jobs:
 
             ```bash
             # One-line install (auto-detects GPU, pinned to this release)
-            MOLD_VERSION=${{ github.ref_name }} curl -fsSL https://raw.githubusercontent.com/utensils/mold/${{ github.ref_name }}/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/utensils/mold/${{ github.ref_name }}/install.sh | MOLD_VERSION=${{ github.ref_name }} sh
 
             # From crates.io (CPU-only, no GPU acceleration)
             cargo install mold-ai

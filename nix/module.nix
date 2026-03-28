@@ -14,7 +14,7 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake. When cudaArch is set and package is not explicitly overridden, the appropriate variant is selected automatically.";
+      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake. Use mold-sm120 for Blackwell GPUs. The module cannot auto-select the package; set it explicitly to match your GPU.";
     };
 
     cudaArch = lib.mkOption {
