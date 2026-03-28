@@ -62,7 +62,7 @@
           # CUDA compute capability — override for different GPU architectures.
           # Default "89" targets RTX 4090 (Ada Lovelace).
           # Common values: "75" (Turing), "80" (Ampere A100), "86" (Ampere 3090),
-          # "89" (Ada 4090), "90" (Hopper H100).
+          # "89" (Ada 4090), "90" (Hopper H100), "120" (Blackwell RTX 5090).
           cudaComputeCap = "89";
 
           pkgs = import inputs.nixpkgs {
@@ -152,22 +152,30 @@
             maintainers = [ ];
           };
 
-          mold = craneLib.buildPackage (
-            commonArgs
-            // {
-              inherit cargoArtifacts meta;
-              cargoExtraArgs =
-                "-p mold-ai --features preview,discord,expand"
-                + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
-              postInstall = ''
-                installShellCompletion --cmd mold \
-                  --bash <($out/bin/mold completions bash) \
-                  --zsh <($out/bin/mold completions zsh) \
-                  --fish <($out/bin/mold completions fish)
-              '';
-              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.installShellFiles ];
-            }
-          );
+          # Build a mold package for a given CUDA compute capability.
+          mkMold =
+            computeCap:
+            craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts meta;
+                cargoExtraArgs =
+                  "-p mold-ai --features preview,discord,expand"
+                  + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
+                postInstall = ''
+                  installShellCompletion --cmd mold \
+                    --bash <($out/bin/mold completions bash) \
+                    --zsh <($out/bin/mold completions zsh) \
+                    --fish <($out/bin/mold completions fish)
+                '';
+                nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.installShellFiles ];
+              }
+              // lib.optionalAttrs isLinux {
+                CUDA_COMPUTE_CAP = computeCap;
+              }
+            );
+
+          mold = mkMold cudaComputeCap;
 
           moldDiscord = craneLib.buildPackage (
             commonArgs
@@ -192,6 +200,9 @@
             inherit mold;
             mold-discord = moldDiscord;
             default = mold;
+          }
+          // lib.optionalAttrs isLinux {
+            mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
           };
 
           apps.default = {
@@ -250,7 +261,7 @@
               }
               {
                 name = "CUDA_COMPUTE_CAP";
-                value = "89";
+                value = cudaComputeCap;
               }
               {
                 name = "CPATH";

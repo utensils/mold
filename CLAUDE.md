@@ -335,7 +335,7 @@ temperature = 0.7
 
 ## Deployment
 
-**Nix build with CUDA**: `nix build .#mold` or `nix develop --command cargo build --release -p mold-cli --features cuda`
+**Nix build with CUDA**: `nix build .#mold` (Ada/sm_89) or `nix build .#mold-sm120` (Blackwell/sm_120)
 
 **Systemd service**: `~/.config/systemd/user/mold-server.service` — configure with `LD_LIBRARY_PATH=/run/opengl-driver/lib` for NixOS CUDA driver access.
 
@@ -353,7 +353,7 @@ temperature = 0.7
 4. **`tokio::sync::Mutex` for engine state** — Async-aware mutex; single-model-at-a-time is appropriate for GPU workloads. Inference runs in `spawn_blocking`.
 5. **Smart VRAM management** — Dynamic device placement + drop-and-reload + quantized encoder auto-fallback. See `device.rs` for thresholds.
 6. **Model pull via hf-hub** — rustls TLS (no OpenSSL), shared components deduplicated by hf-hub cache, `Progress` trait adapter bridges to `indicatif::ProgressBar`.
-7. **Nix flake (flake-parts + crane)** — Pure Nix Rust builds, numtide devshell, treefmt-nix. CUDA 12.8 + `CUDA_COMPUTE_CAP=89` on Linux (RTX 4090), Metal on macOS. Devshell sets `CPATH`, `LIBRARY_PATH`, `LD_LIBRARY_PATH` for CUDA compilation.
+7. **Nix flake (flake-parts + crane)** — Pure Nix Rust builds, numtide devshell, treefmt-nix. CUDA 12.8 on Linux, Metal on macOS. Default `CUDA_COMPUTE_CAP=89` (Ada/RTX 4090); `packages.x86_64-linux.mold-sm120` for Blackwell (RTX 50-series). `mkMold` helper builds for any compute capability. Devshell sets `CPATH`, `LIBRARY_PATH`, `LD_LIBRARY_PATH` for CUDA compilation.
 8. **Shell completions** — Static via `clap_complete` + dynamic via `CompleteEnv` with `ArgValueCandidates` for model names.
 9. **Pipe-friendly output** — `IsTerminal` detection routes image bytes to stdout, status to stderr. SIGPIPE reset to default. `status!` macro handles routing.
 10. **Unified `run` command** — First positional arg disambiguated at runtime: known model name vs prompt text.

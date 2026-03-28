@@ -14,7 +14,26 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake.";
+      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake. When cudaArch is set and package is not explicitly overridden, the appropriate variant is selected automatically.";
+    };
+
+    cudaArch = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "ada"
+          "blackwell"
+        ]
+      );
+      default = null;
+      description = ''
+        CUDA GPU architecture for automatic package selection.
+        - "ada" — RTX 40-series (Ada Lovelace, sm_89)
+        - "blackwell" — RTX 50-series (Blackwell, sm_120)
+        When set and `package` is not explicitly overridden, selects the
+        matching package variant from the mold flake.
+        When null, uses whatever package is provided.
+      '';
+      example = "blackwell";
     };
 
     port = lib.mkOption {
