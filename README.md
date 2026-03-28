@@ -331,11 +331,20 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
 | `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
 | `MOLD_LOG` | `warn` / `info` | Log level |
+| `MOLD_PORT` | `7680` | Server port |
+| `MOLD_EAGER` | — | Set `1` to keep all model components loaded simultaneously |
+| `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
+| `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
+| `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
+| `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
+| `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin |
 | `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
 | `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
+| `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion LLM |
+| `MOLD_EXPAND_THINKING` | — | Set `1` to enable thinking mode in expansion LLM |
 | `MOLD_EXPAND_SYSTEM_PROMPT` | — | Custom single-expansion system prompt template |
 | `MOLD_EXPAND_BATCH_PROMPT` | — | Custom batch-variation system prompt template |
 

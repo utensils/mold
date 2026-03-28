@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::expand_prompts::{build_batch_messages, build_single_messages};
 
+/// Maximum number of prompt variations the server API accepts.
+pub const MAX_VARIATIONS: usize = 10;
+
+/// Maximum number of prompt variations for Discord (embed character limit).
+pub const DISCORD_MAX_VARIATIONS: usize = 5;
+
 /// Per-family word limit and style notes override.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FamilyOverride {
@@ -93,6 +99,12 @@ struct ChatCompletionRequest {
     temperature: f64,
     top_p: f64,
     max_tokens: u32,
+    /// Qwen3/vLLM thinking mode — only serialized when `true`.
+    /// NOTE: this is a non-standard extension; strict OpenAI-compatible
+    /// endpoints may reject it. Only enable when the backend supports it
+    /// (e.g. Ollama, vLLM with Qwen3 models).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    enable_thinking: bool,
 }
 
 /// Response from `/v1/chat/completions`.
@@ -159,6 +171,7 @@ impl PromptExpander for ApiExpander {
             temperature: config.temperature,
             top_p: config.top_p,
             max_tokens: config.max_tokens,
+            enable_thinking: config.thinking,
         };
 
         let url = format!("{}/v1/chat/completions", self.endpoint);
@@ -182,7 +195,10 @@ impl PromptExpander for ApiExpander {
             .choices
             .first()
             .map(|c| c.message.content.clone())
-            .unwrap_or_default();
+            .filter(|c| !c.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("expand API returned empty response (no choices or empty content)")
+            })?;
 
         let expanded = if config.variations > 1 {
             parse_variations(&content, config.variations)

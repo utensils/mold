@@ -109,7 +109,9 @@ pub trait InferenceEngine: Send + Sync {
     fn model_name(&self) -> &str;
     fn is_loaded(&self) -> bool;
     fn load(&mut self) -> Result<()>;
+    fn unload(&mut self) {}                                       // free GPU memory
     fn set_on_progress(&mut self, _callback: ProgressCallback) {} // default no-op
+    fn clear_on_progress(&mut self) {}
 }
 ```
 
@@ -137,6 +139,7 @@ pub trait InferenceEngine: Send + Sync {
 - **Drop-and-reload for text encoders** — T5/CLIP (FLUX) and Qwen3 (Z-Image) are dropped from GPU after encoding to free VRAM for denoising, then reloaded next generation
 - **Dynamic device placement** — Text encoders placed on GPU or CPU based on remaining VRAM after transformer loads (thresholds in `device.rs`)
 - **Quantized encoder auto-fallback** — When FP16/BF16 encoder doesn't fit in VRAM, auto-selects largest quantized GGUF variant that fits. Custom `GgufT5Encoder` and `GgufQwen3Encoder` in `encoders/` handle GGUF-specific tensor naming. Override with `--t5-variant` / `--qwen3-variant` flags.
+- **Block-level offloading** — `flux/offload.rs`: streams transformer blocks between CPU and GPU one at a time, reducing VRAM from ~24GB to ~2-4GB (3-5x slower). Auto-enabled when VRAM is insufficient; force with `--offload` / `MOLD_OFFLOAD=1`.
 
 **Z-Image GGUF specifics** — The quantized Z-Image transformer (`zimage/quantized_transformer.rs`) lives in this crate (not candle) because candle has no quantized Z-Image model. Key GGUF tensor name differences from BF16: fused `attention.qkv` vs separate Q/K/V, `x_embedder` vs `all_x_embedder.2-1`, etc.
 
@@ -192,7 +195,9 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --host <URL>            Override MOLD_HOST
         --format <FORMAT>       png or jpeg [default: png]
         --local                 Skip server, run inference locally (requires GPU features)
+        --guidance <N>          Guidance scale (defaults to model config value)
         --eager                 Keep all model components loaded simultaneously (faster, more memory)
+        --offload               Stream transformer blocks CPU↔GPU (reduces VRAM ~24GB→2-4GB, 3-5x slower)
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
         --scheduler <SCHED>     Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc
@@ -258,6 +263,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
+| `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
 | `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
 | `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |

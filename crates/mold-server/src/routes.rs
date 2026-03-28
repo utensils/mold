@@ -315,7 +315,13 @@ async fn maybe_expand_prompt(
         .resolved_model_config(&req.model)
         .family
         .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()))
-        .unwrap_or_else(|| "flux".to_string());
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                model = %req.model,
+                "could not resolve model family for prompt expansion, defaulting to \"flux\""
+            );
+            "flux".to_string()
+        });
 
     let expand_config = expand_settings.to_expand_config(&model_family, 1);
     let original_prompt = req.prompt.clone();
@@ -386,10 +392,11 @@ async fn expand_prompt(
     State(state): State<AppState>,
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
-    if req.variations == 0 || req.variations > 10 {
-        return Err(ApiError::validation(
-            "variations must be between 1 and 10".to_string(),
-        ));
+    if req.variations == 0 || req.variations > mold_core::expand::MAX_VARIATIONS {
+        return Err(ApiError::validation(format!(
+            "variations must be between 1 and {}",
+            mold_core::expand::MAX_VARIATIONS,
+        )));
     }
 
     let config = state.config.read().await;
