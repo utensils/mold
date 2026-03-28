@@ -36,41 +36,74 @@ jobs:
           name: mold-aarch64-apple-darwin
           path: mold-aarch64-apple-darwin.tar.gz
 
-  build-linux:
+  # Ada Lovelace (RTX 40-series, sm_89)
+  build-linux-sm89:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: Jimver/cuda-toolkit@v0.2.30
         with:
-          cuda: "12.6.3"
+          cuda: "12.8.1"
           method: local
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-cuda-release
+          key: linux-cuda-sm89-release
           cache-on-failure: true
 
-      - name: Build (CUDA)
+      - name: Build (CUDA sm_89)
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord
 
       - name: Package
-        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda.tar.gz -C target/release mold
+        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mold-x86_64-unknown-linux-gnu-cuda
-          path: mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+          name: mold-x86_64-unknown-linux-gnu-cuda-sm89
+          path: mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
+
+  # Blackwell (RTX 50-series, sm_120)
+  build-linux-sm120:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: "12.8.1"
+          method: local
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-cuda-sm120-release
+          cache-on-failure: true
+
+      - name: Build (CUDA sm_120)
+        env:
+          CUDA_COMPUTE_CAP: "120"
+          LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+        run: cargo build --release -p mold-ai --features cuda,preview,discord
+
+      - name: Package
+        run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mold-x86_64-unknown-linux-gnu-cuda-sm120
+          path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
   # Rolling pre-release on every push to main
   release-latest:
     if: github.ref == 'refs/heads/main'
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux-sm89, build-linux-sm120]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,7 +127,8 @@ jobs:
           make_latest: false
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/SHA256SUMS
           body: |
             Rolling pre-release — updated on every push to `main`.
@@ -103,11 +137,18 @@ jobs:
 
             ## Download
 
-            | Platform | File |
-            |----------|------|
-            | macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
-            | Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+            | Platform | GPU | File |
+            |----------|-----|------|
+            | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 50-series (Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
+            The install script auto-detects your GPU:
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
+            ```
+
+            Manual install:
             ```bash
             # macOS
             tar xzf mold-aarch64-apple-darwin.tar.gz
@@ -115,14 +156,15 @@ jobs:
             ./mold version
 
             # Linux (requires NVIDIA driver + CUDA runtime)
-            tar xzf mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz   # RTX 40-series
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
             ```
 
   # Versioned release + crates.io publish on v* tags
   release-version:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux-sm89, build-linux-sm120]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,30 +186,35 @@ jobs:
           make_latest: true
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
-            artifacts/mold-x86_64-unknown-linux-gnu-cuda.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
+            artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
             ## Install
 
             ```bash
+            # One-line install (auto-detects GPU, pinned to this release)
+            curl -fsSL https://raw.githubusercontent.com/utensils/mold/${{ github.ref_name }}/install.sh | MOLD_VERSION=${{ github.ref_name }} sh
+
             # From crates.io (CPU-only, no GPU acceleration)
             cargo install mold-ai
 
             # From source with GPU support
-            cargo install --git https://github.com/utensils/mold --features metal  # macOS
-            cargo install --git https://github.com/utensils/mold --features cuda   # Linux
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal  # macOS
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda   # Linux
 
             # Nix
-            nix run github:utensils/mold
+            nix run github:utensils/mold/${{ github.ref_name }}
             ```
 
             ## Download pre-built binaries
 
-            | Platform | File |
-            |----------|------|
-            | macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
-            | Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+            | Platform | GPU | File |
+            |----------|-----|------|
+            | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
+            | Linux x86_64 | CUDA — RTX 50-series (Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
   # Publish to crates.io on v* tags
   publish:

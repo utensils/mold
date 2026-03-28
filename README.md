@@ -22,7 +22,7 @@ That's it. Mold auto-downloads the model on first run and saves the image to you
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
-This downloads the latest pre-built binary to `~/.local/bin/mold`. Linux builds include CUDA support; macOS builds include Metal support.
+This downloads the latest pre-built binary to `~/.local/bin/mold`. On Linux, the installer auto-detects your NVIDIA GPU and picks the right binary (RTX 40-series or RTX 50-series). macOS builds include Metal support. Override with `MOLD_CUDA_ARCH=sm120` for Blackwell or `MOLD_CUDA_ARCH=sm89` for Ada.
 
 <details>
 <summary>Other install methods</summary>
@@ -30,11 +30,15 @@ This downloads the latest pre-built binary to `~/.local/bin/mold`. Linux builds 
 ### Nix
 
 ```bash
-# Run directly — no install needed
+# Run directly — no install needed (default: Ada/RTX 40-series)
 nix run github:utensils/mold -- run "a cat"
 
+# Blackwell / RTX 50-series
+nix run github:utensils/mold#mold-sm120 -- run "a cat"
+
 # Or add to your system
-nix profile install github:utensils/mold
+nix profile install github:utensils/mold          # Ada (sm_89)
+nix profile install github:utensils/mold#mold-sm120  # Blackwell (sm_120)
 ```
 
 ### From source

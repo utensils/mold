@@ -14,7 +14,25 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake.";
+      description = "The mold package to use. Set to inputs.mold.packages.\${system}.default in your flake. Use mold-sm120 for Blackwell GPUs. The module cannot auto-select the package; set it explicitly to match your GPU.";
+    };
+
+    cudaArch = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "ada"
+          "blackwell"
+        ]
+      );
+      default = null;
+      description = ''
+        CUDA GPU architecture hint. Emits a warning if set to "blackwell"
+        to remind you to use the matching package variant.
+        - "ada" — RTX 40-series (Ada Lovelace, sm_89): use packages.''${system}.mold
+        - "blackwell" — RTX 50-series (Blackwell, sm_120): use packages.''${system}.mold-sm120
+        The module cannot auto-select flake packages; you must set `package` to match.
+      '';
+      example = "blackwell";
     };
 
     port = lib.mkOption {
@@ -135,6 +153,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    warnings = lib.optionals (cfg.cudaArch == "blackwell") [
+      ''
+        services.mold.cudaArch is "blackwell" — make sure you set the matching package:
+          services.mold.package = inputs.mold.packages.''${system}.mold-sm120;
+        The module cannot auto-select flake packages; cudaArch is advisory.
+      ''
+    ];
+
     services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";
 
     users.users.mold = {
