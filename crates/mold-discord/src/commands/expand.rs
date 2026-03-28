@@ -11,7 +11,8 @@ pub async fn expand(
     #[description = "Short prompt to expand (e.g. 'a cat')"] prompt: String,
     #[description = "Target model family for prompt style (flux, sdxl, sd15, sd3)"]
     model_family: Option<String>,
-    #[description = "Number of prompt variations (1-5)"] variations: Option<usize>,
+    #[description = "Number of prompt variations (1-5, capped for Discord embeds)"]
+    variations: Option<usize>,
 ) -> Result<()> {
     if prompt.trim().is_empty() {
         ctx.send(
@@ -26,7 +27,9 @@ pub async fn expand(
     ctx.defer().await?;
 
     let family = model_family.unwrap_or_else(|| "flux".to_string());
-    let variations = variations.unwrap_or(1).clamp(1, 5);
+    let variations = variations
+        .unwrap_or(1)
+        .clamp(1, mold_core::expand::DISCORD_MAX_VARIATIONS);
 
     let req = ExpandRequest {
         prompt: prompt.clone(),

@@ -233,6 +233,7 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | `MOLD_PORT` | `7680` | Server port |
 | `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
 | `MOLD_EAGER` | unset | Set `1` to keep all components loaded |
+| `MOLD_OFFLOAD` | unset | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
 | `MOLD_PREVIEW` | unset | Set `1` to display generated images inline in the terminal |
 | `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
