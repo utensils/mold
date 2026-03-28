@@ -98,8 +98,11 @@ esac
 
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
 
+# Fallback: older releases used unsuffixed asset name for the single Linux binary
+LEGACY_ASSET="mold-x86_64-unknown-linux-gnu-cuda.tar.gz"
+LEGACY_URL="https://github.com/${REPO}/releases/download/${VERSION}/${LEGACY_ASSET}"
+
 echo "Installing mold (${VERSION}) for ${OS}/${ARCH}..."
-echo "  from: ${URL}"
 echo "  to:   ${INSTALL_DIR}/mold"
 
 # Create install directory
@@ -109,7 +112,15 @@ mkdir -p "${INSTALL_DIR}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
-curl -fsSL "${URL}" -o "${TMPDIR}/${ASSET}"
+if ! curl -fsSL "${URL}" -o "${TMPDIR}/${ASSET}" 2>/dev/null; then
+    # Try legacy unsuffixed name (releases before multi-arch support)
+    if [ "${OS}" = "Linux" ] && curl -fsSL "${LEGACY_URL}" -o "${TMPDIR}/${LEGACY_ASSET}" 2>/dev/null; then
+        ASSET="${LEGACY_ASSET}"
+    else
+        echo "Error: failed to download ${URL}" >&2
+        exit 1
+    fi
+fi
 tar -xzf "${TMPDIR}/${ASSET}" -C "${TMPDIR}"
 install -m 755 "${TMPDIR}/mold" "${INSTALL_DIR}/mold"
 
