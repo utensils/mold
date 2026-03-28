@@ -92,6 +92,8 @@ pub async fn run(
     control: Option<String>,
     control_model: Option<String>,
     control_scale: f64,
+    negative_prompt: Option<String>,
+    no_negative: bool,
     expand: bool,
     no_expand: bool,
     expand_backend: Option<String>,
@@ -237,6 +239,17 @@ pub async fn run(
         (prompt, None, None)
     };
 
+    // Resolve effective negative prompt: CLI flag > per-model config > global config > None.
+    // --no-negative suppresses all defaults (forces empty unconditional).
+    let effective_negative_prompt = if no_negative {
+        None
+    } else if negative_prompt.is_some() {
+        negative_prompt
+    } else {
+        let model_cfg = config.resolved_model_config(&model);
+        model_cfg.effective_negative_prompt(&config)
+    };
+
     generate::run(
         &final_prompt,
         &model,
@@ -263,6 +276,7 @@ pub async fn run(
         control_image,
         control_model,
         control_scale,
+        effective_negative_prompt,
         original_prompt,
         batch_prompts,
     )

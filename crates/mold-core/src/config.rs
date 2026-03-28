@@ -73,6 +73,8 @@ pub struct ModelConfig {
     pub is_turbo: Option<bool>,
     /// Scheduler algorithm for UNet-based models (SD1.5, SDXL). Ignored by flow-matching models.
     pub scheduler: Option<Scheduler>,
+    /// Per-model default negative prompt for CFG-based models.
+    pub negative_prompt: Option<String>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -140,6 +142,13 @@ impl ModelConfig {
     /// Effective height.
     pub fn effective_height(&self, global_cfg: &Config) -> u32 {
         self.default_height.unwrap_or(global_cfg.default_height)
+    }
+
+    /// Effective negative prompt: per-model override → global default → None.
+    pub fn effective_negative_prompt(&self, global_cfg: &Config) -> Option<String> {
+        self.negative_prompt
+            .clone()
+            .or_else(|| global_cfg.default_negative_prompt.clone())
     }
 }
 
@@ -300,6 +309,11 @@ pub struct Config {
     #[serde(default)]
     pub output_dir: Option<String>,
 
+    /// Global default negative prompt for CFG-based models (SD1.5, SDXL, SD3).
+    /// Overridden by per-model `negative_prompt` or CLI `--negative-prompt`.
+    #[serde(default)]
+    pub default_negative_prompt: Option<String>,
+
     /// Prompt expansion settings.
     #[serde(default)]
     pub expand: ExpandSettings,
@@ -350,6 +364,7 @@ impl Default for Config {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            default_negative_prompt: None,
             expand: ExpandSettings::default(),
             models: HashMap::new(),
         }

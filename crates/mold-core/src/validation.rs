@@ -107,6 +107,14 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             req.prompt.len()
         ));
     }
+    if let Some(ref neg) = req.negative_prompt {
+        if neg.len() > 77_000 {
+            return Err(format!(
+                "negative_prompt length ({} bytes) exceeds the 77,000-byte limit",
+                neg.len()
+            ));
+        }
+    }
     // img2img validation
     if let Some(ref img) = req.source_image {
         if req.strength <= 0.0 || req.strength > 1.0 {
@@ -157,6 +165,7 @@ mod tests {
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
             prompt: "a red apple".to_string(),
+            negative_prompt: None,
             model: "test-model".to_string(),
             width: 1024,
             height: 1024,
@@ -371,6 +380,36 @@ mod tests {
     fn prompt_at_limit_valid() {
         let mut req = valid_req();
         req.prompt = "x".repeat(77_000);
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn negative_prompt_too_long_rejected() {
+        let mut req = valid_req();
+        req.negative_prompt = Some("x".repeat(77_001));
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("negative_prompt"));
+    }
+
+    #[test]
+    fn negative_prompt_at_limit_valid() {
+        let mut req = valid_req();
+        req.negative_prompt = Some("x".repeat(77_000));
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn negative_prompt_none_valid() {
+        let req = valid_req();
+        assert!(req.negative_prompt.is_none());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn negative_prompt_empty_valid() {
+        let mut req = valid_req();
+        req.negative_prompt = Some(String::new());
         assert!(validate_generate_request(&req).is_ok());
     }
 

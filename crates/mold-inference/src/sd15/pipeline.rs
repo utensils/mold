@@ -389,6 +389,7 @@ impl SD15Engine {
         clip: &stable_diffusion::clip::ClipTextTransformer,
         tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
+        negative_prompt: &str,
         max_len: usize,
         device: &Device,
         dtype: DType,
@@ -408,7 +409,8 @@ impl SD15Engine {
                     .stage_done("Encoding prompt (CLIP-L)", encode_start.elapsed());
 
                 let text_embeddings = if use_cfg {
-                    let uncond_tokens = Self::tokenize(tokenizer, "", max_len, device)?;
+                    let uncond_tokens =
+                        Self::tokenize(tokenizer, negative_prompt, max_len, device)?;
                     let uncond_embeddings = clip.forward(&uncond_tokens)?;
                     Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
                 } else {
@@ -590,10 +592,12 @@ impl SD15Engine {
             .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
         // Encode prompt
+        let neg = req.negative_prompt.as_deref().unwrap_or("");
         let text_embeddings = self.encode_prompt(
             &clip,
             &tokenizer,
             &req.prompt,
+            neg,
             max_len,
             &device,
             dtype,
@@ -807,10 +811,12 @@ impl InferenceEngine for SD15Engine {
 
         // 1. Encode prompt with CLIP-L
         let max_len = loaded.sd_config.clip.max_position_embeddings;
+        let neg = req.negative_prompt.as_deref().unwrap_or("");
         let text_embeddings = self.encode_prompt(
             &loaded.clip,
             &loaded.tokenizer,
             &req.prompt,
+            neg,
             max_len,
             &loaded.device,
             loaded.dtype,

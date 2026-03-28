@@ -82,6 +82,9 @@ fn write_png(
         if let Some(scheduler) = metadata.scheduler {
             encoder.add_text_chunk("mold:scheduler".to_string(), scheduler.to_string())?;
         }
+        if let Some(ref neg) = metadata.negative_prompt {
+            encoder.add_itxt_chunk("mold:negative_prompt".to_string(), neg.clone())?;
+        }
         if let Some(ref original) = metadata.original_prompt {
             encoder.add_itxt_chunk("mold:original_prompt".to_string(), original.clone())?;
         }
@@ -183,6 +186,13 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
     }
     if let Some(scheduler) = metadata.scheduler {
         let _ = write!(xmp, "<mold:scheduler>{scheduler}</mold:scheduler>");
+    }
+    if let Some(ref neg) = metadata.negative_prompt {
+        let _ = write!(
+            xmp,
+            "<mold:negativePrompt>{}</mold:negativePrompt>",
+            xml_escape(neg)
+        );
     }
     if let Some(ref original) = metadata.original_prompt {
         let _ = write!(
@@ -321,6 +331,7 @@ mod tests {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
             prompt: "hello \u{2603}".to_string(),
+            negative_prompt: None,
             original_prompt: None,
             model: "flux-schnell:q8".to_string(),
             seed: 42,
@@ -373,6 +384,7 @@ mod tests {
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
             prompt: "a cat".to_string(),
+            negative_prompt: None,
             model: "flux-schnell:q8".to_string(),
             width: 512,
             height: 512,
@@ -400,6 +412,7 @@ mod tests {
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
             prompt: "a cat".to_string(),
+            negative_prompt: None,
             original_prompt: None,
             model: "wuerstchen-v2:fp16".to_string(),
             seed: 42,
@@ -424,6 +437,7 @@ mod tests {
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
             prompt: "hello world".to_string(),
+            negative_prompt: None,
             original_prompt: None,
             model: "flux-schnell:q8".to_string(),
             seed: 42,
@@ -541,6 +555,7 @@ mod tests {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
             prompt: "a cat & a dog <br>".to_string(),
+            negative_prompt: None,
             original_prompt: None,
             model: "sdxl-turbo:fp16".to_string(),
             seed: 99999,
