@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+/// Model families that are utility models (not image generators).
+/// These are excluded from default-model selection and don't produce ModelPaths.
+pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
     Transformer,
@@ -67,15 +71,15 @@ impl ModelManifest {
         self.model_size_bytes() as f32 / 1_073_741_824.0
     }
 
-    /// True if this is a utility model (e.g., prompt expansion LLM) that has no VAE.
+    /// True if this is a utility model (e.g., prompt expansion LLM) not an image generator.
     ///
     /// Utility models are downloaded and stored like regular models, but they don't
     /// produce a `ModelPaths` or get written into the config `[models]` section.
+    ///
+    /// Uses family-based identification (not VAE absence) because auxiliary diffusion
+    /// components like ControlNet also lack a VAE but are NOT utility models.
     pub fn is_utility(&self) -> bool {
-        !self
-            .files
-            .iter()
-            .any(|f| f.component == ModelComponent::Vae)
+        UTILITY_FAMILIES.contains(&self.family.as_str())
     }
 
     /// True if any file in this model requires HuggingFace authentication.
@@ -3660,31 +3664,6 @@ mod tests {
         );
     }
 
-    // ── Utility model (qwen3-expand) tests ───────────────────────────────
-
-    #[test]
-    fn qwen3_expand_is_utility() {
-        let manifest = find_manifest("qwen3-expand:q8").unwrap();
-        assert!(manifest.is_utility());
-    }
-
-    #[test]
-    fn qwen3_expand_small_is_utility() {
-        let manifest = find_manifest("qwen3-expand-small:q8").unwrap();
-        assert!(manifest.is_utility());
-    }
-
-    #[test]
-    fn diffusion_models_are_not_utility() {
-        for name in &["flux-schnell:q8", "sd3.5-large:q8", "sdxl-base:fp16"] {
-            let manifest = find_manifest(name).unwrap();
-            assert!(
-                !manifest.is_utility(),
-                "{name} should not be marked as utility"
-            );
-        }
-    }
-
     #[test]
     fn qwen3_expand_manifest_has_transformer_and_tokenizer() {
         let manifest = find_manifest("qwen3-expand:q8").unwrap();
@@ -3742,6 +3721,120 @@ mod tests {
             tok_path.starts_with("shared/qwen3-expand"),
             "got: {}",
             tok_path.display()
+        );
+    }
+
+    // --- is_utility family-based identification ---
+
+    #[test]
+    fn qwen3_expand_is_utility() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert!(manifest.is_utility(), "qwen3-expand should be utility");
+    }
+
+    #[test]
+    fn qwen3_expand_small_is_utility() {
+        let manifest = find_manifest("qwen3-expand-small:q8").unwrap();
+        assert!(
+            manifest.is_utility(),
+            "qwen3-expand-small should be utility"
+        );
+    }
+
+    #[test]
+    fn controlnet_is_not_utility() {
+        let manifest = find_manifest("controlnet-canny-sd15:fp16").unwrap();
+        assert!(!manifest.is_utility(), "controlnet should NOT be utility");
+    }
+
+    #[test]
+    fn controlnet_depth_is_not_utility() {
+        let manifest = find_manifest("controlnet-depth-sd15:fp16").unwrap();
+        assert!(
+            !manifest.is_utility(),
+            "controlnet-depth should NOT be utility"
+        );
+    }
+
+    #[test]
+    fn controlnet_openpose_is_not_utility() {
+        let manifest = find_manifest("controlnet-openpose-sd15:fp16").unwrap();
+        assert!(
+            !manifest.is_utility(),
+            "controlnet-openpose should NOT be utility"
+        );
+    }
+
+    #[test]
+    fn flux_models_are_not_utility() {
+        for manifest in known_manifests() {
+            if manifest.family == "flux" {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sd15_models_are_not_utility() {
+        for manifest in known_manifests() {
+            if manifest.family == "sd15" {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_diffusion_model_is_utility() {
+        let diffusion_families = [
+            "flux",
+            "sd15",
+            "sdxl",
+            "sd3",
+            "z-image",
+            "flux2",
+            "qwen-image",
+            "wuerstchen",
+        ];
+        for manifest in known_manifests() {
+            if diffusion_families.contains(&manifest.family.as_str()) {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} (family={}) should NOT be utility",
+                    manifest.name,
+                    manifest.family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn utility_families_constant_matches_expand_manifests() {
+        for manifest in known_manifests() {
+            if manifest.family == "qwen3-expand" {
+                assert!(
+                    UTILITY_FAMILIES.contains(&manifest.family.as_str()),
+                    "{} family not in UTILITY_FAMILIES",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_utility_models_identified_by_is_utility() {
+        let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
+        // Currently 2: qwen3-expand:q8, qwen3-expand-small:q8
+        assert_eq!(
+            utility_count, 2,
+            "expected exactly 2 utility models, got {utility_count}"
         );
     }
 }

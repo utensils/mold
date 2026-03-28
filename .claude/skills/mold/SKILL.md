@@ -60,6 +60,35 @@ mold run "a cat" --no-metadata
 mold run "a cat" --preview
 ```
 
+### Prompt Expansion
+
+Expand short prompts into detailed image generation prompts using a local LLM (Qwen3-1.7B). The expansion model auto-downloads on first use (~1.8GB).
+
+```bash
+# Preview expanded prompt without generating
+mold expand "a cat"
+
+# Expand with multiple variations
+mold expand "cyberpunk city" --variations 5
+
+# Expand as JSON
+mold expand "a cat" --variations 3 --json
+
+# Generate with expansion (short prompt -> detailed prompt -> image)
+mold run "a cat" --expand
+
+# Batch + expand: each image gets a unique expanded prompt
+mold run "a sunset" --expand --batch 4
+
+# Use a specific expansion backend (OpenAI-compatible API)
+mold run "a cat" --expand --expand-backend http://localhost:11434/v1
+
+# Disable expansion (overrides config/env default)
+mold run "a cat" --no-expand
+```
+
+The expansion model is dropped from memory before diffusion begins, so it doesn't compete for VRAM.
+
 ### Model Selection Guide
 
 Pick the right model for the task:
@@ -105,6 +134,8 @@ Default model if none specified: `flux-schnell:q8`
 **Alpha**: `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `wuerstchen-v2:fp16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
+
+**Utility (LLM)**: `qwen3-expand:q8`, `qwen3-expand-small:q8`
 
 ### Name Resolution
 
@@ -208,6 +239,11 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
 | `MOLD_SCHEDULER` | unset | SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
 | `MOLD_CORS_ORIGIN` | unset | Restrict server CORS to specific origin |
+| `MOLD_EXPAND` | unset | Set `1` to enable prompt expansion by default |
+| `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
+| `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
+| `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion |
+| `MOLD_EXPAND_THINKING` | unset | Set `1` to enable thinking mode in expansion LLM |
 | `HF_TOKEN` | unset | HuggingFace token for gated models |
 
 ## Inference Modes
@@ -245,6 +281,7 @@ mold-discord
 ### Slash Commands
 
 - `/generate <prompt> [model] [width] [height] [steps] [guidance] [seed]` — generate an image
+- `/expand <prompt> [model_family] [variations]` — expand a short prompt into detailed image generation prompts
 - `/models` — list available models with status
 - `/status` — show server health, GPU info, uptime
 

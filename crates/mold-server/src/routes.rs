@@ -349,7 +349,9 @@ fn create_server_expander(
     #[cfg(feature = "expand")]
     {
         let config = mold_core::Config::load_or_default();
-        if let Some(local) = mold_inference::expand::LocalExpander::from_config(&config, None) {
+        if let Some(local) =
+            mold_inference::expand::LocalExpander::from_config(&config, Some(&settings.model))
+        {
             return Ok(Box::new(local));
         }
         return Err(ApiError::validation(
