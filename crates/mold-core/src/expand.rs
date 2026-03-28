@@ -423,15 +423,16 @@ impl ExpandSettings {
         }
     }
 
-    /// Validate that custom templates contain required placeholders.
-    /// Returns a list of validation errors (empty = valid).
+    /// Validate that custom templates contain expected placeholders.
+    /// Returns a list of warnings (empty = valid). Callers should treat
+    /// these as non-fatal hints — expansion still runs with partial templates.
     pub fn validate_templates(&self) -> Vec<String> {
-        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
         if let Some(ref tmpl) = self.system_prompt {
             for placeholder in ["{WORD_LIMIT}", "{MODEL_NOTES}"] {
                 if !tmpl.contains(placeholder) {
-                    errors.push(format!(
-                        "system_prompt is missing required placeholder: {placeholder}"
+                    warnings.push(format!(
+                        "system_prompt is missing placeholder {placeholder} — it won't be substituted"
                     ));
                 }
             }
@@ -439,13 +440,13 @@ impl ExpandSettings {
         if let Some(ref tmpl) = self.batch_prompt {
             for placeholder in ["{N}", "{WORD_LIMIT}", "{MODEL_NOTES}"] {
                 if !tmpl.contains(placeholder) {
-                    errors.push(format!(
-                        "batch_prompt is missing required placeholder: {placeholder}"
+                    warnings.push(format!(
+                        "batch_prompt is missing placeholder {placeholder} — it won't be substituted"
                     ));
                 }
             }
         }
-        errors
+        warnings
     }
 
     /// Create the appropriate expander backend.

@@ -6,7 +6,7 @@
 use crate::expand::FamilyOverride;
 
 /// Return the word limit and prompt style notes for a given model family.
-pub fn family_config(family: &str) -> (u32, &'static str) {
+pub(crate) fn family_config(family: &str) -> (u32, &'static str) {
     match family.to_lowercase().as_str() {
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => (
             50,

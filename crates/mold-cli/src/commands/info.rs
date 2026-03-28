@@ -250,7 +250,8 @@ pub async fn run_overview() -> Result<()> {
         println!("  {:<18} {}", "Batch prompt:".dimmed(), "custom".yellow());
     }
     if !expand_settings.families.is_empty() {
-        let families: Vec<&String> = expand_settings.families.keys().collect();
+        let mut families: Vec<&String> = expand_settings.families.keys().collect();
+        families.sort();
         println!(
             "  {:<18} {}",
             "Family overrides:".dimmed(),
