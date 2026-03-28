@@ -215,6 +215,54 @@ pub async fn run_overview() -> Result<()> {
         }
     }
 
+    // Prompt Expansion section
+    let expand_settings = config.expand.clone().with_env_overrides();
+    println!();
+    println!("  {}", "Prompt Expansion".bold());
+    println!(
+        "  {:<18} {}",
+        "Enabled:".dimmed(),
+        if expand_settings.enabled {
+            "yes".green().to_string()
+        } else {
+            "no".dimmed().to_string()
+        },
+    );
+    println!(
+        "  {:<18} {}",
+        "Backend:".dimmed(),
+        if expand_settings.is_local() {
+            "local".to_string()
+        } else {
+            expand_settings.backend.clone()
+        },
+    );
+    let expand_model_name = if expand_settings.is_local() {
+        &expand_settings.model
+    } else {
+        &expand_settings.api_model
+    };
+    println!("  {:<18} {}", "Model:".dimmed(), expand_model_name);
+    if expand_settings.system_prompt.is_some() {
+        println!("  {:<18} {}", "System prompt:".dimmed(), "custom".yellow());
+    }
+    if expand_settings.batch_prompt.is_some() {
+        println!("  {:<18} {}", "Batch prompt:".dimmed(), "custom".yellow());
+    }
+    if !expand_settings.families.is_empty() {
+        let mut families: Vec<&String> = expand_settings.families.keys().collect();
+        families.sort();
+        println!(
+            "  {:<18} {}",
+            "Family overrides:".dimmed(),
+            families
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     // Server section
     let client = MoldClient::from_env();
     println!();

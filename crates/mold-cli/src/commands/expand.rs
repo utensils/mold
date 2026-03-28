@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::{Config, ExpandConfig, ExpandSettings, PromptExpander};
+use mold_core::{Config, ExpandSettings, PromptExpander};
 
 use crate::output::status;
 use crate::theme;
@@ -52,6 +52,14 @@ pub async fn run(
         }
     }
 
+    // Validate custom templates if present
+    let template_errors = expand_settings.validate_templates();
+    if !template_errors.is_empty() {
+        for err in &template_errors {
+            eprintln!("{} {err}", theme::prefix_warning());
+        }
+    }
+
     // Determine model family for prompt style
     let model_family = if let Some(model_name) = model {
         resolve_family(model_name, &config)
@@ -59,14 +67,7 @@ pub async fn run(
         "flux".to_string() // Default to FLUX-style prompts
     };
 
-    let expand_config = ExpandConfig {
-        model_family: model_family.clone(),
-        variations,
-        temperature: expand_settings.temperature,
-        top_p: expand_settings.top_p,
-        max_tokens: expand_settings.max_tokens,
-        thinking: expand_settings.thinking,
-    };
+    let expand_config = expand_settings.to_expand_config(&model_family, variations);
 
     // Get expander (auto-pulls expand model if needed)
     let expander = create_expander(&expand_settings, &config).await?;

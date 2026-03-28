@@ -94,7 +94,7 @@ Shared library used by all other crates:
 - **`client.rs`** — `MoldClient` HTTP client; `is_connection_error()` for local fallback detection; `expand_prompt()` for server-side expansion
 - **`config.rs`** — `Config`, `ModelConfig`, `ModelPaths`; loads from `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy)
 - **`manifest.rs`** — `ModelManifest` registry of downloadable models with HF sources; `resolve_model_name()` for `name:tag` resolution; `UTILITY_FAMILIES` constant for non-diffusion models (e.g. `qwen3-expand`); `is_utility()` for family-based classification
-- **`expand.rs`** — `PromptExpander` trait, `ApiExpander` (OpenAI-compatible HTTP), `ExpandConfig` settings with env var support (`MOLD_EXPAND_*`)
+- **`expand.rs`** — `PromptExpander` trait, `ApiExpander` (OpenAI-compatible HTTP), `ExpandConfig`/`ExpandSettings`/`FamilyOverride` settings with env var support (`MOLD_EXPAND_*`); user-configurable system prompt templates and per-family word limits/style notes
 - **`download.rs`** — `pull_model()` wrapping `hf-hub` with progress bars; SHA-256 integrity verification (fails on mismatch, `--skip-verify` to override); `.pulling` marker for atomic pull detection; `PullOptions` for controlling verification behavior
 - **`validation.rs`** — `validate_generate_request()` — shared validation (used by both server and CLI); `fit_to_model_dimensions()` — aspect-ratio-preserving resize of source images to model-native resolution for img2img
 - **`error.rs`** — `MoldError` enum with thiserror
@@ -262,6 +262,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion (Qwen3-1.7B GGUF) |
 | `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion LLM |
 | `MOLD_EXPAND_THINKING` | — | Set `1` to enable thinking mode in expansion LLM |
+| `MOLD_EXPAND_SYSTEM_PROMPT` | — | Custom single-expansion system prompt template (placeholders: `{WORD_LIMIT}`, `{MODEL_NOTES}`) |
+| `MOLD_EXPAND_BATCH_PROMPT` | — | Custom batch-variation system prompt template (placeholders: `{N}`, `{WORD_LIMIT}`, `{MODEL_NOTES}`) |
 | `MOLD_DISCORD_TOKEN` | — | Discord bot token (preferred; falls back to `DISCORD_TOKEN`) |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
 
@@ -293,6 +295,22 @@ clip_tokenizer = "/path/to/clip.tokenizer.json"
 default_steps = 4
 default_guidance = 0.0
 is_schnell = true
+
+[expand]
+enabled = false
+backend = "local"
+model = "qwen3-expand:q8"
+temperature = 0.7
+# system_prompt = "Custom system prompt. {WORD_LIMIT} {MODEL_NOTES}"
+# batch_prompt = "Custom batch prompt. {N} {WORD_LIMIT} {MODEL_NOTES}"
+
+# [expand.families.sd15]
+# word_limit = 50
+# style_notes = "Short keyword phrases for CLIP-L."
+
+# [expand.families.flux]
+# word_limit = 200
+# style_notes = "Rich natural language descriptions."
 ```
 
 ## Model System

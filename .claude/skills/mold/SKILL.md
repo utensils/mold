@@ -244,6 +244,8 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
 | `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion |
 | `MOLD_EXPAND_THINKING` | unset | Set `1` to enable thinking mode in expansion LLM |
+| `MOLD_EXPAND_SYSTEM_PROMPT` | unset | Custom single-expansion system prompt template |
+| `MOLD_EXPAND_BATCH_PROMPT` | unset | Custom batch-variation system prompt template |
 | `HF_TOKEN` | unset | HuggingFace token for gated models |
 
 ## Inference Modes
