@@ -179,6 +179,29 @@ Generate multiple images with incrementing seeds:
 mold run "a sunset" --batch 4    # Generates 4 images: seed, seed+1, seed+2, seed+3
 ```
 
+### Prompt expansion
+
+Expand short prompts into richly detailed image generation prompts using a local LLM (Qwen3-1.7B, ~1.8GB). The model auto-downloads on first use and is dropped from memory before diffusion runs.
+
+```bash
+# Preview what expansion produces
+mold expand "a cat"
+
+# Multiple variations
+mold expand "cyberpunk city" --variations 5
+
+# Generate with expansion
+mold run "a cat" --expand
+
+# Batch + expand: each image gets a unique expanded prompt
+mold run "a sunset" --expand --batch 4
+
+# Use an external OpenAI-compatible API instead of local LLM
+mold run "a cat" --expand --expand-backend http://localhost:11434/v1
+```
+
+Set `MOLD_EXPAND=1` to enable expansion by default. Use `--no-expand` to override.
+
 ### Manage models
 
 ```bash
@@ -254,6 +277,9 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_LOG` | `warn` / `info` | Log level |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
+| `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
+| `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
+| `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
 
 See [CLAUDE.md](CLAUDE.md) for the full list.
 
@@ -385,6 +411,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | Command | Description |
 |---------|-------------|
 | `/generate <prompt> [model] [width] [height] [steps] [guidance] [seed]` | Generate an image |
+| `/expand <prompt> [model_family] [variations]` | Expand a short prompt into detailed generation prompts |
 | `/models` | List available models with download/loaded status |
 | `/status` | Show server health, GPU info, uptime |
 

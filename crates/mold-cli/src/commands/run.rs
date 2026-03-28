@@ -92,6 +92,10 @@ pub async fn run(
     control: Option<String>,
     control_model: Option<String>,
     control_scale: f64,
+    expand: bool,
+    no_expand: bool,
+    expand_backend: Option<String>,
+    expand_model: Option<String>,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
@@ -156,8 +160,77 @@ pub async fn run(
         )
     })?;
 
+    // --- Prompt expansion ---
+    let expand_settings = config.expand.clone().with_env_overrides();
+    let should_expand = if no_expand {
+        false
+    } else {
+        expand || expand_settings.enabled
+    };
+
+    let (final_prompt, original_prompt, batch_prompts) = if should_expand {
+        use colored::Colorize;
+
+        let mut settings = expand_settings;
+        if let Some(ref backend) = expand_backend {
+            settings.backend = backend.clone();
+        }
+        if let Some(ref m) = expand_model {
+            if settings.is_local() {
+                settings.model = m.clone();
+            } else {
+                settings.api_model = m.clone();
+            }
+        }
+
+        let model_family = super::expand::resolve_family_from_config(&model, &config);
+        let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
+
+        let expander = super::expand::create_expander(&settings, &config).await?;
+
+        crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
+
+        let result = expander.expand(&prompt, &expand_config)?;
+
+        if result.expanded.len() == 1 {
+            let expanded = &result.expanded[0];
+            let display = if expanded.chars().count() > 80 {
+                let truncated: String = expanded.chars().take(77).collect();
+                format!("{truncated}...")
+            } else {
+                expanded.clone()
+            };
+            crate::output::status!(
+                "{} Expanded: \"{}\"",
+                crate::theme::icon_ok(),
+                display.dimmed()
+            );
+            (expanded.clone(), Some(prompt.clone()), None)
+        } else {
+            // Multiple variations: each batch image gets a different prompt.
+            crate::output::status!(
+                "{} Generated {} prompt variations",
+                crate::theme::icon_ok(),
+                result.expanded.len()
+            );
+            for (i, expanded) in result.expanded.iter().enumerate() {
+                let display = if expanded.chars().count() > 70 {
+                    let truncated: String = expanded.chars().take(67).collect();
+                    format!("{truncated}...")
+                } else {
+                    expanded.clone()
+                };
+                crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
+            }
+            let first = result.expanded[0].clone();
+            (first, Some(prompt.clone()), Some(result.expanded))
+        }
+    } else {
+        (prompt, None, None)
+    };
+
     generate::run(
-        &prompt,
+        &final_prompt,
         &model,
         output,
         width,
@@ -182,6 +255,8 @@ pub async fn run(
         control_image,
         control_model,
         control_scale,
+        original_prompt,
+        batch_prompts,
     )
     .await
 }
@@ -193,6 +268,9 @@ mod tests {
     fn test_config() -> Config {
         Config {
             default_model: "flux-schnell".to_string(),
+            // Point models_dir to a non-existent path so the smart default
+            // fallback doesn't detect locally downloaded models.
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
             ..Config::default()
         }
     }

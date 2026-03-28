@@ -18,6 +18,7 @@ pub(crate) fn family_label(family: &str) -> &str {
         "qwen-image" | "qwen_image" => "Qwen-Image",
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         "controlnet" => "ControlNet",
+        "qwen3-expand" => "Expand",
         other => other,
     }
 }
@@ -34,6 +35,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "qwen-image" | "qwen_image" => padded.bright_blue().to_string(),
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "controlnet" => padded.bright_red().to_string(),
+        "qwen3-expand" => padded.bright_cyan().to_string(),
         _ => padded,
     }
 }
@@ -53,6 +55,7 @@ pub(crate) fn format_family(family: &str) -> String {
             | "wuerstchen"
             | "wuerstchen-v2"
             | "controlnet"
+            | "qwen3-expand"
     ) {
         format_family_padded(family, family_label(family).len())
             .trim_end()

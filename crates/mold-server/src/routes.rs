@@ -85,10 +85,12 @@ use crate::queue::clean_error_message;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(generate, generate_stream, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
+    paths(generate, generate_stream, expand_prompt, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
+        mold_core::ExpandRequest,
+        mold_core::ExpandResponse,
         mold_core::ImageData,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
@@ -120,6 +122,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/stream", post(generate_stream))
+        .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
@@ -192,6 +195,9 @@ async fn prepare_generation(
     request: &mut mold_core::GenerateRequest,
 ) -> Result<Option<std::path::PathBuf>, ApiError> {
     apply_default_metadata_setting(state, request).await;
+
+    // Expand prompt if requested (before validation, so the expanded prompt gets validated)
+    maybe_expand_prompt(state, request).await?;
 
     if let Err(e) = validate_generate_request(request) {
         return Err(ApiError::validation(e));
@@ -290,6 +296,118 @@ async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::G
 
     let config = state.config.read().await;
     req.embed_metadata = Some(config.effective_embed_metadata(None));
+}
+
+/// Apply prompt expansion if `expand: true` is set on a generate request.
+async fn maybe_expand_prompt(
+    state: &AppState,
+    req: &mut mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    if req.expand != Some(true) {
+        return Ok(());
+    }
+
+    let config = state.config.read().await;
+    let expand_settings = config.expand.clone().with_env_overrides();
+
+    // Resolve model family for prompt style
+    let model_family = config
+        .resolved_model_config(&req.model)
+        .family
+        .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()))
+        .unwrap_or_else(|| "flux".to_string());
+
+    let expand_config = expand_settings.to_expand_config(&model_family, 1);
+    let original_prompt = req.prompt.clone();
+
+    // Drop config lock before blocking
+    drop(config);
+
+    let expander = create_server_expander(&expand_settings)?;
+    let result =
+        tokio::task::spawn_blocking(move || expander.expand(&original_prompt, &expand_config))
+            .await
+            .map_err(|e| ApiError::internal(format!("expand task failed: {e}")))?
+            .map_err(|e| ApiError::internal(format!("prompt expansion failed: {e}")))?;
+
+    if let Some(expanded) = result.expanded.first() {
+        req.original_prompt = Some(req.prompt.clone());
+        req.prompt = expanded.clone();
+    }
+
+    Ok(())
+}
+
+/// Create the appropriate expander for server-side use.
+fn create_server_expander(
+    settings: &mold_core::ExpandSettings,
+) -> Result<Box<dyn mold_core::PromptExpander>, ApiError> {
+    if let Some(api_expander) = settings.create_api_expander() {
+        return Ok(Box::new(api_expander));
+    }
+
+    #[cfg(feature = "expand")]
+    {
+        let config = mold_core::Config::load_or_default();
+        if let Some(local) =
+            mold_inference::expand::LocalExpander::from_config(&config, Some(&settings.model))
+        {
+            return Ok(Box::new(local));
+        }
+        return Err(ApiError::validation(
+            "local expand model not found — run: mold pull qwen3-expand".to_string(),
+        ));
+    }
+
+    #[cfg(not(feature = "expand"))]
+    {
+        Err(ApiError::validation(
+            "local prompt expansion not available — built without expand feature. \
+             Configure an API backend in [expand] settings."
+                .to_string(),
+        ))
+    }
+}
+
+// ── /api/expand ──────────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/expand",
+    tag = "generation",
+    request_body = mold_core::ExpandRequest,
+    responses(
+        (status = 200, description = "Expanded prompt(s)", body = mold_core::ExpandResponse),
+        (status = 422, description = "Invalid request parameters"),
+        (status = 500, description = "Expansion failed"),
+    )
+)]
+async fn expand_prompt(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::ExpandRequest>,
+) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
+    if req.variations == 0 || req.variations > 10 {
+        return Err(ApiError::validation(
+            "variations must be between 1 and 10".to_string(),
+        ));
+    }
+
+    let config = state.config.read().await;
+    let expand_settings = config.expand.clone().with_env_overrides();
+    let expand_config = expand_settings.to_expand_config(&req.model_family, req.variations);
+    let prompt = req.prompt.clone();
+    drop(config);
+
+    let expander = create_server_expander(&expand_settings)?;
+    let result = tokio::task::spawn_blocking(move || expander.expand(&prompt, &expand_config))
+        .await
+        .map_err(|e| ApiError::internal(format!("expand task failed: {e}")))?
+        .map_err(|e| ApiError::internal(format!("prompt expansion failed: {e}")))?;
+
+    Ok(Json(mold_core::ExpandResponse {
+        original: req.prompt,
+        expanded: result.expanded,
+    }))
 }
 
 // ── /api/generate/stream (SSE) ───────────────────────────────────────────────

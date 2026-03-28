@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::expand::ExpandSettings;
 use crate::manifest::resolve_model_name;
 use crate::types::Scheduler;
 
@@ -299,6 +300,10 @@ pub struct Config {
     #[serde(default)]
     pub output_dir: Option<String>,
 
+    /// Prompt expansion settings.
+    #[serde(default)]
+    pub expand: ExpandSettings,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -345,6 +350,7 @@ impl Default for Config {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            expand: ExpandSettings::default(),
             models: HashMap::new(),
         }
     }
@@ -476,10 +482,10 @@ impl Config {
                 };
             }
         }
-        // 5. Single downloaded model
+        // 5. Single downloaded model (exclude utility models like qwen3-expand)
         let downloaded: Vec<String> = crate::manifest::known_manifests()
             .iter()
-            .filter(|m| self.manifest_model_is_downloaded(&m.name))
+            .filter(|m| !m.is_utility() && self.manifest_model_is_downloaded(&m.name))
             .map(|m| m.name.clone())
             .collect();
         if downloaded.len() == 1 {

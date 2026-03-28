@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+/// Model families that are utility models (not image generators).
+/// These are excluded from default-model selection and don't produce ModelPaths.
+pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
     Transformer,
@@ -65,6 +69,17 @@ impl ModelManifest {
     /// Size of the model-specific files in GB (for display).
     pub fn model_size_gb(&self) -> f32 {
         self.model_size_bytes() as f32 / 1_073_741_824.0
+    }
+
+    /// True if this is a utility model (e.g., prompt expansion LLM) not an image generator.
+    ///
+    /// Utility models are downloaded and stored like regular models, but they don't
+    /// produce a `ModelPaths` or get written into the config `[models]` section.
+    ///
+    /// Uses family-based identification (not VAE absence) because auxiliary diffusion
+    /// components like ControlNet also lack a VAE but are NOT utility models.
+    pub fn is_utility(&self) -> bool {
+        UTILITY_FAMILIES.contains(&self.family.as_str())
     }
 
     /// True if any file in this model requires HuggingFace authentication.
@@ -941,6 +956,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(qwen_image_manifests());
     manifests.extend(wuerstchen_manifests());
     manifests.extend(controlnet_manifests());
+    manifests.extend(qwen3_expand_manifests());
     manifests
 }
 
@@ -2521,6 +2537,68 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+fn qwen3_expand_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 0,
+        guidance: 0.0,
+        width: 0,
+        height: 0,
+        is_schnell: false,
+        scheduler: None,
+    };
+
+    vec![
+        ModelManifest {
+            name: "qwen3-expand:q8".to_string(),
+            family: "qwen3-expand".to_string(),
+            description: "Qwen3-1.7B Q8 — prompt expansion LLM (1.8GB)".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B-GGUF".to_string(),
+                    hf_filename: "Qwen3-1.7B-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_834_426_016,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "qwen3-expand-small:q8".to_string(),
+            family: "qwen3-expand".to_string(),
+            description: "Qwen3-0.6B Q8 — lightweight prompt expansion LLM (0.6GB)".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-0.6B-GGUF".to_string(),
+                    hf_filename: "Qwen3-0.6B-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 639_446_688,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "Qwen/Qwen3-1.7B".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2867,16 +2945,16 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet = 55
-        assert_eq!(known_manifests().len(), 55);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 57
+        assert_eq!(known_manifests().len(), 57);
     }
 
     #[test]
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All models need VAE (except ControlNet, which uses the base model's VAE)
-            if manifest.family != "controlnet" {
+            // All diffusion models need VAE (except ControlNet and utility models like qwen3-expand)
+            if !manifest.is_utility() && manifest.family != "controlnet" {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",
@@ -3583,6 +3661,180 @@ mod tests {
         assert!(
             suggestions.is_empty(),
             "unrelated string should have no suggestions"
+        );
+    }
+
+    #[test]
+    fn qwen3_expand_manifest_has_transformer_and_tokenizer() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
+        assert!(components.contains(&ModelComponent::Transformer));
+        assert!(components.contains(&ModelComponent::TextTokenizer));
+        assert!(!components.contains(&ModelComponent::Vae));
+    }
+
+    #[test]
+    fn qwen3_expand_manifest_ungated() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert!(!manifest.is_gated());
+        let small = find_manifest("qwen3-expand-small:q8").unwrap();
+        assert!(!small.is_gated());
+    }
+
+    #[test]
+    fn qwen3_expand_family() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert_eq!(manifest.family, "qwen3-expand");
+    }
+
+    #[test]
+    fn qwen3_expand_resolve_bare_name() {
+        // "qwen3-expand" should resolve to "qwen3-expand:q8"
+        let resolved = resolve_model_name("qwen3-expand");
+        assert_eq!(resolved, "qwen3-expand:q8");
+    }
+
+    #[test]
+    fn qwen3_expand_storage_paths() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        let path = storage_path(manifest, transformer);
+        // Transformer is model-specific: qwen3-expand-q8/<filename>
+        assert!(
+            path.starts_with("qwen3-expand-q8"),
+            "got: {}",
+            path.display()
+        );
+
+        let tokenizer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextTokenizer)
+            .unwrap();
+        let tok_path = storage_path(manifest, tokenizer);
+        // Tokenizer is shared: shared/qwen3-expand/<filename>
+        assert!(
+            tok_path.starts_with("shared/qwen3-expand"),
+            "got: {}",
+            tok_path.display()
+        );
+    }
+
+    // --- is_utility family-based identification ---
+
+    #[test]
+    fn qwen3_expand_is_utility() {
+        let manifest = find_manifest("qwen3-expand:q8").unwrap();
+        assert!(manifest.is_utility(), "qwen3-expand should be utility");
+    }
+
+    #[test]
+    fn qwen3_expand_small_is_utility() {
+        let manifest = find_manifest("qwen3-expand-small:q8").unwrap();
+        assert!(
+            manifest.is_utility(),
+            "qwen3-expand-small should be utility"
+        );
+    }
+
+    #[test]
+    fn controlnet_is_not_utility() {
+        let manifest = find_manifest("controlnet-canny-sd15:fp16").unwrap();
+        assert!(!manifest.is_utility(), "controlnet should NOT be utility");
+    }
+
+    #[test]
+    fn controlnet_depth_is_not_utility() {
+        let manifest = find_manifest("controlnet-depth-sd15:fp16").unwrap();
+        assert!(
+            !manifest.is_utility(),
+            "controlnet-depth should NOT be utility"
+        );
+    }
+
+    #[test]
+    fn controlnet_openpose_is_not_utility() {
+        let manifest = find_manifest("controlnet-openpose-sd15:fp16").unwrap();
+        assert!(
+            !manifest.is_utility(),
+            "controlnet-openpose should NOT be utility"
+        );
+    }
+
+    #[test]
+    fn flux_models_are_not_utility() {
+        for manifest in known_manifests() {
+            if manifest.family == "flux" {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sd15_models_are_not_utility() {
+        for manifest in known_manifests() {
+            if manifest.family == "sd15" {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_diffusion_model_is_utility() {
+        let diffusion_families = [
+            "flux",
+            "sd15",
+            "sdxl",
+            "sd3",
+            "z-image",
+            "flux2",
+            "qwen-image",
+            "wuerstchen",
+        ];
+        for manifest in known_manifests() {
+            if diffusion_families.contains(&manifest.family.as_str()) {
+                assert!(
+                    !manifest.is_utility(),
+                    "{} (family={}) should NOT be utility",
+                    manifest.name,
+                    manifest.family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn utility_families_constant_matches_expand_manifests() {
+        for manifest in known_manifests() {
+            if manifest.family == "qwen3-expand" {
+                assert!(
+                    UTILITY_FAMILIES.contains(&manifest.family.as_str()),
+                    "{} family not in UTILITY_FAMILIES",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_utility_models_identified_by_is_utility() {
+        let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
+        // Currently 2: qwen3-expand:q8, qwen3-expand-small:q8
+        assert_eq!(
+            utility_count, 2,
+            "expected exactly 2 utility models, got {utility_count}"
         );
     }
 }

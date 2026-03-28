@@ -130,6 +130,7 @@ mod tests {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            expand: mold_core::ExpandSettings::default(),
             models: HashMap::new(),
         }
     }

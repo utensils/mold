@@ -161,6 +161,22 @@ Examples:
         /// ControlNet conditioning scale (0.0 = no effect, 1.0 = full, up to 2.0)
         #[arg(long, default_value = "1.0", help_heading = "ControlNet")]
         control_scale: f64,
+
+        /// Enable LLM-powered prompt expansion
+        #[arg(long, env = "MOLD_EXPAND", help_heading = "Expansion")]
+        expand: bool,
+
+        /// Disable prompt expansion (overrides config/env default)
+        #[arg(long, conflicts_with = "expand", help_heading = "Expansion")]
+        no_expand: bool,
+
+        /// Expansion backend: "local" for built-in GGUF, or an OpenAI-compatible API URL
+        #[arg(long, env = "MOLD_EXPAND_BACKEND", help_heading = "Expansion")]
+        expand_backend: Option<String>,
+
+        /// LLM model for expansion (local or API model name)
+        #[arg(long, env = "MOLD_EXPAND_MODEL", help_heading = "Expansion")]
+        expand_model: Option<String>,
     },
 
     /// Start the inference server
@@ -279,6 +295,41 @@ The MOLD_DEFAULT_MODEL env var takes precedence over the config file.")]
         /// Model name to set as default (e.g. flux-dev:q4). Omit to show current default.
         #[arg(add = ArgValueCandidates::new(commands::default::complete_model_name))]
         model: Option<String>,
+    },
+
+    /// Preview LLM prompt expansion without generating images
+    ///
+    /// Expand a short prompt into detailed image generation prompts using an LLM.
+    /// Useful for previewing what --expand will produce.
+    #[command(after_long_help = "\
+Examples:
+  mold expand \"a cat\"
+  mold expand \"a cat\" --model flux-schnell
+  mold expand \"cyberpunk city\" --variations 5
+  mold expand \"a cat\" --variations 3 --json")]
+    Expand {
+        /// Text prompt to expand
+        prompt: String,
+
+        /// Target diffusion model (used for model-aware prompt style)
+        #[arg(short, long, add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+
+        /// Number of prompt variations to generate
+        #[arg(long, default_value = "1")]
+        variations: usize,
+
+        /// Output as JSON array
+        #[arg(long)]
+        json: bool,
+
+        /// Expansion backend override
+        #[arg(long)]
+        backend: Option<String>,
+
+        /// LLM model name override
+        #[arg(long)]
+        expand_model: Option<String>,
     },
 
     /// Unload the current model from the server to free GPU memory
@@ -462,6 +513,10 @@ async fn run() -> anyhow::Result<()> {
             control,
             control_model,
             control_scale,
+            expand,
+            no_expand,
+            expand_backend,
+            expand_model,
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -489,6 +544,28 @@ async fn run() -> anyhow::Result<()> {
                 control,
                 control_model,
                 control_scale,
+                expand,
+                no_expand,
+                expand_backend,
+                expand_model,
+            )
+            .await?;
+        }
+        Commands::Expand {
+            prompt,
+            model,
+            variations,
+            json,
+            backend,
+            expand_model,
+        } => {
+            commands::expand::run(
+                &prompt,
+                model.as_deref(),
+                variations,
+                json,
+                backend.as_deref(),
+                expand_model.as_deref(),
             )
             .await?;
         }

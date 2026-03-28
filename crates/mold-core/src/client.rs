@@ -1,7 +1,7 @@
 use crate::error::MoldError;
 use crate::types::{
-    GenerateRequest, GenerateResponse, ImageData, ModelInfo, ModelInfoExtended, ServerStatus,
-    SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    ExpandRequest, ExpandResponse, GenerateRequest, GenerateResponse, ImageData, ModelInfo,
+    ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use anyhow::Result;
 use base64::Engine as _;
@@ -354,6 +354,20 @@ impl MoldClient {
             .await?
             .error_for_status()?
             .json::<ServerStatus>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Expand a prompt using the server's LLM prompt expansion endpoint.
+    pub async fn expand_prompt(&self, req: &ExpandRequest) -> Result<ExpandResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/expand", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ExpandResponse>()
             .await?;
         Ok(resp)
     }

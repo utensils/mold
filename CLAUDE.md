@@ -84,16 +84,17 @@ crates/
 └── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
 ```
 
-**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`).
+**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`).
 
 ### mold-core
 
 Shared library used by all other crates:
 
-- **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, etc.)
-- **`client.rs`** — `MoldClient` HTTP client; `is_connection_error()` for local fallback detection
+- **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, `ExpandRequest`, `ExpandResponse`, etc.)
+- **`client.rs`** — `MoldClient` HTTP client; `is_connection_error()` for local fallback detection; `expand_prompt()` for server-side expansion
 - **`config.rs`** — `Config`, `ModelConfig`, `ModelPaths`; loads from `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy)
-- **`manifest.rs`** — `ModelManifest` registry of downloadable models with HF sources; `resolve_model_name()` for `name:tag` resolution
+- **`manifest.rs`** — `ModelManifest` registry of downloadable models with HF sources; `resolve_model_name()` for `name:tag` resolution; `UTILITY_FAMILIES` constant for non-diffusion models (e.g. `qwen3-expand`); `is_utility()` for family-based classification
+- **`expand.rs`** — `PromptExpander` trait, `ApiExpander` (OpenAI-compatible HTTP), `ExpandConfig` settings with env var support (`MOLD_EXPAND_*`)
 - **`download.rs`** — `pull_model()` wrapping `hf-hub` with progress bars; SHA-256 integrity verification (fails on mismatch, `--skip-verify` to override); `.pulling` marker for atomic pull detection; `PullOptions` for controlling verification behavior
 - **`validation.rs`** — `validate_generate_request()` — shared validation (used by both server and CLI); `fit_to_model_dimensions()` — aspect-ratio-preserving resize of source images to model-native resolution for img2img
 - **`error.rs`** — `MoldError` enum with thiserror
@@ -139,7 +140,9 @@ pub trait InferenceEngine: Send + Sync {
 
 **Z-Image GGUF specifics** — The quantized Z-Image transformer (`zimage/quantized_transformer.rs`) lives in this crate (not candle) because candle has no quantized Z-Image model. Key GGUF tensor name differences from BF16: fused `attention.qkv` vs separate Q/K/V, `x_embedder` vs `all_x_embedder.2-1`, etc.
 
-Feature flags: `cuda` (CUDA backend), `metal` (Metal backend).
+**Prompt expansion** — `expand.rs` (behind `expand` feature): `LocalExpander` wraps `candle_transformers::models::quantized_qwen3::ModelWeights` for local GGUF text generation. Uses `PromptExpander` trait from `mold-core`. Includes progress reporting, VRAM-aware device placement (`should_use_gpu()`), and Darwin memory safety guards (`preflight_memory_check()`). The LLM is always dropped before diffusion runs.
+
+Feature flags: `cuda` (CUDA backend), `metal` (Metal backend), `expand` (local LLM prompt expansion).
 
 ### mold-server
 
@@ -149,6 +152,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 |--------|------|-------------|
 | `POST` | `/api/generate` | Generate images from prompt |
 | `POST` | `/api/generate/stream` | Generate with SSE progress streaming |
+| `POST` | `/api/expand` | Expand a prompt using LLM |
 | `GET` | `/api/models` | List available models |
 | `POST` | `/api/models/load` | Load/swap the active model |
 | `POST` | `/api/models/pull` | Pull/download a model |
@@ -166,9 +170,9 @@ Main binary. Feature flags `cuda` and `metal` forward through `mold-server` → 
 
 ### mold-discord
 
-Discord bot library using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/models`, and `/status` slash commands. Consumed by `mold-cli` behind the `discord` feature flag — invoked via `mold discord` (standalone bot) or `mold serve --discord` (server + bot in one process).
+Discord bot library using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/expand`, `/models`, and `/status` slash commands. Consumed by `mold-cli` behind the `discord` feature flag — invoked via `mold discord` (standalone bot) or `mold serve --discord` (server + bot in one process).
 
-Key modules: `commands/` (slash command handlers), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions), `cooldown.rs` (per-user rate limiting), `state.rs` (shared bot state).
+Key modules: `commands/` (slash command handlers — `generate`, `expand`, `models`, `status`), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions including `format_expand_result()`), `cooldown.rs` (per-user rate limiting), `state.rs` (shared bot state).
 
 Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 
@@ -200,6 +204,17 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
         --no-metadata           Disable PNG metadata embedding
         --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
+        --expand                Enable LLM-powered prompt expansion
+        --no-expand             Disable expansion (overrides config/env default)
+        --expand-backend <URL>  Expansion backend: "local" or OpenAI-compatible API URL
+        --expand-model <MODEL>  LLM model for expansion
+
+mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generating
+    -m, --model <MODEL>         Target diffusion model (for model-aware prompt style)
+        --variations <N>        Number of prompt variations [default: 1]
+        --json                  Output as JSON array
+        --backend <URL>         Expansion backend override
+        --expand-model <MODEL>  LLM model name override
 
 mold default [MODEL]               Get or set the default model
 mold serve [--port N] [--bind ADDR] [--models-dir PATH]
@@ -242,6 +257,11 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
+| `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
+| `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
+| `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion (Qwen3-1.7B GGUF) |
+| `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion LLM |
+| `MOLD_EXPAND_THINKING` | — | Set `1` to enable thinking mode in expansion LLM |
 | `MOLD_DISCORD_TOKEN` | — | Discord bot token (preferred; falls back to `DISCORD_TOKEN`) |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
 

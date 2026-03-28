@@ -92,6 +92,8 @@ pub async fn run(
     control_image: Option<Vec<u8>>,
     control_model: Option<String>,
     control_scale: f64,
+    original_prompt: Option<String>,
+    batch_prompts: Option<Vec<String>>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -141,6 +143,8 @@ pub async fn run(
         control_image: control_image.clone(),
         control_model: control_model.clone(),
         control_scale,
+        expand: None,
+        original_prompt,
     };
 
     if let Some(desc) = &model_cfg.description {
@@ -218,6 +222,7 @@ pub async fn run(
             guidance,
             batch,
             base_seed,
+            batch_prompts.as_deref(),
         )
         .await?
     } else {
@@ -230,6 +235,13 @@ pub async fn run(
             let mut iter_req = req.clone();
             iter_req.seed = Some(base_seed.wrapping_add(i as u64));
             iter_req.batch_size = 1;
+
+            // Use per-batch expanded prompt if available
+            if let Some(ref prompts) = batch_prompts {
+                if let Some(p) = prompts.get(i as usize) {
+                    iter_req.prompt = p.clone();
+                }
+            }
 
             if batch > 1 {
                 status!(
@@ -707,6 +719,7 @@ async fn generate_local_batch(
     cli_guidance: Option<f64>,
     batch: u32,
     base_seed: u64,
+    batch_prompts: Option<&[String]>,
 ) -> Result<GenerateResponse> {
     let (base_req, mut engine) = prepare_local_engine(
         req,
@@ -740,6 +753,13 @@ async fn generate_local_batch(
         let mut iter_req = base_req.clone();
         iter_req.seed = Some(base_seed.wrapping_add(i as u64));
         iter_req.batch_size = 1;
+
+        // Use per-batch expanded prompt if available
+        if let Some(ref prompts) = batch_prompts {
+            if let Some(p) = prompts.get(i as usize) {
+                iter_req.prompt = p.clone();
+            }
+        }
 
         if batch > 1 {
             status!(
@@ -822,6 +842,7 @@ async fn generate_local_batch(
     _cli_guidance: Option<f64>,
     _batch: u32,
     _base_seed: u64,
+    _batch_prompts: Option<&[String]>,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\

@@ -2518,6 +2518,7 @@ dependencies = [
  "mold-ai-inference",
  "mold-ai-server",
  "rand 0.8.5",
+ "serde_json",
  "sha2",
  "tokio",
  "toml",
@@ -2543,6 +2544,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "ureq",
  "utoipa",
  "uuid",
 ]

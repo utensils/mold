@@ -662,11 +662,20 @@ is_schnell = false
 
     // ── resolved_default_model ────────────────────────────────────────────
 
+    /// Config with models_dir pointing to a non-existent path so the smart
+    /// default fallback doesn't detect locally downloaded models.
+    fn isolated_config() -> Config {
+        Config {
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn resolved_default_model_returns_config_value() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_DEFAULT_MODEL");
-        let cfg = Config::default();
+        let cfg = isolated_config();
         assert_eq!(cfg.resolved_default_model(), "flux-schnell");
     }
 
@@ -674,7 +683,7 @@ is_schnell = false
     fn resolved_default_model_env_overrides_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_DEFAULT_MODEL", "sdxl-turbo:fp16");
-        let result = Config::default().resolved_default_model();
+        let result = isolated_config().resolved_default_model();
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         assert_eq!(result, "sdxl-turbo:fp16");
     }
@@ -683,7 +692,7 @@ is_schnell = false
     fn resolved_default_model_empty_env_ignored() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MOLD_DEFAULT_MODEL", "");
-        let result = Config::default().resolved_default_model();
+        let result = isolated_config().resolved_default_model();
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         // Empty env should fall through to config value
         assert_eq!(result, "flux-schnell");

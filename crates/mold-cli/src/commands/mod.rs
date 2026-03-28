@@ -1,6 +1,7 @@
 pub mod default;
 #[cfg(feature = "discord")]
 pub mod discord;
+pub mod expand;
 pub(crate) mod generate;
 pub mod info;
 pub mod list;

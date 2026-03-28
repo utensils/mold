@@ -252,6 +252,56 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
     }
 }
 
+/// Format an expand result into embed data.
+pub fn format_expand_result(
+    resp: &mold_core::ExpandResponse,
+    original_prompt: &str,
+    model_family: &str,
+) -> EmbedData {
+    let description = if resp.expanded.len() == 1 {
+        let expanded = &resp.expanded[0];
+        if expanded.chars().count() > 4000 {
+            let truncated: String = expanded.chars().take(3997).collect();
+            format!("{truncated}...")
+        } else {
+            expanded.clone()
+        }
+    } else {
+        let mut parts = Vec::new();
+        for (i, expanded) in resp.expanded.iter().enumerate() {
+            let display = if expanded.chars().count() > 800 {
+                let truncated: String = expanded.chars().take(797).collect();
+                format!("{truncated}...")
+            } else {
+                expanded.clone()
+            };
+            parts.push(format!("**Variation {}:**\n{}", i + 1, display));
+        }
+        let joined = parts.join("\n\n");
+        if joined.chars().count() > 4000 {
+            let truncated: String = joined.chars().take(3997).collect();
+            format!("{truncated}...")
+        } else {
+            joined
+        }
+    };
+
+    EmbedData {
+        title: "Prompt Expanded".to_string(),
+        description,
+        fields: vec![
+            ("Original".to_string(), original_prompt.to_string(), false),
+            ("Family".to_string(), model_family.to_uppercase(), true),
+            (
+                "Variations".to_string(),
+                resp.expanded.len().to_string(),
+                true,
+            ),
+        ],
+        color: COLOR_SUCCESS,
+    }
+}
+
 /// Format an error message into embed data.
 pub fn format_error(msg: &str) -> EmbedData {
     EmbedData {
@@ -658,5 +708,81 @@ mod tests {
         let bar = progress_bar(0, 0);
         assert!(bar.contains('['));
         assert!(bar.contains(']'));
+    }
+
+    // --- format_expand_result tests ---
+
+    #[test]
+    fn expand_result_single_variation() {
+        let resp = mold_core::ExpandResponse {
+            original: "a cat".to_string(),
+            expanded: vec!["a fluffy orange tabby cat sitting on a windowsill".to_string()],
+        };
+        let embed = format_expand_result(&resp, "a cat", "flux");
+        assert_eq!(embed.title, "Prompt Expanded");
+        assert!(embed.description.contains("fluffy orange tabby"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Original" && v == "a cat"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Family" && v == "FLUX"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Variations" && v == "1"));
+        assert_eq!(embed.color, COLOR_SUCCESS);
+    }
+
+    #[test]
+    fn expand_result_multiple_variations() {
+        let resp = mold_core::ExpandResponse {
+            original: "sunset".to_string(),
+            expanded: vec![
+                "golden sunset over the ocean".to_string(),
+                "dramatic red sunset behind mountains".to_string(),
+                "pastel sunset with silhouetted trees".to_string(),
+            ],
+        };
+        let embed = format_expand_result(&resp, "sunset", "sdxl");
+        assert!(embed.description.contains("Variation 1:"));
+        assert!(embed.description.contains("Variation 2:"));
+        assert!(embed.description.contains("Variation 3:"));
+        assert!(embed.description.contains("golden sunset"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Variations" && v == "3"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Family" && v == "SDXL"));
+    }
+
+    #[test]
+    fn expand_result_truncates_long_single_prompt() {
+        let long_prompt = "a".repeat(5000);
+        let resp = mold_core::ExpandResponse {
+            original: "test".to_string(),
+            expanded: vec![long_prompt],
+        };
+        let embed = format_expand_result(&resp, "test", "flux");
+        assert!(embed.description.chars().count() <= 4003);
+        assert!(embed.description.ends_with("..."));
+    }
+
+    #[test]
+    fn expand_result_sd15_family() {
+        let resp = mold_core::ExpandResponse {
+            original: "dog".to_string(),
+            expanded: vec!["cute dog, photorealistic, 8k".to_string()],
+        };
+        let embed = format_expand_result(&resp, "dog", "sd15");
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Family" && v == "SD15"));
     }
 }

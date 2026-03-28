@@ -5,6 +5,8 @@ pub mod config;
 pub mod control;
 pub mod download;
 pub mod error;
+pub mod expand;
+pub mod expand_prompts;
 pub mod manifest;
 pub mod types;
 pub mod validation;
@@ -27,3 +29,6 @@ pub use types::*;
 pub use validation::{
     clamp_to_megapixel_limit, fit_to_model_dimensions, validate_generate_request,
 };
+
+pub use expand::{ApiExpander, ExpandConfig, ExpandResult, ExpandSettings, PromptExpander};
+pub use expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
