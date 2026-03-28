@@ -711,7 +711,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
             prompt: "a cat".to_string(),
