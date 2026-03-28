@@ -202,6 +202,8 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --control <PATH>        Control image for ControlNet conditioning
         --control-model <NAME>  ControlNet model (e.g. controlnet-canny-sd15; requires --control)
         --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
+    -n, --negative-prompt <TEXT>   Negative prompt (what to avoid generating; CFG models only)
+        --no-negative              Suppress config-file default negative prompt
         --no-metadata           Disable PNG metadata embedding
         --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
         --expand                Enable LLM-powered prompt expansion
@@ -284,6 +286,7 @@ default_height = 1024
 # t5_variant = "auto"
 # qwen3_variant = "auto"
 # output_dir = "/srv/mold/gallery"
+# default_negative_prompt = "low quality, worst quality, blurry, watermark"
 
 [models."flux-schnell:q8"]
 transformer = "/path/to/flux1-schnell-Q8_0.gguf"

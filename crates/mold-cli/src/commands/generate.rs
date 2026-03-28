@@ -92,6 +92,7 @@ pub async fn run(
     control_image: Option<Vec<u8>>,
     control_model: Option<String>,
     control_scale: f64,
+    negative_prompt: Option<String>,
     original_prompt: Option<String>,
     batch_prompts: Option<Vec<String>>,
 ) -> Result<()> {
@@ -143,6 +144,7 @@ pub async fn run(
         control_image: control_image.clone(),
         control_model: control_model.clone(),
         control_scale,
+        negative_prompt: negative_prompt.clone(),
         expand: None,
         original_prompt,
     };
@@ -163,6 +165,19 @@ pub async fn run(
         prompt.to_string()
     };
     status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
+    if let Some(ref neg) = negative_prompt {
+        let display_neg = if neg.chars().count() > 50 {
+            let truncated: String = neg.chars().take(47).collect();
+            format!("{truncated}...")
+        } else {
+            neg.clone()
+        };
+        status!(
+            "{} Negative: \"{}\"",
+            theme::icon_info(),
+            display_neg.dimmed()
+        );
+    }
     if mask_image.is_some() {
         status!(
             "{} inpainting mode (strength: {:.2})",

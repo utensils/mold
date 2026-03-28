@@ -69,11 +69,13 @@ impl SD3Engine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_conditioning(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
         triple_encoder: &mut encoders::sd3_clip::SD3TripleEncoder,
         prompt: &str,
+        negative_prompt: &str,
         device: &Device,
         dtype: DType,
         is_quantized: bool,
@@ -88,7 +90,8 @@ impl SD3Engine {
                 progress.stage_start("Encoding prompt (SD3 triple)");
                 let encode_start = Instant::now();
                 let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
-                let (context_uncond, y_uncond) = triple_encoder.encode("", device, dtype)?;
+                let (context_uncond, y_uncond) =
+                    triple_encoder.encode(negative_prompt, device, dtype)?;
                 progress.stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
 
                 let pair = if is_quantized {
@@ -445,11 +448,13 @@ impl SD3Engine {
             .progress
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
+        let neg = req.negative_prompt.as_deref().unwrap_or("");
         let (context, y) = Self::encode_conditioning(
             &self.base.progress,
             &self.prompt_cache,
             &mut triple_encoder,
             &req.prompt,
+            neg,
             &device,
             gpu_dtype,
             is_quantized,
@@ -650,11 +655,13 @@ impl InferenceEngine for SD3Engine {
                 progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
             }
 
+            let neg = req.negative_prompt.as_deref().unwrap_or("");
             let (context, y) = Self::encode_conditioning(
                 progress,
                 prompt_cache,
                 &mut loaded.triple_encoder,
                 &req.prompt,
+                neg,
                 &loaded_device,
                 loaded_dtype,
                 is_quantized,

@@ -163,6 +163,7 @@ impl ModelManifest {
             is_schnell: Some(self.defaults.is_schnell),
             is_turbo: None,
             scheduler: self.defaults.scheduler,
+            negative_prompt: None,
             description: Some(self.description.clone()),
             family: Some(self.family.clone()),
         }

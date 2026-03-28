@@ -421,6 +421,7 @@ impl SDXLEngine {
         tokenizer_l: &tokenizers::Tokenizer,
         tokenizer_g: &tokenizers::Tokenizer,
         prompt: &str,
+        negative_prompt: &str,
         max_len: usize,
         device: &Device,
         dtype: DType,
@@ -450,9 +451,11 @@ impl SDXLEngine {
                 let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
 
                 let text_embeddings = if use_cfg {
-                    let uncond_tokens_l = Self::tokenize(tokenizer_l, "", max_len, device)?;
+                    let uncond_tokens_l =
+                        Self::tokenize(tokenizer_l, negative_prompt, max_len, device)?;
                     let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
-                    let uncond_tokens_g = Self::tokenize(tokenizer_g, "", max_len, device)?;
+                    let uncond_tokens_g =
+                        Self::tokenize(tokenizer_g, negative_prompt, max_len, device)?;
                     let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
                     let uncond_embeddings =
                         Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
@@ -579,12 +582,14 @@ impl SDXLEngine {
             .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
 
         // Encode prompt
+        let neg = req.negative_prompt.as_deref().unwrap_or("");
         let text_embeddings = self.encode_prompt(
             &clip_l,
             &clip_g,
             &tokenizer_l,
             &tokenizer_g,
             &req.prompt,
+            neg,
             max_len,
             &device,
             dtype,
@@ -795,12 +800,14 @@ impl InferenceEngine for SDXLEngine {
 
         // 1. Encode prompt with both CLIP encoders
         let max_len = loaded.sd_config.clip.max_position_embeddings;
+        let neg = req.negative_prompt.as_deref().unwrap_or("");
         let text_embeddings = self.encode_prompt(
             &loaded.clip_l,
             &loaded.clip_g,
             &loaded.tokenizer_l,
             &loaded.tokenizer_g,
             &req.prompt,
+            neg,
             max_len,
             &loaded.device,
             loaded.dtype,

@@ -27,6 +27,7 @@ pub fn build_generate_request(
     steps: Option<u32>,
     guidance: Option<f64>,
     seed: Option<u64>,
+    negative_prompt: Option<&str>,
     defaults: Option<&mold_core::ModelDefaults>,
 ) -> GenerateRequest {
     let (def_w, def_h, def_steps, def_guidance) = match defaults {
@@ -41,6 +42,7 @@ pub fn build_generate_request(
 
     GenerateRequest {
         prompt: prompt.to_string(),
+        negative_prompt: negative_prompt.map(|s| s.to_string()),
         model: model.to_string(),
         width: width.unwrap_or(def_w),
         height: height.unwrap_or(def_h),
@@ -105,6 +107,8 @@ pub async fn generate(
     #[description = "Number of inference steps"] steps: Option<u32>,
     #[description = "Guidance scale (0.0 for schnell, ~3.5 for dev)"] guidance: Option<f64>,
     #[description = "Random seed for reproducibility"] seed: Option<u64>,
+    #[description = "Negative prompt — what to avoid (CFG models: SD1.5, SDXL, SD3)"]
+    negative_prompt: Option<String>,
 ) -> Result<()> {
     // Validate prompt before deferring (avoids wasting the interaction)
     if prompt.trim().is_empty() {
@@ -154,6 +158,7 @@ pub async fn generate(
         steps,
         guidance,
         seed,
+        negative_prompt.as_deref(),
         model_defaults,
     );
 
@@ -197,6 +202,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&defaults),
         );
         assert_eq!(req.prompt, "a cat");
@@ -206,6 +212,7 @@ mod tests {
         assert_eq!(req.steps, 4);
         assert_eq!(req.guidance, 0.0);
         assert!(req.seed.is_none());
+        assert!(req.negative_prompt.is_none());
         assert_eq!(req.batch_size, 1);
     }
 
@@ -226,6 +233,7 @@ mod tests {
             Some(28),
             Some(7.5),
             Some(42),
+            None,
             Some(&defaults),
         );
         assert_eq!(req.width, 768);
@@ -237,8 +245,17 @@ mod tests {
 
     #[test]
     fn build_request_no_defaults() {
-        let req =
-            build_generate_request("test", "unknown-model", None, None, None, None, None, None);
+        let req = build_generate_request(
+            "test",
+            "unknown-model",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(req.width, 1024);
         assert_eq!(req.height, 1024);
         assert_eq!(req.steps, 20);
@@ -263,11 +280,28 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&defaults),
         );
         assert_eq!(req.width, 768);
         assert_eq!(req.height, 512); // from defaults
         assert_eq!(req.steps, 4); // from defaults
+    }
+
+    #[test]
+    fn build_request_with_negative_prompt() {
+        let req = build_generate_request(
+            "a cat",
+            "sd15:fp16",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("blurry, low quality"),
+            None,
+        );
+        assert_eq!(req.negative_prompt.as_deref(), Some("blurry, low quality"));
     }
 
     #[test]
