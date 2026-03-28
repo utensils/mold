@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -122,8 +122,8 @@ fn collect_hf_cache_blob_paths(
 /// The latter two matter because manifest-backed models can exist without a
 /// config entry, and incomplete pulls should prevent us from racing cleanup
 /// against files that are still being written.
-fn collect_referenced_paths(config: &Config) -> std::collections::HashSet<String> {
-    let mut referenced: std::collections::HashSet<String> = config
+fn collect_referenced_paths(config: &Config) -> HashSet<String> {
+    let mut referenced: HashSet<String> = config
         .models
         .values()
         .flat_map(|mc| mc.all_file_paths())
@@ -265,8 +265,7 @@ fn is_path_older_than(path: &Path, age: Duration) -> bool {
 fn pull_marker_path_for_model(config: &Config, model_name: &str) -> PathBuf {
     config
         .resolved_models_dir()
-        .join(model_name.replace(':', "-"))
-        .join(".pulling")
+        .join(mold_core::download::pulling_marker_rel_path(model_name))
 }
 
 fn is_stale_pull_marker(config: &Config, model_name: &str) -> bool {
@@ -274,7 +273,7 @@ fn is_stale_pull_marker(config: &Config, model_name: &str) -> bool {
     marker.exists() && is_path_older_than(&marker, STALE_PULL_MAX_AGE)
 }
 
-fn active_pull_models(config: &Config) -> std::collections::HashSet<String> {
+fn active_pull_models(config: &Config) -> HashSet<String> {
     known_manifests()
         .iter()
         .filter_map(|manifest| {
@@ -285,7 +284,7 @@ fn active_pull_models(config: &Config) -> std::collections::HashSet<String> {
         .collect()
 }
 
-fn active_pull_repos(config: &Config) -> std::collections::HashSet<String> {
+fn active_pull_repos(config: &Config) -> HashSet<String> {
     let active_models = active_pull_models(config);
     let mut repos = std::collections::HashSet::new();
 
@@ -377,7 +376,7 @@ fn clean_orphaned_shared_files(config: &Config) {
 /// Returns `(files_deleted, bytes_freed)`.
 fn remove_orphaned_files_recursive(
     dir: &Path,
-    referenced: &std::collections::HashSet<String>,
+    referenced: &HashSet<String>,
     config: &Config,
 ) -> (u64, u64) {
     let entries = match std::fs::read_dir(dir) {
@@ -398,10 +397,11 @@ fn remove_orphaned_files_recursive(
                 let mut removed_any = false;
                 let mut removed_bytes = 0u64;
                 let cache_targets = collect_hf_cache_paths_for_clean_path(&path, config);
+                let mut counted_inodes = HashSet::new();
 
                 for target in &cache_targets {
                     if target.exists() {
-                        let size = file_size(&target.to_string_lossy());
+                        let size = reclaimed_disk_bytes(target, &mut counted_inodes);
                         match std::fs::remove_file(target) {
                             Ok(()) => {
                                 removed_any = true;
@@ -420,13 +420,11 @@ fn remove_orphaned_files_recursive(
                 }
 
                 if path.exists() {
-                    let clean_size = file_size(&path_str);
+                    let clean_size = reclaimed_disk_bytes(&path, &mut counted_inodes);
                     match std::fs::remove_file(&path) {
                         Ok(()) => {
                             removed_any = true;
-                            if cache_targets.is_empty() {
-                                removed_bytes += clean_size;
-                            }
+                            removed_bytes += clean_size;
                         }
                         Err(e) => {
                             eprintln!(
@@ -447,6 +445,33 @@ fn remove_orphaned_files_recursive(
         }
     }
     (count, bytes)
+}
+
+fn reclaimed_disk_bytes(path: &Path, counted_inodes: &mut HashSet<(u64, u64)>) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+
+    if meta.file_type().is_symlink() {
+        return 0;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let inode = (meta.dev(), meta.ino());
+        if !counted_inodes.insert(inode) {
+            return 0;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = counted_inodes;
+    }
+
+    meta.len()
 }
 
 /// Recursively remove empty directories under `dir` (bottom-up).
@@ -1070,7 +1095,7 @@ mod tests {
         let tmp = make_tmp_dir("inactive-repo");
         let blobs_dir = tmp
             .join(".hf-cache")
-            .join("models--city96--FLUX.1-dev-gguf")
+            .join("models--example--orphaned-repo")
             .join("blobs");
         std::fs::create_dir_all(&blobs_dir).unwrap();
 
@@ -1088,6 +1113,51 @@ mod tests {
         assert!(
             !part.exists(),
             "inactive repo sync.part file should be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn clean_orphaned_shared_files_preserves_manifest_discovered_shared_files() {
+        let tmp = make_tmp_dir("manifest-shared");
+        let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
+
+        for file in &manifest.files {
+            let path = tmp.join(mold_core::manifest::storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"x").unwrap();
+        }
+
+        let orphan = tmp.join("shared/flux/orphan.bin");
+        std::fs::write(&orphan, b"orphan").unwrap();
+
+        let mut cfg = Config::default();
+        cfg.models_dir = tmp.to_string_lossy().to_string();
+
+        clean_orphaned_shared_files(&cfg);
+
+        let shared_vae = tmp.join("shared/flux/ae.safetensors");
+        let shared_t5 = tmp.join("shared/flux/t5xxl_fp16.safetensors");
+        let transformer = tmp.join("flux-schnell-q8/flux1-schnell-Q8_0.gguf");
+
+        assert!(
+            transformer.exists(),
+            "manifest model should still appear downloaded"
+        );
+        assert!(
+            shared_vae.exists(),
+            "shared file for manifest-discovered model should survive"
+        );
+        assert!(
+            shared_t5.exists(),
+            "shared encoder for manifest-discovered model should survive"
+        );
+        assert!(
+            !orphan.exists(),
+            "unreferenced sibling orphan should be removed"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
