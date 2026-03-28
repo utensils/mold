@@ -182,6 +182,7 @@ impl LocalExpander {
         let eos_token = tokenizer
             .token_to_id("<|im_end|>")
             .or_else(|| tokenizer.token_to_id("<|endoftext|>"));
+        let start_think_token = tokenizer.token_to_id("<think>");
         let end_think_token = tokenizer.token_to_id("</think>");
 
         let max_new_tokens = config.max_tokens as usize;
@@ -211,10 +212,18 @@ impl LocalExpander {
                 }
             }
 
-            // Track thinking mode
+            // Track thinking mode — skip <think>...</think> tokens from output
+            if let Some(st) = start_think_token {
+                if next_token == st {
+                    in_thinking = true;
+                }
+            }
             if let Some(et) = end_think_token {
                 if next_token == et {
                     in_thinking = false;
+                    all_tokens.push(next_token);
+                    last_token = next_token;
+                    continue; // Don't include </think> in generated_tokens
                 }
             }
 
@@ -339,9 +348,9 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64) -> Result<u32> {
     Ok(candidates.last().map(|&(idx, _)| idx as u32).unwrap_or(0))
 }
 
-/// Find a GGUF file in a directory, optionally matching a model spec.
-fn find_gguf_in_dir(dir: &Path, _model_spec: &str) -> Option<PathBuf> {
-    // Look for any .gguf file, preferring q4_k_m
+/// Find a GGUF file in a directory, preferring one matching the model spec's
+/// quantization tag (e.g., "q8" from "qwen3-expand:q8").
+fn find_gguf_in_dir(dir: &Path, model_spec: &str) -> Option<PathBuf> {
     let entries: Vec<_> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -353,19 +362,18 @@ fn find_gguf_in_dir(dir: &Path, _model_spec: &str) -> Option<PathBuf> {
         })
         .collect();
 
-    // Prefer q4_k_m, then q4, then any
+    // Extract quantization tag from model spec (e.g., "qwen3-expand:q8" → "q8")
+    let quant_tag = model_spec.split(':').nth(1).unwrap_or("q8").to_uppercase();
+
+    // Prefer file matching the requested quantization
     for entry in &entries {
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name.contains("q4_k_m") || name.contains("q4-k-m") {
+        let name = entry.file_name().to_string_lossy().to_uppercase();
+        if name.contains(&quant_tag) {
             return Some(entry.path());
         }
     }
-    for entry in &entries {
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name.contains("q4") {
-            return Some(entry.path());
-        }
-    }
+
+    // Fallback to any GGUF
     entries.first().map(|e| e.path())
 }
 

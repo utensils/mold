@@ -386,6 +386,12 @@ async fn expand_prompt(
     State(state): State<AppState>,
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
+    if req.variations == 0 || req.variations > 10 {
+        return Err(ApiError::validation(
+            "variations must be between 1 and 10".to_string(),
+        ));
+    }
+
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
     let expand_config = expand_settings.to_expand_config(&req.model_family, req.variations);
