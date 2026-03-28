@@ -129,8 +129,15 @@ impl WuerstchenEngine {
         }
     }
 
-    fn prompt_cache_key(prompt: &str, negative_prompt: &str, use_cfg: bool) -> String {
-        format!("{prompt}\u{1f}{negative_prompt}\u{1f}cfg={use_cfg}")
+    fn prompt_cache_key(
+        prompt: &str,
+        negative_prompt: &str,
+        use_prior_cfg: bool,
+        use_decoder_cfg: bool,
+    ) -> String {
+        format!(
+            "{prompt}\u{1f}{negative_prompt}\u{1f}prior_cfg={use_prior_cfg}\u{1f}decoder_cfg={use_decoder_cfg}"
+        )
     }
 
     fn pad_token_id(
@@ -165,6 +172,21 @@ impl WuerstchenEngine {
             .to_dtype(dtype)?)
     }
 
+    fn decoder_guidance() -> f64 {
+        std::env::var("MOLD_WUERSTCHEN_DECODER_GUIDANCE")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+
+    fn effective_prior_steps(requested_steps: usize) -> usize {
+        if requested_steps == 30 {
+            60
+        } else {
+            requested_steps
+        }
+    }
+
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
@@ -183,12 +205,15 @@ impl WuerstchenEngine {
         negative_prompt: &str,
         device: &Device,
         dtype: DType,
-        guidance: f64,
+        prior_guidance: f64,
+        decoder_guidance: f64,
     ) -> Result<(Tensor, Tensor)> {
-        let use_cfg = guidance > 1.0;
+        let use_prior_cfg = prior_guidance > 1.0;
+        let use_decoder_cfg = decoder_guidance > 1.0;
         let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
         let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let cache_key = Self::prompt_cache_key(prompt, negative_prompt, use_cfg);
+        let cache_key =
+            Self::prompt_cache_key(prompt, negative_prompt, use_prior_cfg, use_decoder_cfg);
         let ((prior_text_embeddings, decoder_text_embeddings), cache_hit) =
             get_or_insert_cached_tensor_pair(&self.prompt_cache, cache_key, device, dtype, || {
                 self.base
@@ -203,7 +228,7 @@ impl WuerstchenEngine {
                     device,
                     dtype,
                 )?;
-                let prior_text_embeddings = if use_cfg {
+                let prior_text_embeddings = if use_prior_cfg {
                     let prior_negative_embeddings = Self::encode_clip_prompt(
                         prior_clip,
                         prior_tokenizer,
@@ -233,7 +258,7 @@ impl WuerstchenEngine {
                     device,
                     dtype,
                 )?;
-                let decoder_text_embeddings = if use_cfg {
+                let decoder_text_embeddings = if use_decoder_cfg {
                     let decoder_negative_embeddings = Self::encode_clip_prompt(
                         decoder_clip,
                         decoder_tokenizer,
@@ -506,6 +531,7 @@ impl WuerstchenEngine {
         prior: &WPrior,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        _base_seed: u64,
         steps: usize,
         guidance: f64,
         device: &Device,
@@ -562,6 +588,7 @@ impl WuerstchenEngine {
         image_embeddings: &Tensor,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        _base_seed: u64,
         steps: usize,
         guidance: f64,
         device: &Device,
@@ -629,19 +656,29 @@ impl WuerstchenEngine {
         let seed = req.seed.unwrap_or_else(rand_seed);
         let width = req.width as usize;
         let height = req.height as usize;
-        let guidance = req.guidance;
+        let prior_guidance = req.guidance;
+        let decoder_guidance = Self::decoder_guidance();
         let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
-        let prior_steps = req.steps as usize;
+        let requested_prior_steps = req.steps as usize;
+        let prior_steps = Self::effective_prior_steps(requested_prior_steps);
         let decoder_steps = 12;
 
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
+            requested_prior_steps,
             prior_steps,
             decoder_steps,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
             "starting sequential Wuerstchen generation"
         );
+
+        if prior_steps != requested_prior_steps {
+            self.base.progress.info(
+                "Using 60-step Stage C prior for Wuerstchen (legacy 30-step default promoted)",
+            );
+        }
 
         self.base
             .progress
@@ -699,7 +736,8 @@ impl WuerstchenEngine {
             negative_prompt,
             &device,
             dtype,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
         )?;
         Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
@@ -749,20 +787,18 @@ impl WuerstchenEngine {
         // Stage C latent dimensions: 42x compression
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let mut prior_latents = crate::engine::seeded_randn(
-            seed,
-            &[1, PRIOR_C_IN, latent_h, latent_w],
-            &device,
-            dtype,
-        )?;
+        device.set_seed(seed)?;
+        let mut prior_latents =
+            Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?;
         Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
         self.denoise_prior(
             &prior,
             &prior_text_embeddings,
             &mut prior_latents,
+            seed,
             prior_steps,
-            guidance,
+            prior_guidance,
             &device,
         )?;
 
@@ -812,8 +848,8 @@ impl WuerstchenEngine {
         // Decoder latent dims derived from prior output spatial dims
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let mut decoder_latents =
-            crate::engine::seeded_randn(seed + 1, &[1, 4, stage_b_h, stage_b_w], &device, dtype)?;
+        device.set_seed(seed.wrapping_add(1))?;
+        let mut decoder_latents = Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?;
         Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
@@ -821,8 +857,9 @@ impl WuerstchenEngine {
             &prior_latents,
             &decoder_text_embeddings,
             &mut decoder_latents,
+            seed,
             decoder_steps,
-            guidance,
+            decoder_guidance,
             &device,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
@@ -922,19 +959,29 @@ impl InferenceEngine for WuerstchenEngine {
         let seed = req.seed.unwrap_or_else(rand_seed);
         let width = req.width as usize;
         let height = req.height as usize;
-        let guidance = req.guidance;
+        let prior_guidance = req.guidance;
+        let decoder_guidance = Self::decoder_guidance();
         let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
-        let prior_steps = req.steps as usize;
+        let requested_prior_steps = req.steps as usize;
+        let prior_steps = Self::effective_prior_steps(requested_prior_steps);
         let decoder_steps = 12;
 
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
+            requested_prior_steps,
             prior_steps,
             decoder_steps,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
             "starting Wuerstchen generation"
         );
+
+        if prior_steps != requested_prior_steps {
+            self.base.progress.info(
+                "Using 60-step Stage C prior for Wuerstchen (legacy 30-step default promoted)",
+            );
+        }
 
         // 1. Encode prompt with Prior CLIP-G (1280-dim)
         let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
@@ -946,7 +993,8 @@ impl InferenceEngine for WuerstchenEngine {
             negative_prompt,
             &loaded.device,
             loaded.dtype,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
         )?;
         Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
@@ -954,11 +1002,12 @@ impl InferenceEngine for WuerstchenEngine {
         // 3. Stage C (Prior): denoise in highly compressed latent space
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let mut prior_latents = crate::engine::seeded_randn(
-            seed,
-            &[1, PRIOR_C_IN, latent_h, latent_w],
+        loaded.device.set_seed(seed)?;
+        let mut prior_latents = Tensor::randn(
+            0f32,
+            1f32,
+            (1, PRIOR_C_IN, latent_h, latent_w),
             &loaded.device,
-            loaded.dtype,
         )?;
         Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
@@ -966,8 +1015,9 @@ impl InferenceEngine for WuerstchenEngine {
             &loaded.prior,
             &prior_text_embeddings,
             &mut prior_latents,
+            seed,
             prior_steps,
-            guidance,
+            prior_guidance,
             &loaded.device,
         )?;
 
@@ -980,12 +1030,9 @@ impl InferenceEngine for WuerstchenEngine {
         // Decoder latent dims derived from prior output spatial dims
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let mut decoder_latents = crate::engine::seeded_randn(
-            seed + 1,
-            &[1, 4, stage_b_h, stage_b_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
+        loaded.device.set_seed(seed.wrapping_add(1))?;
+        let mut decoder_latents =
+            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
         Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
@@ -993,8 +1040,9 @@ impl InferenceEngine for WuerstchenEngine {
             &prior_latents,
             &decoder_text_embeddings,
             &mut decoder_latents,
+            seed,
             decoder_steps,
-            guidance,
+            decoder_guidance,
             &loaded.device,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
@@ -1098,13 +1146,15 @@ mod tests {
 
     #[test]
     fn prompt_cache_key_includes_negative_prompt_and_cfg() {
-        let base = WuerstchenEngine::prompt_cache_key("hello", "", false);
-        let neg = WuerstchenEngine::prompt_cache_key("hello", "bad", false);
-        let cfg = WuerstchenEngine::prompt_cache_key("hello", "", true);
+        let base = WuerstchenEngine::prompt_cache_key("hello", "", false, false);
+        let neg = WuerstchenEngine::prompt_cache_key("hello", "bad", false, false);
+        let prior_cfg = WuerstchenEngine::prompt_cache_key("hello", "", true, false);
+        let decoder_cfg = WuerstchenEngine::prompt_cache_key("hello", "", false, true);
 
         assert_ne!(base, neg);
-        assert_ne!(base, cfg);
-        assert_ne!(neg, cfg);
+        assert_ne!(base, prior_cfg);
+        assert_ne!(base, decoder_cfg);
+        assert_ne!(prior_cfg, decoder_cfg);
     }
 
     #[test]
@@ -1129,5 +1179,12 @@ mod tests {
 
         assert_eq!(tokens_len, 1);
         assert_eq!(ids, vec![7, 7, 7]);
+    }
+
+    #[test]
+    fn effective_prior_steps_promotes_legacy_default() {
+        assert_eq!(WuerstchenEngine::effective_prior_steps(30), 60);
+        assert_eq!(WuerstchenEngine::effective_prior_steps(60), 60);
+        assert_eq!(WuerstchenEngine::effective_prior_steps(20), 20);
     }
 }

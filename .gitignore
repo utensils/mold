@@ -16,5 +16,6 @@
 
 # Nix / direnv
 .direnv/
+.cache/
 result
 /target/coverage/
