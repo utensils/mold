@@ -162,6 +162,32 @@ mold pull controlnet-canny-sd15
 mold run sd15:fp16 "a futuristic city" --control edges.png --control-model controlnet-canny-sd15
 ```
 
+### Negative prompts
+
+Guide what the model should avoid generating. Works with CFG-based models (SD1.5, SDXL, SD3); ignored by FLUX and other flow-matching models.
+
+```bash
+# Specify a negative prompt
+mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"
+mold run sdxl:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
+
+# Override config default with empty unconditional
+mold run sd15:fp16 "a cat" --no-negative
+```
+
+Negative prompts can also be set in `config.toml` as per-model or global defaults:
+
+```toml
+# Global default for all CFG models
+default_negative_prompt = "low quality, worst quality, blurry, watermark"
+
+[models."sd15:fp16"]
+# Per-model override (takes precedence over global)
+negative_prompt = "worst quality, low quality, bad anatomy, bad hands, extra fingers, blurry"
+```
+
+Precedence: CLI `--negative-prompt` > per-model config > global config > empty string.
+
 ### Scheduler selection
 
 Choose the noise scheduler for SD1.5/SDXL models:

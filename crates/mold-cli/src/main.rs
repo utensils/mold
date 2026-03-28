@@ -162,6 +162,14 @@ Examples:
         #[arg(long, default_value = "1.0", help_heading = "ControlNet")]
         control_scale: f64,
 
+        /// Negative prompt — what to avoid generating (CFG-based models: SD1.5, SDXL, SD3)
+        #[arg(short = 'n', long, help_heading = "Image")]
+        negative_prompt: Option<String>,
+
+        /// Suppress config-file default negative prompt (use empty unconditional)
+        #[arg(long, help_heading = "Image")]
+        no_negative: bool,
+
         /// Enable LLM-powered prompt expansion
         #[arg(long, env = "MOLD_EXPAND", help_heading = "Expansion")]
         expand: bool,
@@ -513,6 +521,8 @@ async fn run() -> anyhow::Result<()> {
             control,
             control_model,
             control_scale,
+            negative_prompt,
+            no_negative,
             expand,
             no_expand,
             expand_backend,
@@ -544,6 +554,8 @@ async fn run() -> anyhow::Result<()> {
                 control,
                 control_model,
                 control_scale,
+                negative_prompt,
+                no_negative,
                 expand,
                 no_expand,
                 expand_backend,

@@ -109,6 +109,11 @@ pub struct ExpandResponse {
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
     pub prompt: String,
+    /// Negative prompt — describes what to avoid generating.
+    /// Only effective for CFG-based models (SD1.5, SDXL, SD3). Ignored by FLUX, Z-Image, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "blurry, low quality, watermark")]
+    pub negative_prompt: Option<String>,
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
     #[schema(example = 1024)]
@@ -204,6 +209,8 @@ pub struct ImageData {
 pub struct OutputMetadata {
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
     pub model: String,
     pub seed: u64,
@@ -227,6 +234,7 @@ impl OutputMetadata {
     ) -> Self {
         Self {
             prompt: req.prompt.clone(),
+            negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
             model: req.model.clone(),
             seed,
@@ -476,6 +484,7 @@ mod tests {
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
             prompt: "a cat on Mars".to_string(),
+            negative_prompt: None,
             model: "flux-schnell".to_string(),
             width: 768,
             height: 768,
@@ -605,9 +614,77 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_backward_compat_no_negative_prompt() {
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.negative_prompt.is_none());
+    }
+
+    #[test]
+    fn generate_request_negative_prompt_roundtrip() {
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: Some("blurry, low quality".to_string()),
+            model: "sd15:fp16".to_string(),
+            width: 512,
+            height: 512,
+            steps: 25,
+            guidance: 7.5,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("negative_prompt"));
+        assert!(json.contains("blurry, low quality"));
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.negative_prompt.as_deref(), Some("blurry, low quality"));
+    }
+
+    #[test]
+    fn generate_request_negative_prompt_omitted_when_none() {
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: "test".to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("negative_prompt"));
+    }
+
+    #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "flux-schnell:q8".to_string(),
             width: 1024,
             height: 1024,
@@ -634,9 +711,39 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn output_metadata_includes_negative_prompt_when_provided() {
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: Some("blurry, ugly".to_string()),
+            model: "sd15:fp16".to_string(),
+            width: 512,
+            height: 512,
+            steps: 25,
+            guidance: 7.5,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: Some(true),
+            scheduler: None,
+            source_image: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+        };
+        let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
+        assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
+    }
+
+    #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "sd15:fp16".to_string(),
             width: 512,
             height: 512,
@@ -755,6 +862,7 @@ mod tests {
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "test".to_string(),
             width: 512,
             height: 512,
@@ -803,6 +911,7 @@ mod tests {
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "test".to_string(),
             width: 512,
             height: 512,
@@ -834,6 +943,7 @@ mod tests {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "test".to_string(),
             width: 512,
             height: 512,
@@ -886,6 +996,7 @@ mod tests {
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
             prompt: "test".to_string(),
+            negative_prompt: None,
             model: "test".to_string(),
             width: 512,
             height: 512,

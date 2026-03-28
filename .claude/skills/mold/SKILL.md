@@ -58,6 +58,11 @@ mold run "a cat" --no-metadata
 
 # Display image inline in terminal after generation (requires `preview` feature)
 mold run "a cat" --preview
+
+# Negative prompt (CFG-based models: SD1.5, SDXL, SD3)
+mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"
+mold run sdxl:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
+mold run sd15:fp16 "a cat" --no-negative  # suppress config default
 ```
 
 ### Prompt Expansion
