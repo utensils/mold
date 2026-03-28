@@ -64,8 +64,7 @@ fn collect_hf_cache_blob_paths(
     // Build a set of unique clean paths to restrict which manifest files we
     // collect cache blobs for. Shared components (VAE, T5, CLIP) that are
     // still referenced by other models must NOT have their blobs deleted.
-    let unique_set: std::collections::HashSet<String> =
-        unique_clean_paths.iter().map(|(p, _)| p.clone()).collect();
+    let unique_set: HashSet<String> = unique_clean_paths.iter().map(|(p, _)| p.clone()).collect();
 
     let mut blobs = Vec::new();
 
@@ -152,87 +151,123 @@ fn collect_referenced_paths(config: &Config) -> HashSet<String> {
     referenced
 }
 
-/// Resolve the hf-cache blob and snapshot symlink corresponding to a clean path.
+/// Pre-built index mapping inode identity `(dev, ino)` to hf-cache paths
+/// (blobs and snapshot symlinks) that should be removed when the corresponding
+/// clean path is deleted.
 ///
-/// `mold pull` hardlinks hf-hub blobs into the clean models dir, so removing only
-/// the clean path doesn't necessarily reclaim disk. This finds the matching
-/// snapshot symlink and its target blob for a single clean path.
-fn collect_hf_cache_paths_for_clean_path(clean_path: &Path, config: &Config) -> Vec<PathBuf> {
-    let models_dir = config.resolved_models_dir();
-    let cache_dir = models_dir.join(".hf-cache");
-    if !cache_dir.is_dir() {
-        return Vec::new();
-    }
-
-    let canonical_clean = clean_path
-        .canonicalize()
-        .unwrap_or_else(|_| clean_path.to_path_buf());
-    let Some(clean_leaf) = clean_path.file_name() else {
-        return Vec::new();
-    };
-
-    let mut matches = Vec::new();
-
-    let repos = match std::fs::read_dir(&cache_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    for repo in repos.flatten() {
-        let snapshots_dir = repo.path().join("snapshots");
-        if !snapshots_dir.is_dir() {
-            continue;
-        }
-        let revisions = match std::fs::read_dir(&snapshots_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for rev in revisions.flatten() {
-            let rev_dir = rev.path();
-            if !rev_dir.is_dir() {
-                continue;
-            }
-            let files = match walk_files_recursive(&rev_dir) {
-                Ok(files) => files,
-                Err(_) => continue,
-            };
-            for snapshot_path in files {
-                if snapshot_path.file_name() != Some(clean_leaf) {
-                    continue;
-                }
-                let Ok(blob) = snapshot_path.canonicalize() else {
-                    continue;
-                };
-                if same_file_identity(&blob, &canonical_clean) {
-                    matches.push(blob.clone());
-                    matches.push(snapshot_path);
-                }
-            }
-        }
-    }
-
-    matches.sort();
-    matches.dedup();
-    matches
+/// Building this once avoids re-walking the entire `.hf-cache` tree for every
+/// orphaned shared file.
+struct HfCacheIndex {
+    /// Maps `(dev, ino)` to the list of cache paths (blobs + snapshot symlinks)
+    /// sharing that inode.
+    #[cfg(unix)]
+    by_inode: HashMap<(u64, u64), Vec<PathBuf>>,
+    #[cfg(not(unix))]
+    by_canonical: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
-fn same_file_identity(left: &Path, right: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+impl HfCacheIndex {
+    fn build(config: &Config) -> Self {
+        #[cfg(unix)]
+        let mut by_inode: HashMap<(u64, u64), Vec<PathBuf>> = HashMap::new();
+        #[cfg(not(unix))]
+        let mut by_canonical: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-        let Ok(left_meta) = std::fs::metadata(left) else {
-            return false;
+        let models_dir = config.resolved_models_dir();
+        let cache_dir = models_dir.join(".hf-cache");
+        if !cache_dir.is_dir() {
+            #[cfg(unix)]
+            return Self { by_inode };
+            #[cfg(not(unix))]
+            return Self { by_canonical };
+        }
+
+        let repos = match std::fs::read_dir(&cache_dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                #[cfg(unix)]
+                return Self { by_inode };
+                #[cfg(not(unix))]
+                return Self { by_canonical };
+            }
         };
-        let Ok(right_meta) = std::fs::metadata(right) else {
-            return false;
-        };
-        left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino()
+
+        for repo in repos.flatten() {
+            let snapshots_dir = repo.path().join("snapshots");
+            if !snapshots_dir.is_dir() {
+                continue;
+            }
+            let revisions = match std::fs::read_dir(&snapshots_dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for rev in revisions.flatten() {
+                let rev_dir = rev.path();
+                if !rev_dir.is_dir() {
+                    continue;
+                }
+                let files = match walk_files_recursive(&rev_dir) {
+                    Ok(files) => files,
+                    Err(_) => continue,
+                };
+                for snapshot_path in files {
+                    let Ok(blob) = snapshot_path.canonicalize() else {
+                        continue;
+                    };
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if let Ok(meta) = std::fs::metadata(&blob) {
+                            let key = (meta.dev(), meta.ino());
+                            let entry = by_inode.entry(key).or_default();
+                            if !entry.contains(&blob) {
+                                entry.push(blob.clone());
+                            }
+                            entry.push(snapshot_path);
+                        }
+                    }
+
+                    #[cfg(not(unix))]
+                    {
+                        let entry = by_canonical.entry(blob.clone()).or_default();
+                        if !entry.contains(&blob) {
+                            entry.push(blob.clone());
+                        }
+                        entry.push(snapshot_path);
+                    }
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        return Self { by_inode };
+        #[cfg(not(unix))]
+        return Self { by_canonical };
     }
 
-    #[cfg(not(unix))]
-    {
-        left == right
+    /// Look up hf-cache paths (blobs + snapshot symlinks) for a given clean path.
+    fn lookup(&self, clean_path: &Path) -> Vec<PathBuf> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(meta) = std::fs::metadata(clean_path) else {
+                return Vec::new();
+            };
+            let key = (meta.dev(), meta.ino());
+            self.by_inode.get(&key).cloned().unwrap_or_default()
+        }
+
+        #[cfg(not(unix))]
+        {
+            let canonical = clean_path
+                .canonicalize()
+                .unwrap_or_else(|_| clean_path.to_path_buf());
+            self.by_canonical
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -286,7 +321,7 @@ fn active_pull_models(config: &Config) -> HashSet<String> {
 
 fn active_pull_repos(config: &Config) -> HashSet<String> {
     let active_models = active_pull_models(config);
-    let mut repos = std::collections::HashSet::new();
+    let mut repos = HashSet::new();
 
     for manifest in known_manifests() {
         if active_models.contains(&manifest.name) {
@@ -348,10 +383,11 @@ fn clean_orphaned_shared_files(config: &Config) {
     }
 
     let referenced = collect_referenced_paths(config);
+    let hf_index = HfCacheIndex::build(config);
 
     let mut total_count = 0u64;
     let mut total_bytes = 0u64;
-    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced, config);
+    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced, &hf_index);
     total_count += count;
     total_bytes += bytes;
 
@@ -377,7 +413,7 @@ fn clean_orphaned_shared_files(config: &Config) {
 fn remove_orphaned_files_recursive(
     dir: &Path,
     referenced: &HashSet<String>,
-    config: &Config,
+    hf_index: &HfCacheIndex,
 ) -> (u64, u64) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -388,7 +424,7 @@ fn remove_orphaned_files_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_symlink() && path.is_dir() {
-            let (c, b) = remove_orphaned_files_recursive(&path, referenced, config);
+            let (c, b) = remove_orphaned_files_recursive(&path, referenced, hf_index);
             count += c;
             bytes += b;
         } else if path.is_file() {
@@ -396,7 +432,7 @@ fn remove_orphaned_files_recursive(
             if !referenced.contains(&path_str) {
                 let mut removed_any = false;
                 let mut removed_bytes = 0u64;
-                let cache_targets = collect_hf_cache_paths_for_clean_path(&path, config);
+                let cache_targets = hf_index.lookup(&path);
                 let mut counted_inodes = HashSet::new();
 
                 for target in &cache_targets {
@@ -926,11 +962,13 @@ mod tests {
         let orphan = t5_gguf_dir.join("t5-v1_1-xxl-encoder-Q8_0.gguf");
         std::fs::write(&orphan, b"orphaned encoder data").unwrap();
 
-        let referenced_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let referenced_set: HashSet<String> = HashSet::new();
 
         // Run the orphan removal logic on the scoped cache dir
         let cfg = Config::default();
-        let (count, bytes) = remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set, &cfg);
+        let hf_index = HfCacheIndex::build(&cfg);
+        let (count, bytes) =
+            remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set, &hf_index);
         assert_eq!(count, 1, "should delete exactly 1 orphaned file");
         assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
 
@@ -949,9 +987,10 @@ mod tests {
         let flux_vae = flux_dir.join("ae.safetensors");
         std::fs::write(&flux_vae, b"vae data").unwrap();
 
-        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
-        remove_orphaned_files_recursive(&shared, &referenced, &cfg);
+        let hf_index = HfCacheIndex::build(&cfg);
+        remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
         remove_empty_dirs_recursive(&shared);
 
         assert!(
@@ -974,9 +1013,10 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
 
         // All empty — simulate post-deletion state
-        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
-        remove_orphaned_files_recursive(&shared, &referenced, &cfg);
+        let hf_index = HfCacheIndex::build(&cfg);
+        remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
         remove_empty_dirs_recursive(&shared);
         let _ = std::fs::remove_dir(&shared);
 
@@ -1006,9 +1046,10 @@ mod tests {
         std::fs::write(&orphan_t5, b"t5 data").unwrap();
         std::fs::write(&orphan_qwen, b"qwen data").unwrap();
 
-        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &cfg);
+        let hf_index = HfCacheIndex::build(&cfg);
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
         assert_eq!(count, 2, "should delete both orphaned files");
         assert_eq!(bytes, 16, "should report correct total bytes"); // "t5 data"(7) + "qwen data"(9)
         remove_empty_dirs_recursive(&shared);
@@ -1038,7 +1079,7 @@ mod tests {
         std::fs::write(&shared_t5, b"t5").unwrap();
 
         // model-b still references both files
-        let referenced: std::collections::HashSet<String> = [
+        let referenced: HashSet<String> = [
             shared_vae.to_string_lossy().to_string(),
             shared_t5.to_string_lossy().to_string(),
         ]
@@ -1046,7 +1087,8 @@ mod tests {
         .collect();
 
         let cfg = Config::default();
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &cfg);
+        let hf_index = HfCacheIndex::build(&cfg);
+        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
         assert_eq!(count, 0, "no files should be deleted");
         assert_eq!(bytes, 0, "no bytes should be freed");
         remove_empty_dirs_recursive(&shared);
@@ -1190,8 +1232,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.models_dir = tmp.to_string_lossy().to_string();
 
-        let referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let (count, _bytes) = remove_orphaned_files_recursive(&shared_flux, &referenced, &cfg);
+        let referenced: HashSet<String> = HashSet::new();
+        let hf_index = HfCacheIndex::build(&cfg);
+        let (count, _bytes) = remove_orphaned_files_recursive(&shared_flux, &referenced, &hf_index);
 
         assert_eq!(count, 1, "should count the orphaned shared file once");
         assert!(!clean_path.exists(), "clean shared path should be removed");
