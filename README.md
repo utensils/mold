@@ -202,6 +202,36 @@ mold run "a cat" --expand --expand-backend http://localhost:11434/v1
 
 Set `MOLD_EXPAND=1` to enable expansion by default. Use `--no-expand` to override.
 
+#### Custom expansion prompts
+
+The system prompt templates and per-model-family word limits can be customized in `~/.config/mold/config.toml`:
+
+```toml
+[expand]
+enabled = true
+model = "qwen3-expand:q8"
+
+# Override the single-expansion system prompt template.
+# Available placeholders: {WORD_LIMIT}, {MODEL_NOTES}
+# system_prompt = "You are an image prompt writer. Keep under {WORD_LIMIT} words. {MODEL_NOTES}"
+
+# Override the batch-variation system prompt template.
+# Available placeholders: {N}, {WORD_LIMIT}, {MODEL_NOTES}
+# batch_prompt = "Generate {N} distinct image prompts under {WORD_LIMIT} words each. {MODEL_NOTES}"
+
+# Override per-family word limits and style notes.
+# Families: sd15, sdxl, wuerstchen, flux, sd3, z-image, flux2, qwen-image
+[expand.families.sd15]
+word_limit = 50
+style_notes = "SD 1.5 uses CLIP-L (77 tokens). Use comma-separated keyword phrases."
+
+[expand.families.flux]
+word_limit = 200
+style_notes = "Write rich, descriptive natural language with atmosphere and mood."
+```
+
+Templates can also be set via environment variables: `MOLD_EXPAND_SYSTEM_PROMPT`, `MOLD_EXPAND_BATCH_PROMPT`.
+
 ### Manage models
 
 ```bash
@@ -280,6 +310,8 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
 | `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
+| `MOLD_EXPAND_SYSTEM_PROMPT` | — | Custom single-expansion system prompt template |
+| `MOLD_EXPAND_BATCH_PROMPT` | — | Custom batch-variation system prompt template |
 
 See [CLAUDE.md](CLAUDE.md) for the full list.
 

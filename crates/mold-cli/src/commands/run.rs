@@ -183,6 +183,14 @@ pub async fn run(
             }
         }
 
+        // Validate custom templates if present
+        let template_errors = settings.validate_templates();
+        if !template_errors.is_empty() {
+            for err in &template_errors {
+                eprintln!("{} {err}", crate::theme::prefix_warning());
+            }
+        }
+
         let model_family = super::expand::resolve_family_from_config(&model, &config);
         let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
 

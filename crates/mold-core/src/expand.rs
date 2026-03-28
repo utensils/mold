@@ -4,10 +4,21 @@
 //! - `ApiExpander`: calls any OpenAI-compatible `/v1/chat/completions` endpoint
 //! - Local GGUF inference (in `mold-inference`, behind the `expand` feature flag)
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::expand_prompts::{build_batch_messages, build_single_messages};
+
+/// Per-family word limit and style notes override.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FamilyOverride {
+    /// Word limit for expanded prompts (overrides built-in default for this family).
+    pub word_limit: Option<u32>,
+    /// Style notes injected into the system prompt (overrides built-in default).
+    pub style_notes: Option<String>,
+}
 
 /// Configuration for a prompt expansion request.
 #[derive(Debug, Clone)]
@@ -24,6 +35,14 @@ pub struct ExpandConfig {
     pub max_tokens: u32,
     /// Enable Qwen3 thinking mode for higher quality (slower).
     pub thinking: bool,
+    /// Custom single-expansion system prompt template (overrides built-in).
+    /// Placeholders: `{WORD_LIMIT}`, `{MODEL_NOTES}`
+    pub system_prompt: Option<String>,
+    /// Custom batch-variation system prompt template (overrides built-in).
+    /// Placeholders: `{N}`, `{WORD_LIMIT}`, `{MODEL_NOTES}`
+    pub batch_prompt: Option<String>,
+    /// Per-family overrides for word limits and style notes.
+    pub family_overrides: HashMap<String, FamilyOverride>,
 }
 
 impl Default for ExpandConfig {
@@ -35,6 +54,9 @@ impl Default for ExpandConfig {
             top_p: 0.9,
             max_tokens: 300,
             thinking: false,
+            system_prompt: None,
+            batch_prompt: None,
+            family_overrides: HashMap::new(),
         }
     }
 }
@@ -108,10 +130,22 @@ impl ApiExpander {
 
 impl PromptExpander for ApiExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
+        let family_override = config.family_overrides.get(&config.model_family);
         let messages = if config.variations > 1 {
-            build_batch_messages(prompt, &config.model_family, config.variations)
+            build_batch_messages(
+                prompt,
+                &config.model_family,
+                config.variations,
+                config.batch_prompt.as_deref(),
+                family_override,
+            )
         } else {
-            build_single_messages(prompt, &config.model_family)
+            build_single_messages(
+                prompt,
+                &config.model_family,
+                config.system_prompt.as_deref(),
+                family_override,
+            )
         };
 
         let chat_messages: Vec<ChatMessage> = messages
@@ -278,6 +312,17 @@ pub struct ExpandSettings {
     /// Enable thinking mode for Qwen3 (higher quality, slower).
     #[serde(default)]
     pub thinking: bool,
+    /// Custom single-expansion system prompt template.
+    /// Available placeholders: `{WORD_LIMIT}`, `{MODEL_NOTES}`
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Custom batch-variation system prompt template.
+    /// Available placeholders: `{N}`, `{WORD_LIMIT}`, `{MODEL_NOTES}`
+    #[serde(default)]
+    pub batch_prompt: Option<String>,
+    /// Per-family word limit and style notes overrides.
+    #[serde(default)]
+    pub families: HashMap<String, FamilyOverride>,
 }
 
 fn default_backend() -> String {
@@ -315,6 +360,9 @@ impl Default for ExpandSettings {
             top_p: default_top_p(),
             max_tokens: default_max_tokens(),
             thinking: false,
+            system_prompt: None,
+            batch_prompt: None,
+            families: HashMap::new(),
         }
     }
 }
@@ -347,6 +395,16 @@ impl ExpandSettings {
         if let Ok(v) = std::env::var("MOLD_EXPAND_THINKING") {
             self.thinking = matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes");
         }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_SYSTEM_PROMPT") {
+            if !v.is_empty() {
+                self.system_prompt = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("MOLD_EXPAND_BATCH_PROMPT") {
+            if !v.is_empty() {
+                self.batch_prompt = Some(v);
+            }
+        }
         self
     }
 
@@ -359,7 +417,35 @@ impl ExpandSettings {
             top_p: self.top_p,
             max_tokens: self.max_tokens,
             thinking: self.thinking,
+            system_prompt: self.system_prompt.clone(),
+            batch_prompt: self.batch_prompt.clone(),
+            family_overrides: self.families.clone(),
         }
+    }
+
+    /// Validate that custom templates contain required placeholders.
+    /// Returns a list of validation errors (empty = valid).
+    pub fn validate_templates(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Some(ref tmpl) = self.system_prompt {
+            for placeholder in ["{WORD_LIMIT}", "{MODEL_NOTES}"] {
+                if !tmpl.contains(placeholder) {
+                    errors.push(format!(
+                        "system_prompt is missing required placeholder: {placeholder}"
+                    ));
+                }
+            }
+        }
+        if let Some(ref tmpl) = self.batch_prompt {
+            for placeholder in ["{N}", "{WORD_LIMIT}", "{MODEL_NOTES}"] {
+                if !tmpl.contains(placeholder) {
+                    errors.push(format!(
+                        "batch_prompt is missing required placeholder: {placeholder}"
+                    ));
+                }
+            }
+        }
+        errors
     }
 
     /// Create the appropriate expander backend.
@@ -534,6 +620,9 @@ mod tests {
         assert_eq!(settings.top_p, 0.9);
         assert_eq!(settings.max_tokens, 300);
         assert!(!settings.thinking);
+        assert!(settings.system_prompt.is_none());
+        assert!(settings.batch_prompt.is_none());
+        assert!(settings.families.is_empty());
     }
 
     #[test]
@@ -585,6 +674,14 @@ mod tests {
 
     #[test]
     fn expand_settings_serde_roundtrip() {
+        let mut families = HashMap::new();
+        families.insert(
+            "sd15".to_string(),
+            FamilyOverride {
+                word_limit: Some(80),
+                style_notes: Some("Custom SD1.5 notes.".to_string()),
+            },
+        );
         let settings = ExpandSettings {
             enabled: true,
             backend: "http://example.com".to_string(),
@@ -594,6 +691,9 @@ mod tests {
             top_p: 0.95,
             max_tokens: 500,
             thinking: true,
+            system_prompt: Some("Custom system prompt {WORD_LIMIT} {MODEL_NOTES}".to_string()),
+            batch_prompt: Some("Custom batch {N} {WORD_LIMIT} {MODEL_NOTES}".to_string()),
+            families,
         };
         let toml_str = toml::to_string(&settings).unwrap();
         let deserialized: ExpandSettings = toml::from_str(&toml_str).unwrap();
@@ -604,6 +704,12 @@ mod tests {
         assert_eq!(deserialized.temperature, settings.temperature);
         assert_eq!(deserialized.max_tokens, settings.max_tokens);
         assert_eq!(deserialized.thinking, settings.thinking);
+        assert_eq!(deserialized.system_prompt, settings.system_prompt);
+        assert_eq!(deserialized.batch_prompt, settings.batch_prompt);
+        assert_eq!(deserialized.families.len(), 1);
+        let sd15 = deserialized.families.get("sd15").unwrap();
+        assert_eq!(sd15.word_limit, Some(80));
+        assert_eq!(sd15.style_notes.as_deref(), Some("Custom SD1.5 notes."));
     }
 
     #[test]
@@ -680,5 +786,159 @@ mod tests {
         }
         assert_eq!(s.api_model, "llama3:70b");
         assert_eq!(s.model, "qwen3-expand:q8"); // unchanged
+    }
+
+    // ── template overrides in ExpandConfig ───────────────────────────────
+
+    #[test]
+    fn to_expand_config_passes_overrides() {
+        let mut families = HashMap::new();
+        families.insert(
+            "flux".to_string(),
+            FamilyOverride {
+                word_limit: Some(200),
+                style_notes: None,
+            },
+        );
+        let settings = ExpandSettings {
+            system_prompt: Some("Custom {WORD_LIMIT} {MODEL_NOTES}".to_string()),
+            batch_prompt: Some("Batch {N} {WORD_LIMIT} {MODEL_NOTES}".to_string()),
+            families,
+            ..Default::default()
+        };
+        let config = settings.to_expand_config("flux", 3);
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("Custom {WORD_LIMIT} {MODEL_NOTES}")
+        );
+        assert_eq!(
+            config.batch_prompt.as_deref(),
+            Some("Batch {N} {WORD_LIMIT} {MODEL_NOTES}")
+        );
+        assert_eq!(config.family_overrides.len(), 1);
+        assert_eq!(
+            config.family_overrides.get("flux").unwrap().word_limit,
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn expand_config_default_has_no_overrides() {
+        let config = ExpandConfig::default();
+        assert!(config.system_prompt.is_none());
+        assert!(config.batch_prompt.is_none());
+        assert!(config.family_overrides.is_empty());
+    }
+
+    // ── validate_templates ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_templates_valid() {
+        let settings = ExpandSettings {
+            system_prompt: Some("You are a writer. {WORD_LIMIT} words. {MODEL_NOTES}".to_string()),
+            batch_prompt: Some(
+                "Generate {N} prompts. {WORD_LIMIT} words. {MODEL_NOTES}".to_string(),
+            ),
+            ..Default::default()
+        };
+        assert!(settings.validate_templates().is_empty());
+    }
+
+    #[test]
+    fn validate_templates_none_is_valid() {
+        let settings = ExpandSettings::default();
+        assert!(settings.validate_templates().is_empty());
+    }
+
+    #[test]
+    fn validate_templates_missing_word_limit() {
+        let settings = ExpandSettings {
+            system_prompt: Some("You are a writer. {MODEL_NOTES}".to_string()),
+            ..Default::default()
+        };
+        let errors = settings.validate_templates();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("{WORD_LIMIT}"));
+    }
+
+    #[test]
+    fn validate_templates_missing_model_notes() {
+        let settings = ExpandSettings {
+            system_prompt: Some("You are a writer. {WORD_LIMIT} words.".to_string()),
+            ..Default::default()
+        };
+        let errors = settings.validate_templates();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("{MODEL_NOTES}"));
+    }
+
+    #[test]
+    fn validate_templates_batch_missing_n() {
+        let settings = ExpandSettings {
+            batch_prompt: Some("Generate prompts. {WORD_LIMIT} {MODEL_NOTES}".to_string()),
+            ..Default::default()
+        };
+        let errors = settings.validate_templates();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("{N}"));
+    }
+
+    #[test]
+    fn validate_templates_batch_missing_all() {
+        let settings = ExpandSettings {
+            batch_prompt: Some("Generate prompts.".to_string()),
+            ..Default::default()
+        };
+        let errors = settings.validate_templates();
+        assert_eq!(errors.len(), 3);
+    }
+
+    // ── FamilyOverride serde ────────────────────────────────────────────
+
+    #[test]
+    fn family_override_serde_roundtrip() {
+        let ov = FamilyOverride {
+            word_limit: Some(100),
+            style_notes: Some("Be creative.".to_string()),
+        };
+        let json = serde_json::to_string(&ov).unwrap();
+        let deserialized: FamilyOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.word_limit, Some(100));
+        assert_eq!(deserialized.style_notes.as_deref(), Some("Be creative."));
+    }
+
+    #[test]
+    fn family_override_partial_toml() {
+        let toml_str = "word_limit = 75\n";
+        let ov: FamilyOverride = toml::from_str(toml_str).unwrap();
+        assert_eq!(ov.word_limit, Some(75));
+        assert!(ov.style_notes.is_none());
+    }
+
+    // ── full config with families in TOML ───────────────────────────────
+
+    #[test]
+    fn expand_settings_toml_with_families() {
+        let toml_str = r#"
+enabled = true
+system_prompt = "Custom prompt. {WORD_LIMIT} words. {MODEL_NOTES}"
+
+[families.sd15]
+word_limit = 40
+style_notes = "Short keywords only."
+
+[families.flux]
+word_limit = 250
+"#;
+        let settings: ExpandSettings = toml::from_str(toml_str).unwrap();
+        assert!(settings.enabled);
+        assert!(settings.system_prompt.is_some());
+        assert_eq!(settings.families.len(), 2);
+        let sd15 = settings.families.get("sd15").unwrap();
+        assert_eq!(sd15.word_limit, Some(40));
+        assert_eq!(sd15.style_notes.as_deref(), Some("Short keywords only."));
+        let flux = settings.families.get("flux").unwrap();
+        assert_eq!(flux.word_limit, Some(250));
+        assert!(flux.style_notes.is_none());
     }
 }

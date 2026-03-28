@@ -3,8 +3,10 @@
 //! Different diffusion models have different prompt styles and token limits.
 //! This module provides tailored system prompts for each model family.
 
+use crate::expand::FamilyOverride;
+
 /// Return the word limit and prompt style notes for a given model family.
-fn family_config(family: &str) -> (u32, &'static str) {
+pub fn family_config(family: &str) -> (u32, &'static str) {
     match family.to_lowercase().as_str() {
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => (
             50,
@@ -57,14 +59,36 @@ Example format: [\"prompt one\", \"prompt two\"]
 
 {MODEL_NOTES}";
 
+/// Resolve the effective word limit and model notes for a family, applying
+/// any user-provided overrides on top of the built-in defaults.
+fn resolve_family_config(family: &str, overrides: Option<&FamilyOverride>) -> (u32, String) {
+    let (default_limit, default_notes) = family_config(family);
+    match overrides {
+        Some(ov) => (
+            ov.word_limit.unwrap_or(default_limit),
+            ov.style_notes
+                .clone()
+                .unwrap_or_else(|| default_notes.to_string()),
+        ),
+        None => (default_limit, default_notes.to_string()),
+    }
+}
+
 /// Build chat messages for a single prompt expansion.
 ///
+/// Accepts optional custom template and per-family overrides.
 /// Returns `Vec<(role, content)>` tuples.
-pub fn build_single_messages(prompt: &str, family: &str) -> Vec<(String, String)> {
-    let (word_limit, model_notes) = family_config(family);
-    let system = SINGLE_SYSTEM_TEMPLATE
+pub fn build_single_messages(
+    prompt: &str,
+    family: &str,
+    custom_template: Option<&str>,
+    family_override: Option<&FamilyOverride>,
+) -> Vec<(String, String)> {
+    let (word_limit, model_notes) = resolve_family_config(family, family_override);
+    let template = custom_template.unwrap_or(SINGLE_SYSTEM_TEMPLATE);
+    let system = template
         .replace("{WORD_LIMIT}", &word_limit.to_string())
-        .replace("{MODEL_NOTES}", model_notes);
+        .replace("{MODEL_NOTES}", &model_notes);
 
     vec![
         ("system".to_string(), system),
@@ -74,17 +98,21 @@ pub fn build_single_messages(prompt: &str, family: &str) -> Vec<(String, String)
 
 /// Build chat messages for batch variation generation.
 ///
+/// Accepts optional custom template and per-family overrides.
 /// Returns `Vec<(role, content)>` tuples.
 pub fn build_batch_messages(
     prompt: &str,
     family: &str,
     variations: usize,
+    custom_template: Option<&str>,
+    family_override: Option<&FamilyOverride>,
 ) -> Vec<(String, String)> {
-    let (word_limit, model_notes) = family_config(family);
-    let system = BATCH_SYSTEM_TEMPLATE
+    let (word_limit, model_notes) = resolve_family_config(family, family_override);
+    let template = custom_template.unwrap_or(BATCH_SYSTEM_TEMPLATE);
+    let system = template
         .replace("{N}", &variations.to_string())
         .replace("{WORD_LIMIT}", &word_limit.to_string())
-        .replace("{MODEL_NOTES}", model_notes);
+        .replace("{MODEL_NOTES}", &model_notes);
 
     vec![
         ("system".to_string(), system),
@@ -176,7 +204,7 @@ mod tests {
 
     #[test]
     fn single_messages_flux() {
-        let msgs = build_single_messages("a cat", "flux");
+        let msgs = build_single_messages("a cat", "flux", None, None);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].0, "system");
         assert!(msgs[0].1.contains("150 words"));
@@ -186,7 +214,7 @@ mod tests {
 
     #[test]
     fn single_messages_sd15() {
-        let msgs = build_single_messages("a cat", "sd15");
+        let msgs = build_single_messages("a cat", "sd15", None, None);
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].1.contains("50 words"));
         assert!(msgs[0].1.contains("keyword"));
@@ -195,7 +223,7 @@ mod tests {
     #[test]
     fn single_messages_preserves_user_prompt() {
         let prompt = "a cyberpunk city at night with neon reflections";
-        let msgs = build_single_messages(prompt, "flux");
+        let msgs = build_single_messages(prompt, "flux", None, None);
         assert_eq!(msgs[1].1, prompt);
     }
 
@@ -203,7 +231,7 @@ mod tests {
 
     #[test]
     fn batch_messages_sdxl() {
-        let msgs = build_batch_messages("sunset", "sdxl", 3);
+        let msgs = build_batch_messages("sunset", "sdxl", 3, None, None);
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].1.contains("3 distinct"));
         assert!(msgs[0].1.contains("JSON array"));
@@ -213,7 +241,7 @@ mod tests {
     #[test]
     fn batch_messages_count_substitution() {
         for n in [2, 5, 10] {
-            let msgs = build_batch_messages("test", "flux", n);
+            let msgs = build_batch_messages("test", "flux", n, None, None);
             assert!(
                 msgs[0].1.contains(&format!("{n} distinct")),
                 "should contain '{n} distinct' for variations={n}"
@@ -224,8 +252,93 @@ mod tests {
     #[test]
     fn batch_messages_preserves_user_prompt() {
         let prompt = "a dragon in a crystal cave";
-        let msgs = build_batch_messages(prompt, "sdxl", 4);
+        let msgs = build_batch_messages(prompt, "sdxl", 4, None, None);
         assert_eq!(msgs[1].1, prompt);
+    }
+
+    // ── custom templates and family overrides ────────────────────────────
+
+    #[test]
+    fn single_messages_custom_template() {
+        let custom = "Custom system: limit {WORD_LIMIT}. Notes: {MODEL_NOTES}";
+        let msgs = build_single_messages("a cat", "flux", Some(custom), None);
+        assert!(msgs[0].1.contains("Custom system: limit 150"));
+        assert!(msgs[0].1.contains("natural language"));
+    }
+
+    #[test]
+    fn batch_messages_custom_template() {
+        let custom = "Generate {N} prompts, max {WORD_LIMIT} words. {MODEL_NOTES}";
+        let msgs = build_batch_messages("a cat", "flux", 3, Some(custom), None);
+        assert!(msgs[0].1.contains("Generate 3 prompts"));
+        assert!(msgs[0].1.contains("max 150 words"));
+    }
+
+    #[test]
+    fn single_messages_family_override_word_limit() {
+        let ov = FamilyOverride {
+            word_limit: Some(200),
+            style_notes: None,
+        };
+        let msgs = build_single_messages("a cat", "flux", None, Some(&ov));
+        assert!(msgs[0].1.contains("200 words"));
+        // Should still use built-in style notes
+        assert!(msgs[0].1.contains("natural language"));
+    }
+
+    #[test]
+    fn single_messages_family_override_style_notes() {
+        let ov = FamilyOverride {
+            word_limit: None,
+            style_notes: Some("Use haiku style.".to_string()),
+        };
+        let msgs = build_single_messages("a cat", "sd15", None, Some(&ov));
+        // Word limit should still be the SD1.5 default (50)
+        assert!(msgs[0].1.contains("50 words"));
+        // But style notes should be overridden
+        assert!(msgs[0].1.contains("Use haiku style."));
+        assert!(!msgs[0].1.contains("keyword"));
+    }
+
+    #[test]
+    fn batch_messages_family_override_both() {
+        let ov = FamilyOverride {
+            word_limit: Some(75),
+            style_notes: Some("Cinematic descriptions only.".to_string()),
+        };
+        let msgs = build_batch_messages("a cat", "sdxl", 4, None, Some(&ov));
+        assert!(msgs[0].1.contains("75 words"));
+        assert!(msgs[0].1.contains("Cinematic descriptions only."));
+    }
+
+    #[test]
+    fn custom_template_with_family_override() {
+        let custom = "Limit: {WORD_LIMIT}. Style: {MODEL_NOTES}";
+        let ov = FamilyOverride {
+            word_limit: Some(300),
+            style_notes: Some("Go wild.".to_string()),
+        };
+        let msgs = build_single_messages("test", "flux", Some(custom), Some(&ov));
+        assert_eq!(msgs[0].1, "Limit: 300. Style: Go wild.");
+    }
+
+    #[test]
+    fn resolve_family_config_defaults_preserved() {
+        let (limit, notes) = resolve_family_config("sd15", None);
+        assert_eq!(limit, 50);
+        assert!(notes.contains("keyword"));
+    }
+
+    #[test]
+    fn resolve_family_config_partial_override() {
+        let ov = FamilyOverride {
+            word_limit: Some(100),
+            style_notes: None,
+        };
+        let (limit, notes) = resolve_family_config("sd15", Some(&ov));
+        assert_eq!(limit, 100);
+        // Notes should fall back to default
+        assert!(notes.contains("keyword"));
     }
 
     // ── format_chatml ────────────────────────────────────────────────────

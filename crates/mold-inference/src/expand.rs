@@ -263,10 +263,22 @@ impl LocalExpander {
 
 impl PromptExpander for LocalExpander {
     fn expand(&self, prompt: &str, config: &ExpandConfig) -> Result<ExpandResult> {
+        let family_override = config.family_overrides.get(&config.model_family);
         let messages = if config.variations > 1 {
-            build_batch_messages(prompt, &config.model_family, config.variations)
+            build_batch_messages(
+                prompt,
+                &config.model_family,
+                config.variations,
+                config.batch_prompt.as_deref(),
+                family_override,
+            )
         } else {
-            build_single_messages(prompt, &config.model_family)
+            build_single_messages(
+                prompt,
+                &config.model_family,
+                config.system_prompt.as_deref(),
+                family_override,
+            )
         };
 
         let prompt_text = format_chatml(&messages, config.thinking);
