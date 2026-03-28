@@ -26,12 +26,11 @@ in
       );
       default = null;
       description = ''
-        CUDA GPU architecture for automatic package selection.
-        - "ada" — RTX 40-series (Ada Lovelace, sm_89)
-        - "blackwell" — RTX 50-series (Blackwell, sm_120)
-        When set and `package` is not explicitly overridden, selects the
-        matching package variant from the mold flake.
-        When null, uses whatever package is provided.
+        CUDA GPU architecture hint. Emits a warning if set to "blackwell"
+        to remind you to use the matching package variant.
+        - "ada" — RTX 40-series (Ada Lovelace, sm_89): use packages.''${system}.mold
+        - "blackwell" — RTX 50-series (Blackwell, sm_120): use packages.''${system}.mold-sm120
+        The module cannot auto-select flake packages; you must set `package` to match.
       '';
       example = "blackwell";
     };
@@ -154,6 +153,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    warnings = lib.optionals (cfg.cudaArch == "blackwell") [
+      ''
+        services.mold.cudaArch is "blackwell" — make sure you set the matching package:
+          services.mold.package = inputs.mold.packages.''${system}.mold-sm120;
+        The module cannot auto-select flake packages; cudaArch is advisory.
+      ''
+    ];
+
     services.mold.modelsDir = lib.mkDefault "${cfg.homeDir}/models";
 
     users.users.mold = {

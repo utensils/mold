@@ -32,12 +32,28 @@ detect_cuda_arch() {
     if command -v nvidia-smi >/dev/null 2>&1; then
         CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]')"
         if [ -n "${CC}" ]; then
-            # Parse major version: "8.9" -> 8, "12.0" -> 12
+            # Parse major.minor: "8.9" -> 8 9, "12.0" -> 12 0
             MAJOR="$(echo "${CC}" | cut -d. -f1)"
+            MINOR="$(echo "${CC}" | cut -d. -f2)"
+            MINOR="${MINOR:-0}"
+
             if [ "${MAJOR}" -ge 12 ] 2>/dev/null; then
                 echo "sm120"
                 return
-            elif [ "${MAJOR}" -ge 8 ] 2>/dev/null; then
+            elif [ "${MAJOR}" -eq 8 ] 2>/dev/null && [ "${MINOR}" -ge 9 ] 2>/dev/null; then
+                # Ada Lovelace (8.9) — native sm_89 binary
+                echo "sm89"
+                return
+            elif [ "${MAJOR}" -eq 8 ] 2>/dev/null; then
+                # Ampere (8.0, 8.6) — sm_89 binary works via PTX JIT but
+                # flash-attention kernels won't run natively. Still the
+                # best available binary; core inference works.
+                echo "Warning: GPU compute capability ${CC} (Ampere) — using sm89 binary." >&2
+                echo "  Core inference works via PTX JIT. Flash-attention may be unavailable." >&2
+                echo "sm89"
+                return
+            elif [ "${MAJOR}" -ge 9 ] 2>/dev/null; then
+                # Hopper (9.0) or other post-Ada — use sm89 with JIT
                 echo "sm89"
                 return
             else

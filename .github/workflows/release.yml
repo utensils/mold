@@ -194,18 +194,18 @@ jobs:
             ## Install
 
             ```bash
-            # One-line install (auto-detects GPU)
-            curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
+            # One-line install (auto-detects GPU, pinned to this release)
+            MOLD_VERSION=${{ github.ref_name }} curl -fsSL https://raw.githubusercontent.com/utensils/mold/${{ github.ref_name }}/install.sh | sh
 
             # From crates.io (CPU-only, no GPU acceleration)
             cargo install mold-ai
 
             # From source with GPU support
-            cargo install --git https://github.com/utensils/mold --features metal  # macOS
-            cargo install --git https://github.com/utensils/mold --features cuda   # Linux
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal  # macOS
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda   # Linux
 
             # Nix
-            nix run github:utensils/mold
+            nix run github:utensils/mold/${{ github.ref_name }}
             ```
 
             ## Download pre-built binaries
