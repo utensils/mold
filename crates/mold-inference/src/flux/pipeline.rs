@@ -535,6 +535,49 @@ fn flux_safetensors_var_builder<'a>(
     Ok(unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device)? })
 }
 
+/// Build a VarBuilder from base safetensors with LoRA deltas pre-merged.
+///
+/// Loads all base tensors into a HashMap, applies LoRA weight merging, then
+/// returns a `VarBuilder::from_tensors`. This is slower than the mmap path
+/// but necessary because we need to mutate the weight tensors in memory.
+fn flux_lora_var_builder<'a>(
+    transformer_path: &Path,
+    lora: &mold_core::LoraWeight,
+    dtype: DType,
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<VarBuilder<'a>> {
+    use super::lora;
+    use std::collections::HashMap;
+
+    progress.info("Loading base transformer weights for LoRA merge");
+    let base_st = candle_core::safetensors::load(transformer_path, &Device::Cpu)?;
+    let mut tensors: HashMap<String, candle_core::Tensor> = lora::strip_tensor_prefix(base_st);
+
+    progress.info("Loading LoRA adapter");
+    let adapter = lora::LoraAdapter::load(Path::new(&lora.path))?;
+    progress.info(&format!(
+        "LoRA: {} layers, rank {}, scale {:.2}",
+        adapter.layers.len(),
+        adapter.rank,
+        lora.scale
+    ));
+
+    lora::merge_lora_into_tensors(&mut tensors, &adapter, lora.scale, progress)?;
+
+    // Move merged tensors to target device and dtype
+    let tensors: HashMap<String, candle_core::Tensor> = tensors
+        .into_iter()
+        .map(|(k, v)| {
+            let v = v.to_dtype(dtype).unwrap_or(v);
+            let v = v.to_device(device).unwrap_or(v);
+            (k, v)
+        })
+        .collect();
+
+    Ok(VarBuilder::from_tensors(tensors, dtype, device))
+}
+
 /// Loaded FLUX model components, ready for inference.
 /// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
 /// depending on available VRAM (checked at load time after the transformer is loaded).
@@ -1174,13 +1217,29 @@ impl FluxEngine {
             self.base.progress.info(&status);
         }
 
+        // LoRA guards
+        if req.lora.is_some() && is_quantized {
+            bail!(
+                "LoRA adapters are not yet supported with quantized (GGUF) models. \
+                 Use a BF16 model instead (e.g. flux-dev:bf16)."
+            );
+        }
+        if req.lora.is_some() && use_offload {
+            bail!(
+                "LoRA adapters are not yet supported with block-level offloading. \
+                 Remove --offload to use LoRA."
+            );
+        }
+
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
         } else {
             flux::model::Config::dev()
         };
 
-        let xformer_label = if use_offload {
+        let xformer_label = if req.lora.is_some() {
+            "Loading FLUX transformer + LoRA (GPU, BF16)"
+        } else if use_offload {
             "Loading FLUX transformer (offloaded, blocks on CPU)"
         } else if is_quantized {
             "Loading FLUX transformer (GPU, quantized)"
@@ -1206,6 +1265,15 @@ impl FluxEngine {
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+        } else if let Some(ref lora) = req.lora {
+            let flux_vb = flux_lora_var_builder(
+                &transformer_path,
+                lora,
+                gpu_dtype,
+                &device,
+                &self.base.progress,
+            )?;
+            FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
                 &transformer_path,
@@ -1450,6 +1518,14 @@ impl InferenceEngine for FluxEngine {
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
+        }
+
+        // LoRA is only supported in sequential mode (the default).
+        if req.lora.is_some() {
+            bail!(
+                "LoRA adapters require sequential loading mode (the default). \
+                 Remove --eager to use LoRA."
+            );
         }
 
         // Eager mode: use pre-loaded components

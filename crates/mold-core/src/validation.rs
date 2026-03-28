@@ -154,6 +154,22 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("mask_image must be a PNG or JPEG image".to_string());
         }
     }
+    // LoRA validation
+    if let Some(ref lora) = req.lora {
+        if lora.scale < 0.0 || lora.scale > 2.0 {
+            return Err(format!(
+                "lora scale ({}) must be in range [0.0, 2.0]",
+                lora.scale
+            ));
+        }
+        let path = std::path::Path::new(&lora.path);
+        if !path.exists() {
+            return Err(format!("lora file not found: {}", lora.path));
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("safetensors") {
+            return Err("lora file must be a .safetensors file".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -184,6 +200,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         }
     }
 

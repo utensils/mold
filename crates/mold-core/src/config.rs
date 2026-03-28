@@ -75,6 +75,10 @@ pub struct ModelConfig {
     pub scheduler: Option<Scheduler>,
     /// Per-model default negative prompt for CFG-based models.
     pub negative_prompt: Option<String>,
+    /// Default LoRA adapter path for this model.
+    pub lora: Option<String>,
+    /// Default LoRA scale for this model (0.0-2.0).
+    pub lora_scale: Option<f64>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -149,6 +153,13 @@ impl ModelConfig {
         self.negative_prompt
             .clone()
             .or_else(|| global_cfg.default_negative_prompt.clone())
+    }
+
+    /// Effective LoRA config: per-model default path and scale, or None.
+    pub fn effective_lora(&self) -> Option<(String, f64)> {
+        self.lora
+            .as_ref()
+            .map(|path| (path.clone(), self.lora_scale.unwrap_or(1.0)))
     }
 }
 

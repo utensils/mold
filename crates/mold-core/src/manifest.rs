@@ -164,6 +164,8 @@ impl ModelManifest {
             is_turbo: None,
             scheduler: self.defaults.scheduler,
             negative_prompt: None,
+            lora: None,
+            lora_scale: None,
             description: Some(self.description.clone()),
             family: Some(self.family.clone()),
         }
