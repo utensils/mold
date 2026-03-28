@@ -268,6 +268,9 @@ mod tests {
     fn test_config() -> Config {
         Config {
             default_model: "flux-schnell".to_string(),
+            // Point models_dir to a non-existent path so the smart default
+            // fallback doesn't detect locally downloaded models.
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
             ..Config::default()
         }
     }
