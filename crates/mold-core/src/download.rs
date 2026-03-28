@@ -225,10 +225,15 @@ pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<b
 
 // ── Pull marker file (.pulling) ──────────────────────────────────────────────
 
+/// Relative path to a model's `.pulling` marker: `<sanitized-name>/.pulling`.
+pub fn pulling_marker_rel_path(model_name: &str) -> PathBuf {
+    let canonical = crate::manifest::resolve_model_name(model_name);
+    PathBuf::from(canonical.replace(':', "-")).join(".pulling")
+}
+
 /// Path to the `.pulling` marker for a model: `<models_dir>/<sanitized-name>/.pulling`.
 fn pulling_marker_path(model_name: &str) -> PathBuf {
-    let sanitized = model_name.replace(':', "-");
-    models_dir().join(sanitized).join(".pulling")
+    models_dir().join(pulling_marker_rel_path(model_name))
 }
 
 /// Write a `.pulling` marker to signal an in-progress download.
