@@ -558,7 +558,8 @@ async fn run() -> anyhow::Result<()> {
                 json,
                 backend.as_deref(),
                 expand_model.as_deref(),
-            )?;
+            )
+            .await?;
         }
         Commands::Serve {
             port,

@@ -13,8 +13,10 @@ use tokenizers::Tokenizer;
 use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
 
-use crate::device::{create_device, fits_in_memory, free_vram_bytes};
-use crate::progress::ProgressReporter;
+use crate::device::{
+    create_device, free_vram_bytes, memory_status_string, preflight_memory_check, should_use_gpu,
+};
+use crate::progress::{ProgressCallback, ProgressReporter};
 
 /// VRAM threshold for placing the expand LLM on GPU (Q4 1.7B ~1.3GB + headroom).
 const EXPAND_LLM_VRAM_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
@@ -23,6 +25,7 @@ const EXPAND_LLM_VRAM_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 pub struct LocalExpander {
     model_path: PathBuf,
     tokenizer_path: PathBuf,
+    progress: ProgressReporter,
 }
 
 impl LocalExpander {
@@ -31,7 +34,13 @@ impl LocalExpander {
         Self {
             model_path: model_path.into(),
             tokenizer_path: tokenizer_path.into(),
+            progress: ProgressReporter::default(),
         }
+    }
+
+    /// Set a progress callback for reporting device selection, loading, and generation status.
+    pub fn set_on_progress(&mut self, callback: ProgressCallback) {
+        self.progress.set_callback(callback);
     }
 
     /// Try to create a local expander by finding the model files.
@@ -95,25 +104,44 @@ impl LocalExpander {
 
     /// Load model, generate text, drop model.
     fn generate_text(&self, prompt_text: &str, config: &ExpandConfig) -> Result<String> {
-        // Determine device: GPU if enough VRAM, else CPU
-        let progress = ProgressReporter::default();
-        let gpu_device = create_device(&progress)?;
+        // Device selection: Metal always uses GPU (unified memory), CUDA checks VRAM
+        let gpu_device = create_device(&self.progress)?;
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
-        let device = if is_cuda || is_metal {
-            let free_vram = free_vram_bytes().unwrap_or(0);
-            if fits_in_memory(is_cuda, is_metal, free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
-                tracing::info!("Loading expand LLM on GPU");
-                gpu_device
-            } else {
-                tracing::info!("Loading expand LLM on CPU (GPU VRAM insufficient)");
-                Device::Cpu
-            }
+        let free_vram = free_vram_bytes().unwrap_or(0);
+
+        let device = if should_use_gpu(is_cuda, is_metal, free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
+            gpu_device
         } else {
+            self.progress
+                .info("Using CPU for prompt expansion (insufficient GPU memory)");
             Device::Cpu
         };
 
+        let device_label = if device.is_metal() {
+            "Metal"
+        } else if device.is_cuda() {
+            "CUDA"
+        } else {
+            "CPU"
+        };
+
+        // Report memory status
+        if let Some(mem_status) = memory_status_string() {
+            self.progress.info(&mem_status);
+        }
+
+        // Preflight memory check (Darwin safety guard — prevents OOM from page reclamation storms)
+        let model_size = std::fs::metadata(&self.model_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        preflight_memory_check("Expand LLM", model_size)?;
+
         // Load GGUF model
+        let load_start = std::time::Instant::now();
+        let stage_name = format!("Loading expand model ({device_label})");
+        self.progress.stage_start(&stage_name);
+
         let mut file = std::fs::File::open(&self.model_path)
             .map_err(|e| anyhow::anyhow!("failed to open expand model: {e}"))?;
         let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
@@ -126,6 +154,8 @@ impl LocalExpander {
         let tokenizer = Tokenizer::from_file(&self.tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load expand tokenizer: {e}"))?;
 
+        self.progress.stage_done(&stage_name, load_start.elapsed());
+
         // Tokenize prompt
         let encoding = tokenizer
             .encode(prompt_text, false)
@@ -133,6 +163,7 @@ impl LocalExpander {
         let input_ids = encoding.get_ids();
 
         // Generate tokens autoregressively
+        let gen_start = std::time::Instant::now();
         let mut all_tokens: Vec<u32> = input_ids.to_vec();
         let mut generated_tokens: Vec<u32> = Vec::new();
 
@@ -182,6 +213,15 @@ impl LocalExpander {
             }
             last_token = next_token;
         }
+
+        // Report generation speed
+        let gen_elapsed = gen_start.elapsed().as_secs_f64();
+        let tok_per_sec = generated_tokens.len() as f64 / gen_elapsed.max(0.001);
+        self.progress.info(&format!(
+            "Generated {} tokens ({:.1} tok/s)",
+            generated_tokens.len(),
+            tok_per_sec
+        ));
 
         // Decode generated tokens
         let output = tokenizer

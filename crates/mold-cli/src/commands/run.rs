@@ -185,7 +185,7 @@ pub async fn run(
         let model_family = super::expand::resolve_family_from_config(&model, &config);
         let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
 
-        let expander = super::expand::create_expander(&settings, &config)?;
+        let expander = super::expand::create_expander(&settings, &config).await?;
 
         crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
 
