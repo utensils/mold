@@ -669,6 +669,20 @@ function _clap_dynamic_completer_mold() {{
     local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
     local _CLAP_IFS=$'\n'
 
+    # File-path flags: fall back to zsh native _files for tilde expansion,
+    # directory traversal, and proper path completion.
+    local prev_word="${{words[$(( CURRENT - 1 ))]}}"
+    case "$prev_word" in
+        --lora|--image|-i|--mask|--control|--output|-o)
+            _files
+            return
+            ;;
+        --control-model|--models-dir)
+            _files -/
+            return
+            ;;
+    esac
+
     local completions=("${{(@f)$( \
         _CLAP_IFS="$_CLAP_IFS" \
         _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
