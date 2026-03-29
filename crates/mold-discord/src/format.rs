@@ -608,7 +608,7 @@ mod tests {
                     default_guidance: 4.0,
                     default_width: 1024,
                     default_height: 1024,
-                    description: "[alpha] Wuerstchen v2".to_string(),
+                    description: "Wuerstchen v2".to_string(),
                 },
                 downloaded: false,
                 disk_usage_bytes: None,
@@ -621,8 +621,9 @@ mod tests {
         assert!(embed.description.contains("**flux-schnell:q8**"));
         assert!(embed.description.contains("flux-dev:q4"));
         assert!(!embed.description.contains("**flux-dev:q4**"));
-        // Wuerstchen section tagged as alpha, variant name visible
-        assert!(embed.description.contains("**WUERSTCHEN** (alpha)"));
+        // Wuerstchen section, variant name visible
+        assert!(embed.description.contains("**WUERSTCHEN**"));
+        assert!(!embed.description.contains("(alpha)"));
         assert!(embed.description.contains("wuerstchen-v2:fp16"));
         assert!(!embed.description.contains("**wuerstchen-v2:fp16**"));
     }

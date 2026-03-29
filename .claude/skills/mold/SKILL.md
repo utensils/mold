@@ -60,7 +60,7 @@ mold run "a cat" --no-metadata
 # Display image inline in terminal after generation (requires `preview` feature)
 mold run "a cat" --preview
 
-# Negative prompt (CFG-based models: SD1.5, SDXL, SD3)
+# Negative prompt (CFG-based models: SD1.5, SDXL, SD3, Wuerstchen)
 mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"
 mold run sdxl:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
 mold run sd15:fp16 "a cat" --no-negative  # suppress config default
@@ -166,7 +166,9 @@ Default model if none specified: `flux-schnell:q8`
 
 **Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
 
-**Alpha**: `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `wuerstchen-v2:fp16`
+**Wuerstchen**: `wuerstchen-v2:fp16`
+
+**Alpha**: `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 

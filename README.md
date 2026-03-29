@@ -178,7 +178,7 @@ mold run sd15:fp16 "a futuristic city" --control edges.png --control-model contr
 
 ### Negative prompts
 
-Guide what the model should avoid generating. Works with CFG-based models (SD1.5, SDXL, SD3); ignored by FLUX and other flow-matching models.
+Guide what the model should avoid generating. Works with CFG-based models (SD1.5, SDXL, SD3, Wuerstchen); ignored by FLUX and other flow-matching models.
 
 ```bash
 # Specify a negative prompt
@@ -429,13 +429,18 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
-### Wuerstchen v2 / Flux.2 / Qwen-Image (alpha, improving on CUDA/MPS)
-
-> **Warning**: These model families are still in active alpha development. Results vary by backend and may be better on CUDA than Apple Silicon (MPS/Metal). Use FLUX, SDXL, SD1.5, SD3.5, or Z-Image for production use.
+### Wuerstchen v2
 
 | Model | Steps | Size | Notes |
 |-------|-------|------|-------|
-| `wuerstchen-v2:fp16` | 30 | 5.6GB | Alpha 3-stage cascade, backend-dependent output quality |
+| `wuerstchen-v2:fp16` | 60 | 5.6GB | 3-stage cascade with 42x latent compression, includes default negative prompt |
+
+### Flux.2 / Qwen-Image (alpha, improving on CUDA/MPS)
+
+> **Warning**: These model families are still in active alpha development. Results vary by backend and may be better on CUDA than Apple Silicon (MPS/Metal).
+
+| Model | Steps | Size | Notes |
+|-------|-------|------|-------|
 | `flux2-klein:q8` | 4 | 4.3GB | Alpha Flux.2 Klein 4B Q8, actively being improved |
 | `flux2-klein:q4` | 4 | 2.6GB | Alpha Flux.2 Klein 4B Q4, smaller footprint |
 | `flux2-klein:bf16` | 4 | 7.8GB | Alpha Flux.2 Klein 4B BF16, backend-dependent output quality |
