@@ -180,11 +180,14 @@ impl WuerstchenEngine {
     }
 
     fn effective_prior_steps(requested_steps: usize) -> usize {
-        if requested_steps == 30 {
-            60
-        } else {
-            requested_steps
+        if requested_steps < 20 {
+            // Very low step counts produce noise; warn but respect the request.
+            tracing::warn!(
+                steps = requested_steps,
+                "Wuerstchen prior works best with ≥60 steps"
+            );
         }
+        requested_steps
     }
 
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
@@ -532,6 +535,7 @@ impl WuerstchenEngine {
         prior: &WPrior,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        // TODO: use for per-step RNG reseeding to close RMSE gap vs candle reference
         _base_seed: u64,
         steps: usize,
         guidance: f64,
@@ -590,6 +594,7 @@ impl WuerstchenEngine {
         image_embeddings: &Tensor,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        // TODO: use for per-step RNG reseeding to close RMSE gap vs candle reference
         _base_seed: u64,
         steps: usize,
         guidance: f64,
@@ -661,26 +666,18 @@ impl WuerstchenEngine {
         let prior_guidance = req.guidance;
         let decoder_guidance = Self::decoder_guidance();
         let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
-        let requested_prior_steps = req.steps as usize;
-        let prior_steps = Self::effective_prior_steps(requested_prior_steps);
+        let prior_steps = Self::effective_prior_steps(req.steps as usize);
         let decoder_steps = 12;
 
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
-            requested_prior_steps,
             prior_steps,
             decoder_steps,
             prior_guidance,
             decoder_guidance,
             "starting sequential Wuerstchen generation"
         );
-
-        if prior_steps != requested_prior_steps {
-            self.base.progress.info(
-                "Using 60-step Stage C prior for Wuerstchen (legacy 30-step default promoted)",
-            );
-        }
 
         self.base
             .progress
@@ -964,26 +961,18 @@ impl InferenceEngine for WuerstchenEngine {
         let prior_guidance = req.guidance;
         let decoder_guidance = Self::decoder_guidance();
         let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
-        let requested_prior_steps = req.steps as usize;
-        let prior_steps = Self::effective_prior_steps(requested_prior_steps);
+        let prior_steps = Self::effective_prior_steps(req.steps as usize);
         let decoder_steps = 12;
 
         tracing::info!(
             prompt = %req.prompt,
             seed, width, height,
-            requested_prior_steps,
             prior_steps,
             decoder_steps,
             prior_guidance,
             decoder_guidance,
             "starting Wuerstchen generation"
         );
-
-        if prior_steps != requested_prior_steps {
-            self.base.progress.info(
-                "Using 60-step Stage C prior for Wuerstchen (legacy 30-step default promoted)",
-            );
-        }
 
         // 1. Encode prompt with Prior CLIP-G (1280-dim)
         let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
@@ -1184,8 +1173,8 @@ mod tests {
     }
 
     #[test]
-    fn effective_prior_steps_promotes_legacy_default() {
-        assert_eq!(WuerstchenEngine::effective_prior_steps(30), 60);
+    fn effective_prior_steps_passes_through() {
+        assert_eq!(WuerstchenEngine::effective_prior_steps(30), 30);
         assert_eq!(WuerstchenEngine::effective_prior_steps(60), 60);
         assert_eq!(WuerstchenEngine::effective_prior_steps(20), 20);
     }
