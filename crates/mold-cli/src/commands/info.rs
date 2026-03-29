@@ -10,6 +10,25 @@ use sha2::{Digest, Sha256};
 use crate::theme;
 use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
 
+/// Count files and total bytes in a directory (recursive).
+fn dir_stats(path: &std::path::Path) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    if let Ok(entries) = walkdir::WalkDir::new(path)
+        .follow_links(true)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
+        for entry in entries {
+            if entry.file_type().is_file() {
+                files += 1;
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    (files, bytes)
+}
+
 fn compute_sha256(path: &str) -> Result<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -212,6 +231,69 @@ pub async fn run_overview() -> Result<()> {
                     .dimmed(),
                 );
             }
+        }
+    }
+
+    // Storage section
+    println!();
+    println!("  {}", "Storage".bold());
+
+    // Cache directory
+    if let Some(home) = Config::mold_dir() {
+        let cache_dir = home.join("cache");
+        if cache_dir.exists() {
+            let (files, bytes) = dir_stats(&cache_dir);
+            println!(
+                "  {:<18} {} ({}, {} files)",
+                "Cache:".dimmed(),
+                cache_dir.display(),
+                format_disk_size(bytes),
+                files,
+            );
+        } else {
+            println!(
+                "  {:<18} {} ({})",
+                "Cache:".dimmed(),
+                cache_dir.display(),
+                "empty".dimmed(),
+            );
+        }
+    }
+
+    // Output directory — check config/env first, then fall back to $MOLD_HOME/output
+    let output_dir = config
+        .resolved_output_dir()
+        .or_else(|| Config::mold_dir().map(|h| h.join("output")));
+    if let Some(output_dir) = output_dir {
+        if output_dir.exists() {
+            let (files, bytes) = dir_stats(&output_dir);
+            if files > 0 {
+                println!(
+                    "  {:<18} {} ({}, {} images)",
+                    "Output:".dimmed(),
+                    output_dir.display(),
+                    format_disk_size(bytes),
+                    files,
+                );
+            }
+        }
+    }
+
+    // HuggingFace hub cache
+    let hf_cache = dirs::cache_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
+        .join("huggingface")
+        .join("hub");
+    if hf_cache.exists() {
+        let (files, bytes) = dir_stats(&hf_cache);
+        if bytes > 0 {
+            println!(
+                "  {:<18} {} ({}, {} files)",
+                "HF hub cache:".dimmed(),
+                hf_cache.display(),
+                format_disk_size(bytes),
+                files,
+            );
         }
     }
 
