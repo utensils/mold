@@ -111,10 +111,10 @@ mold run flux-dev:bf16 "oil painting" --lora art.safetensors --image photo.png -
 ```
 
 **Requirements:**
-- Base model must be FLUX BF16 (e.g. `flux-dev:bf16`, `flux-schnell:bf16`)
+- FLUX models only (BF16 or GGUF quantized)
 - LoRA file must be `.safetensors` format (diffusers-format keys)
-- GGUF quantized models do not support LoRA yet
-- On 24GB cards, LoRA auto-uses block-level offloading (3-5x slower but fits in VRAM)
+- BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
+- GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
 ```toml
