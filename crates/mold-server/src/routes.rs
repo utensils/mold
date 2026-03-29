@@ -244,6 +244,8 @@ async fn generate(
         guidance = req.guidance,
         seed = ?req.seed,
         format = %req.output_format,
+        lora = ?req.lora.as_ref().map(|l| &l.path),
+        lora_scale = ?req.lora.as_ref().map(|l| l.scale),
         "generate request"
     );
 

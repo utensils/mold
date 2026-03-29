@@ -4,7 +4,7 @@ use mold_core::manifest::{
     all_model_names, is_known_model, looks_like_model_name, resolve_model_name,
     suggest_similar_models,
 };
-use mold_core::{Config, OutputFormat, Scheduler};
+use mold_core::{Config, LoraWeight, OutputFormat, Scheduler};
 use std::io::{IsTerminal, Read};
 
 use super::generate;
@@ -86,6 +86,8 @@ pub async fn run(
     scheduler: Option<Scheduler>,
     eager: bool,
     offload: bool,
+    lora: Option<String>,
+    lora_scale: f64,
     image: Option<String>,
     strength: f64,
     mask: Option<String>,
@@ -250,6 +252,19 @@ pub async fn run(
         model_cfg.effective_negative_prompt(&config)
     };
 
+    // Resolve LoRA: CLI --lora overrides config default
+    let effective_lora = if let Some(ref lora_path) = lora {
+        Some(LoraWeight {
+            path: lora_path.clone(),
+            scale: lora_scale,
+        })
+    } else {
+        let model_cfg = config.resolved_model_config(&model);
+        model_cfg
+            .effective_lora()
+            .map(|(path, scale)| LoraWeight { path, scale })
+    };
+
     generate::run(
         &final_prompt,
         &model,
@@ -279,6 +294,7 @@ pub async fn run(
         effective_negative_prompt,
         original_prompt,
         batch_prompts,
+        effective_lora,
     )
     .await
 }

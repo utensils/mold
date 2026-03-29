@@ -138,6 +138,14 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         offload: bool,
 
+        /// LoRA adapter safetensors file path
+        #[arg(long, help_heading = "LoRA", value_hint = ValueHint::FilePath)]
+        lora: Option<String>,
+
+        /// LoRA effect strength (0.0 = none, 1.0 = full, up to 2.0)
+        #[arg(long, default_value = "1.0", help_heading = "LoRA")]
+        lora_scale: f64,
+
         /// Source image for img2img (file path or - for stdin)
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Option<String>,
@@ -515,6 +523,8 @@ async fn run() -> anyhow::Result<()> {
             scheduler,
             eager,
             offload,
+            lora,
+            lora_scale,
             image,
             strength,
             mask,
@@ -548,6 +558,8 @@ async fn run() -> anyhow::Result<()> {
                 scheduler,
                 eager,
                 offload,
+                lora,
+                lora_scale,
                 image,
                 strength,
                 mask,
@@ -656,6 +668,20 @@ fn generate_completions(shell: &str) -> anyhow::Result<()> {
 function _clap_dynamic_completer_mold() {{
     local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
     local _CLAP_IFS=$'\n'
+
+    # File-path flags: fall back to zsh native _files for tilde expansion,
+    # directory traversal, and proper path completion.
+    local prev_word="${{words[$(( CURRENT - 1 ))]}}"
+    case "$prev_word" in
+        --lora|--image|-i|--mask|--control|--output|-o)
+            _files
+            return
+            ;;
+        --control-model|--models-dir)
+            _files -/
+            return
+            ;;
+    esac
 
     local completions=("${{(@f)$( \
         _CLAP_IFS="$_CLAP_IFS" \

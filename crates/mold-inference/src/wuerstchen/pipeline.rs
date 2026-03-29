@@ -227,13 +227,13 @@ impl WuerstchenEngine {
         // Load Prior (Stage C)
         self.base.progress.stage_start("Loading Prior (Stage C)");
         let prior_start = Instant::now();
-        let prior_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[&self.base.paths.transformer],
-                dtype,
-                &device,
-            )?
-        };
+        let prior_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&self.base.paths.transformer],
+            dtype,
+            &device,
+            "Wuerstchen Prior",
+            &self.base.progress,
+        )?;
         let prior = WPrior::new(
             PRIOR_C_IN,
             PRIOR_C,
@@ -251,9 +251,13 @@ impl WuerstchenEngine {
         // Load Decoder (Stage B)
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let decoder_start = Instant::now();
-        let decoder_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&decoder_path], dtype, &device)?
-        };
+        let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&decoder_path],
+            dtype,
+            &device,
+            "Wuerstchen Decoder",
+            &self.base.progress,
+        )?;
         let decoder = WDiffNeXt::new(
             DECODER_C_IN,
             DECODER_C_OUT,
@@ -271,9 +275,13 @@ impl WuerstchenEngine {
         // Load VQ-GAN (Stage A)
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
-        let vqgan_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.base.paths.vae], dtype, &device)?
-        };
+        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&self.base.paths.vae],
+            dtype,
+            &device,
+            "VQ-GAN",
+            &self.base.progress,
+        )?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
@@ -564,13 +572,13 @@ impl WuerstchenEngine {
 
         self.base.progress.stage_start("Loading Prior (Stage C)");
         let prior_start = Instant::now();
-        let prior_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[&self.base.paths.transformer],
-                dtype,
-                &device,
-            )?
-        };
+        let prior_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&self.base.paths.transformer],
+            dtype,
+            &device,
+            "Wuerstchen Prior",
+            &self.base.progress,
+        )?;
         let prior = WPrior::new(
             PRIOR_C_IN,
             PRIOR_C,
@@ -624,9 +632,13 @@ impl WuerstchenEngine {
 
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let dec_start = Instant::now();
-        let decoder_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&decoder_path], dtype, &device)?
-        };
+        let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&decoder_path],
+            dtype,
+            &device,
+            "Wuerstchen Decoder",
+            &self.base.progress,
+        )?;
         let decoder = WDiffNeXt::new(
             DECODER_C_IN,
             DECODER_C_OUT,
@@ -665,9 +677,13 @@ impl WuerstchenEngine {
         // --- Phase 4: VQ-GAN decode (Stage A) ---
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
-        let vqgan_vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[&self.base.paths.vae], dtype, &device)?
-        };
+        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[&self.base.paths.vae],
+            dtype,
+            &device,
+            "VQ-GAN",
+            &self.base.progress,
+        )?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress

@@ -61,6 +61,7 @@ pub fn build_generate_request(
         control_scale: 1.0,
         expand: None,
         original_prompt: None,
+        lora: None,
     }
 }
 

@@ -154,6 +154,19 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("mask_image must be a PNG or JPEG image".to_string());
         }
     }
+    // LoRA validation (format checks only — path existence is checked at the
+    // inference layer, since in remote mode the path refers to the server filesystem).
+    if let Some(ref lora) = req.lora {
+        if lora.scale < 0.0 || lora.scale > 2.0 {
+            return Err(format!(
+                "lora scale ({}) must be in range [0.0, 2.0]",
+                lora.scale
+            ));
+        }
+        if !lora.path.ends_with(".safetensors") {
+            return Err("lora file must be a .safetensors file".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -184,6 +197,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         }
     }
 
@@ -668,5 +682,83 @@ mod tests {
     fn fit_tiny_source_gets_model_native() {
         // 64x64 source -> 1024x1024 model
         assert_eq!(fit_to_model_dimensions(64, 64, 1024, 1024), (1024, 1024));
+    }
+
+    // ── LoRA validation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn lora_none_valid() {
+        let req = valid_req();
+        assert!(req.lora.is_none());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn lora_scale_too_low_rejected() {
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: -0.1,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("lora scale"),
+            "expected lora scale error: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_scale_too_high_rejected() {
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 2.1,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("lora scale"),
+            "expected lora scale error: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_scale_boundary_valid() {
+        for scale in [0.0, 1.0, 2.0] {
+            let mut req = valid_req();
+            req.lora = Some(crate::LoraWeight {
+                path: "adapter.safetensors".to_string(),
+                scale,
+            });
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "scale={scale} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn lora_path_not_found_passes_validation() {
+        // Path existence is checked at the inference layer, not validation,
+        // so remote LoRA paths (server-side files) work correctly.
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "/nonexistent/path/adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn lora_wrong_extension_rejected() {
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "/some/path/adapter.bin".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("safetensors"),
+            "expected safetensors error: {err}"
+        );
     }
 }

@@ -14,7 +14,6 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -151,8 +150,13 @@ impl Flux2Engine {
             } else {
                 vec![self.base.paths.transformer.clone()]
             };
-            let flux_vb =
-                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, gpu_dtype, device)? };
+            let flux_vb = crate::weight_loader::load_safetensors_with_progress(
+                &xformer_paths,
+                gpu_dtype,
+                device,
+                "Flux.2 transformer",
+                &self.base.progress,
+            )?;
             Ok((
                 Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
                     cfg, flux_vb,
@@ -269,13 +273,13 @@ impl Flux2Engine {
         let vae_stage = Instant::now();
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         let vae_cfg = Flux2VaeConfig::klein();
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
-                &device,
-            )?
-        };
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            gpu_dtype,
+            &device,
+            "VAE",
+            &self.base.progress,
+        )?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -329,6 +333,7 @@ impl Flux2Engine {
                 &text_tokenizer_path,
                 enc_device,
                 enc_dtype,
+                &self.base.progress,
             )?
         };
         self.base
@@ -426,6 +431,7 @@ impl Flux2Engine {
                 &text_tokenizer_path,
                 enc_device,
                 enc_dtype,
+                &self.base.progress,
             )?
         };
         self.base
@@ -469,13 +475,13 @@ impl Flux2Engine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_cfg = Flux2VaeConfig::klein();
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
-                &device,
-            )?
-        };
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            gpu_dtype,
+            &device,
+            "VAE",
+            &self.base.progress,
+        )?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -615,7 +621,7 @@ impl InferenceEngine for Flux2Engine {
         if loaded.text_encoder.model.is_none() {
             progress.stage_start("Reloading Qwen3 encoder");
             let reload_start = Instant::now();
-            loaded.text_encoder.reload()?;
+            loaded.text_encoder.reload(progress)?;
             progress.stage_done("Reloading Qwen3 encoder", reload_start.elapsed());
         }
 

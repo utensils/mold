@@ -1,6 +1,5 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
 use candle_transformers::models::t5;
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
@@ -73,6 +72,7 @@ impl T5Encoder {
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
         let is_quantized = encoder_path
             .extension()
@@ -83,13 +83,13 @@ impl T5Encoder {
         let model = if is_quantized {
             T5Model::Quantized(GgufT5Encoder::load(encoder_path, device)?)
         } else {
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(encoder_path),
-                    dtype,
-                    device,
-                )?
-            };
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(encoder_path),
+                dtype,
+                device,
+                "T5 encoder",
+                progress,
+            )?;
             T5Model::FP16(t5::T5EncoderModel::load(vb, &config())?)
         };
 
@@ -139,20 +139,25 @@ impl T5Encoder {
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
-    pub fn reload(&mut self, encoder_path: &PathBuf, dtype: DType) -> Result<()> {
+    pub fn reload(
+        &mut self,
+        encoder_path: &PathBuf,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
         if self.is_quantized {
             self.model = Some(T5Model::Quantized(GgufT5Encoder::load(
                 encoder_path,
                 &self.device,
             )?));
         } else {
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(encoder_path),
-                    dtype,
-                    &self.device,
-                )?
-            };
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(encoder_path),
+                dtype,
+                &self.device,
+                "T5 encoder",
+                progress,
+            )?;
             self.model = Some(T5Model::FP16(t5::T5EncoderModel::load(vb, &config())?));
         }
         Ok(())

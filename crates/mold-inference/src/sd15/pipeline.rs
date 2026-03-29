@@ -476,7 +476,13 @@ impl SD15Engine {
         // Use default SD1.5 UNet config for ControlNet architecture
         let unet_config =
             candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModelConfig::default();
-        let model = ControlNetModel::load(&cn_paths.transformer, device, dtype, unet_config)?;
+        let model = ControlNetModel::load(
+            &cn_paths.transformer,
+            device,
+            dtype,
+            unet_config,
+            &self.base.progress,
+        )?;
 
         self.base
             .progress

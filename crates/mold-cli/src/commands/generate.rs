@@ -3,7 +3,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions, Config, GenerateRequest, GenerateResponse,
-    GenerateServerAction, ImageData, MoldClient, OutputFormat, Scheduler,
+    GenerateServerAction, ImageData, LoraWeight, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
 use std::io::Write;
@@ -95,6 +95,7 @@ pub async fn run(
     negative_prompt: Option<String>,
     original_prompt: Option<String>,
     batch_prompts: Option<Vec<String>>,
+    lora: Option<LoraWeight>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -147,6 +148,7 @@ pub async fn run(
         negative_prompt: negative_prompt.clone(),
         expand: None,
         original_prompt,
+        lora: lora.clone(),
     };
 
     if let Some(desc) = &model_cfg.description {

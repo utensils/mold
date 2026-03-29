@@ -19,6 +19,7 @@ pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
 pub mod sdxl;
+pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
 

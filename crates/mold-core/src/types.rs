@@ -164,6 +164,25 @@ pub struct GenerateRequest {
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    /// LoRA adapter to apply during generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora: Option<LoraWeight>,
+}
+
+/// A LoRA adapter specification: path to safetensors file and effect scale.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoraWeight {
+    /// Path to the LoRA safetensors file.
+    #[schema(example = "/path/to/lora.safetensors")]
+    pub path: String,
+    /// Scaling factor for LoRA effect (0.0 = no effect, 1.0 = full strength, up to 2.0).
+    #[serde(default = "default_lora_scale")]
+    #[schema(example = 1.0)]
+    pub scale: f64,
+}
+
+fn default_lora_scale() -> f64 {
+    1.0
 }
 
 fn default_guidance() -> f64 {
@@ -222,6 +241,10 @@ pub struct OutputMetadata {
     pub strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora_scale: Option<f64>,
     pub version: String,
 }
 
@@ -232,6 +255,16 @@ impl OutputMetadata {
         scheduler: Option<Scheduler>,
         version: impl Into<String>,
     ) -> Self {
+        let (lora, lora_scale) = match &req.lora {
+            Some(lw) => {
+                let name = std::path::Path::new(&lw.path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| lw.path.clone());
+                (Some(name), Some(lw.scale))
+            }
+            None => (None, None),
+        };
         Self {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
@@ -244,6 +277,8 @@ impl OutputMetadata {
             height: req.height,
             strength: req.source_image.as_ref().map(|_| req.strength),
             scheduler,
+            lora,
+            lora_scale,
             version: version.into(),
         }
     }
@@ -417,6 +452,12 @@ pub enum SseProgressEvent {
     Queued {
         position: usize,
     },
+    /// Progress loading model weights from disk.
+    WeightLoad {
+        bytes_loaded: u64,
+        bytes_total: u64,
+        component: String,
+    },
 }
 
 /// Completion event sent when image generation finishes successfully.
@@ -503,6 +544,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -644,6 +686,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -675,6 +718,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -703,6 +747,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -733,6 +778,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -761,6 +807,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
 
         let metadata =
@@ -853,6 +900,28 @@ mod tests {
         assert!(matches!(back, SseProgressEvent::Queued { position: 3 }));
     }
 
+    #[test]
+    fn sse_progress_weight_load_roundtrip() {
+        let event = SseProgressEvent::WeightLoad {
+            bytes_loaded: 5_000_000,
+            bytes_total: 10_000_000,
+            component: "FLUX transformer".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"weight_load""#));
+        assert!(json.contains(r#""bytes_loaded":5000000"#));
+        assert!(json.contains(r#""component":"FLUX transformer""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::WeightLoad {
+                bytes_loaded: 5_000_000,
+                bytes_total: 10_000_000,
+                ..
+            }
+        ));
+    }
+
     // ── img2img field tests ────────────────────────────────────────────────
 
     #[test]
@@ -880,6 +949,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -929,6 +999,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -961,6 +1032,7 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1014,6 +1086,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

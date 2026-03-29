@@ -341,6 +341,8 @@ mod tests {
             height: 4,
             strength: None,
             scheduler: None,
+            lora: None,
+            lora_scale: None,
             version: "0.1.0".to_string(),
         };
 
@@ -403,6 +405,7 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            lora: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -422,6 +425,8 @@ mod tests {
             height: 1024,
             strength: None,
             scheduler: None,
+            lora: None,
+            lora_scale: None,
             version: "0.1.0".to_string(),
         });
 
@@ -447,6 +452,8 @@ mod tests {
             height: 4,
             strength: None,
             scheduler: None,
+            lora: None,
+            lora_scale: None,
             version: "0.1.0".to_string(),
         }
     }
@@ -565,6 +572,8 @@ mod tests {
             height: 8,
             strength: Some(0.6),
             scheduler: Some(mold_core::Scheduler::EulerAncestral),
+            lora: None,
+            lora_scale: None,
             version: "0.2.0".to_string(),
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
