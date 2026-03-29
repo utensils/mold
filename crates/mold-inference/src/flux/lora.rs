@@ -570,12 +570,13 @@ pub(crate) fn lora_var_builder<'a>(
 /// Build a quantized VarBuilder from a GGUF file with LoRA deltas applied.
 ///
 /// Loads the GGUF file into a `HashMap<String, Arc<QTensor>>`, then for each
-/// LoRA-targeted tensor: dequantizes to F32, applies the LoRA delta, and stores
-/// the result as a BF16 `QTensor`.  Non-LoRA tensors stay quantized.
+/// LoRA-targeted tensor: dequantizes to F32 on CPU, applies the LoRA delta,
+/// and re-quantizes back to the original GGML dtype (e.g. Q8_0) on the target
+/// device.  Non-LoRA tensors stay quantized and untouched.
 ///
-/// The patched BF16 tensors auto-dequantize inside `QMatMul::from_arc`, so they
-/// behave as regular float weights during inference while the rest of the model
-/// remains quantized — selective dequantization.
+/// By re-quantizing to the original dtype instead of storing as F16/BF16, each
+/// patched tensor occupies the same VRAM as its original — no inflation.  The
+/// LoRA rank is small (typically 32) so the re-quantization error is negligible.
 pub(crate) fn gguf_lora_var_builder(
     transformer_path: &Path,
     adapter: &LoraAdapter,
@@ -629,87 +630,120 @@ pub(crate) fn gguf_lora_var_builder(
         adapter.rank
     ));
 
-    // GPU device for A×B matmul (tiny LoRA tensors always fit).
-    let on_gpu = device.is_cuda() || device.is_metal();
-    let matmul_device = if on_gpu { device } else { &Device::Cpu };
-
-    // Load each tensor, applying LoRA patches to affected ones.
-    // Non-LoRA tensors: load directly to GPU (quantized, compact).
-    // LoRA tensors: dequantize + merge on CPU, re-quantize to original dtype,
-    // then load to GPU. Re-quantizing preserves the original VRAM footprint.
-    let mut applied = 0usize;
+    // Phase 1: Load ALL tensors via normal GGUF path (same as from_gguf).
+    // This uses the exact same CUDA allocation as the non-LoRA path.
+    progress.info("Loading GGUF tensors");
     for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
-        if let Some(layer_patches) = patches.get(tensor_name.as_str()) {
-            // Load to CPU and dequantize there to avoid GPU F32 intermediates
-            let qtensor = content.tensor(&mut file, tensor_name, &Device::Cpu)?;
-            let original_dtype = qtensor.dtype();
-            let mut t = qtensor.dequantize(&Device::Cpu)?;
+        let qtensor = content.tensor(&mut file, tensor_name, device)?;
+        data.insert(tensor_name.clone(), Arc::new(qtensor));
+        if (i + 1) % 200 == 0 || i + 1 == total_tensors {
+            progress.info(&format!("Loading GGUF tensor {}/{total_tensors}", i + 1));
+        }
+    }
+    drop(file); // close GGUF file
 
-            for patch in layer_patches {
-                // A×B matmul on GPU (tiny tensors), bring delta back to CPU
-                let a = patch.a.to_dtype(DType::F32)?.to_device(matmul_device)?;
-                let b = patch.b.to_dtype(DType::F32)?.to_device(matmul_device)?;
-                let delta = b.matmul(&a)?;
-                let delta = (&delta * patch.effective_scale)?.to_device(&Device::Cpu)?;
+    // Phase 2: Patch LoRA-affected tensors in-place.
+    // For each target: dequantize the GPU QTensor to F32 on CPU, apply LoRA
+    // delta, re-quantize back to the original GGML dtype (e.g. Q8_0), and
+    // place the result on GPU.  This keeps each patched tensor at its original
+    // quantized size — no VRAM inflation.
+    let on_gpu = device.is_cuda() || device.is_metal();
+    let mut applied = 0usize;
+    let lora_keys: Vec<String> = patches.keys().cloned().collect();
+    for (i, candle_key) in lora_keys.iter().enumerate() {
+        let layer_patches = &patches[candle_key];
 
-                t = match &patch.target {
-                    LoraTarget::Direct { .. } => (&t + &delta)?,
-                    LoraTarget::FusedSlice {
-                        component,
-                        num_components,
-                        ..
-                    } => {
-                        let base_rows = t.dim(0)?;
-                        let lora_out_dim = delta.dim(0)?;
-                        let (offset, size) =
-                            fused_slice_range(base_rows, lora_out_dim, *component, *num_components);
-
-                        if offset + size > base_rows {
-                            tracing::warn!(
-                                offset,
-                                size,
-                                base_rows,
-                                "fused slice out of bounds, skipping"
-                            );
-                            t
-                        } else {
-                            let slice = t.narrow(0, offset, size)?;
-                            let updated_slice = (&slice + &delta)?;
-                            let mut parts: Vec<Tensor> = Vec::new();
-                            if offset > 0 {
-                                parts.push(t.narrow(0, 0, offset)?);
-                            }
-                            parts.push(updated_slice);
-                            let after = offset + size;
-                            if after < base_rows {
-                                parts.push(t.narrow(0, after, base_rows - after)?);
-                            }
-                            Tensor::cat(&parts, 0)?
-                        }
-                    }
-                };
-                applied += 1;
-            }
-
-            // Re-quantize to the original GGUF dtype directly onto the GPU.
-            // quantize_to_device takes CPU F32 data and quantizes it into GPU
-            // QStorage without creating a full F32 tensor on GPU — saves VRAM.
-            let patched = QTensor::quantize_to_device(&t, original_dtype, device)?;
-            drop(t); // free CPU F32 copy
-            data.insert(tensor_name.clone(), Arc::new(patched));
+        // Find the matching tensor key (try with .weight suffix)
+        let tensor_key = if data.contains_key(candle_key) {
+            candle_key.clone()
         } else {
-            // Non-LoRA tensor: load directly to GPU, stays quantized
-            let qtensor = content.tensor(&mut file, tensor_name, device)?;
-            data.insert(tensor_name.clone(), Arc::new(qtensor));
+            // Shouldn't happen if map_lora_key produced correct candle keys
+            tracing::warn!(
+                key = candle_key.as_str(),
+                "LoRA target tensor not found in GGUF, skipping"
+            );
+            continue;
+        };
+
+        // Remember the original quantized dtype so we can re-quantize to it.
+        let orig_dtype = data[&tensor_key].dtype();
+
+        // Dequantize to F32 on CPU — keeps GPU clean for other tensors.
+        // The original Q8 GPU entry is removed to reclaim its VRAM.
+        let qtensor = data.remove(&tensor_key).unwrap();
+        let mut t = qtensor.dequantize(&Device::Cpu)?;
+        drop(qtensor); // release GPU QTensor VRAM
+        if on_gpu {
+            device.synchronize()?; // ensure CUDA frees the Q8 allocation
         }
 
-        if (i + 1) % 100 == 0 || i + 1 == total_tensors {
-            progress.info(&format!("Loading GGUF tensor {}/{total_tensors}", i + 1));
+        for patch in layer_patches {
+            // A×B matmul on GPU (tiny LoRA tensors), bring delta to CPU for merge
+            let matmul_dev = if on_gpu { device } else { &Device::Cpu };
+            let a = patch.a.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+            let b = patch.b.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+            let delta = b.matmul(&a)?;
+            let delta = (&delta * patch.effective_scale)?.to_device(&Device::Cpu)?;
+
+            t = match &patch.target {
+                LoraTarget::Direct { .. } => (&t + &delta)?,
+                LoraTarget::FusedSlice {
+                    component,
+                    num_components,
+                    ..
+                } => {
+                    let base_rows = t.dim(0)?;
+                    let lora_out_dim = delta.dim(0)?;
+                    let (offset, size) =
+                        fused_slice_range(base_rows, lora_out_dim, *component, *num_components);
+
+                    if offset + size > base_rows {
+                        tracing::warn!(
+                            offset,
+                            size,
+                            base_rows,
+                            "fused slice out of bounds, skipping"
+                        );
+                        t
+                    } else {
+                        let slice = t.narrow(0, offset, size)?;
+                        let updated_slice = (&slice + &delta)?;
+                        let mut parts: Vec<Tensor> = Vec::new();
+                        if offset > 0 {
+                            parts.push(t.narrow(0, 0, offset)?);
+                        }
+                        parts.push(updated_slice);
+                        let after = offset + size;
+                        if after < base_rows {
+                            parts.push(t.narrow(0, after, base_rows - after)?);
+                        }
+                        Tensor::cat(&parts, 0)?
+                    }
+                }
+            };
+            applied += 1;
+        }
+
+        // Re-quantize back to the original GGML dtype (e.g. Q8_0) and place
+        // on the target device.  `quantize_onto` quantizes the CPU F32 tensor
+        // into CPU Q8_0 blocks, then copies the raw bytes to GPU — producing
+        // the exact same storage size as the original GGUF-loaded tensor.
+        // This avoids the 2x VRAM inflation that storing as F16 would cause.
+        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        drop(t); // free CPU F32 copy
+        data.insert(tensor_key, Arc::new(patched));
+
+        if (i + 1) % 100 == 0 || i + 1 == lora_keys.len() {
+            progress.info(&format!(
+                "Patching LoRA tensor {}/{}",
+                i + 1,
+                lora_keys.len()
+            ));
         }
     }
 
     progress.info(&format!(
-        "LoRA: {applied} applied, {} skipped (rank {}, {patched_keys} layers re-quantized)",
+        "LoRA: {applied} applied, {} skipped (rank {}, {patched_keys} layers patched)",
         adapter.layers.len() - applied,
         adapter.rank
     ));

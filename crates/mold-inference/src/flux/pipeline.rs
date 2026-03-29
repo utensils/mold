@@ -1318,6 +1318,9 @@ impl FluxEngine {
         self.base
             .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
+        if let Some(status) = memory_status_string() {
+            self.base.progress.info(&status);
+        }
 
         // Generate noise and build state
         let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
