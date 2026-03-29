@@ -429,13 +429,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-core"
+name = "candle-core-mold"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
  "byteorder",
  "candle-kernels",
- "candle-metal-kernels",
+ "candle-metal-kernels-mold",
  "candle-ug",
  "cudarc 0.19.3",
  "float8",
@@ -460,15 +460,15 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
  "cudaforge",
 ]
 
 [[package]]
-name = "candle-metal-kernels"
+name = "candle-metal-kernels-mold"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
  "half",
  "objc2",
@@ -480,12 +480,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-nn"
+name = "candle-nn-mold"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
- "candle-core",
- "candle-metal-kernels",
+ "candle-core-mold",
+ "candle-metal-kernels-mold",
  "half",
  "libc",
  "num-traits",
@@ -497,13 +497,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-transformers"
+name = "candle-transformers-mold"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core-mold",
+ "candle-nn-mold",
  "fancy-regex",
  "num-traits",
  "rand 0.9.2",
@@ -517,7 +517,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.9.2"
-source = "git+https://github.com/utensils/candle?rev=3d9e1c26#3d9e1c2692af689a3075b93323e135dddf8ad386"
+source = "git+https://github.com/utensils/candle?rev=5bfa8bb4910c98ed819db514a2928368c17ebbd5#5bfa8bb4910c98ed819db514a2928368c17ebbd5"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -2583,9 +2583,9 @@ name = "mold-ai-inference"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
- "candle-transformers",
+ "candle-core-mold",
+ "candle-nn-mold",
+ "candle-transformers-mold",
  "image",
  "mold-ai-core",
  "png",

@@ -1179,13 +1179,8 @@ impl FluxEngine {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // LoRA + GGUF guard (checked early, before offload decision).
-        if req.lora.is_some() && is_quantized {
-            bail!(
-                "LoRA adapters are not yet supported with quantized (GGUF) models. \
-                 Use a BF16 model instead (e.g. flux-dev:bf16)."
-            );
-        }
+        // LoRA + GGUF: supported via selective dequantization.
+        // LoRA-affected layers are dequantized to BF16, rest stays quantized.
 
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
@@ -1238,6 +1233,8 @@ impl FluxEngine {
         let has_lora = req.lora.is_some();
         let xformer_label = if has_lora && use_offload {
             "Loading FLUX transformer + LoRA (offloaded)"
+        } else if has_lora && is_quantized {
+            "Loading FLUX transformer + LoRA (GPU, quantized + selective deq)"
         } else if has_lora {
             "Loading FLUX transformer + LoRA (GPU, BF16)"
         } else if use_offload {
@@ -1277,6 +1274,24 @@ impl FluxEngine {
                 &device,
                 &self.base.progress,
             )?)
+        } else if is_quantized && req.lora.is_some() {
+            // GGUF + LoRA: dequantize LoRA-affected layers, keep rest quantized
+            let lora = req.lora.as_ref().unwrap();
+            let adapter = super::lora::LoraAdapter::load(Path::new(&lora.path))?;
+            self.base.progress.info(&format!(
+                "LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                lora.scale
+            ));
+            let vb = super::lora::gguf_lora_var_builder(
+                &transformer_path,
+                &adapter,
+                lora.scale,
+                &device,
+                &self.base.progress,
+            )?;
+            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
