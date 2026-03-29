@@ -11,19 +11,19 @@ use crate::theme;
 use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
 
 /// Count files and total bytes in a directory (recursive).
+/// Count files and total bytes in a directory (recursive, no symlink following).
+/// Avoids double-counting symlinked HF cache blobs.
 fn dir_stats(path: &std::path::Path) -> (u64, u64) {
     let mut files = 0u64;
     let mut bytes = 0u64;
-    if let Ok(entries) = walkdir::WalkDir::new(path)
-        .follow_links(true)
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()
+        .flatten()
     {
-        for entry in entries {
-            if entry.file_type().is_file() {
-                files += 1;
-                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            }
+        if entry.file_type().is_file() {
+            files += 1;
+            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
     (files, bytes)
@@ -279,11 +279,8 @@ pub async fn run_overview() -> Result<()> {
         }
     }
 
-    // HuggingFace hub cache
-    let hf_cache = dirs::cache_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
-        .join("huggingface")
-        .join("hub");
+    // HuggingFace hub cache — mold uses <models_dir>/.hf-cache/
+    let hf_cache = models_dir.join(".hf-cache");
     if hf_cache.exists() {
         let (files, bytes) = dir_stats(&hf_cache);
         if bytes > 0 {
