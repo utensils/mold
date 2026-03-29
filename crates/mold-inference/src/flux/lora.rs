@@ -274,8 +274,14 @@ pub(crate) fn merge_lora_into_tensors(
         // A shape: (rank, in_features), B shape: (out_features, rank)
         // delta shape: (out_features, in_features)
         // When a GPU is available, move A/B there for the matmul then bring delta back.
-        let a = lora_layer.a.to_dtype(DType::F32)?.to_device(compute_device)?;
-        let b = lora_layer.b.to_dtype(DType::F32)?.to_device(compute_device)?;
+        let a = lora_layer
+            .a
+            .to_dtype(DType::F32)?
+            .to_device(compute_device)?;
+        let b = lora_layer
+            .b
+            .to_dtype(DType::F32)?
+            .to_device(compute_device)?;
         let delta = b.matmul(&a)?;
         let delta = (delta * effective_scale)?.to_device(&Device::Cpu)?;
 
@@ -432,7 +438,9 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
 
                         if offset + size > base_rows {
                             tracing::warn!(
-                                offset, size, base_rows,
+                                offset,
+                                size,
+                                base_rows,
                                 "fused slice out of bounds, skipping"
                             );
                             t
@@ -468,9 +476,7 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
             format!("{}{name}", self.prefix)
         };
         // Check via trying to load metadata (tensors() lists all names)
-        self.st
-            .get(&raw_key)
-            .is_ok()
+        self.st.get(&raw_key).is_ok()
     }
 }
 
@@ -491,17 +497,21 @@ pub(crate) fn lora_var_builder<'a>(
     use candle_core::safetensors::MmapedSafetensors;
 
     // Open mmap (cheap, no I/O)
-    let st = unsafe {
-        MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))?
-    };
+    let st = unsafe { MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))? };
 
     // Detect key prefix
     let all_names: Vec<String> = st.tensors().into_iter().map(|(n, _)| n).collect();
     let prefix = if all_names.iter().any(|n| n == "img_in.weight") {
         ""
-    } else if all_names.iter().any(|n| n == "model.diffusion_model.img_in.weight") {
+    } else if all_names
+        .iter()
+        .any(|n| n == "model.diffusion_model.img_in.weight")
+    {
         "model.diffusion_model."
-    } else if all_names.iter().any(|n| n == "diffusion_model.img_in.weight") {
+    } else if all_names
+        .iter()
+        .any(|n| n == "diffusion_model.img_in.weight")
+    {
         "diffusion_model."
     } else {
         ""
@@ -520,17 +530,17 @@ pub(crate) fn lora_var_builder<'a>(
                 Some(alpha) => scale * alpha / adapter.rank as f64,
                 None => scale,
             };
-            patches
-                .entry(candle_key)
-                .or_default()
-                .push(LoraPatch {
-                    a: lora_layer.a.clone(),
-                    b: lora_layer.b.clone(),
-                    effective_scale,
-                    target,
-                });
+            patches.entry(candle_key).or_default().push(LoraPatch {
+                a: lora_layer.a.clone(),
+                b: lora_layer.b.clone(),
+                effective_scale,
+                target,
+            });
         } else {
-            tracing::warn!(key = diffusers_key.as_str(), "unrecognized LoRA key, skipping");
+            tracing::warn!(
+                key = diffusers_key.as_str(),
+                "unrecognized LoRA key, skipping"
+            );
             skipped += 1;
         }
     }

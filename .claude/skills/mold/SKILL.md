@@ -17,6 +17,7 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
+mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
 ```
 
 ## How to Use This Skill
@@ -93,6 +94,35 @@ mold run "a cat" --no-expand
 ```
 
 The expansion model is dropped from memory before diffusion begins, so it doesn't compete for VRAM.
+
+### LoRA Adapters
+
+Apply LoRA (Low-Rank Adaptation) fine-tuned adapters on top of FLUX BF16 base models:
+
+```bash
+# Basic LoRA usage
+mold run flux-dev:bf16 "a portrait" --lora /path/to/adapter.safetensors
+
+# Adjust LoRA strength (0.0 = no effect, 1.0 = full, up to 2.0)
+mold run flux-dev:bf16 "anime style" --lora style.safetensors --lora-scale 0.7
+
+# LoRA with other options (img2img, seed, etc.)
+mold run flux-dev:bf16 "oil painting" --lora art.safetensors --image photo.png --strength 0.6
+```
+
+**Requirements:**
+- Base model must be FLUX BF16 (e.g. `flux-dev:bf16`, `flux-schnell:bf16`)
+- LoRA file must be `.safetensors` format (diffusers-format keys)
+- GGUF quantized models do not support LoRA yet
+- On 24GB cards, LoRA auto-uses block-level offloading (3-5x slower but fits in VRAM)
+
+**Per-model config defaults** (config.toml):
+```toml
+[models."flux-dev:bf16"]
+# ... other fields ...
+lora = "/path/to/default-adapter.safetensors"
+lora_scale = 0.8
+```
 
 ### Model Selection Guide
 
@@ -273,6 +303,8 @@ Models auto-pull if not downloaded: `mold run flux-schnell "a cat"` will downloa
 - Dimensions must be multiples of 16; total pixels capped at ~1.1 megapixels
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
+- LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects
+- On 24GB cards, LoRA + BF16 auto-offloads (slower but avoids OOM)
 
 ## Discord Bot
 

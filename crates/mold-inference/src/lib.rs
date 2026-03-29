@@ -19,8 +19,8 @@ pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
 pub mod sdxl;
-pub mod wuerstchen;
 pub(crate) mod weight_loader;
+pub mod wuerstchen;
 pub mod zimage;
 
 pub use device::reclaim_gpu_memory;

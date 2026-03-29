@@ -90,13 +90,13 @@ crates/
 
 Shared library used by all other crates:
 
-- **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, `ExpandRequest`, `ExpandResponse`, etc.)
+- **`types.rs`** — API request/response types (`GenerateRequest`, `GenerateResponse`, `ModelInfo`, `ServerStatus`, `ExpandRequest`, `ExpandResponse`, `LoraWeight`, etc.)
 - **`client.rs`** — `MoldClient` HTTP client; `is_connection_error()` for local fallback detection; `expand_prompt()` for server-side expansion
-- **`config.rs`** — `Config`, `ModelConfig`, `ModelPaths`; loads from `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy)
+- **`config.rs`** — `Config`, `ModelConfig`, `ModelPaths`; loads from `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy); per-model `lora` path and `lora_scale` defaults
 - **`manifest.rs`** — `ModelManifest` registry of downloadable models with HF sources; `resolve_model_name()` for `name:tag` resolution; `UTILITY_FAMILIES` constant for non-diffusion models (e.g. `qwen3-expand`); `is_utility()` for family-based classification
 - **`expand.rs`** — `PromptExpander` trait, `ApiExpander` (OpenAI-compatible HTTP), `ExpandConfig`/`ExpandSettings`/`FamilyOverride` settings with env var support (`MOLD_EXPAND_*`); user-configurable system prompt templates and per-family word limits/style notes
 - **`download.rs`** — `pull_model()` wrapping `hf-hub` with progress bars; SHA-256 integrity verification (fails on mismatch, `--skip-verify` to override); `.pulling` marker for atomic pull detection; `PullOptions` for controlling verification behavior
-- **`validation.rs`** — `validate_generate_request()` — shared validation (used by both server and CLI); `fit_to_model_dimensions()` — aspect-ratio-preserving resize of source images to model-native resolution for img2img
+- **`validation.rs`** — `validate_generate_request()` — shared validation (used by both server and CLI); `fit_to_model_dimensions()` — aspect-ratio-preserving resize of source images to model-native resolution for img2img; LoRA scale range [0.0, 2.0] and .safetensors extension validation
 - **`error.rs`** — `MoldError` enum with thiserror
 
 ### mold-inference
@@ -130,6 +130,7 @@ pub trait InferenceEngine: Send + Sync {
 - `scheduler.rs` — Configurable scheduler builder (DDIM, Euler Ancestral, UniPC) for SD1.5/SDXL
 - `img_utils.rs` — Source image decoding, resizing, mask processing for img2img/inpainting
 - `controlnet/` — ControlNet model (UNet encoder copy with zero convolutions) for SD1.5
+- `weight_loader.rs` — `load_safetensors_with_progress()` utility: replaces opaque `VarBuilder::from_mmaped_safetensors()` with per-tensor loading that emits `WeightLoad` progress events for byte-level progress bars
 
 **Key architectural patterns:**
 
@@ -140,6 +141,7 @@ pub trait InferenceEngine: Send + Sync {
 - **Dynamic device placement** — Text encoders placed on GPU or CPU based on remaining VRAM after transformer loads (thresholds in `device.rs`)
 - **Quantized encoder auto-fallback** — When FP16/BF16 encoder doesn't fit in VRAM, auto-selects largest quantized GGUF variant that fits. Custom `GgufT5Encoder` and `GgufQwen3Encoder` in `encoders/` handle GGUF-specific tensor naming. Override with `--t5-variant` / `--qwen3-variant` flags.
 - **Block-level offloading** — `flux/offload.rs`: streams transformer blocks between CPU and GPU one at a time, reducing VRAM from ~24GB to ~2-4GB (3-5x slower). Auto-enabled when VRAM is insufficient; force with `--offload` / `MOLD_OFFLOAD=1`.
+- **LoRA adapter support** — `flux/lora.rs`: custom `SimpleBackend` (`LoraBackend`) that wraps mmap'd base weights and applies LoRA deltas inline during model construction. Parses diffusers-format LoRA safetensors (A/B weight pairs + alpha), maps keys to candle's fused tensor layout (QKV, linear1), and merges via `W' = W + scale * (B @ A)`. Compatible with block-level offloading — LoRA patches are baked into blocks on CPU, then streamed to GPU during inference.
 
 **Z-Image GGUF specifics** — The quantized Z-Image transformer (`zimage/quantized_transformer.rs`) lives in this crate (not candle) because candle has no quantized Z-Image model. Key GGUF tensor name differences from BF16: fused `attention.qkv` vs separate Q/K/V, `x_embedder` vs `all_x_embedder.2-1`, etc.
 
@@ -201,6 +203,8 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
         --scheduler <SCHED>     Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc
+        --lora <PATH>           LoRA adapter safetensors file (FLUX BF16 only; repeatable in future)
+        --lora-scale <FLOAT>    LoRA effect strength (0.0-2.0) [default: 1.0]
     -i, --image <PATH|->        Source image for img2img (file path or - for stdin)
         --strength <FLOAT>      Denoising strength for img2img (0.0-1.0) [default: 0.75]
         --mask <PATH>           Mask for inpainting (white=repaint, black=preserve; requires --image)
@@ -304,6 +308,8 @@ clip_tokenizer = "/path/to/clip.tokenizer.json"
 default_steps = 4
 default_guidance = 0.0
 is_schnell = true
+# lora = "/path/to/adapter.safetensors"
+# lora_scale = 0.8
 
 [expand]
 enabled = false
@@ -331,7 +337,7 @@ temperature = 0.7
 2. **Local fallback**: If server unreachable, falls back to local GPU inference (with auto-pull if model not downloaded)
 3. **Local forced (`--local`)**: Skip server attempt entirely
 
-> **VRAM note**: Full BF16 FLUX dev (23GB) causes OOM on 24GB cards. Always use GGUF quantized models. SDXL FP16 UNets (~5GB) fit comfortably.
+> **VRAM note**: Full BF16 FLUX dev (23GB) auto-offloads on 24GB cards (blocks stream CPU↔GPU). GGUF quantized models fit without offloading. SDXL FP16 UNets (~5GB) fit comfortably. LoRA adapters work with BF16 FLUX models via the offload path.
 
 ## Deployment
 
@@ -358,3 +364,4 @@ temperature = 0.7
 9. **Pipe-friendly output** — `IsTerminal` detection routes image bytes to stdout, status to stderr. SIGPIPE reset to default. `status!` macro handles routing.
 10. **Unified `run` command** — First positional arg disambiguated at runtime: known model name vs prompt text.
 11. **CPU-based noise generation** — Initial denoising noise is generated on CPU with a deterministic Rust RNG (`StdRng`/ChaCha20), then moved to GPU. This ensures same seed produces identical images across CUDA, Metal, and CPU backends. See `seeded_randn()` in `engine.rs`.
+12. **LoRA via custom VarBuilder backend** — candle has no built-in LoRA support. Instead of pre-merging weights into a HashMap (causes OOM on tight cards), a custom `SimpleBackend` wraps the mmap'd safetensors and intercepts `vb.get()` calls during model construction. Each tensor loads from mmap → device, and LoRA deltas (`B @ A`) are applied inline. Memory profile is identical to non-LoRA loading. Works with block-level offloading by targeting CPU device.

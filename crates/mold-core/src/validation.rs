@@ -686,4 +686,94 @@ mod tests {
         // 64x64 source -> 1024x1024 model
         assert_eq!(fit_to_model_dimensions(64, 64, 1024, 1024), (1024, 1024));
     }
+
+    // ── LoRA validation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn lora_none_valid() {
+        let req = valid_req();
+        assert!(req.lora.is_none());
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn lora_scale_too_low_rejected() {
+        let mut req = valid_req();
+        // Create a temp .safetensors file so the path check passes
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.safetensors");
+        std::fs::write(&path, b"fake").unwrap();
+        req.lora = Some(crate::LoraWeight {
+            path: path.to_str().unwrap().to_string(),
+            scale: -0.1,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("lora scale"),
+            "expected lora scale error: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_scale_too_high_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.safetensors");
+        std::fs::write(&path, b"fake").unwrap();
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: path.to_str().unwrap().to_string(),
+            scale: 2.1,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("lora scale"),
+            "expected lora scale error: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_scale_boundary_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.safetensors");
+        std::fs::write(&path, b"fake").unwrap();
+        for scale in [0.0, 1.0, 2.0] {
+            let mut req = valid_req();
+            req.lora = Some(crate::LoraWeight {
+                path: path.to_str().unwrap().to_string(),
+                scale,
+            });
+            assert!(
+                validate_generate_request(&req).is_ok(),
+                "scale={scale} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn lora_file_not_found_rejected() {
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "/nonexistent/path/adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("not found"), "expected not found error: {err}");
+    }
+
+    #[test]
+    fn lora_wrong_extension_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"fake").unwrap();
+        let mut req = valid_req();
+        req.lora = Some(crate::LoraWeight {
+            path: path.to_str().unwrap().to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("safetensors"),
+            "expected safetensors error: {err}"
+        );
+    }
 }

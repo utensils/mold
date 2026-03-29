@@ -566,7 +566,14 @@ fn flux_lora_var_builder<'a>(
         lora.scale
     ));
 
-    lora::lora_var_builder(transformer_path, &adapter, lora.scale, dtype, device, progress)
+    lora::lora_var_builder(
+        transformer_path,
+        &adapter,
+        lora.scale,
+        dtype,
+        device,
+        progress,
+    )
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -1649,7 +1656,9 @@ impl InferenceEngine for FluxEngine {
             if loaded.clip.model.is_none() {
                 progress.stage_start("Reloading CLIP encoder (GPU)");
                 let reload_start = Instant::now();
-                loaded.clip.reload(&clip_encoder_path, loaded_dtype, progress)?;
+                loaded
+                    .clip
+                    .reload(&clip_encoder_path, loaded_dtype, progress)?;
                 progress.stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
             }
 

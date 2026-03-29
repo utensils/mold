@@ -272,7 +272,12 @@ impl QwenImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<QwenImageVae> {
-        Ok(QwenImageVae::load(&self.base.paths.vae, device, dtype, &self.base.progress)?)
+        Ok(QwenImageVae::load(
+            &self.base.paths.vae,
+            device,
+            dtype,
+            &self.base.progress,
+        )?)
     }
 
     /// Load text encoder from disk.
