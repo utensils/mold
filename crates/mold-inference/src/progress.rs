@@ -17,6 +17,12 @@ pub enum ProgressEvent {
         total: usize,
         elapsed: Duration,
     },
+    /// Progress loading model weights from disk.
+    WeightLoad {
+        bytes_loaded: u64,
+        bytes_total: u64,
+        component: String,
+    },
 }
 
 /// Callback type for receiving progress events.
@@ -63,6 +69,14 @@ impl ProgressReporter {
         });
     }
 
+    pub fn weight_load(&self, component: &str, bytes_loaded: u64, bytes_total: u64) {
+        self.emit(ProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component: component.to_string(),
+        });
+    }
+
     pub fn set_callback(&mut self, callback: ProgressCallback) {
         self.callback = Some(callback);
     }
@@ -92,6 +106,15 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
                 step,
                 total,
                 elapsed_ms: elapsed.as_millis() as u64,
+            },
+            ProgressEvent::WeightLoad {
+                bytes_loaded,
+                bytes_total,
+                component,
+            } => mold_core::SseProgressEvent::WeightLoad {
+                bytes_loaded,
+                bytes_total,
+                component,
             },
         }
     }
@@ -257,6 +280,21 @@ mod tests {
         let entries = log.lock().unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].contains("before-clear"));
+    }
+
+    #[test]
+    fn test_weight_load_emits_structured_event() {
+        let mut reporter = ProgressReporter::default();
+        let (cb, log) = capturing_callback();
+        reporter.set_callback(cb);
+
+        reporter.weight_load("FLUX transformer", 500_000_000, 1_000_000_000);
+
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("WeightLoad"));
+        assert!(entries[0].contains("FLUX transformer"));
+        assert!(entries[0].contains("500000000"));
     }
 
     #[test]

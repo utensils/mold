@@ -16,7 +16,6 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -258,8 +257,13 @@ impl QwenImageEngine {
             ))
         } else {
             let xformer_paths = self.transformer_paths();
-            let xformer_vb =
-                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
+            let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
+                &xformer_paths,
+                dtype,
+                device,
+                "Qwen-Image transformer",
+                &self.base.progress,
+            )?;
             Ok(QwenImageTransformer::BF16(
                 QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
             ))
@@ -268,7 +272,7 @@ impl QwenImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<QwenImageVae> {
-        Ok(QwenImageVae::load(&self.base.paths.vae, device, dtype)?)
+        Ok(QwenImageVae::load(&self.base.paths.vae, device, dtype, &self.base.progress)?)
     }
 
     /// Load text encoder from disk.
@@ -284,6 +288,7 @@ impl QwenImageEngine {
             tokenizer_path,
             device,
             dtype,
+            &self.base.progress,
         )
     }
 
@@ -722,7 +727,7 @@ impl InferenceEngine for QwenImageEngine {
         if loaded.text_encoder.model.is_none() {
             progress.stage_start("Reloading Qwen2.5 encoder");
             let reload_start = Instant::now();
-            loaded.text_encoder.reload()?;
+            loaded.text_encoder.reload(progress)?;
             progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
         }
 

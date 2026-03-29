@@ -118,9 +118,15 @@ impl ControlNetModel {
         device: &Device,
         dtype: DType,
         config: UNet2DConditionModelConfig,
+        progress: &crate::progress::ProgressReporter,
     ) -> anyhow::Result<Self> {
-        let vs =
-            unsafe { nn::VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)? };
+        let vs = crate::weight_loader::load_safetensors_with_progress(
+            &[weights_path],
+            dtype,
+            device,
+            "ControlNet",
+            progress,
+        )?;
         let model = Self::new(vs, config)?;
         Ok(model)
     }

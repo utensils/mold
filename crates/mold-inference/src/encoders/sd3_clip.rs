@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use candle_core::{DType, IndexOp, Module, Tensor, D};
-use candle_nn::VarBuilder;
 use candle_transformers::models::stable_diffusion::clip::{
     self, ClipTextTransformer, Config as ClipConfig,
 };
@@ -33,6 +32,7 @@ struct ClipWithTokenizer {
 }
 
 impl ClipWithTokenizer {
+    #[allow(clippy::too_many_arguments)]
     fn load(
         encoder_path: &PathBuf,
         tokenizer_path: &PathBuf,
@@ -40,10 +40,16 @@ impl ClipWithTokenizer {
         max_position_embeddings: usize,
         device: &candle_core::Device,
         dtype: DType,
+        component: &str,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(encoder_path), dtype, device)?
-        };
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(encoder_path),
+            dtype,
+            device,
+            component,
+            progress,
+        )?;
         let model = ClipTextTransformer::new(vb, &config)?;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
@@ -105,14 +111,20 @@ impl ClipWithTokenizer {
         self.model = None;
     }
 
-    fn reload(&mut self, encoder_path: &PathBuf, dtype: DType) -> Result<()> {
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(encoder_path),
-                dtype,
-                &self.device,
-            )?
-        };
+    fn reload(
+        &mut self,
+        encoder_path: &PathBuf,
+        dtype: DType,
+        component: &str,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(encoder_path),
+            dtype,
+            &self.device,
+            component,
+            progress,
+        )?;
         self.model = Some(ClipTextTransformer::new(vb, &self.config)?);
         Ok(())
     }
@@ -150,6 +162,7 @@ impl SD3TripleEncoder {
         t5_tokenizer_path: &PathBuf,
         device: &candle_core::Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
         let max_position_embeddings = 77usize;
 
@@ -161,12 +174,18 @@ impl SD3TripleEncoder {
             max_position_embeddings,
             device,
             dtype,
+            "SD3 CLIP-L",
+            progress,
         )?;
 
         // Load CLIP-G text_projection from the CLIP-G weights
-        let clip_g_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(clip_g_path), dtype, device)?
-        };
+        let clip_g_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(clip_g_path),
+            dtype,
+            device,
+            "SD3 CLIP-G projection",
+            progress,
+        )?;
         let text_projection =
             candle_nn::linear_no_bias(1280, 1280, clip_g_vb.pp("text_projection"))?;
 
@@ -178,12 +197,14 @@ impl SD3TripleEncoder {
             max_position_embeddings,
             device,
             dtype,
+            "SD3 CLIP-G",
+            progress,
         )?;
 
         let on_gpu = crate::device::is_gpu(device);
 
         // T5 encoder
-        let t5 = T5Encoder::load(t5_path, t5_tokenizer_path, device, dtype)?;
+        let t5 = T5Encoder::load(t5_path, t5_tokenizer_path, device, dtype, progress)?;
 
         Ok(Self {
             clip_l,
@@ -254,10 +275,16 @@ impl SD3TripleEncoder {
     }
 
     /// Reload all encoder weights (e.g. for next generation after being dropped).
-    pub fn reload(&mut self, dtype: DType) -> Result<()> {
-        self.clip_l.reload(&self.clip_l_path, dtype)?;
-        self.clip_g.reload(&self.clip_g_path, dtype)?;
-        self.t5.reload(&self.t5_path, dtype)?;
+    pub fn reload(
+        &mut self,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        self.clip_l
+            .reload(&self.clip_l_path, dtype, "SD3 CLIP-L", progress)?;
+        self.clip_g
+            .reload(&self.clip_g_path, dtype, "SD3 CLIP-G", progress)?;
+        self.t5.reload(&self.t5_path, dtype, progress)?;
         Ok(())
     }
 

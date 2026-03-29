@@ -75,6 +75,18 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
         SseProgressEvent::PullComplete { model } => {
             format!("Model {model} downloaded")
         }
+        SseProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component,
+        } => {
+            let pct = if *bytes_total > 0 {
+                (*bytes_loaded as f64 / *bytes_total as f64 * 100.0) as u64
+            } else {
+                0
+            };
+            format!("Loading {component} ({pct}%)")
+        }
     }
 }
 

@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
 use candle_transformers::models::z_image::{
     calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
     SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
@@ -171,8 +170,13 @@ impl ZImageEngine {
                 QuantizedZImageTransformer2DModel::new(cfg, dtype, vb)?,
             ))
         } else {
-            let xformer_vb =
-                unsafe { VarBuilder::from_mmaped_safetensors(&xformer_paths, dtype, device)? };
+            let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
+                &xformer_paths,
+                dtype,
+                device,
+                "Z-Image transformer",
+                &self.base.progress,
+            )?;
             Ok(ZImageTransformer::BF16(ZImageTransformer2DModel::new(
                 cfg, xformer_vb,
             )?))
@@ -182,9 +186,13 @@ impl ZImageEngine {
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<AutoEncoderKL> {
         let vae_cfg = VaeConfig::z_image();
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[self.base.paths.vae.as_path()], dtype, device)?
-        };
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            &[self.base.paths.vae.as_path()],
+            dtype,
+            device,
+            "VAE",
+            &self.base.progress,
+        )?;
         Ok(AutoEncoderKL::new(&vae_cfg, vae_vb)?)
     }
 
@@ -325,6 +333,7 @@ impl ZImageEngine {
                 &text_tokenizer_path,
                 &te_device,
                 te_dtype,
+                &self.base.progress,
             )?
         };
 
@@ -458,6 +467,7 @@ impl ZImageEngine {
                 &text_tokenizer_path,
                 &te_device,
                 te_dtype,
+                &self.base.progress,
             )?
         };
         self.base.progress.stage_done(&te_label, te_start.elapsed());
@@ -718,7 +728,7 @@ impl InferenceEngine for ZImageEngine {
             };
             progress.stage_start(te_label);
             let reload_start = Instant::now();
-            loaded.text_encoder.reload()?;
+            loaded.text_encoder.reload(progress)?;
             progress.stage_done(te_label, reload_start.elapsed());
         }
 
@@ -855,13 +865,13 @@ impl InferenceEngine for ZImageEngine {
                         loaded.device.synchronize()?;
                         // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
                         let vae_cfg = VaeConfig::z_image();
-                        let vae_vb = unsafe {
-                            VarBuilder::from_mmaped_safetensors(
-                                &[loaded.vae_path.as_path()],
-                                DType::F32,
-                                &Device::Cpu,
-                            )?
-                        };
+                        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                            &[loaded.vae_path.as_path()],
+                            DType::F32,
+                            &Device::Cpu,
+                            "VAE",
+                            progress,
+                        )?;
                         let cpu_vae = AutoEncoderKL::new(&vae_cfg, vae_vb)?;
                         let cpu_latents =
                             latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;

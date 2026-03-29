@@ -452,6 +452,12 @@ pub enum SseProgressEvent {
     Queued {
         position: usize,
     },
+    /// Progress loading model weights from disk.
+    WeightLoad {
+        bytes_loaded: u64,
+        bytes_total: u64,
+        component: String,
+    },
 }
 
 /// Completion event sent when image generation finishes successfully.
@@ -892,6 +898,28 @@ mod tests {
         assert!(json.contains(r#""position":3"#));
         let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, SseProgressEvent::Queued { position: 3 }));
+    }
+
+    #[test]
+    fn sse_progress_weight_load_roundtrip() {
+        let event = SseProgressEvent::WeightLoad {
+            bytes_loaded: 5_000_000,
+            bytes_total: 10_000_000,
+            component: "FLUX transformer".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"weight_load""#));
+        assert!(json.contains(r#""bytes_loaded":5000000"#));
+        assert!(json.contains(r#""component":"FLUX transformer""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::WeightLoad {
+                bytes_loaded: 5_000_000,
+                bytes_total: 10_000_000,
+                ..
+            }
+        ));
     }
 
     // ── img2img field tests ────────────────────────────────────────────────

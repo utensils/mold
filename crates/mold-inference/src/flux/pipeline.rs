@@ -531,8 +531,16 @@ fn flux_safetensors_var_builder<'a>(
     path: &std::path::Path,
     dtype: DType,
     device: &Device,
+    component: &str,
+    progress: &ProgressReporter,
 ) -> Result<VarBuilder<'a>> {
-    Ok(unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device)? })
+    crate::weight_loader::load_safetensors_with_progress(
+        std::slice::from_ref(&path),
+        dtype,
+        device,
+        component,
+        progress,
+    )
 }
 
 /// Build a VarBuilder from base safetensors with LoRA deltas pre-merged.
@@ -563,7 +571,7 @@ fn flux_lora_var_builder<'a>(
         lora.scale
     ));
 
-    lora::merge_lora_into_tensors(&mut tensors, &adapter, lora.scale, progress)?;
+    lora::merge_lora_into_tensors(&mut tensors, &adapter, lora.scale, device, progress)?;
 
     // Move merged tensors to target device and dtype
     let tensors: HashMap<String, candle_core::Tensor> = tensors
@@ -858,6 +866,8 @@ impl FluxEngine {
                 &transformer_path,
                 gpu_dtype,
                 &device,
+                "FLUX transformer",
+                &self.base.progress,
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
@@ -870,13 +880,13 @@ impl FluxEngine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
-                &device,
-            )?
-        };
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            gpu_dtype,
+            &device,
+            "VAE",
+            &self.base.progress,
+        )?;
         let vae_cfg = if is_schnell {
             flux::autoencoder::Config::schnell()
         } else {
@@ -933,6 +943,7 @@ impl FluxEngine {
             &t5_tokenizer_path,
             t5_device,
             t5_dtype,
+            &self.base.progress,
         )?;
         self.base
             .progress
@@ -965,6 +976,7 @@ impl FluxEngine {
             &clip_tokenizer_path,
             clip_device,
             clip_dtype,
+            &self.base.progress,
         )?;
         self.base
             .progress
@@ -1105,6 +1117,7 @@ impl FluxEngine {
                 &t5_tokenizer_path,
                 t5_device,
                 t5_dtype,
+                &self.base.progress,
             )?;
             self.base
                 .progress
@@ -1141,6 +1154,7 @@ impl FluxEngine {
                 &clip_tokenizer_path,
                 clip_device,
                 clip_dtype,
+                &self.base.progress,
             )?;
             self.base
                 .progress
@@ -1175,10 +1189,50 @@ impl FluxEngine {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        // LoRA + GGUF guard (checked early, before offload decision).
+        if req.lora.is_some() && is_quantized {
+            bail!(
+                "LoRA adapters are not yet supported with quantized (GGUF) models. \
+                 Use a BF16 model instead (e.g. flux-dev:bf16)."
+            );
+        }
+
         // Determine if block-level offloading should be used.
+        // When LoRA is active, suppress auto-offload — LoRA pre-merges into a full
+        // tensor map that loads directly on GPU. Only honor explicit --offload (and
+        // reject it, since offloaded inference isn't LoRA-compatible yet).
+        let has_lora = req.lora.is_some();
         let use_offload = if !is_quantized {
             let free = free_vram_bytes().unwrap_or(0);
-            if self.offload || should_offload(xformer_size, free) {
+            if self.offload {
+                if has_lora {
+                    bail!(
+                        "LoRA adapters are not yet supported with block-level offloading. \
+                         Remove --offload to use LoRA."
+                    );
+                }
+                if free > 0 && free < MIN_OFFLOAD_VRAM {
+                    bail!(
+                        "GPU only has {:.1} GB free — at least {:.1} GB is required \
+                         for block-level offloading",
+                        free as f64 / 1e9,
+                        MIN_OFFLOAD_VRAM as f64 / 1e9,
+                    );
+                }
+                true
+            } else if has_lora {
+                // Skip auto-offload for LoRA: the merged weights load directly on GPU.
+                // If it truly doesn't fit, CUDA will OOM with a clear error.
+                if free > 0 && should_offload(xformer_size, free) {
+                    tracing::info!(
+                        "auto-offload suppressed for LoRA merge (transformer {:.1} GB, \
+                         VRAM {:.1} GB free — tight fit expected)",
+                        xformer_size as f64 / 1e9,
+                        free as f64 / 1e9,
+                    );
+                }
+                false
+            } else if should_offload(xformer_size, free) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(
                         "GPU only has {:.1} GB free — at least {:.1} GB is required \
@@ -1217,20 +1271,6 @@ impl FluxEngine {
             self.base.progress.info(&status);
         }
 
-        // LoRA guards
-        if req.lora.is_some() && is_quantized {
-            bail!(
-                "LoRA adapters are not yet supported with quantized (GGUF) models. \
-                 Use a BF16 model instead (e.g. flux-dev:bf16)."
-            );
-        }
-        if req.lora.is_some() && use_offload {
-            bail!(
-                "LoRA adapters are not yet supported with block-level offloading. \
-                 Remove --offload to use LoRA."
-            );
-        }
-
         let flux_cfg = if is_schnell {
             flux::model::Config::schnell()
         } else {
@@ -1255,6 +1295,8 @@ impl FluxEngine {
                 &transformer_path,
                 gpu_dtype,
                 &Device::Cpu,
+                "FLUX transformer",
+                &self.base.progress,
             )?);
             FluxTransformer::Offloaded(crate::flux::offload::OffloadedFluxTransformer::load(
                 cpu_vb,
@@ -1279,6 +1321,8 @@ impl FluxEngine {
                 &transformer_path,
                 gpu_dtype,
                 &device,
+                "FLUX transformer",
+                &self.base.progress,
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
@@ -1332,13 +1376,13 @@ impl FluxEngine {
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.base.paths.vae),
-                    gpu_dtype,
-                    &device,
-                )?
-            };
+            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.vae),
+                gpu_dtype,
+                &device,
+                "VAE",
+                &self.base.progress,
+            )?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress
@@ -1457,13 +1501,13 @@ impl FluxEngine {
         } else {
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.base.paths.vae),
-                    gpu_dtype,
-                    &device,
-                )?
-            };
+            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.vae),
+                gpu_dtype,
+                &device,
+                "VAE",
+                &self.base.progress,
+            )?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress
@@ -1601,6 +1645,8 @@ impl InferenceEngine for FluxEngine {
                         &transformer_path,
                         loaded.dtype,
                         &loaded.device,
+                        "FLUX transformer",
+                        progress,
                     )?);
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 });
@@ -1630,13 +1676,13 @@ impl InferenceEngine for FluxEngine {
             if loaded.t5.model.is_none() {
                 progress.stage_start("Reloading T5 encoder (GPU)");
                 let reload_start = Instant::now();
-                loaded.t5.reload(&t5_encoder_path, loaded_dtype)?;
+                loaded.t5.reload(&t5_encoder_path, loaded_dtype, progress)?;
                 progress.stage_done("Reloading T5 encoder (GPU)", reload_start.elapsed());
             }
             if loaded.clip.model.is_none() {
                 progress.stage_start("Reloading CLIP encoder (GPU)");
                 let reload_start = Instant::now();
-                loaded.clip.reload(&clip_encoder_path, loaded_dtype)?;
+                loaded.clip.reload(&clip_encoder_path, loaded_dtype, progress)?;
                 progress.stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
             }
 

@@ -359,8 +359,16 @@ impl QwenImageVae {
         vae_path: &std::path::Path,
         device: &candle_core::Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[vae_path], dtype, device)? };
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            &[vae_path],
+            dtype,
+            device,
+            "Qwen-Image VAE",
+            progress,
+        )
+        .map_err(candle_core::Error::msg)?;
         let post_quant_conv = load_3d_conv1x1_as_2d(16, 16, vb.pp("post_quant_conv"))?;
         let decoder = QwenImageDecoder2d::new(vb.pp("decoder"))?;
 

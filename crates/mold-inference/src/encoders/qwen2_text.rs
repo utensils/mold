@@ -423,13 +423,16 @@ impl Qwen2TextEncoder {
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
         let config = Qwen2TextEncoderConfig::qwen_image();
-        let path_strs: Vec<&str> = encoder_paths
-            .iter()
-            .map(|p| p.to_str().expect("non-UTF8 path"))
-            .collect();
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&path_strs, dtype, device)? };
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            encoder_paths,
+            dtype,
+            device,
+            "Qwen2.5-VL encoder",
+            progress,
+        )?;
         let model = Qwen2TextModel::new(&config, vb)?;
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
@@ -519,14 +522,14 @@ impl Qwen2TextEncoder {
         self.model = None;
     }
 
-    pub fn reload(&mut self) -> Result<()> {
-        let path_strs: Vec<&str> = self
-            .encoder_paths
-            .iter()
-            .map(|p| p.to_str().expect("non-UTF8 path"))
-            .collect();
-        let vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(&path_strs, self.dtype, &self.device)? };
+    pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            &self.encoder_paths,
+            self.dtype,
+            &self.device,
+            "Qwen2.5-VL encoder",
+            progress,
+        )?;
         self.model = Some(Qwen2TextModel::new(&self.config, vb)?);
         Ok(())
     }

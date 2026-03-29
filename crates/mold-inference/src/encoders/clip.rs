@@ -1,6 +1,5 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};
-use candle_nn::VarBuilder;
 use candle_transformers::models::clip;
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
@@ -39,10 +38,15 @@ impl ClipEncoder {
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(encoder_path), dtype, device)?
-        };
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(encoder_path),
+            dtype,
+            device,
+            "CLIP-L",
+            progress,
+        )?;
         let model = clip::text_model::ClipTextTransformer::new(vb.pp("text_model"), &config())?;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
@@ -90,14 +94,19 @@ impl ClipEncoder {
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
-    pub fn reload(&mut self, encoder_path: &PathBuf, dtype: DType) -> Result<()> {
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(encoder_path),
-                dtype,
-                &self.device,
-            )?
-        };
+    pub fn reload(
+        &mut self,
+        encoder_path: &PathBuf,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(encoder_path),
+            dtype,
+            &self.device,
+            "CLIP-L",
+            progress,
+        )?;
         self.model = Some(clip::text_model::ClipTextTransformer::new(
             vb.pp("text_model"),
             &config(),

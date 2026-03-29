@@ -120,9 +120,12 @@ fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
                 component: 2,
                 num_components: 3,
             }),
-            // Direct mappings
+            // Output projections
             "attn.to_out.0" => Some(LoraTarget::Direct {
                 candle_key: format!("{block}.img_attn.proj.weight"),
+            }),
+            "attn.to_add_out" => Some(LoraTarget::Direct {
+                candle_key: format!("{block}.txt_attn.proj.weight"),
             }),
             "ff.net.0.proj" => Some(LoraTarget::Direct {
                 candle_key: format!("{block}.img_mlp.0.weight"),
@@ -223,15 +226,26 @@ fn fused_slice_range(
 ///
 /// For direct mappings: `W' = W + scale * (B @ A)`
 /// For fused slices: compute delta, then add to the corresponding row slice.
+///
+/// When a CUDA/Metal device is provided, the matmul (`B @ A`) runs on GPU for
+/// speed — LoRA tensors are small (~50-200 MB total) and GPU matmul handles all
+/// layers in seconds versus minutes on CPU.  The merged result is kept on CPU
+/// (same as the base tensors) so the caller can build a VarBuilder normally.
 pub(crate) fn merge_lora_into_tensors(
     base_tensors: &mut HashMap<String, Tensor>,
     adapter: &LoraAdapter,
     scale: f64,
+    compute_device: &Device,
     progress: &ProgressReporter,
 ) -> Result<()> {
     let total = adapter.layers.len();
     let mut applied = 0usize;
     let mut skipped = 0usize;
+    let on_gpu = compute_device.is_cuda() || compute_device.is_metal();
+
+    if on_gpu {
+        progress.info("Merging LoRA on GPU (fast path)");
+    }
 
     for (i, (diffusers_key, lora_layer)) in adapter.layers.iter().enumerate() {
         if (i + 1) % 100 == 0 || i + 1 == total {
@@ -253,13 +267,14 @@ pub(crate) fn merge_lora_into_tensors(
             None => scale,
         };
 
-        // Compute delta: B @ A (both on CPU in F32)
+        // Compute delta: B @ A
         // A shape: (rank, in_features), B shape: (out_features, rank)
         // delta shape: (out_features, in_features)
-        let a = lora_layer.a.to_dtype(DType::F32)?;
-        let b = lora_layer.b.to_dtype(DType::F32)?;
+        // When a GPU is available, move A/B there for the matmul then bring delta back.
+        let a = lora_layer.a.to_dtype(DType::F32)?.to_device(compute_device)?;
+        let b = lora_layer.b.to_dtype(DType::F32)?.to_device(compute_device)?;
         let delta = b.matmul(&a)?;
-        let delta = (delta * effective_scale)?;
+        let delta = (delta * effective_scale)?.to_device(&Device::Cpu)?;
 
         match target {
             LoraTarget::Direct { candle_key } => {
@@ -413,6 +428,10 @@ mod tests {
             (
                 "transformer.transformer_blocks.3.attn.to_out.0",
                 "double_blocks.3.img_attn.proj.weight",
+            ),
+            (
+                "transformer.transformer_blocks.3.attn.to_add_out",
+                "double_blocks.3.txt_attn.proj.weight",
             ),
             (
                 "transformer.transformer_blocks.3.ff.net.0.proj",

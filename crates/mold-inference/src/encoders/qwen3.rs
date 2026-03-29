@@ -6,7 +6,6 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
 use std::path::{Path, PathBuf};
 
 use super::qwen3_bf16::Bf16Qwen3Encoder;
@@ -80,12 +79,15 @@ impl Qwen3Encoder {
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let path_strs: Vec<&str> = encoder_paths
-            .iter()
-            .map(|p| p.to_str().expect("non-UTF8 path"))
-            .collect();
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&path_strs, dtype, device)? };
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            encoder_paths,
+            dtype,
+            device,
+            "Qwen3 encoder",
+            progress,
+        )?;
         let model = Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?);
 
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
@@ -192,21 +194,20 @@ impl Qwen3Encoder {
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
-    pub fn reload(&mut self) -> Result<()> {
+    pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
         if self.is_quantized {
             self.model = Some(Qwen3Model::Quantized(GgufQwen3Encoder::load(
                 &self.encoder_paths[0],
                 &self.device,
             )?));
         } else {
-            let path_strs: Vec<&str> = self
-                .encoder_paths
-                .iter()
-                .map(|p| p.to_str().expect("non-UTF8 path"))
-                .collect();
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&path_strs, self.dtype, &self.device)?
-            };
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                &self.encoder_paths,
+                self.dtype,
+                &self.device,
+                "Qwen3 encoder",
+                progress,
+            )?;
             self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?));
         }
         Ok(())

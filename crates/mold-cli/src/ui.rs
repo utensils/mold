@@ -232,6 +232,7 @@ pub(crate) async fn render_progress(
     pb.tick();
 
     let mut denoise_bar: Option<ProgressBar> = None;
+    let mut weight_bar: Option<ProgressBar> = None;
     let mut download_multi: Option<MultiProgress> = None;
     let mut download_bars: HashMap<usize, (ProgressBar, SmoothedRate)> = HashMap::new();
     while let Some(event) = rx.recv().await {
@@ -239,6 +240,9 @@ pub(crate) async fn render_progress(
             SseProgressEvent::StageStart { name } => {
                 if let Some(db) = denoise_bar.take() {
                     db.finish_and_clear();
+                }
+                if let Some(wb) = weight_bar.take() {
+                    wb.finish_and_clear();
                 }
                 pb.set_message(format!("{}...", name));
                 pb.tick();
@@ -367,10 +371,46 @@ pub(crate) async fn render_progress(
                     status!("{} Pull complete: {}", theme::icon_done(), model.bold());
                 });
             }
+            SseProgressEvent::WeightLoad {
+                bytes_loaded,
+                bytes_total,
+                component,
+            } => {
+                let bar = weight_bar.get_or_insert_with(|| {
+                    pb.disable_steady_tick();
+                    pb.set_message("");
+
+                    let bar = ProgressBar::new(bytes_total);
+                    if is_piped() {
+                        bar.set_draw_target(ProgressDrawTarget::stderr());
+                    }
+                    bar.set_style(
+                        ProgressStyle::default_bar()
+                            .template(&format!(
+                                "  {{spinner:.{c}}} {{msg}} [{{bar:30.{c}/dim}}] {{bytes}}/{{total_bytes}}",
+                                c = theme::SPINNER_STYLE,
+                            ))
+                            .unwrap()
+                            .progress_chars("━╸─"),
+                    );
+                    bar.set_message(format!("Loading {}", component));
+                    bar.enable_steady_tick(Duration::from_millis(100));
+                    bar
+                });
+                bar.set_position(bytes_loaded);
+                if bytes_loaded >= bytes_total {
+                    bar.finish_and_clear();
+                    weight_bar = None;
+                    pb.enable_steady_tick(Duration::from_millis(100));
+                }
+            }
         }
     }
     if let Some(db) = denoise_bar.take() {
         db.finish_and_clear();
+    }
+    if let Some(wb) = weight_bar.take() {
+        wb.finish_and_clear();
     }
     for (_, (bar, _)) in download_bars.drain() {
         bar.finish_and_clear();

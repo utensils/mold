@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp};
-use candle_nn::VarBuilder;
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
@@ -269,13 +268,13 @@ impl SD3Engine {
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.base.paths.transformer),
-                    gpu_dtype,
-                    &device,
-                )?
-            };
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.transformer),
+                gpu_dtype,
+                &device,
+                "SD3 transformer",
+                &self.base.progress,
+            )?;
             SD3Transformer::BF16(MMDiT::new(
                 &mmdit_config,
                 false,
@@ -327,6 +326,7 @@ impl SD3Engine {
             &t5_tokenizer_path,
             encoder_device,
             encoder_dtype,
+            &self.base.progress,
         )?;
 
         self.base
@@ -443,6 +443,7 @@ impl SD3Engine {
             &t5_tokenizer_path,
             encoder_device,
             encoder_dtype,
+            &self.base.progress,
         )?;
         self.base
             .progress
@@ -492,13 +493,13 @@ impl SD3Engine {
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&self.base.paths.transformer),
-                    gpu_dtype,
-                    &device,
-                )?
-            };
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.transformer),
+                gpu_dtype,
+                &device,
+                "SD3 transformer",
+                &self.base.progress,
+            )?;
             SD3Transformer::BF16(MMDiT::new(
                 &mmdit_config,
                 false,
@@ -545,13 +546,13 @@ impl SD3Engine {
         // --- Phase 3: VAE decode ---
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
-                &device,
-            )?
-        };
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            gpu_dtype,
+            &device,
+            "VAE",
+            &self.base.progress,
+        )?;
         let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
         let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
         self.base
@@ -651,7 +652,7 @@ impl InferenceEngine for SD3Engine {
             if !loaded.triple_encoder.is_loaded() {
                 progress.stage_start("Reloading SD3 triple encoder");
                 let reload_start = Instant::now();
-                loaded.triple_encoder.reload(loaded_dtype)?;
+                loaded.triple_encoder.reload(loaded_dtype, progress)?;
                 progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
             }
 
@@ -710,13 +711,13 @@ impl InferenceEngine for SD3Engine {
             progress.stage_start("VAE decode");
             let vae_decode_start = Instant::now();
 
-            let vae_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&loaded.vae_vb_path),
-                    loaded.dtype,
-                    &loaded.device,
-                )?
-            };
+            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&loaded.vae_vb_path),
+                loaded.dtype,
+                &loaded.device,
+                "VAE",
+                progress,
+            )?;
             let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
             let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
 
