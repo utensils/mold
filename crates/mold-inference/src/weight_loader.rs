@@ -55,12 +55,18 @@ pub fn load_safetensors_with_progress<'a>(
 
     let mut tensor_map: HashMap<String, Tensor> = HashMap::with_capacity(tensor_list.len());
     for (name, byte_size) in &tensor_list {
-        // Load tensor from mmap (triggers page fault → disk read → device transfer)
-        let tensor = st.load(name, device)?;
-        let tensor = if tensor.dtype() != dtype {
-            tensor.to_dtype(dtype)?
+        let needs_conversion = st.get(name).is_ok_and(|v| v.dtype() != dtype.into());
+        let tensor = if needs_conversion {
+            // On-disk dtype differs from target: load to CPU, convert, transfer.
+            // We avoid calling to_dtype() on a GPU tensor because the CUDA
+            // type-conversion kernel can conflict with GGUF quantized kernel
+            // contexts loaded on the same device.
+            st.load(name, &candle_core::Device::Cpu)?
+                .to_dtype(dtype)?
+                .to_device(device)?
         } else {
-            tensor
+            // On-disk dtype matches target — load directly to device.
+            st.load(name, device)?
         };
         tensor_map.insert(name.clone(), tensor);
 
