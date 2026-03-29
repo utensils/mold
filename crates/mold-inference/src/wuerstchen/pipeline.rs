@@ -526,6 +526,7 @@ impl WuerstchenEngine {
     }
 
     /// Run the Stage C (Prior) denoising loop.
+    #[allow(clippy::too_many_arguments)]
     fn denoise_prior(
         &self,
         prior: &WPrior,
@@ -582,6 +583,7 @@ impl WuerstchenEngine {
     /// `image_embeddings` is the scaled Prior output (effnet slot in WDiffNeXt).
     /// `text_embeddings` is the 1024-dim Decoder CLIP output (clip slot in WDiffNeXt).
     /// Applies decoder CFG using Diffusers-style conditioning when guidance > 1.0.
+    #[allow(clippy::too_many_arguments)]
     fn denoise_decoder(
         &self,
         decoder: &WDiffNeXt,
