@@ -45,6 +45,8 @@ pub struct ManifestDefaults {
     pub is_schnell: bool,
     /// Scheduler algorithm: None for flow-matching models, Some for UNet-based models.
     pub scheduler: Option<Scheduler>,
+    /// Default negative prompt for CFG-based models.
+    pub negative_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +337,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: true,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -362,6 +365,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -389,6 +393,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -416,6 +421,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -442,6 +448,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -468,6 +475,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: true,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -495,6 +503,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: true,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -522,6 +531,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: true,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -549,6 +559,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -577,6 +588,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -605,6 +617,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -631,6 +644,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // ── jibMixFlux v7 PixelHeaven (FLUX-dev fine-tune by J1B) ──────────
@@ -657,6 +671,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -683,6 +698,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -709,6 +725,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -735,6 +752,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // ── UltraReal Fine-Tune (photorealistic FLUX-dev fine-tune by Danrisi) ──
@@ -762,6 +780,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -789,6 +808,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -816,6 +836,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -843,6 +864,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -869,6 +891,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -895,6 +918,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -921,6 +945,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // ── iNiverse Mix SFW/NSFW (FLUX-dev fine-tune by JinnGames) ──────────
@@ -948,6 +973,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
     ];
@@ -1065,6 +1091,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1090,6 +1117,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // --- SD3.5 Large Turbo (depth=38, 8.1B, 4 steps, CFG=1.0) ---
@@ -1116,6 +1144,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // --- SD3.5 Medium (depth=24, 2.5B) ---
@@ -1142,6 +1171,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
     ]
@@ -1206,6 +1236,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 height: 512,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1234,6 +1265,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 height: 512,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1261,6 +1293,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 height: 512,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
     ]
@@ -1341,6 +1374,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1368,6 +1402,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1395,6 +1430,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1422,6 +1458,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1449,6 +1486,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
+                negative_prompt: None,
             },
         },
         // --- Pony / CyberRealistic (standard SDXL architecture, anime/art/photorealistic) ---
@@ -1475,6 +1513,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1500,6 +1539,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
+                negative_prompt: None,
             },
         },
         // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
@@ -1528,6 +1568,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 height: 512,
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
+                negative_prompt: None,
             },
         },
     ]
@@ -1635,6 +1676,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         // GGUF quantized variants (transformer only; shared components are always BF16)
@@ -1663,6 +1705,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1690,6 +1733,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1717,6 +1761,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
     ]
@@ -1795,6 +1840,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None, // Uses flow-matching Euler
+                negative_prompt: None,
             },
         },
         // Flux.2 Klein-4B GGUF quantizations (from unsloth, Apache 2.0)
@@ -1821,6 +1867,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1846,6 +1893,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
         ModelManifest {
@@ -1871,6 +1919,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 height: 1024,
                 is_schnell: false,
                 scheduler: None,
+                negative_prompt: None,
             },
         },
     ]
@@ -1943,6 +1992,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         height: 1024,
         is_schnell: false,
         scheduler: None,
+        negative_prompt: None,
     };
 
     vec![
@@ -2039,18 +2089,21 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
 
 fn wuerstchen_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
-        steps: 30,
+        steps: 60,
         guidance: 4.0,
         width: 1024,
         height: 1024,
         is_schnell: false,
         scheduler: None,
+        negative_prompt: Some(
+            "low quality, blurry, distorted, deformed, disfigured, bad anatomy, watermark"
+                .to_string(),
+        ),
     };
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
         family: "wuerstchen".to_string(),
-        description: "[alpha] Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression"
-            .to_string(),
+        description: "Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression".to_string(),
         files: vec![
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
@@ -2493,6 +2546,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
         height: 512,
         is_schnell: false,
         scheduler: Some(Scheduler::Ddim),
+        negative_prompt: None,
     };
     vec![
         ModelManifest {
@@ -2548,6 +2602,7 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
         height: 0,
         is_schnell: false,
         scheduler: None,
+        negative_prompt: None,
     };
 
     vec![

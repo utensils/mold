@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, CachedTensorPair, LruCache,
+    clear_cache, get_or_insert_cached_tensor_pair, CachedTensorPair, LruCache,
     DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
@@ -64,6 +64,132 @@ pub struct WuerstchenEngine {
 }
 
 impl WuerstchenEngine {
+    fn debug_tensor_stats(name: &str, tensor: &Tensor) {
+        if std::env::var_os("MOLD_WUERSTCHEN_DEBUG").is_none() {
+            return;
+        }
+
+        let stats = || -> Result<String> {
+            let dims = tensor.dims().to_vec();
+            let dtype = tensor.dtype();
+            let flat = tensor
+                .to_device(&Device::Cpu)?
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+
+            if flat.is_empty() {
+                return Ok(format!(
+                    "[wuerstchen-debug] {name}: shape={dims:?} dtype={dtype:?} <empty>"
+                ));
+            }
+
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sum = 0.0f64;
+            let mut sum_sq = 0.0f64;
+            let mut nan_count = 0usize;
+            let mut inf_count = 0usize;
+            let mut finite_count = 0usize;
+
+            for &value in &flat {
+                if value.is_nan() {
+                    nan_count += 1;
+                    continue;
+                }
+                if value.is_infinite() {
+                    inf_count += 1;
+                    continue;
+                }
+                min = min.min(value);
+                max = max.max(value);
+                let value = value as f64;
+                sum += value;
+                sum_sq += value * value;
+                finite_count += 1;
+            }
+
+            let (mean, std) = if finite_count > 0 {
+                let mean = sum / finite_count as f64;
+                let variance = (sum_sq / finite_count as f64) - (mean * mean);
+                (mean, variance.max(0.0).sqrt())
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+            let checksum16: f64 = flat.iter().take(16).map(|&v| v as f64).sum();
+
+            Ok(format!(
+                "[wuerstchen-debug] {name}: shape={dims:?} dtype={dtype:?} min={min:.4} max={max:.4} mean={mean:.4} std={std:.4} nan={nan_count} inf={inf_count} checksum16={checksum16:.4}"
+            ))
+        };
+
+        match stats() {
+            Ok(message) => eprintln!("{message}"),
+            Err(err) => eprintln!("[wuerstchen-debug] {name}: <failed: {err}>"),
+        }
+    }
+
+    fn prompt_cache_key(
+        prompt: &str,
+        negative_prompt: &str,
+        use_prior_cfg: bool,
+        use_decoder_cfg: bool,
+    ) -> String {
+        format!(
+            "{prompt}\u{1f}{negative_prompt}\u{1f}prior_cfg={use_prior_cfg}\u{1f}decoder_cfg={use_decoder_cfg}"
+        )
+    }
+
+    fn pad_token_id(
+        tokenizer: &tokenizers::Tokenizer,
+        clip_config: &stable_diffusion::clip::Config,
+    ) -> Result<u32> {
+        let vocab = tokenizer.get_vocab(true);
+        let token = clip_config.pad_with.as_deref().unwrap_or("<|endoftext|>");
+        vocab
+            .get(token)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("tokenizer missing pad/eos token '{token}'"))
+    }
+
+    fn encode_clip_prompt(
+        clip: &stable_diffusion::clip::ClipTextTransformer,
+        tokenizer: &tokenizers::Tokenizer,
+        clip_config: &stable_diffusion::clip::Config,
+        prompt: &str,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Tensor> {
+        let (tokens, tokens_len) = Self::tokenize(
+            tokenizer,
+            prompt,
+            clip_config.max_position_embeddings,
+            clip_config,
+            device,
+        )?;
+        Ok(clip
+            .forward_with_mask(&tokens, tokens_len - 1)?
+            .to_dtype(dtype)?)
+    }
+
+    fn decoder_guidance() -> f64 {
+        std::env::var("MOLD_WUERSTCHEN_DECODER_GUIDANCE")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+
+    fn effective_prior_steps(requested_steps: usize) -> usize {
+        if requested_steps < 20 {
+            // Very low step counts produce noise; warn but respect the request.
+            tracing::warn!(
+                steps = requested_steps,
+                "Wuerstchen prior works best with ≥60 steps"
+            );
+        }
+        requested_steps
+    }
+
     pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
@@ -79,27 +205,45 @@ impl WuerstchenEngine {
         decoder_clip: &stable_diffusion::clip::ClipTextTransformer,
         decoder_tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
+        negative_prompt: &str,
         device: &Device,
         dtype: DType,
+        prior_guidance: f64,
+        decoder_guidance: f64,
     ) -> Result<(Tensor, Tensor)> {
+        let use_prior_cfg = prior_guidance > 1.0;
+        let use_decoder_cfg = decoder_guidance > 1.0;
         let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
         let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let cache_key = prompt_text_key(prompt);
+        let cache_key =
+            Self::prompt_cache_key(prompt, negative_prompt, use_prior_cfg, use_decoder_cfg);
         let ((prior_text_embeddings, decoder_text_embeddings), cache_hit) =
             get_or_insert_cached_tensor_pair(&self.prompt_cache, cache_key, device, dtype, || {
                 self.base
                     .progress
                     .stage_start("Encoding prompt (Prior CLIP-G, 1280-dim)");
                 let encode_start = Instant::now();
-                let (prior_tokens, prior_tokens_len) = Self::tokenize(
+                let prior_text_embeddings = Self::encode_clip_prompt(
+                    prior_clip,
                     prior_tokenizer,
+                    &prior_clip_config,
                     prompt,
-                    prior_clip_config.max_position_embeddings,
                     device,
+                    dtype,
                 )?;
-                let prior_text_embeddings = prior_clip
-                    .forward_with_mask(&prior_tokens, prior_tokens_len - 1)?
-                    .to_dtype(dtype)?;
+                let prior_text_embeddings = if use_prior_cfg {
+                    let prior_negative_embeddings = Self::encode_clip_prompt(
+                        prior_clip,
+                        prior_tokenizer,
+                        &prior_clip_config,
+                        negative_prompt,
+                        device,
+                        dtype,
+                    )?;
+                    Tensor::cat(&[&prior_text_embeddings, &prior_negative_embeddings], 0)?
+                } else {
+                    prior_text_embeddings
+                };
                 self.base.progress.stage_done(
                     "Encoding prompt (Prior CLIP-G, 1280-dim)",
                     encode_start.elapsed(),
@@ -109,15 +253,27 @@ impl WuerstchenEngine {
                     .progress
                     .stage_start("Encoding prompt (Decoder CLIP, 1024-dim)");
                 let dec_encode_start = Instant::now();
-                let (dec_tokens, dec_tokens_len) = Self::tokenize(
+                let decoder_text_embeddings = Self::encode_clip_prompt(
+                    decoder_clip,
                     decoder_tokenizer,
+                    &dec_clip_config,
                     prompt,
-                    dec_clip_config.max_position_embeddings,
                     device,
+                    dtype,
                 )?;
-                let decoder_text_embeddings = decoder_clip
-                    .forward_with_mask(&dec_tokens, dec_tokens_len - 1)?
-                    .to_dtype(dtype)?;
+                let decoder_text_embeddings = if use_decoder_cfg {
+                    let decoder_negative_embeddings = Self::encode_clip_prompt(
+                        decoder_clip,
+                        decoder_tokenizer,
+                        &dec_clip_config,
+                        negative_prompt,
+                        device,
+                        dtype,
+                    )?;
+                    Tensor::cat(&[&decoder_text_embeddings, &decoder_negative_embeddings], 0)?
+                } else {
+                    decoder_text_embeddings
+                };
                 self.base.progress.stage_done(
                     "Encoding prompt (Decoder CLIP, 1024-dim)",
                     dec_encode_start.elapsed(),
@@ -350,27 +506,37 @@ impl WuerstchenEngine {
         tokenizer: &tokenizers::Tokenizer,
         prompt: &str,
         max_len: usize,
+        clip_config: &stable_diffusion::clip::Config,
         device: &Device,
     ) -> Result<(Tensor, usize)> {
+        let pad_id = Self::pad_token_id(tokenizer, clip_config)?;
         let encoding = tokenizer
             .encode(prompt, true)
             .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
         let mut ids = encoding.get_ids().to_vec();
         ids.truncate(max_len);
+        if ids.is_empty() {
+            ids.push(pad_id);
+        }
         let tokens_len = ids.len();
         while ids.len() < max_len {
-            ids.push(49407); // CLIP EOS/PAD token
+            ids.push(pad_id);
         }
-        let ids = ids.into_iter().map(|i| i as i64).collect::<Vec<_>>();
-        Ok((Tensor::new(ids, device)?.unsqueeze(0)?, tokens_len))
+        Ok((
+            Tensor::new(ids.as_slice(), device)?.unsqueeze(0)?,
+            tokens_len,
+        ))
     }
 
     /// Run the Stage C (Prior) denoising loop.
+    #[allow(clippy::too_many_arguments)]
     fn denoise_prior(
         &self,
         prior: &WPrior,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        // TODO: use for per-step RNG reseeding to close RMSE gap vs candle reference
+        _base_seed: u64,
         steps: usize,
         guidance: f64,
         device: &Device,
@@ -390,13 +556,11 @@ impl WuerstchenEngine {
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
-                // CFG: batch [latents, latents] with [text_embeddings, uncond]
-                // text first (index 0), uncond second (index 1)
+                // CFG: batch [latents, latents] with [text_embeddings, negative_prompt]
+                // text first (index 0), negative/unconditional second (index 1)
                 let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
                 let r = (Tensor::ones(2, DType::F32, device)? * t)?;
-                let uncond = Tensor::zeros_like(text_embeddings)?;
-                let c_input = Tensor::cat(&[text_embeddings, &uncond], 0)?;
-                let pred = prior.forward(&latent_input, &r, &c_input)?;
+                let pred = prior.forward(&latent_input, &r, text_embeddings)?;
                 let chunks = pred.chunk(2, 0)?;
                 let (pred_text, pred_uncond) = (&chunks[0], &chunks[1]);
                 (pred_uncond + ((pred_text - pred_uncond)? * guidance)?)?
@@ -422,16 +586,21 @@ impl WuerstchenEngine {
     ///
     /// `image_embeddings` is the scaled Prior output (effnet slot in WDiffNeXt).
     /// `text_embeddings` is the 1024-dim Decoder CLIP output (clip slot in WDiffNeXt).
-    /// No CFG is applied at the decoder stage, matching the upstream candle example.
+    /// Applies decoder CFG using Diffusers-style conditioning when guidance > 1.0.
+    #[allow(clippy::too_many_arguments)]
     fn denoise_decoder(
         &self,
         decoder: &WDiffNeXt,
         image_embeddings: &Tensor,
         text_embeddings: &Tensor,
         latents: &mut Tensor,
+        // TODO: use for per-step RNG reseeding to close RMSE gap vs candle reference
+        _base_seed: u64,
         steps: usize,
+        guidance: f64,
         device: &Device,
     ) -> Result<()> {
+        let use_cfg = guidance > 1.0;
         let scheduler = DDPMWScheduler::new(steps, DDPMWSchedulerConfig::default())?;
         let timesteps = scheduler.timesteps().to_vec();
 
@@ -445,9 +614,22 @@ impl WuerstchenEngine {
             }
             let step_start = Instant::now();
 
-            let r = (Tensor::ones(1, DType::F32, device)? * t)?;
-            let noise_pred =
-                decoder.forward(&*latents, &r, image_embeddings, Some(text_embeddings))?;
+            let noise_pred = if use_cfg {
+                let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
+                let r = (Tensor::ones(2, DType::F32, device)? * t)?;
+                let effnet_input = Tensor::cat(
+                    &[image_embeddings, &Tensor::zeros_like(image_embeddings)?],
+                    0,
+                )?;
+                let pred =
+                    decoder.forward(&latent_input, &r, &effnet_input, Some(text_embeddings))?;
+                let chunks = pred.chunk(2, 0)?;
+                let (pred_text, pred_uncond) = (&chunks[0], &chunks[1]);
+                (pred_uncond + ((pred_text - pred_uncond)? * guidance)?)?
+            } else {
+                let r = (Tensor::ones(1, DType::F32, device)? * t)?;
+                decoder.forward(&*latents, &r, image_embeddings, Some(text_embeddings))?
+            };
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
 
@@ -481,8 +663,10 @@ impl WuerstchenEngine {
         let seed = req.seed.unwrap_or_else(rand_seed);
         let width = req.width as usize;
         let height = req.height as usize;
-        let guidance = req.guidance;
-        let prior_steps = req.steps as usize;
+        let prior_guidance = req.guidance;
+        let decoder_guidance = Self::decoder_guidance();
+        let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
+        let prior_steps = Self::effective_prior_steps(req.steps as usize);
         let decoder_steps = 12;
 
         tracing::info!(
@@ -490,7 +674,8 @@ impl WuerstchenEngine {
             seed, width, height,
             prior_steps,
             decoder_steps,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
             "starting sequential Wuerstchen generation"
         );
 
@@ -547,9 +732,14 @@ impl WuerstchenEngine {
             &decoder_clip,
             &decoder_tokenizer,
             &req.prompt,
+            negative_prompt,
             &device,
             dtype,
+            prior_guidance,
+            decoder_guidance,
         )?;
+        Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
+        Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
 
         drop(prior_clip);
         drop(prior_tokenizer);
@@ -596,24 +786,25 @@ impl WuerstchenEngine {
         // Stage C latent dimensions: 42x compression
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let mut prior_latents = crate::engine::seeded_randn(
-            seed,
-            &[1, PRIOR_C_IN, latent_h, latent_w],
-            &device,
-            dtype,
-        )?;
+        device.set_seed(seed)?;
+        let mut prior_latents =
+            Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?;
+        Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
         self.denoise_prior(
             &prior,
             &prior_text_embeddings,
             &mut prior_latents,
+            seed,
             prior_steps,
-            guidance,
+            prior_guidance,
             &device,
         )?;
 
         // Scale prior output: convert from Prior latent space to Decoder conditioning space
+        Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
         prior_latents = ((prior_latents * 42.)? - 1.)?;
+        Self::debug_tensor_stats("image_embeddings", &prior_latents);
 
         drop(prior);
         drop(prior_text_embeddings);
@@ -656,17 +847,21 @@ impl WuerstchenEngine {
         // Decoder latent dims derived from prior output spatial dims
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let mut decoder_latents =
-            crate::engine::seeded_randn(seed + 1, &[1, 4, stage_b_h, stage_b_w], &device, dtype)?;
+        device.set_seed(seed.wrapping_add(1))?;
+        let mut decoder_latents = Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?;
+        Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
             &decoder,
             &prior_latents,
             &decoder_text_embeddings,
             &mut decoder_latents,
+            seed,
             decoder_steps,
+            decoder_guidance,
             &device,
         )?;
+        Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
         drop(decoder);
         drop(prior_latents);
@@ -691,8 +886,11 @@ impl WuerstchenEngine {
 
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
+        Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
         let img = vqgan.decode(&(&decoder_latents * 0.3764)?)?;
+        Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
+        Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
         self.base
@@ -760,8 +958,10 @@ impl InferenceEngine for WuerstchenEngine {
         let seed = req.seed.unwrap_or_else(rand_seed);
         let width = req.width as usize;
         let height = req.height as usize;
-        let guidance = req.guidance;
-        let prior_steps = req.steps as usize;
+        let prior_guidance = req.guidance;
+        let decoder_guidance = Self::decoder_guidance();
+        let negative_prompt = req.negative_prompt.as_deref().unwrap_or("");
+        let prior_steps = Self::effective_prior_steps(req.steps as usize);
         let decoder_steps = 12;
 
         tracing::info!(
@@ -769,7 +969,8 @@ impl InferenceEngine for WuerstchenEngine {
             seed, width, height,
             prior_steps,
             decoder_steps,
-            guidance,
+            prior_guidance,
+            decoder_guidance,
             "starting Wuerstchen generation"
         );
 
@@ -780,57 +981,71 @@ impl InferenceEngine for WuerstchenEngine {
             &loaded.decoder_clip,
             &loaded.decoder_tokenizer,
             &req.prompt,
+            negative_prompt,
             &loaded.device,
             loaded.dtype,
+            prior_guidance,
+            decoder_guidance,
         )?;
+        Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
+        Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
 
         // 3. Stage C (Prior): denoise in highly compressed latent space
         let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let mut prior_latents = crate::engine::seeded_randn(
-            seed,
-            &[1, PRIOR_C_IN, latent_h, latent_w],
+        loaded.device.set_seed(seed)?;
+        let mut prior_latents = Tensor::randn(
+            0f32,
+            1f32,
+            (1, PRIOR_C_IN, latent_h, latent_w),
             &loaded.device,
-            loaded.dtype,
         )?;
+        Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
         self.denoise_prior(
             &loaded.prior,
             &prior_text_embeddings,
             &mut prior_latents,
+            seed,
             prior_steps,
-            guidance,
+            prior_guidance,
             &loaded.device,
         )?;
 
         // Scale prior output: convert from Prior latent space to Decoder conditioning space
+        Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
         prior_latents = ((prior_latents * 42.)? - 1.)?;
+        Self::debug_tensor_stats("image_embeddings", &prior_latents);
 
         // 4. Stage B (Decoder): decode prior latents to VQ-GAN latent space
         // Decoder latent dims derived from prior output spatial dims
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let mut decoder_latents = crate::engine::seeded_randn(
-            seed + 1,
-            &[1, 4, stage_b_h, stage_b_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
+        loaded.device.set_seed(seed.wrapping_add(1))?;
+        let mut decoder_latents =
+            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
+        Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
             &loaded.decoder,
             &prior_latents,
             &decoder_text_embeddings,
             &mut decoder_latents,
+            seed,
             decoder_steps,
+            decoder_guidance,
             &loaded.device,
         )?;
+        Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
         // 5. Stage A (VQ-GAN): decode to pixel space
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
+        Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
         let img = loaded.vqgan.decode(&(&decoder_latents * 0.3764)?)?;
+        Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
+        Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
         self.base
@@ -891,5 +1106,76 @@ impl InferenceEngine for WuerstchenEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_tokenizer() -> tokenizers::Tokenizer {
+        let tokenizer_json = r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": null,
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<|endoftext|>": 7,
+      "hello": 11
+    },
+    "unk_token": "<|endoftext|>"
+  }
+}"#;
+        tokenizers::Tokenizer::from_bytes(tokenizer_json.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn prompt_cache_key_includes_negative_prompt_and_cfg() {
+        let base = WuerstchenEngine::prompt_cache_key("hello", "", false, false);
+        let neg = WuerstchenEngine::prompt_cache_key("hello", "bad", false, false);
+        let prior_cfg = WuerstchenEngine::prompt_cache_key("hello", "", true, false);
+        let decoder_cfg = WuerstchenEngine::prompt_cache_key("hello", "", false, true);
+
+        assert_ne!(base, neg);
+        assert_ne!(base, prior_cfg);
+        assert_ne!(base, decoder_cfg);
+        assert_ne!(prior_cfg, decoder_cfg);
+    }
+
+    #[test]
+    fn tokenize_uses_clip_pad_token() {
+        let tokenizer = test_tokenizer();
+        let clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let (tokens, tokens_len) =
+            WuerstchenEngine::tokenize(&tokenizer, "hello", 4, &clip_config, &Device::Cpu).unwrap();
+        let ids = tokens.squeeze(0).unwrap().to_vec1::<u32>().unwrap();
+
+        assert_eq!(tokens_len, 1);
+        assert_eq!(ids, vec![11, 7, 7, 7]);
+    }
+
+    #[test]
+    fn tokenize_falls_back_to_pad_token_for_empty_prompt() {
+        let tokenizer = test_tokenizer();
+        let clip_config = stable_diffusion::clip::Config::wuerstchen();
+        let (tokens, tokens_len) =
+            WuerstchenEngine::tokenize(&tokenizer, "", 3, &clip_config, &Device::Cpu).unwrap();
+        let ids = tokens.squeeze(0).unwrap().to_vec1::<u32>().unwrap();
+
+        assert_eq!(tokens_len, 1);
+        assert_eq!(ids, vec![7, 7, 7]);
+    }
+
+    #[test]
+    fn effective_prior_steps_passes_through() {
+        assert_eq!(WuerstchenEngine::effective_prior_steps(30), 30);
+        assert_eq!(WuerstchenEngine::effective_prior_steps(60), 60);
+        assert_eq!(WuerstchenEngine::effective_prior_steps(20), 20);
     }
 }

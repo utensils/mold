@@ -320,7 +320,7 @@ pub struct Config {
     #[serde(default)]
     pub output_dir: Option<String>,
 
-    /// Global default negative prompt for CFG-based models (SD1.5, SDXL, SD3).
+    /// Global default negative prompt for CFG-based models (SD1.5, SDXL, SD3, Wuerstchen).
     /// Overridden by per-model `negative_prompt` or CLI `--negative-prompt`.
     #[serde(default)]
     pub default_negative_prompt: Option<String>,
@@ -664,6 +664,9 @@ impl Config {
             }
             if cfg.scheduler.is_none() {
                 cfg.scheduler = manifest.defaults.scheduler;
+            }
+            if cfg.negative_prompt.is_none() {
+                cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
             }
             if cfg.description.is_none() {
                 cfg.description = Some(manifest.description.clone());

@@ -121,6 +121,10 @@
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
 
+          opensslPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig";
+          opensslLibDir = "${pkgs.lib.getLib pkgs.openssl}/lib";
+          opensslIncludeDir = "${pkgs.openssl.dev}/include";
+
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
           gpuFeature =
@@ -243,6 +247,22 @@
                 name = "RUST_BACKTRACE";
                 value = "1";
               }
+              {
+                name = "PKG_CONFIG_PATH";
+                value = opensslPkgConfigPath;
+              }
+              {
+                name = "OPENSSL_DIR";
+                value = "${pkgs.openssl.dev}";
+              }
+              {
+                name = "OPENSSL_LIB_DIR";
+                value = opensslLibDir;
+              }
+              {
+                name = "OPENSSL_INCLUDE_DIR";
+                value = opensslIncludeDir;
+              }
             ]
             ++ lib.optionals isDarwin [
               {
@@ -320,6 +340,24 @@
                 name = "build-discord";
                 help = "cargo build -p mold-ai --features discord";
                 command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+              }
+              {
+                category = "build";
+                name = "build-candle-wuerstchen";
+                help = "build the official Candle Wuerstchen example in the devshell";
+                command = ''
+                  set -euo pipefail
+                  repo_dir="''${CANDLE_UPSTREAM_DIR:-$PWD/.cache/candle-upstream}"
+                  if [ ! -d "$repo_dir/.git" ]; then
+                    mkdir -p "$(dirname "$repo_dir")"
+                    git clone https://github.com/huggingface/candle "$repo_dir"
+                  fi
+                  git -C "$repo_dir" fetch --tags origin
+                  git -C "$repo_dir" checkout main
+                  git -C "$repo_dir" pull --ff-only
+                  cd "$repo_dir/candle-examples"
+                  cargo build --example wuerstchen --features ${gpuFeature}
+                '';
               }
               {
                 category = "check";

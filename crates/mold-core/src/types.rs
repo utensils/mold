@@ -110,7 +110,8 @@ pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
     pub prompt: String,
     /// Negative prompt — describes what to avoid generating.
-    /// Only effective for CFG-based models (SD1.5, SDXL, SD3). Ignored by FLUX, Z-Image, etc.
+    /// Effective for CFG-based models such as SD1.5, SDXL, SD3, and Wuerstchen.
+    /// Ignored by distilled / non-CFG families such as FLUX schnell, Z-Image, etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "blurry, low quality, watermark")]
     pub negative_prompt: Option<String>,
