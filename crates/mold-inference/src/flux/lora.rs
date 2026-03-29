@@ -223,6 +223,9 @@ fn fused_slice_range(
 }
 
 /// Apply LoRA deltas to base model tensors in-place.
+/// Currently unused (superseded by `stream_merge_lora` for FLUX), but retained
+/// for future SD1.5/SDXL LoRA support where the UNet loading path differs.
+#[allow(dead_code)]
 ///
 /// For direct mappings: `W' = W + scale * (B @ A)`
 /// For fused slices: compute delta, then add to the corresponding row slice.
@@ -343,10 +346,200 @@ pub(crate) fn merge_lora_into_tensors(
     Ok(())
 }
 
+/// Stream-load safetensors to GPU, applying LoRA deltas on-GPU as each tensor loads.
+///
+/// Instead of loading all weights to CPU, merging, then bulk-transferring to GPU,
+/// this function streams one tensor at a time from mmap → GPU, applies any LoRA
+/// delta immediately on GPU, and stores the result.  This keeps CPU memory low
+/// and does all math on GPU (fast even in debug builds).
+///
+/// Returns a `VarBuilder::from_tensors` backed by GPU tensors with LoRA merged in.
+pub(crate) fn stream_merge_lora<'a>(
+    transformer_path: &Path,
+    adapter: &LoraAdapter,
+    scale: f64,
+    dtype: DType,
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<candle_nn::VarBuilder<'a>> {
+    use candle_core::safetensors::MmapedSafetensors;
+
+    let on_gpu = device.is_cuda() || device.is_metal();
+    let device_label = if device.is_cuda() {
+        "GPU"
+    } else if device.is_metal() {
+        "Metal"
+    } else {
+        "CPU"
+    };
+
+    // Open mmap (cheap, no I/O)
+    let st = unsafe {
+        MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))?
+    };
+
+    // Detect key prefix (model.diffusion_model. or diffusion_model. or none)
+    let all_names: Vec<String> = st.tensors().into_iter().map(|(n, _)| n).collect();
+    let prefix = if all_names.iter().any(|n| n == "img_in.weight") {
+        ""
+    } else if all_names.iter().any(|n| n == "model.diffusion_model.img_in.weight") {
+        "model.diffusion_model."
+    } else if all_names.iter().any(|n| n == "diffusion_model.img_in.weight") {
+        "diffusion_model."
+    } else {
+        ""
+    };
+
+    // Pre-compute: which candle keys have LoRA deltas and what targets they map to.
+    // Multiple diffusers keys can target the same candle key (e.g. Q, K, V → fused qkv).
+    let mut lora_targets: HashMap<String, Vec<(&str, &LoraLayer, LoraTarget)>> = HashMap::new();
+    for (diffusers_key, lora_layer) in &adapter.layers {
+        if let Some(target) = map_lora_key(diffusers_key) {
+            let candle_key = match &target {
+                LoraTarget::Direct { candle_key } => candle_key.clone(),
+                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
+            };
+            lora_targets
+                .entry(candle_key)
+                .or_default()
+                .push((diffusers_key.as_str(), lora_layer, target));
+        } else {
+            tracing::warn!(key = diffusers_key.as_str(), "unrecognized LoRA key, skipping");
+        }
+    }
+
+    // Compute total bytes for progress
+    let bytes_total: u64 = std::fs::metadata(transformer_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut bytes_loaded: u64 = 0;
+    let mut last_reported: u64 = 0;
+    let report_interval = (bytes_total / 100).max(50_000_000);
+
+    progress.weight_load(
+        &format!("FLUX transformer + LoRA ({device_label})"),
+        0,
+        bytes_total,
+    );
+
+    let total_tensors = all_names.len();
+    let mut tensor_map: HashMap<String, Tensor> = HashMap::with_capacity(total_tensors);
+    let mut applied = 0usize;
+
+    for (i, raw_name) in all_names.iter().enumerate() {
+        // Load this single tensor from mmap directly to target device
+        let tensor = st.load(raw_name, device)?;
+        let tensor = if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype)?
+        } else {
+            tensor
+        };
+
+        // Strip prefix for the canonical key
+        let key = raw_name.strip_prefix(prefix).unwrap_or(raw_name).to_string();
+
+        // Estimate bytes for progress (shape * dtype size)
+        let elements: usize = tensor.dims().iter().product();
+        let byte_size = elements * dtype.size_in_bytes();
+        bytes_loaded += byte_size as u64;
+
+        // Apply LoRA deltas if any target this tensor
+        let tensor = if let Some(targets) = lora_targets.get(&key) {
+            let mut t = tensor;
+            for (_, lora_layer, target) in targets {
+                let effective_scale = match lora_layer.alpha {
+                    Some(alpha) => scale * alpha / adapter.rank as f64,
+                    None => scale,
+                };
+
+                // Compute delta on GPU: B @ A (both moved to device)
+                let a = lora_layer.a.to_dtype(DType::F32)?.to_device(device)?;
+                let b = lora_layer.b.to_dtype(DType::F32)?.to_device(device)?;
+                let delta = b.matmul(&a)?;
+                let delta = (delta * effective_scale)?;
+
+                t = match target {
+                    LoraTarget::Direct { .. } => {
+                        let t_f32 = t.to_dtype(DType::F32)?;
+                        let merged = (t_f32 + delta)?;
+                        applied += 1;
+                        merged.to_dtype(dtype)?
+                    }
+                    LoraTarget::FusedSlice {
+                        component,
+                        num_components,
+                        ..
+                    } => {
+                        let t_f32 = t.to_dtype(DType::F32)?;
+                        let base_rows = t_f32.dim(0)?;
+                        let lora_out_dim = delta.dim(0)?;
+                        let (offset, size) =
+                            fused_slice_range(base_rows, lora_out_dim, *component, *num_components);
+
+                        if offset + size > base_rows {
+                            tracing::warn!(
+                                offset, size, base_rows,
+                                "fused slice out of bounds, skipping"
+                            );
+                            t
+                        } else {
+                            let slice = t_f32.narrow(0, offset, size)?;
+                            let updated_slice = (slice + delta)?;
+                            let mut parts: Vec<Tensor> = Vec::new();
+                            if offset > 0 {
+                                parts.push(t_f32.narrow(0, 0, offset)?);
+                            }
+                            parts.push(updated_slice);
+                            let after = offset + size;
+                            if after < base_rows {
+                                parts.push(t_f32.narrow(0, after, base_rows - after)?);
+                            }
+                            applied += 1;
+                            Tensor::cat(&parts, 0)?.to_dtype(dtype)?
+                        }
+                    }
+                };
+            }
+            t
+        } else {
+            tensor
+        };
+
+        tensor_map.insert(key, tensor);
+
+        // Progress reporting
+        if bytes_loaded - last_reported >= report_interval || i + 1 == total_tensors {
+            progress.weight_load(
+                &format!("FLUX transformer + LoRA ({device_label})"),
+                bytes_loaded.min(bytes_total),
+                bytes_total,
+            );
+            last_reported = bytes_loaded;
+        }
+    }
+
+    let skipped = adapter.layers.len() - applied;
+    if on_gpu {
+        progress.info(&format!(
+            "LoRA merged on {device_label}: {applied} applied, {skipped} skipped (rank {})",
+            adapter.rank
+        ));
+    } else {
+        progress.info(&format!(
+            "LoRA merged: {applied} applied, {skipped} skipped (rank {})",
+            adapter.rank
+        ));
+    }
+    tracing::info!(applied, skipped, rank = adapter.rank, "LoRA stream merge complete");
+
+    Ok(candle_nn::VarBuilder::from_tensors(tensor_map, dtype, device))
+}
+
 /// Strip a known prefix from all tensor keys in a HashMap.
 ///
 /// FLUX safetensors may store weights under `model.diffusion_model.` or
 /// `diffusion_model.` — this normalizes them to root level.
+#[allow(dead_code)]
 pub(crate) fn strip_tensor_prefix(tensors: HashMap<String, Tensor>) -> HashMap<String, Tensor> {
     let prefix = if tensors.contains_key("img_in.weight") {
         ""

@@ -543,11 +543,11 @@ fn flux_safetensors_var_builder<'a>(
     )
 }
 
-/// Build a VarBuilder from base safetensors with LoRA deltas pre-merged.
+/// Build a VarBuilder from base safetensors with LoRA deltas merged on GPU.
 ///
-/// Loads all base tensors into a HashMap, applies LoRA weight merging, then
-/// returns a `VarBuilder::from_tensors`. This is slower than the mmap path
-/// but necessary because we need to mutate the weight tensors in memory.
+/// Streams tensors one at a time from mmap directly to GPU, applying LoRA
+/// deltas on-GPU as each tensor loads.  This keeps CPU memory low and does
+/// all math on GPU (fast even in debug builds).
 fn flux_lora_var_builder<'a>(
     transformer_path: &Path,
     lora: &mold_core::LoraWeight,
@@ -556,11 +556,6 @@ fn flux_lora_var_builder<'a>(
     progress: &ProgressReporter,
 ) -> Result<VarBuilder<'a>> {
     use super::lora;
-    use std::collections::HashMap;
-
-    progress.info("Loading base transformer weights for LoRA merge");
-    let base_st = candle_core::safetensors::load(transformer_path, &Device::Cpu)?;
-    let mut tensors: HashMap<String, candle_core::Tensor> = lora::strip_tensor_prefix(base_st);
 
     progress.info("Loading LoRA adapter");
     let adapter = lora::LoraAdapter::load(Path::new(&lora.path))?;
@@ -571,19 +566,7 @@ fn flux_lora_var_builder<'a>(
         lora.scale
     ));
 
-    lora::merge_lora_into_tensors(&mut tensors, &adapter, lora.scale, device, progress)?;
-
-    // Move merged tensors to target device and dtype
-    let tensors: HashMap<String, candle_core::Tensor> = tensors
-        .into_iter()
-        .map(|(k, v)| {
-            let v = v.to_dtype(dtype).unwrap_or(v);
-            let v = v.to_device(device).unwrap_or(v);
-            (k, v)
-        })
-        .collect();
-
-    Ok(VarBuilder::from_tensors(tensors, dtype, device))
+    lora::stream_merge_lora(transformer_path, &adapter, lora.scale, dtype, device, progress)
 }
 
 /// Loaded FLUX model components, ready for inference.
