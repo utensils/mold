@@ -657,8 +657,7 @@ pub(crate) fn gguf_lora_var_builder(
     let on_gpu = device.is_cuda() || device.is_metal();
     let mut applied = 0usize;
     let lora_keys: Vec<String> = patches.keys().cloned().collect();
-    let lora_total = lora_keys.len() as u64;
-    progress.weight_load("Patching LoRA", 0, lora_total);
+    let lora_total = lora_keys.len();
     for (i, candle_key) in lora_keys.iter().enumerate() {
         let layer_patches = &patches[candle_key];
 
@@ -742,9 +741,7 @@ pub(crate) fn gguf_lora_var_builder(
         drop(t); // free CPU F32 copy
         data.insert(tensor_key, Arc::new(patched));
 
-        progress.weight_load("Patching LoRA", (i + 1) as u64, lora_total);
-
-        if (i + 1) % 100 == 0 || i + 1 == lora_keys.len() {
+        if (i + 1) % 50 == 0 || i + 1 == lora_total {
             progress.info(&format!(
                 "Patching LoRA tensor {}/{}",
                 i + 1,
