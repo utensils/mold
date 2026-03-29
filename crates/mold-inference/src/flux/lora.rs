@@ -632,13 +632,20 @@ pub(crate) fn gguf_lora_var_builder(
 
     // Phase 1: Load ALL tensors via normal GGUF path (same as from_gguf).
     // This uses the exact same CUDA allocation as the non-LoRA path.
-    progress.info("Loading GGUF tensors");
+    let gguf_bytes_total: u64 = std::fs::metadata(transformer_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    progress.weight_load("FLUX transformer (GGUF)", 0, gguf_bytes_total);
     for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
         let qtensor = content.tensor(&mut file, tensor_name, device)?;
         data.insert(tensor_name.clone(), Arc::new(qtensor));
-        if (i + 1) % 200 == 0 || i + 1 == total_tensors {
-            progress.info(&format!("Loading GGUF tensor {}/{total_tensors}", i + 1));
-        }
+        // Approximate progress based on tensor count (GGUF has no per-tensor byte info)
+        let approx_bytes = gguf_bytes_total * (i as u64 + 1) / total_tensors as u64;
+        progress.weight_load(
+            "FLUX transformer (GGUF)",
+            approx_bytes.min(gguf_bytes_total),
+            gguf_bytes_total,
+        );
     }
     drop(file); // close GGUF file
 
@@ -650,6 +657,8 @@ pub(crate) fn gguf_lora_var_builder(
     let on_gpu = device.is_cuda() || device.is_metal();
     let mut applied = 0usize;
     let lora_keys: Vec<String> = patches.keys().cloned().collect();
+    let lora_total = lora_keys.len() as u64;
+    progress.weight_load("Patching LoRA", 0, lora_total);
     for (i, candle_key) in lora_keys.iter().enumerate() {
         let layer_patches = &patches[candle_key];
 
@@ -732,6 +741,8 @@ pub(crate) fn gguf_lora_var_builder(
         let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
         drop(t); // free CPU F32 copy
         data.insert(tensor_key, Arc::new(patched));
+
+        progress.weight_load("Patching LoRA", (i + 1) as u64, lora_total);
 
         if (i + 1) % 100 == 0 || i + 1 == lora_keys.len() {
             progress.info(&format!(
