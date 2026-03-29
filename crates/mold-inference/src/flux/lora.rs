@@ -567,6 +567,198 @@ pub(crate) fn lora_var_builder<'a>(
     ))
 }
 
+/// Build a quantized VarBuilder from a GGUF file with LoRA deltas applied.
+///
+/// Loads the GGUF file into a `HashMap<String, Arc<QTensor>>`, then for each
+/// LoRA-targeted tensor: dequantizes to F32 on CPU, applies the LoRA delta,
+/// and re-quantizes back to the original GGML dtype (e.g. Q8_0) on the target
+/// device.  Non-LoRA tensors stay quantized and untouched.
+///
+/// By re-quantizing to the original dtype instead of storing as F16/BF16, each
+/// patched tensor occupies the same VRAM as its original — no inflation.  The
+/// LoRA rank is small (typically 32) so the re-quantization error is negligible.
+pub(crate) fn gguf_lora_var_builder(
+    transformer_path: &Path,
+    adapter: &LoraAdapter,
+    scale: f64,
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+    use candle_core::quantized::{gguf_file, QTensor};
+    use std::sync::Arc;
+
+    // Load GGUF tensors
+    let mut file = std::fs::File::open(transformer_path)?;
+    let content = gguf_file::Content::read(&mut file)?;
+
+    let total_tensors = content.tensor_infos.len();
+    let mut data: HashMap<String, Arc<QTensor>> = HashMap::with_capacity(total_tensors);
+
+    // Build patch index (same as safetensors LoRA path)
+    let mut patches: HashMap<String, Vec<LoraPatch>> = HashMap::new();
+    let mut skipped = 0usize;
+    for (diffusers_key, lora_layer) in &adapter.layers {
+        if let Some(target) = map_lora_key(diffusers_key) {
+            let candle_key = match &target {
+                LoraTarget::Direct { candle_key } => candle_key.clone(),
+                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
+            };
+            let layer_rank = lora_layer.a.dims()[0] as f64;
+            let effective_scale = match lora_layer.alpha {
+                Some(alpha) => scale * alpha / layer_rank,
+                None => scale,
+            };
+            patches.entry(candle_key).or_default().push(LoraPatch {
+                a: lora_layer.a.clone(),
+                b: lora_layer.b.clone(),
+                effective_scale,
+                target,
+            });
+        } else {
+            tracing::warn!(
+                key = diffusers_key.as_str(),
+                "unrecognized LoRA key, skipping"
+            );
+            skipped += 1;
+        }
+    }
+
+    let patched_keys = patches.len();
+    let total_patches: usize = patches.values().map(|v| v.len()).sum();
+    progress.info(&format!(
+        "LoRA: {total_patches} patches on {patched_keys} tensors, {skipped} skipped (rank {})",
+        adapter.rank
+    ));
+
+    // Phase 1: Load ALL tensors via normal GGUF path (same as from_gguf).
+    // This uses the exact same CUDA allocation as the non-LoRA path.
+    let gguf_bytes_total: u64 = std::fs::metadata(transformer_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    progress.weight_load("FLUX transformer (GGUF)", 0, gguf_bytes_total);
+    for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
+        let qtensor = content.tensor(&mut file, tensor_name, device)?;
+        data.insert(tensor_name.clone(), Arc::new(qtensor));
+        // Approximate progress based on tensor count (GGUF has no per-tensor byte info)
+        let approx_bytes = gguf_bytes_total * (i as u64 + 1) / total_tensors as u64;
+        progress.weight_load(
+            "FLUX transformer (GGUF)",
+            approx_bytes.min(gguf_bytes_total),
+            gguf_bytes_total,
+        );
+    }
+    drop(file); // close GGUF file
+
+    // Phase 2: Patch LoRA-affected tensors in-place.
+    // For each target: dequantize the GPU QTensor to F32 on CPU, apply LoRA
+    // delta, re-quantize back to the original GGML dtype (e.g. Q8_0), and
+    // place the result on GPU.  This keeps each patched tensor at its original
+    // quantized size — no VRAM inflation.
+    let on_gpu = device.is_cuda() || device.is_metal();
+    let mut applied = 0usize;
+    let lora_keys: Vec<String> = patches.keys().cloned().collect();
+    let lora_total = lora_keys.len();
+    for (i, candle_key) in lora_keys.iter().enumerate() {
+        let layer_patches = &patches[candle_key];
+
+        // Find the matching tensor key (try with .weight suffix)
+        let tensor_key = if data.contains_key(candle_key) {
+            candle_key.clone()
+        } else {
+            // Shouldn't happen if map_lora_key produced correct candle keys
+            tracing::warn!(
+                key = candle_key.as_str(),
+                "LoRA target tensor not found in GGUF, skipping"
+            );
+            continue;
+        };
+
+        // Remember the original quantized dtype so we can re-quantize to it.
+        let orig_dtype = data[&tensor_key].dtype();
+
+        // Dequantize to F32 on CPU — keeps GPU clean for other tensors.
+        // The original Q8 GPU entry is removed to reclaim its VRAM.
+        let qtensor = data.remove(&tensor_key).unwrap();
+        let mut t = qtensor.dequantize(&Device::Cpu)?;
+        drop(qtensor); // release GPU QTensor VRAM
+        if on_gpu {
+            device.synchronize()?; // ensure CUDA frees the Q8 allocation
+        }
+
+        for patch in layer_patches {
+            // A×B matmul on GPU (tiny LoRA tensors), bring delta to CPU for merge
+            let matmul_dev = if on_gpu { device } else { &Device::Cpu };
+            let a = patch.a.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+            let b = patch.b.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+            let delta = b.matmul(&a)?;
+            let delta = (&delta * patch.effective_scale)?.to_device(&Device::Cpu)?;
+
+            t = match &patch.target {
+                LoraTarget::Direct { .. } => (&t + &delta)?,
+                LoraTarget::FusedSlice {
+                    component,
+                    num_components,
+                    ..
+                } => {
+                    let base_rows = t.dim(0)?;
+                    let lora_out_dim = delta.dim(0)?;
+                    let (offset, size) =
+                        fused_slice_range(base_rows, lora_out_dim, *component, *num_components);
+
+                    if offset + size > base_rows {
+                        tracing::warn!(
+                            offset,
+                            size,
+                            base_rows,
+                            "fused slice out of bounds, skipping"
+                        );
+                        t
+                    } else {
+                        let slice = t.narrow(0, offset, size)?;
+                        let updated_slice = (&slice + &delta)?;
+                        let mut parts: Vec<Tensor> = Vec::new();
+                        if offset > 0 {
+                            parts.push(t.narrow(0, 0, offset)?);
+                        }
+                        parts.push(updated_slice);
+                        let after = offset + size;
+                        if after < base_rows {
+                            parts.push(t.narrow(0, after, base_rows - after)?);
+                        }
+                        Tensor::cat(&parts, 0)?
+                    }
+                }
+            };
+            applied += 1;
+        }
+
+        // Re-quantize back to the original GGML dtype (e.g. Q8_0) and place
+        // on the target device.  `quantize_onto` quantizes the CPU F32 tensor
+        // into CPU Q8_0 blocks, then copies the raw bytes to GPU — producing
+        // the exact same storage size as the original GGUF-loaded tensor.
+        // This avoids the 2x VRAM inflation that storing as F16 would cause.
+        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        drop(t); // free CPU F32 copy
+        data.insert(tensor_key, Arc::new(patched));
+
+        if (i + 1) % 50 == 0 || i + 1 == lora_total {
+            progress.info(&format!(
+                "Patching LoRA tensor {}/{}",
+                i + 1,
+                lora_keys.len()
+            ));
+        }
+    }
+
+    progress.info(&format!(
+        "LoRA: {applied} applied, {} skipped (rank {}, {patched_keys} layers patched)",
+        adapter.layers.len() - applied,
+        adapter.rank
+    ));
+
+    Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
+}
+
 /// Strip a known prefix from all tensor keys in a HashMap.
 ///
 /// FLUX safetensors may store weights under `model.diffusion_model.` or
