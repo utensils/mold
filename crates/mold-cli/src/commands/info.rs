@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use crate::theme;
 use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
 
-/// Count files and total bytes in a directory (recursive).
 /// Count files and total bytes in a directory (recursive, no symlink following).
 /// Avoids double-counting symlinked HF cache blobs.
 fn dir_stats(path: &std::path::Path) -> (u64, u64) {

@@ -1180,7 +1180,9 @@ impl FluxEngine {
             .unwrap_or(0);
 
         // LoRA + GGUF: supported via selective dequantization.
-        // LoRA-affected layers are dequantized to BF16, rest stays quantized.
+        // LoRA-affected layers are dequantized to F32 on CPU, patched, then
+        // re-quantized back to the original GGML dtype. Non-LoRA tensors are
+        // left quantized and untouched.
 
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
