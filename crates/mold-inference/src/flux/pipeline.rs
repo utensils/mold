@@ -1181,41 +1181,9 @@ impl FluxEngine {
         }
 
         // Determine if block-level offloading should be used.
-        // When LoRA is active, suppress auto-offload — LoRA pre-merges into a full
-        // tensor map that loads directly on GPU. Only honor explicit --offload (and
-        // reject it, since offloaded inference isn't LoRA-compatible yet).
-        let has_lora = req.lora.is_some();
         let use_offload = if !is_quantized {
             let free = free_vram_bytes().unwrap_or(0);
-            if self.offload {
-                if has_lora {
-                    bail!(
-                        "LoRA adapters are not yet supported with block-level offloading. \
-                         Remove --offload to use LoRA."
-                    );
-                }
-                if free > 0 && free < MIN_OFFLOAD_VRAM {
-                    bail!(
-                        "GPU only has {:.1} GB free — at least {:.1} GB is required \
-                         for block-level offloading",
-                        free as f64 / 1e9,
-                        MIN_OFFLOAD_VRAM as f64 / 1e9,
-                    );
-                }
-                true
-            } else if has_lora {
-                // Skip auto-offload for LoRA: the merged weights load directly on GPU.
-                // If it truly doesn't fit, CUDA will OOM with a clear error.
-                if free > 0 && should_offload(xformer_size, free) {
-                    tracing::info!(
-                        "auto-offload suppressed for LoRA merge (transformer {:.1} GB, \
-                         VRAM {:.1} GB free — tight fit expected)",
-                        xformer_size as f64 / 1e9,
-                        free as f64 / 1e9,
-                    );
-                }
-                false
-            } else if should_offload(xformer_size, free) {
+            if self.offload || should_offload(xformer_size, free) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(
                         "GPU only has {:.1} GB free — at least {:.1} GB is required \
@@ -1260,7 +1228,10 @@ impl FluxEngine {
             flux::model::Config::dev()
         };
 
-        let xformer_label = if req.lora.is_some() {
+        let has_lora = req.lora.is_some();
+        let xformer_label = if has_lora && use_offload {
+            "Loading FLUX transformer + LoRA (offloaded)"
+        } else if has_lora {
             "Loading FLUX transformer + LoRA (GPU, BF16)"
         } else if use_offload {
             "Loading FLUX transformer (offloaded, blocks on CPU)"
@@ -1273,14 +1244,26 @@ impl FluxEngine {
         let xformer_stage = Instant::now();
 
         let flux_model = if use_offload {
-            // Load transformer on CPU, move stem to GPU, keep blocks on CPU
-            let cpu_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
-                &transformer_path,
-                gpu_dtype,
-                &Device::Cpu,
-                "FLUX transformer",
-                &self.base.progress,
-            )?);
+            // Load transformer blocks on CPU (with LoRA merged in if active),
+            // move stem to GPU. Blocks stream CPU→GPU one at a time during forward.
+            let cpu_vb: VarBuilder = if let Some(ref lora) = req.lora {
+                // LoRA backend: loads from mmap to CPU, patches inline
+                flux_lora_var_builder(
+                    &transformer_path,
+                    lora,
+                    gpu_dtype,
+                    &Device::Cpu,
+                    &self.base.progress,
+                )?
+            } else {
+                flux_transformer_var_builder(flux_safetensors_var_builder(
+                    &transformer_path,
+                    gpu_dtype,
+                    &Device::Cpu,
+                    "FLUX transformer",
+                    &self.base.progress,
+                )?)
+            };
             FluxTransformer::Offloaded(crate::flux::offload::OffloadedFluxTransformer::load(
                 cpu_vb,
                 &flux_cfg,
@@ -1291,6 +1274,7 @@ impl FluxEngine {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if let Some(ref lora) = req.lora {
+            // LoRA without offload (GPU has enough VRAM for full model)
             let flux_vb = flux_lora_var_builder(
                 &transformer_path,
                 lora,
