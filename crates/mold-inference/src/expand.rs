@@ -248,13 +248,19 @@ impl LocalExpander {
             .decode(&generated_tokens, true)
             .map_err(|e| anyhow::anyhow!("failed to decode generated tokens: {e}"))?;
 
-        // Clear KV cache and drop model (RAII handles the rest)
+        // Clear KV cache and drop model + device before reclaiming GPU memory.
+        // The device must be dropped BEFORE cuDevicePrimaryCtxReset — otherwise
+        // the candle Device still holds a CudaDevice reference to the context
+        // we're about to destroy, causing a use-after-free segfault when the
+        // next pipeline creates a new Device on the same GPU.
+        let was_cuda = device.is_cuda();
         model.clear_kv_cache();
         drop(model);
+        drop(device);
 
         // Reclaim GPU memory if we used it
-        if device.is_cuda() {
-            let _ = crate::device::reclaim_gpu_memory();
+        if was_cuda {
+            crate::device::reclaim_gpu_memory();
         }
 
         Ok(output)
