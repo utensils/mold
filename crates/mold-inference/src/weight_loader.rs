@@ -34,13 +34,14 @@ pub fn load_safetensors_with_progress<'a>(
     // Open mmap (cheap — sets up page table entries, no I/O yet)
     let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
 
-    // Enumerate all tensors and compute per-tensor byte sizes from shape/dtype
+    // Enumerate all tensors and compute per-tensor byte sizes from on-disk dtype
+    // (not target dtype — bytes_total is derived from file size on disk).
     let tensor_list: Vec<(String, usize)> = st
         .tensors()
         .into_iter()
         .map(|(name, view)| {
             let elements: usize = view.shape().iter().product();
-            let byte_size = elements * dtype.size_in_bytes();
+            let byte_size = elements * (view.dtype().bitsize() / 8);
             (name, byte_size)
         })
         .collect();

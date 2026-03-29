@@ -223,7 +223,7 @@ fn fused_slice_range(
 }
 
 /// Apply LoRA deltas to base model tensors in-place.
-/// Currently unused (superseded by `stream_merge_lora` for FLUX), but retained
+/// Currently unused (superseded by `LoraBackend` for FLUX), but retained
 /// for future SD1.5/SDXL LoRA support where the UNet loading path differs.
 #[allow(dead_code)]
 ///
@@ -264,9 +264,11 @@ pub(crate) fn merge_lora_into_tensors(
             }
         };
 
-        // Effective scale: if alpha is present, scale = user_scale * alpha / rank
+        // Effective scale: if alpha is present, scale = user_scale * alpha / layer_rank.
+        // Use per-layer rank (A's dim 0) for correct normalization with non-uniform ranks.
+        let layer_rank = lora_layer.a.dim(0)? as f64;
         let effective_scale = match lora_layer.alpha {
-            Some(alpha) => scale * alpha / adapter.rank as f64,
+            Some(alpha) => scale * alpha / layer_rank,
             None => scale,
         };
 
@@ -524,8 +526,10 @@ pub(crate) fn lora_var_builder<'a>(
                 LoraTarget::Direct { candle_key } => candle_key.clone(),
                 LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
             };
+            // Use per-layer rank (A's dim 0) for correct alpha normalization.
+            let layer_rank = lora_layer.a.dims()[0] as f64;
             let effective_scale = match lora_layer.alpha {
-                Some(alpha) => scale * alpha / adapter.rank as f64,
+                Some(alpha) => scale * alpha / layer_rank,
                 None => scale,
             };
             patches.entry(candle_key).or_default().push(LoraPatch {

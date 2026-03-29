@@ -175,7 +175,7 @@ pub struct LoraWeight {
     /// Path to the LoRA safetensors file.
     #[schema(example = "/path/to/lora.safetensors")]
     pub path: String,
-    /// Scaling factor for LoRA effect (0.0 = no effect, 1.0 = full strength).
+    /// Scaling factor for LoRA effect (0.0 = no effect, 1.0 = full strength, up to 2.0).
     #[serde(default = "default_lora_scale")]
     #[schema(example = 1.0)]
     pub scale: f64,
