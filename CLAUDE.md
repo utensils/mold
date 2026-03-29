@@ -203,7 +203,7 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
         --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
         --scheduler <SCHED>     Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc
-        --lora <PATH>           LoRA adapter safetensors file (FLUX BF16 only; repeatable in future)
+        --lora <PATH>           LoRA adapter safetensors file (FLUX BF16 or GGUF quantized)
         --lora-scale <FLOAT>    LoRA effect strength (0.0-2.0) [default: 1.0]
     -i, --image <PATH|->        Source image for img2img (file path or - for stdin)
         --strength <FLOAT>      Denoising strength for img2img (0.0-1.0) [default: 0.75]
@@ -337,7 +337,7 @@ temperature = 0.7
 2. **Local fallback**: If server unreachable, falls back to local GPU inference (with auto-pull if model not downloaded)
 3. **Local forced (`--local`)**: Skip server attempt entirely
 
-> **VRAM note**: Full BF16 FLUX dev (23GB) auto-offloads on 24GB cards (blocks stream CPU↔GPU). GGUF quantized models fit without offloading. SDXL FP16 UNets (~5GB) fit comfortably. LoRA adapters work with BF16 FLUX models via the offload path.
+> **VRAM note**: Full BF16 FLUX dev (23GB) auto-offloads on 24GB cards (blocks stream CPU↔GPU). GGUF quantized models fit without offloading. SDXL FP16 UNets (~5GB) fit comfortably. LoRA adapters work with both BF16 (via offload path) and GGUF quantized FLUX models.
 
 ## Deployment
 
@@ -364,4 +364,4 @@ temperature = 0.7
 9. **Pipe-friendly output** — `IsTerminal` detection routes image bytes to stdout, status to stderr. SIGPIPE reset to default. `status!` macro handles routing.
 10. **Unified `run` command** — First positional arg disambiguated at runtime: known model name vs prompt text.
 11. **CPU-based noise generation** — Initial denoising noise is generated on CPU with a deterministic Rust RNG (`StdRng`/ChaCha20), then moved to GPU. This ensures same seed produces identical images across CUDA, Metal, and CPU backends. See `seeded_randn()` in `engine.rs`.
-12. **LoRA via custom VarBuilder backend** — candle has no built-in LoRA support. Instead of pre-merging weights into a HashMap (causes OOM on tight cards), a custom `SimpleBackend` wraps the mmap'd safetensors and intercepts `vb.get()` calls during model construction. Each tensor loads from mmap → device, and LoRA deltas (`B @ A`) are applied inline. Memory profile is identical to non-LoRA loading. Works with block-level offloading by targeting CPU device.
+12. **LoRA via custom VarBuilder backend** — candle has no built-in LoRA support. For BF16 models, a custom `SimpleBackend` (`LoraBackend`) wraps mmap'd safetensors and intercepts `vb.get()` calls during model construction — each tensor loads from mmap → device, and LoRA deltas (`B @ A`) are applied inline. For GGUF models, `gguf_lora_var_builder()` selectively dequantizes LoRA-affected tensors to F32 on CPU, merges deltas, and re-quantizes back to the original GGML dtype. Non-LoRA tensors stay quantized. Works with block-level offloading by targeting CPU device.

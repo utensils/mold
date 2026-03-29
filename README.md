@@ -157,13 +157,14 @@ Selectively edit parts of an image with a mask (white = repaint, black = keep):
 mold run "a red sports car" --image photo.png --mask mask.png
 ```
 
-### LoRA adapters (FLUX BF16)
+### LoRA adapters (FLUX)
 
-Apply LoRA adapter weights to customize model output:
+Apply LoRA adapter weights to customize model output (BF16 and GGUF quantized):
 
 ```bash
-# LoRA adapter (FLUX BF16)
+# LoRA adapter (FLUX BF16 or GGUF)
 mold run flux-dev:bf16 "a portrait" --lora style.safetensors --lora-scale 0.8
+mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 ```
 
 ### ControlNet (SD1.5)
@@ -199,7 +200,7 @@ default_negative_prompt = "low quality, worst quality, blurry, watermark"
 negative_prompt = "worst quality, low quality, bad anatomy, bad hands, extra fingers, blurry"
 
 [models."flux-dev:bf16"]
-# LoRA adapter (FLUX BF16 models only)
+# LoRA adapter (FLUX BF16 or GGUF quantized)
 # lora = "/path/to/adapter.safetensors"
 # lora_scale = 0.8
 ```
