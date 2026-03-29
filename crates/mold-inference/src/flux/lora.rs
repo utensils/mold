@@ -346,131 +346,77 @@ pub(crate) fn merge_lora_into_tensors(
     Ok(())
 }
 
-/// Stream-load safetensors with LoRA deltas merged, using deferred GPU placement.
+/// A `SimpleBackend` that wraps mmap'd safetensors and applies LoRA deltas
+/// on-the-fly when the model constructor requests each tensor.
 ///
-/// All tensors are loaded and merged on **CPU**, then stored in a HashMap.  The
-/// returned `VarBuilder` carries the target GPU device — candle's model constructor
-/// calls `.to_device(gpu)` per-tensor on demand, moving each weight to VRAM only
-/// when the model layer is built.  This mirrors the lazy loading of the mmap
-/// VarBuilder and keeps peak VRAM ≈ final model size (no pre-loaded HashMap on GPU).
+/// This is the ComfyUI/InvokeAI approach adapted for candle:
+/// - Tensors are loaded lazily from mmap (identical memory profile to non-LoRA)
+/// - LoRA deltas are computed and applied per-tensor as `Flux::new()` calls `vb.get()`
+/// - Peak VRAM = final model size only (no pre-loaded HashMap)
 ///
-/// The A×B matmul for each LoRA layer runs on GPU when available (the LoRA matrices
-/// are tiny, ~400KB each), then the delta is moved back to CPU for the merge.
-///
-/// On systems with ample VRAM headroom (e.g. 48GB card, 24GB model), the per-tensor
-/// `.to_device()` during model construction is fast.  On tight cards (24GB/24GB),
-/// this avoids the OOM that would occur from pre-loading the full HashMap on GPU.
-pub(crate) fn stream_merge_lora<'a>(
-    transformer_path: &Path,
-    adapter: &LoraAdapter,
-    scale: f64,
-    dtype: DType,
-    device: &Device,
-    progress: &ProgressReporter,
-) -> Result<candle_nn::VarBuilder<'a>> {
-    use candle_core::safetensors::MmapedSafetensors;
+/// The A×B matmul runs on the target device (GPU if available), and the merge
+/// (F32 cast + add + cast back) also happens on the target device since we're
+/// processing one tensor at a time with plenty of headroom.
+struct LoraBackend {
+    /// The mmap'd base safetensors.
+    st: candle_core::safetensors::MmapedSafetensors,
+    /// Key prefix to strip (e.g. "model.diffusion_model.").
+    prefix: String,
+    /// Pre-computed LoRA patches keyed by canonical tensor name.
+    /// Each entry has: LoRA layer ref (A, B, alpha), target type, effective scale.
+    patches: HashMap<String, Vec<LoraPatch>>,
+}
 
-    let on_gpu = device.is_cuda() || device.is_metal();
-    let device_label = if device.is_cuda() {
-        "GPU"
-    } else if device.is_metal() {
-        "Metal"
-    } else {
-        "CPU"
-    };
+/// A single LoRA patch to apply to a base tensor.
+struct LoraPatch {
+    a: Tensor,
+    b: Tensor,
+    effective_scale: f64,
+    target: LoraTarget,
+}
 
-    // Open mmap (cheap, no I/O)
-    let st = unsafe {
-        MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))?
-    };
-
-    // Detect key prefix (model.diffusion_model. or diffusion_model. or none)
-    let all_names: Vec<String> = st.tensors().into_iter().map(|(n, _)| n).collect();
-    let prefix = if all_names.iter().any(|n| n == "img_in.weight") {
-        ""
-    } else if all_names.iter().any(|n| n == "model.diffusion_model.img_in.weight") {
-        "model.diffusion_model."
-    } else if all_names.iter().any(|n| n == "diffusion_model.img_in.weight") {
-        "diffusion_model."
-    } else {
-        ""
-    };
-
-    // Pre-compute: which candle keys have LoRA deltas and what targets they map to.
-    // Multiple diffusers keys can target the same candle key (e.g. Q, K, V → fused qkv).
-    let mut lora_targets: HashMap<String, Vec<(&str, &LoraLayer, LoraTarget)>> = HashMap::new();
-    for (diffusers_key, lora_layer) in &adapter.layers {
-        if let Some(target) = map_lora_key(diffusers_key) {
-            let candle_key = match &target {
-                LoraTarget::Direct { candle_key } => candle_key.clone(),
-                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
-            };
-            lora_targets
-                .entry(candle_key)
-                .or_default()
-                .push((diffusers_key.as_str(), lora_layer, target));
-        } else {
-            tracing::warn!(key = diffusers_key.as_str(), "unrecognized LoRA key, skipping");
-        }
+impl candle_nn::var_builder::SimpleBackend for LoraBackend {
+    fn get(
+        &self,
+        _s: candle_core::Shape,
+        name: &str,
+        _h: candle_nn::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        self.get_unchecked(name, dtype, dev)
     }
 
-    // Compute total bytes for progress
-    let bytes_total: u64 = std::fs::metadata(transformer_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let mut bytes_loaded: u64 = 0;
-    let mut last_reported: u64 = 0;
-    let report_interval = (bytes_total / 100).max(50_000_000);
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        // Resolve the raw key in the safetensors file
+        let raw_key = if self.prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}{name}", self.prefix)
+        };
 
-    let component_label = format!("FLUX transformer + LoRA ({device_label})");
-    progress.weight_load(&component_label, 0, bytes_total);
-
-    let total_tensors = all_names.len();
-    let mut tensor_map: HashMap<String, Tensor> = HashMap::with_capacity(total_tensors);
-    let mut applied = 0usize;
-
-    // GPU device for the small A×B matmul (LoRA matrices are tiny, always fit).
-    let matmul_device = if on_gpu { device } else { &Device::Cpu };
-
-    for (i, raw_name) in all_names.iter().enumerate() {
-        // Load every tensor to CPU via mmap page faults.
-        // Candle's model constructor will move them to GPU on demand.
-        let tensor = st.load(raw_name, &Device::Cpu)?;
+        // Load from mmap directly to target device (same as non-LoRA path)
+        let tensor = self.st.load(&raw_key, dev)?;
         let tensor = if tensor.dtype() != dtype {
             tensor.to_dtype(dtype)?
         } else {
             tensor
         };
 
-        // Strip prefix for the canonical key
-        let key = raw_name.strip_prefix(prefix).unwrap_or(raw_name).to_string();
-
-        // Estimate bytes for progress
-        let elements: usize = tensor.dims().iter().product();
-        let byte_size = elements * dtype.size_in_bytes();
-        bytes_loaded += byte_size as u64;
-
-        // Apply LoRA deltas on CPU (F32 temporaries stay in system RAM)
-        let tensor = if let Some(targets) = lora_targets.get(&key) {
+        // Apply LoRA patches if any target this tensor
+        let tensor = if let Some(patches) = self.patches.get(name) {
             let mut t = tensor;
-
-            for (_, lora_layer, target) in targets {
-                let effective_scale = match lora_layer.alpha {
-                    Some(alpha) => scale * alpha / adapter.rank as f64,
-                    None => scale,
-                };
-
-                // A×B matmul on GPU (tiny tensors), bring delta back to CPU for merge.
-                let a = lora_layer.a.to_dtype(DType::F32)?.to_device(matmul_device)?;
-                let b = lora_layer.b.to_dtype(DType::F32)?.to_device(matmul_device)?;
+            for patch in patches {
+                // Compute delta: B @ A on the same device as the base tensor
+                let a = patch.a.to_dtype(DType::F32)?.to_device(dev)?;
+                let b = patch.b.to_dtype(DType::F32)?.to_device(dev)?;
                 let delta = b.matmul(&a)?;
-                let delta = (delta * effective_scale)?.to_device(&Device::Cpu)?;
+                let delta = (&delta * patch.effective_scale)?;
 
-                t = match target {
+                t = match &patch.target {
                     LoraTarget::Direct { .. } => {
                         let t_f32 = t.to_dtype(DType::F32)?;
-                        let merged = (t_f32 + delta)?;
-                        applied += 1;
+                        let merged = (&t_f32 + &delta)?;
                         merged.to_dtype(dtype)?
                     }
                     LoraTarget::FusedSlice {
@@ -492,7 +438,7 @@ pub(crate) fn stream_merge_lora<'a>(
                             t
                         } else {
                             let slice = t_f32.narrow(0, offset, size)?;
-                            let updated_slice = (slice + delta)?;
+                            let updated_slice = (&slice + &delta)?;
                             let mut parts: Vec<Tensor> = Vec::new();
                             if offset > 0 {
                                 parts.push(t_f32.narrow(0, 0, offset)?);
@@ -502,7 +448,6 @@ pub(crate) fn stream_merge_lora<'a>(
                             if after < base_rows {
                                 parts.push(t_f32.narrow(0, after, base_rows - after)?);
                             }
-                            applied += 1;
                             Tensor::cat(&parts, 0)?.to_dtype(dtype)?
                         }
                     }
@@ -513,29 +458,101 @@ pub(crate) fn stream_merge_lora<'a>(
             tensor
         };
 
-        tensor_map.insert(key, tensor);
+        Ok(tensor)
+    }
 
-        // Progress reporting
-        if bytes_loaded - last_reported >= report_interval || i + 1 == total_tensors {
-            progress.weight_load(
-                &component_label,
-                bytes_loaded.min(bytes_total),
-                bytes_total,
-            );
-            last_reported = bytes_loaded;
+    fn contains_tensor(&self, name: &str) -> bool {
+        let raw_key = if self.prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}{name}", self.prefix)
+        };
+        // Check via trying to load metadata (tensors() lists all names)
+        self.st
+            .get(&raw_key)
+            .is_ok()
+    }
+}
+
+/// Build a LoRA-patching VarBuilder that wraps mmap'd safetensors.
+///
+/// This uses candle's `SimpleBackend` trait to intercept every `vb.get()` call
+/// during model construction.  Each tensor is loaded from mmap directly to the
+/// target device (GPU), with LoRA deltas applied inline.  Memory profile is
+/// identical to the non-LoRA mmap path — no HashMap, no pre-loading.
+pub(crate) fn lora_var_builder<'a>(
+    transformer_path: &Path,
+    adapter: &LoraAdapter,
+    scale: f64,
+    dtype: DType,
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<candle_nn::VarBuilder<'a>> {
+    use candle_core::safetensors::MmapedSafetensors;
+
+    // Open mmap (cheap, no I/O)
+    let st = unsafe {
+        MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))?
+    };
+
+    // Detect key prefix
+    let all_names: Vec<String> = st.tensors().into_iter().map(|(n, _)| n).collect();
+    let prefix = if all_names.iter().any(|n| n == "img_in.weight") {
+        ""
+    } else if all_names.iter().any(|n| n == "model.diffusion_model.img_in.weight") {
+        "model.diffusion_model."
+    } else if all_names.iter().any(|n| n == "diffusion_model.img_in.weight") {
+        "diffusion_model."
+    } else {
+        ""
+    };
+
+    // Build patch index: for each candle key, collect all LoRA patches
+    let mut patches: HashMap<String, Vec<LoraPatch>> = HashMap::new();
+    let mut skipped = 0usize;
+    for (diffusers_key, lora_layer) in &adapter.layers {
+        if let Some(target) = map_lora_key(diffusers_key) {
+            let candle_key = match &target {
+                LoraTarget::Direct { candle_key } => candle_key.clone(),
+                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
+            };
+            let effective_scale = match lora_layer.alpha {
+                Some(alpha) => scale * alpha / adapter.rank as f64,
+                None => scale,
+            };
+            patches
+                .entry(candle_key)
+                .or_default()
+                .push(LoraPatch {
+                    a: lora_layer.a.clone(),
+                    b: lora_layer.b.clone(),
+                    effective_scale,
+                    target,
+                });
+        } else {
+            tracing::warn!(key = diffusers_key.as_str(), "unrecognized LoRA key, skipping");
+            skipped += 1;
         }
     }
 
-    let skipped = adapter.layers.len() - applied;
+    let patched_keys = patches.len();
+    let total_patches: usize = patches.values().map(|v| v.len()).sum();
     progress.info(&format!(
-        "LoRA: {applied} applied, {skipped} skipped (rank {})",
+        "LoRA: {total_patches} patches on {patched_keys} tensors, {skipped} skipped (rank {})",
         adapter.rank
     ));
-    tracing::info!(applied, skipped, rank = adapter.rank, "LoRA stream merge complete");
 
-    // VarBuilder carries the GPU device — candle's model constructor will call
-    // .to_device(gpu) per-tensor during Flux::new(), keeping peak VRAM = model size.
-    Ok(candle_nn::VarBuilder::from_tensors(tensor_map, dtype, device))
+    let backend = LoraBackend {
+        st,
+        prefix: prefix.to_string(),
+        patches,
+    };
+
+    Ok(candle_nn::VarBuilder::from_backend(
+        Box::new(backend),
+        dtype,
+        device.clone(),
+    ))
 }
 
 /// Strip a known prefix from all tensor keys in a HashMap.

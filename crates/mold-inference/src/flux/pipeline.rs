@@ -543,11 +543,11 @@ fn flux_safetensors_var_builder<'a>(
     )
 }
 
-/// Build a VarBuilder from base safetensors with LoRA deltas merged on GPU.
+/// Build a LoRA-patching VarBuilder that wraps mmap'd base weights.
 ///
-/// Streams tensors one at a time from mmap directly to GPU, applying LoRA
-/// deltas on-GPU as each tensor loads.  This keeps CPU memory low and does
-/// all math on GPU (fast even in debug builds).
+/// Uses a custom `SimpleBackend` that intercepts every `vb.get()` call during
+/// model construction.  Each tensor loads from mmap directly to GPU with LoRA
+/// deltas applied inline — identical memory profile to the non-LoRA mmap path.
 fn flux_lora_var_builder<'a>(
     transformer_path: &Path,
     lora: &mold_core::LoraWeight,
@@ -566,7 +566,7 @@ fn flux_lora_var_builder<'a>(
         lora.scale
     ));
 
-    lora::stream_merge_lora(transformer_path, &adapter, lora.scale, dtype, device, progress)
+    lora::lora_var_builder(transformer_path, &adapter, lora.scale, dtype, device, progress)
 }
 
 /// Loaded FLUX model components, ready for inference.
