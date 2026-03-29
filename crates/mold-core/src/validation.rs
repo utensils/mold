@@ -154,7 +154,8 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("mask_image must be a PNG or JPEG image".to_string());
         }
     }
-    // LoRA validation
+    // LoRA validation (format checks only — path existence is checked at the
+    // inference layer, since in remote mode the path refers to the server filesystem).
     if let Some(ref lora) = req.lora {
         if lora.scale < 0.0 || lora.scale > 2.0 {
             return Err(format!(
@@ -162,11 +163,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
                 lora.scale
             ));
         }
-        let path = std::path::Path::new(&lora.path);
-        if !path.exists() {
-            return Err(format!("lora file not found: {}", lora.path));
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("safetensors") {
+        if !lora.path.ends_with(".safetensors") {
             return Err("lora file must be a .safetensors file".to_string());
         }
     }
@@ -699,12 +696,8 @@ mod tests {
     #[test]
     fn lora_scale_too_low_rejected() {
         let mut req = valid_req();
-        // Create a temp .safetensors file so the path check passes
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.safetensors");
-        std::fs::write(&path, b"fake").unwrap();
         req.lora = Some(crate::LoraWeight {
-            path: path.to_str().unwrap().to_string(),
+            path: "adapter.safetensors".to_string(),
             scale: -0.1,
         });
         let err = validate_generate_request(&req).unwrap_err();
@@ -716,12 +709,9 @@ mod tests {
 
     #[test]
     fn lora_scale_too_high_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.safetensors");
-        std::fs::write(&path, b"fake").unwrap();
         let mut req = valid_req();
         req.lora = Some(crate::LoraWeight {
-            path: path.to_str().unwrap().to_string(),
+            path: "adapter.safetensors".to_string(),
             scale: 2.1,
         });
         let err = validate_generate_request(&req).unwrap_err();
@@ -733,13 +723,10 @@ mod tests {
 
     #[test]
     fn lora_scale_boundary_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.safetensors");
-        std::fs::write(&path, b"fake").unwrap();
         for scale in [0.0, 1.0, 2.0] {
             let mut req = valid_req();
             req.lora = Some(crate::LoraWeight {
-                path: path.to_str().unwrap().to_string(),
+                path: "adapter.safetensors".to_string(),
                 scale,
             });
             assert!(
@@ -750,24 +737,22 @@ mod tests {
     }
 
     #[test]
-    fn lora_file_not_found_rejected() {
+    fn lora_path_not_found_passes_validation() {
+        // Path existence is checked at the inference layer, not validation,
+        // so remote LoRA paths (server-side files) work correctly.
         let mut req = valid_req();
         req.lora = Some(crate::LoraWeight {
             path: "/nonexistent/path/adapter.safetensors".to_string(),
             scale: 1.0,
         });
-        let err = validate_generate_request(&req).unwrap_err();
-        assert!(err.contains("not found"), "expected not found error: {err}");
+        assert!(validate_generate_request(&req).is_ok());
     }
 
     #[test]
     fn lora_wrong_extension_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.bin");
-        std::fs::write(&path, b"fake").unwrap();
         let mut req = valid_req();
         req.lora = Some(crate::LoraWeight {
-            path: path.to_str().unwrap().to_string(),
+            path: "/some/path/adapter.bin".to_string(),
             scale: 1.0,
         });
         let err = validate_generate_request(&req).unwrap_err();

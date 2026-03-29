@@ -410,7 +410,7 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
         };
 
         // Apply LoRA patches if any target this tensor
-        let tensor = if let Some(patches) = self.patches.get(name) {
+        if let Some(patches) = self.patches.get(name) {
             let mut t = tensor;
             for patch in patches {
                 // Compute delta: B @ A on the same device as the base tensor
@@ -461,12 +461,10 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
                     }
                 };
             }
-            t
+            Ok(t)
         } else {
-            tensor
-        };
-
-        Ok(tensor)
+            Ok(tensor)
+        }
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
