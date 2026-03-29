@@ -346,14 +346,18 @@ pub(crate) fn merge_lora_into_tensors(
     Ok(())
 }
 
-/// Stream-load safetensors to GPU, applying LoRA deltas on-GPU as each tensor loads.
+/// Stream-load safetensors to GPU with LoRA deltas merged inline.
 ///
-/// Instead of loading all weights to CPU, merging, then bulk-transferring to GPU,
-/// this function streams one tensor at a time from mmap → GPU, applies any LoRA
-/// delta immediately on GPU, and stores the result.  This keeps CPU memory low
-/// and does all math on GPU (fast even in debug builds).
+/// Streams one tensor at a time from mmap.  Non-LoRA tensors go directly to GPU.
+/// LoRA-affected tensors are merged on whichever device has enough headroom:
 ///
-/// Returns a `VarBuilder::from_tensors` backed by GPU tensors with LoRA merged in.
+/// - **GPU merge** (fast): when free VRAM > 4× the tensor's F32 size (enough for
+///   BF16 base + F32 cast + delta + merged + back to BF16 without fragmentation).
+/// - **CPU merge** (safe): when VRAM is tight.  The A×B matmul still runs on GPU
+///   (the LoRA matrices are tiny), but the base tensor work stays on CPU and only
+///   the final BF16 result is moved to GPU.
+///
+/// This keeps peak VRAM close to model size regardless of LoRA overhead.
 pub(crate) fn stream_merge_lora<'a>(
     transformer_path: &Path,
     adapter: &LoraAdapter,
@@ -363,6 +367,7 @@ pub(crate) fn stream_merge_lora<'a>(
     progress: &ProgressReporter,
 ) -> Result<candle_nn::VarBuilder<'a>> {
     use candle_core::safetensors::MmapedSafetensors;
+    use crate::device::free_vram_bytes;
 
     let on_gpu = device.is_cuda() || device.is_metal();
     let device_label = if device.is_cuda() {
@@ -416,27 +421,30 @@ pub(crate) fn stream_merge_lora<'a>(
     let mut last_reported: u64 = 0;
     let report_interval = (bytes_total / 100).max(50_000_000);
 
-    progress.weight_load(
-        &format!("FLUX transformer + LoRA ({device_label})"),
-        0,
-        bytes_total,
-    );
+    let component_label = format!("FLUX transformer + LoRA ({device_label})");
+    progress.weight_load(&component_label, 0, bytes_total);
 
     let total_tensors = all_names.len();
     let mut tensor_map: HashMap<String, Tensor> = HashMap::with_capacity(total_tensors);
     let mut applied = 0usize;
+    let mut gpu_merges = 0usize;
+    let mut cpu_merges = 0usize;
 
     for (i, raw_name) in all_names.iter().enumerate() {
-        // Load this single tensor from mmap directly to target device
-        let tensor = st.load(raw_name, device)?;
+        // Strip prefix for the canonical key
+        let key = raw_name.strip_prefix(prefix).unwrap_or(raw_name).to_string();
+
+        let has_lora = lora_targets.contains_key(&key);
+
+        // Non-LoRA tensors: load directly to GPU (fast path, no intermediates).
+        // LoRA tensors: load to CPU initially — merge device chosen below.
+        let load_device = if has_lora { &Device::Cpu } else { device };
+        let tensor = st.load(raw_name, load_device)?;
         let tensor = if tensor.dtype() != dtype {
             tensor.to_dtype(dtype)?
         } else {
             tensor
         };
-
-        // Strip prefix for the canonical key
-        let key = raw_name.strip_prefix(prefix).unwrap_or(raw_name).to_string();
 
         // Estimate bytes for progress (shape * dtype size)
         let elements: usize = tensor.dims().iter().product();
@@ -445,18 +453,34 @@ pub(crate) fn stream_merge_lora<'a>(
 
         // Apply LoRA deltas if any target this tensor
         let tensor = if let Some(targets) = lora_targets.get(&key) {
-            let mut t = tensor;
+            // Decide merge device: GPU if enough VRAM for F32 temporaries, else CPU.
+            // F32 overhead ≈ 4× the BF16 tensor size (base_f32 + delta + merged + cast back).
+            let f32_headroom = (byte_size as u64) * 4;
+            let free = if on_gpu { free_vram_bytes().unwrap_or(0) } else { 0 };
+            let merge_on_gpu = on_gpu && free > f32_headroom;
+            let merge_device = if merge_on_gpu { device } else { &Device::Cpu };
+
+            let mut t = if merge_on_gpu {
+                // Move base tensor to GPU for merge
+                tensor.to_device(device)?
+            } else {
+                // Keep on CPU for merge
+                tensor
+            };
+
             for (_, lora_layer, target) in targets {
                 let effective_scale = match lora_layer.alpha {
                     Some(alpha) => scale * alpha / adapter.rank as f64,
                     None => scale,
                 };
 
-                // Compute delta on GPU: B @ A (both moved to device)
-                let a = lora_layer.a.to_dtype(DType::F32)?.to_device(device)?;
-                let b = lora_layer.b.to_dtype(DType::F32)?.to_device(device)?;
+                // A×B matmul: always on GPU if available (LoRA matrices are tiny).
+                // Delta then moved to the merge device for the base tensor addition.
+                let matmul_device = if on_gpu { device } else { &Device::Cpu };
+                let a = lora_layer.a.to_dtype(DType::F32)?.to_device(matmul_device)?;
+                let b = lora_layer.b.to_dtype(DType::F32)?.to_device(matmul_device)?;
                 let delta = b.matmul(&a)?;
-                let delta = (delta * effective_scale)?;
+                let delta = (delta * effective_scale)?.to_device(merge_device)?;
 
                 t = match target {
                     LoraTarget::Direct { .. } => {
@@ -500,7 +524,19 @@ pub(crate) fn stream_merge_lora<'a>(
                     }
                 };
             }
-            t
+
+            if merge_on_gpu {
+                gpu_merges += 1;
+            } else {
+                cpu_merges += 1;
+            }
+
+            // If merged on CPU, move final result to GPU
+            if !merge_on_gpu && on_gpu {
+                t.to_device(device)?
+            } else {
+                t
+            }
         } else {
             tensor
         };
@@ -510,7 +546,7 @@ pub(crate) fn stream_merge_lora<'a>(
         // Progress reporting
         if bytes_loaded - last_reported >= report_interval || i + 1 == total_tensors {
             progress.weight_load(
-                &format!("FLUX transformer + LoRA ({device_label})"),
+                &component_label,
                 bytes_loaded.min(bytes_total),
                 bytes_total,
             );
@@ -519,18 +555,20 @@ pub(crate) fn stream_merge_lora<'a>(
     }
 
     let skipped = adapter.layers.len() - applied;
-    if on_gpu {
-        progress.info(&format!(
-            "LoRA merged on {device_label}: {applied} applied, {skipped} skipped (rank {})",
-            adapter.rank
-        ));
+    let merge_detail = if gpu_merges > 0 && cpu_merges > 0 {
+        format!(" ({gpu_merges} on {device_label}, {cpu_merges} on CPU)")
+    } else if gpu_merges > 0 {
+        format!(" (all on {device_label})")
+    } else if cpu_merges > 0 && on_gpu {
+        format!(" (merged on CPU, loaded to {device_label})")
     } else {
-        progress.info(&format!(
-            "LoRA merged: {applied} applied, {skipped} skipped (rank {})",
-            adapter.rank
-        ));
-    }
-    tracing::info!(applied, skipped, rank = adapter.rank, "LoRA stream merge complete");
+        String::new()
+    };
+    progress.info(&format!(
+        "LoRA: {applied} applied, {skipped} skipped (rank {}){merge_detail}",
+        adapter.rank
+    ));
+    tracing::info!(applied, skipped, gpu_merges, cpu_merges, rank = adapter.rank, "LoRA stream merge complete");
 
     Ok(candle_nn::VarBuilder::from_tensors(tensor_map, dtype, device))
 }
