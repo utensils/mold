@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use mold_core::{build_model_catalog, ModelInfoExtended, ModelPaths};
 
+use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
@@ -31,25 +32,23 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded)
 }
 
+/// Check whether a model is available — either already in the cache or
+/// has resolvable paths on disk. Returns `Some(paths)` if the model needs
+/// to be created from scratch, `None` if already in the cache.
 pub(crate) async fn check_model_available(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<ModelPaths>, ApiError> {
+    // Check the model cache first.
     {
-        let engine = state.engine.lock().await;
-        if let Some(ref e) = *engine {
-            if e.model_name() == model_name {
-                // Engine exists for this model (loaded or unloaded) —
-                // ensure_model_ready will handle loading if needed.
-                return Ok(None);
-            }
+        let cache = state.model_cache.lock().await;
+        if cache.contains(model_name) {
+            return Ok(None);
         }
     }
 
-    // The engine may be temporarily taken out of the slot during loading
-    // (ensure_model_ready uses .take() to avoid holding the mutex across
-    // spawn_blocking). Check the snapshot as a fallback — it retains the
-    // model name even while the engine is being loaded.
+    // Check the snapshot as a fallback — it retains the model name even
+    // while the engine is temporarily taken out during loading.
     {
         let snapshot = state.engine_snapshot.read().await;
         if snapshot.model_name.as_deref() == Some(model_name) {
@@ -85,68 +84,90 @@ pub(crate) async fn check_model_available(
     )))
 }
 
+/// Ensure the requested model is loaded on GPU and ready for inference.
+///
+/// Checks the model cache: if already loaded, just touches the LRU order.
+/// If cached but unloaded, reloads it. If not in cache, creates a new engine.
 pub(crate) async fn ensure_model_ready(
     state: &AppState,
     model_name: &str,
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
+
+    // Fast path: model is in cache and loaded.
     {
-        let mut guard = state.engine.lock().await;
-        if let Some(engine) = guard.as_mut() {
-            if engine.model_name() == model_name {
+        let mut cache = state.model_cache.lock().await;
+        if let Some(entry) = cache.get_mut(model_name) {
+            if entry.residency == ModelResidency::Gpu {
+                // Already loaded — just set up progress callback.
                 if let Some(callback) = progress.clone() {
-                    engine.set_on_progress(Box::new(move |event| {
+                    entry.engine.set_on_progress(Box::new(move |event| {
                         callback(event);
                     }));
                 } else {
-                    engine.clear_on_progress();
-                }
-                if !engine.is_loaded() {
-                    // Take the engine out so we can load it in spawn_blocking
-                    // without holding the tokio mutex across a blocking call.
-                    // This keeps the runtime responsive for SSE event delivery
-                    // during long operations like FP8→Q8 conversion.
-                    let mut taken = guard.take().unwrap();
-                    drop(guard);
-
-                    let model_log = model_name.to_string();
-                    let result = tokio::task::spawn_blocking(move || {
-                        tracing::info!(model = %model_log, "loading existing engine...");
-                        if let Err(e) = taken.load() {
-                            tracing::error!("model load failed: {e:#}");
-                            return Err((
-                                ApiError::internal(format!("model load error: {e}")),
-                                taken,
-                            ));
-                        }
-                        Ok(taken)
-                    })
-                    .await
-                    .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?;
-
-                    match result {
-                        Ok(loaded) => {
-                            let mut guard = state.engine.lock().await;
-                            *guard = Some(loaded);
-                            let mut snapshot = state.engine_snapshot.write().await;
-                            snapshot.model_name = Some(model_name.to_string());
-                            snapshot.is_loaded = true;
-                        }
-                        Err((api_err, unloaded)) => {
-                            // Restore the unloaded engine so the next request
-                            // can retry without recreating from scratch.
-                            let mut guard = state.engine.lock().await;
-                            *guard = Some(unloaded);
-                            return Err(api_err);
-                        }
-                    }
+                    entry.engine.clear_on_progress();
                 }
                 return Ok(());
             }
+
+            // Cached but unloaded — need to reload.
+            // First unload the currently active model (if any) to free VRAM.
+            if let Some(active_name) = cache.unload_active() {
+                tracing::info!(
+                    from = %active_name,
+                    to = %model_name,
+                    "unloaded active model to reload cached model"
+                );
+                mold_inference::reclaim_gpu_memory();
+            }
+
+            // Take the engine out of cache to load in spawn_blocking.
+            let mut engine = cache.remove(model_name).unwrap();
+            drop(cache);
+
+            if let Some(callback) = progress.clone() {
+                engine.set_on_progress(Box::new(move |event| {
+                    callback(event);
+                }));
+            } else {
+                engine.clear_on_progress();
+            }
+
+            let model_log = model_name.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                tracing::info!(model = %model_log, "reloading cached engine...");
+                if let Err(e) = engine.load() {
+                    tracing::error!("model reload failed: {e:#}");
+                    return Err((
+                        ApiError::internal(format!("model reload error: {e}")),
+                        engine,
+                    ));
+                }
+                Ok(engine)
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("model reload task failed: {e}")))?;
+
+            match result {
+                Ok(loaded_engine) => {
+                    let vram = mold_inference::device::vram_used_estimate();
+                    let mut cache = state.model_cache.lock().await;
+                    cache.insert(loaded_engine, vram);
+                    update_snapshot(state, &cache).await;
+                }
+                Err((api_err, unloaded_engine)) => {
+                    // Put it back as unloaded so cache isn't corrupted.
+                    let mut cache = state.model_cache.lock().await;
+                    cache.insert(unloaded_engine, 0);
+                    return Err(api_err);
+                }
+            }
+            return Ok(());
         }
     }
 
+    // Not in cache — check if model is available on disk.
     match check_model_available(state, model_name).await? {
         Some(paths) => create_and_load_engine(state, model_name, paths, progress).await,
         None => Ok(()),
@@ -201,35 +222,19 @@ pub(crate) async fn pull_model(
     Ok(PullStatus::Pulled)
 }
 
+/// Unload the active model from GPU. The engine remains in the cache (unloaded)
+/// so it can be reloaded quickly on the next request.
 pub(crate) async fn unload_model(state: &AppState) -> String {
-    let mut engine = state.engine.lock().await;
-    match engine.as_ref() {
-        Some(e) if e.is_loaded() => {
-            let name = e.model_name().to_string();
-            // Drop the entire engine (not just its loaded state) so all GPU
-            // resources — tensors, CUDA device handles, cuDNN/cuBLAS workspace
-            // buffers — are fully released back to the system.
-            *engine = None;
-            // Update snapshot while still holding the engine lock to avoid
-            // a window where engine is unloaded but snapshot still says loaded.
-            let mut snapshot = state.engine_snapshot.write().await;
-            snapshot.model_name = None;
-            snapshot.is_loaded = false;
-            drop(snapshot);
-
-            // Reset the CUDA primary context to reclaim all GPU memory —
-            // cuBLAS workspace caches, compiled kernel modules, memory pools.
-            // Safe because the engine (and all its Device references) was
-            // already dropped above, and we still hold the engine mutex so
-            // no concurrent load can begin creating new CUDA objects.
+    let mut cache = state.model_cache.lock().await;
+    match cache.unload_active() {
+        Some(name) => {
+            update_snapshot(state, &cache).await;
+            drop(cache);
             mold_inference::reclaim_gpu_memory();
-
-            drop(engine);
-
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
-        _ => "no model loaded".to_string(),
+        None => "no model loaded".to_string(),
     }
 }
 
@@ -239,26 +244,25 @@ async fn create_and_load_engine(
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
-    // Unload the current model (if any) before loading the new one to free
-    // GPU memory. Without this, loading a large model on top of an existing
-    // one causes OOM (e.g. switching between flux-dev:bf16 and flux-dev:q8).
-    {
-        let mut engine = state.engine.lock().await;
-        if let Some(ref old) = *engine {
+    // Unload the current active model to free GPU memory.
+    // Only reclaim GPU memory if there was an active model — calling
+    // reclaim_gpu_memory() (CUDA primary context reset) when nothing was
+    // loaded is unnecessary and may misbehave on some driver versions.
+    let had_active = {
+        let mut cache = state.model_cache.lock().await;
+        let result = cache.unload_active();
+        if let Some(ref name) = result {
             tracing::info!(
-                from = %old.model_name(),
+                from = %name,
                 to = %model_name,
-                "unloading current model before loading new one"
+                "unloading active model before loading new one"
             );
         }
-        if engine.is_some() {
-            *engine = None;
-            let mut snapshot = state.engine_snapshot.write().await;
-            snapshot.model_name = None;
-            snapshot.is_loaded = false;
-            drop(snapshot);
-            mold_inference::reclaim_gpu_memory();
-        }
+        update_snapshot(state, &cache).await;
+        result.is_some()
+    };
+    if had_active {
+        mold_inference::reclaim_gpu_memory();
     }
 
     let config = state.config.read().await;
@@ -281,11 +285,6 @@ async fn create_and_load_engine(
         new_engine.clear_on_progress();
     }
 
-    // Load model weights in a blocking thread to avoid starving the tokio
-    // runtime. This is critical for long-running operations like FP8→Q8
-    // GGUF conversion (can take minutes) — without spawn_blocking, the
-    // blocked worker thread prevents SSE progress events from reaching
-    // the client, causing the CLI to show a spinner with no status.
     let model_log = model_name.to_string();
     new_engine = tokio::task::spawn_blocking(move || {
         tracing::info!(model = %model_log, "loading model...");
@@ -298,17 +297,20 @@ async fn create_and_load_engine(
     .await
     .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))??;
 
-    // Place the loaded engine into shared state and update the snapshot
-    // while holding the engine lock to prevent unload_model from racing.
-    let mut engine = state.engine.lock().await;
-    *engine = Some(new_engine);
-
-    {
-        let mut snapshot = state.engine_snapshot.write().await;
-        snapshot.model_name = Some(model_name.to_string());
-        snapshot.is_loaded = true;
-    }
-    drop(engine);
+    let vram = mold_inference::device::vram_used_estimate();
+    let mut cache = state.model_cache.lock().await;
+    // Evicted engine (if any) is dropped here, freeing its resources.
+    let _evicted = cache.insert(new_engine, vram);
+    update_snapshot(state, &cache).await;
+    drop(cache);
 
     Ok(())
+}
+
+/// Synchronize the engine snapshot with the current cache state.
+async fn update_snapshot(state: &AppState, cache: &crate::model_cache::ModelCache) {
+    let mut snapshot = state.engine_snapshot.write().await;
+    snapshot.model_name = cache.active_model().map(|s| s.to_string());
+    snapshot.is_loaded = cache.active_model().is_some();
+    snapshot.cached_models = cache.cached_model_names();
 }

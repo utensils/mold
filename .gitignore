@@ -14,6 +14,9 @@
 # Claude Code
 .claude/worktrees/
 
+# Reference repos for architecture research
+/tmp/
+
 # Nix / direnv
 .direnv/
 .cache/

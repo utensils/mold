@@ -207,6 +207,22 @@ pub(crate) fn free_vram_bytes() -> Option<u64> {
     free_system_memory_bytes()
 }
 
+/// Estimate current VRAM usage (total - free). Returns 0 if unavailable.
+/// Used by the model cache to track per-model VRAM footprint.
+#[cfg(feature = "cuda")]
+pub fn vram_used_estimate() -> u64 {
+    candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
+        .ok()
+        .map(|(_free, total)| total as u64 - _free as u64)
+        .unwrap_or(0)
+}
+
+/// Non-CUDA stub — no VRAM tracking available.
+#[cfg(not(feature = "cuda"))]
+pub fn vram_used_estimate() -> u64 {
+    0
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 // ── Device helpers ───────────────────────────────────────────────────────────
