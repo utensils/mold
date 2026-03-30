@@ -245,17 +245,23 @@ async fn create_and_load_engine(
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
     // Unload the current active model to free GPU memory.
-    {
+    // Only reclaim GPU memory if there was an active model — calling
+    // reclaim_gpu_memory() (CUDA primary context reset) when nothing was
+    // loaded is unnecessary and may misbehave on some driver versions.
+    let had_active = {
         let mut cache = state.model_cache.lock().await;
-        if let Some(active_name) = cache.unload_active() {
+        let result = cache.unload_active();
+        if let Some(ref name) = result {
             tracing::info!(
-                from = %active_name,
+                from = %name,
                 to = %model_name,
                 "unloading active model before loading new one"
             );
         }
         update_snapshot(state, &cache).await;
-        drop(cache);
+        result.is_some()
+    };
+    if had_active {
         mold_inference::reclaim_gpu_memory();
     }
 
