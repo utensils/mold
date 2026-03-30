@@ -3,8 +3,8 @@ set -euo pipefail
 
 # ── RunPod entrypoint for mold inference server ──
 #
-# RunPod convention: start services, then sleep infinity to keep the
-# container alive. We run mold serve in the background and monitor it.
+# mold serve becomes the main process under tini (PID 1).
+# tini handles signal forwarding and zombie reaping.
 
 # If a network volume is mounted, use it for model storage and config
 if [ -d "/workspace" ]; then
@@ -15,7 +15,7 @@ if [ -d "/workspace" ]; then
 fi
 
 # Ensure directories exist
-mkdir -p "${MOLD_HOME:-/root/.mold}" "${MOLD_MODELS_DIR:-/root/.mold/models}"
+mkdir -p "${MOLD_HOME:-/root/.mold}" "${MOLD_MODELS_DIR:-/root/.mold/models}" "${HF_HOME:-/root/.cache/huggingface}"
 
 # Export environment for SSH sessions (RunPod convention)
 env | grep -E '^(MOLD_|HF_|CUDA|LD_LIBRARY)' > /etc/rp_environment 2>/dev/null || true

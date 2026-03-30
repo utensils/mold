@@ -70,9 +70,9 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 # Build the real binary
 RUN cargo build --release -p mold-ai --features cuda,expand
 
-# Verify the binary exists and libs resolve (libcuda.so.1 is expected to be
-# "not found" — it's the NVIDIA driver, injected at runtime by the container toolkit)
-RUN ldd /build/target/release/mold | grep -v "libcuda.so" | grep -v "not found"
+# Verify no unexpected missing libraries (libcuda.so.1 is expected to be
+# absent — it's the NVIDIA driver, injected at runtime by the container toolkit)
+RUN ! ldd /build/target/release/mold | grep "not found" | grep -v "libcuda.so"
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
