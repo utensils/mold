@@ -148,7 +148,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     }
 
     // 2. Run inference in spawn_blocking
-    let engine = state.engine.clone();
+    let model_cache = state.model_cache.clone();
     let active_gen = state.active_generation.clone();
     let gen_state = state.clone();
     let gen_req = job.request.clone();
@@ -156,10 +156,11 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut guard = engine.blocking_lock();
-            let e = guard.as_mut().ok_or_else(|| {
+            let mut guard = model_cache.blocking_lock();
+            let entry = guard.get_mut(&gen_req.model).ok_or_else(|| {
                 anyhow::anyhow!("no engine available after model readiness check")
             })?;
+            let e = &mut entry.engine;
             set_active_generation(&gen_state, &gen_req.model, &gen_req.prompt);
 
             // Install progress callback for the generate phase

@@ -1065,9 +1065,12 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Engine must be None — fully dropped, not just internally unloaded
-        let engine = state.engine.lock().await;
-        assert!(engine.is_none(), "engine should be dropped after unload");
+        // Engine must be unloaded — in cache but not on GPU
+        let cache = state.model_cache.lock().await;
+        assert!(
+            cache.active_model().is_none(),
+            "no model should be active after unload"
+        );
     }
 
     #[tokio::test]
@@ -1126,13 +1129,15 @@ mod tests {
         let load_count = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
+        let engine = MockEngine::unloaded(load_count.clone(), Duration::from_millis(50));
+        let mut cache = crate::model_cache::ModelCache::new(3);
+        cache.insert(Box::new(engine), 0);
         let state = AppState {
-            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
-                MockEngine::unloaded(load_count.clone(), Duration::from_millis(50)),
-            )))),
+            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
                 is_loaded: false,
+                cached_models: vec!["mock-model".to_string()],
             })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
@@ -1165,13 +1170,15 @@ mod tests {
     async fn stream_delivers_load_progress_events() {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
+        let engine = MockEngine::unloaded_with_progress();
+        let mut cache = crate::model_cache::ModelCache::new(3);
+        cache.insert(Box::new(engine), 0);
         let state = AppState {
-            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
-                MockEngine::unloaded_with_progress(),
-            )))),
+            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
                 is_loaded: false,
+                cached_models: vec!["mock-model".to_string()],
             })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
@@ -1397,13 +1404,15 @@ mod tests {
         let load_count = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
+        let engine = MockEngine::unloaded(load_count, Duration::from_millis(10));
+        let mut cache = crate::model_cache::ModelCache::new(3);
+        cache.insert(Box::new(engine), 0);
         let state = AppState {
-            engine: Arc::new(tokio::sync::Mutex::new(Some(Box::new(
-                MockEngine::unloaded(load_count, Duration::from_millis(10)),
-            )))),
+            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
                 is_loaded: false,
+                cached_models: vec!["mock-model".to_string()],
             })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),

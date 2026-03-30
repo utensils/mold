@@ -6,10 +6,15 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+use crate::model_cache::ModelCache;
+
 #[derive(Debug, Clone, Default)]
 pub struct EngineSnapshot {
+    /// Currently GPU-loaded model (None if no model on GPU).
     pub model_name: Option<String>,
     pub is_loaded: bool,
+    /// All models in the cache (loaded + unloaded), for status display.
+    pub cached_models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +88,7 @@ impl QueueHandle {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub engine: Arc<Mutex<Option<Box<dyn InferenceEngine>>>>,
+    pub model_cache: Arc<Mutex<ModelCache>>,
     pub engine_snapshot: Arc<tokio::sync::RwLock<EngineSnapshot>>,
     /// Uses std::sync::RwLock (not tokio) because it's only accessed from
     /// synchronous contexts (inside spawn_blocking closures and brief reads).
@@ -99,15 +104,23 @@ pub struct AppState {
     pub queue: QueueHandle,
 }
 
+/// Default maximum number of cached models (loaded + unloaded engine structs).
+const DEFAULT_MAX_CACHED_MODELS: usize = 3;
+
 impl AppState {
     /// Create state with a pre-loaded engine (server starts with a configured model).
     pub fn new(engine: Box<dyn InferenceEngine>, config: Config, queue: QueueHandle) -> Self {
+        let name = engine.model_name().to_string();
+        let loaded = engine.is_loaded();
+        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        cache.insert(engine, 0);
         let snapshot = EngineSnapshot {
-            model_name: Some(engine.model_name().to_string()),
-            is_loaded: engine.is_loaded(),
+            model_name: Some(name),
+            is_loaded: loaded,
+            cached_models: cache.cached_model_names(),
         };
         Self {
-            engine: Arc::new(Mutex::new(Some(engine))),
+            model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
@@ -121,7 +134,7 @@ impl AppState {
     /// Create state with no engine (zero-config startup, models pulled on demand).
     pub fn empty(config: Config, queue: QueueHandle) -> Self {
         Self {
-            engine: Arc::new(Mutex::new(None)),
+            model_cache: Arc::new(Mutex::new(ModelCache::new(DEFAULT_MAX_CACHED_MODELS))),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
@@ -136,12 +149,17 @@ impl AppState {
     pub fn with_engine(engine: impl InferenceEngine + 'static) -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
+        let name = engine.model_name().to_string();
+        let loaded = engine.is_loaded();
+        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        cache.insert(Box::new(engine), 0);
         let snapshot = EngineSnapshot {
-            model_name: Some(engine.model_name().to_string()),
-            is_loaded: engine.is_loaded(),
+            model_name: Some(name),
+            is_loaded: loaded,
+            cached_models: cache.cached_model_names(),
         };
         Self {
-            engine: Arc::new(Mutex::new(Some(Box::new(engine)))),
+            model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
@@ -159,12 +177,17 @@ impl AppState {
     ) -> (Self, tokio::sync::mpsc::Receiver<GenerationJob>) {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
+        let name = engine.model_name().to_string();
+        let loaded = engine.is_loaded();
+        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        cache.insert(Box::new(engine), 0);
         let snapshot = EngineSnapshot {
-            model_name: Some(engine.model_name().to_string()),
-            is_loaded: engine.is_loaded(),
+            model_name: Some(name),
+            is_loaded: loaded,
+            cached_models: cache.cached_model_names(),
         };
         let state = Self {
-            engine: Arc::new(Mutex::new(Some(Box::new(engine)))),
+            model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
