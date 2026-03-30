@@ -121,11 +121,11 @@ fn validate_file_args(
     if let Some(img_path) = image {
         if img_path != "-" {
             let p = Path::new(img_path);
-            if !p.exists() {
-                anyhow::bail!("--image file not found: {img_path}");
-            }
             if p.is_dir() {
                 anyhow::bail!("--image path is a directory, not an image file: {img_path}");
+            }
+            if !p.exists() {
+                anyhow::bail!("--image file not found: {img_path}");
             }
         }
     }
@@ -133,22 +133,22 @@ fn validate_file_args(
     // -- --mask validation --
     if let Some(mask_path) = mask {
         let p = Path::new(mask_path);
-        if !p.exists() {
-            anyhow::bail!("--mask file not found: {mask_path}");
-        }
         if p.is_dir() {
             anyhow::bail!("--mask path is a directory, not an image file: {mask_path}");
+        }
+        if !p.exists() {
+            anyhow::bail!("--mask file not found: {mask_path}");
         }
     }
 
     // -- --control validation --
     if let Some(ctrl_path) = control {
         let p = Path::new(ctrl_path);
-        if !p.exists() {
-            anyhow::bail!("--control file not found: {ctrl_path}");
-        }
         if p.is_dir() {
             anyhow::bail!("--control path is a directory, not an image file: {ctrl_path}");
+        }
+        if !p.exists() {
+            anyhow::bail!("--control file not found: {ctrl_path}");
         }
     }
 
@@ -160,7 +160,7 @@ fn validate_file_args(
                 anyhow::bail!(
                     "--output '{}' is a directory. Provide a filename, e.g.: {}/image.png",
                     out_path,
-                    out_path.trim_end_matches('/')
+                    p.display()
                 );
             }
             if let Some(parent) = p.parent() {
