@@ -46,6 +46,7 @@ jobs:
         with:
           cuda: "12.8.1"
           method: local
+          log-file-suffix: sm89
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -78,6 +79,7 @@ jobs:
         with:
           cuda: "12.8.1"
           method: local
+          log-file-suffix: sm120
 
       - uses: dtolnay/rust-toolchain@stable
 
