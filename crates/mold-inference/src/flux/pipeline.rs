@@ -1558,15 +1558,10 @@ impl InferenceEngine for FluxEngine {
             return self.generate_sequential(req);
         }
 
-        // LoRA is only supported in sequential mode (the default).
-        if req.lora.is_some() {
-            bail!(
-                "LoRA adapters require sequential loading mode (the default). \
-                 Remove --eager to use LoRA."
-            );
-        }
-
         // Eager mode: use pre-loaded components
+        // LoRA is supported — the transformer is rebuilt from disk on each generation
+        // (dropped for VAE decode), so LoRA is applied during the rebuild via a
+        // patched VarBuilder. No additional overhead compared to non-LoRA eager mode.
         // Borrow progress reporter separately from loaded state.
         let progress = &self.base.progress;
         let prompt_cache = &self.prompt_cache;
@@ -1613,13 +1608,27 @@ impl InferenceEngine for FluxEngine {
         );
 
         (|| -> Result<GenerateResponse> {
+            // If LoRA is requested and the model is already loaded (no VAE drop
+            // occurred since last generate), force a rebuild to apply LoRA.
+            // This only happens on the first LoRA request after server start.
+            if req.lora.is_some() && loaded.flux_model.is_some() {
+                loaded.flux_model = None;
+                loaded.device.synchronize()?;
+            }
+
             if loaded.flux_model.is_none() {
-                let xformer_label = if loaded.is_quantized {
-                    "Reloading FLUX transformer (GPU, quantized)"
-                } else if loaded.dtype == DType::F16 {
-                    "Reloading FLUX transformer (GPU, FP16)"
-                } else {
-                    "Reloading FLUX transformer (GPU, BF16)"
+                let has_lora = req.lora.is_some();
+                let xformer_label = match (loaded.is_quantized, has_lora) {
+                    (true, true) => "Reloading FLUX transformer (GPU, quantized + LoRA)",
+                    (true, false) => "Reloading FLUX transformer (GPU, quantized)",
+                    (false, true) if loaded.dtype == DType::F16 => {
+                        "Reloading FLUX transformer (GPU, FP16 + LoRA)"
+                    }
+                    (false, true) => "Reloading FLUX transformer (GPU, BF16 + LoRA)",
+                    (false, false) if loaded.dtype == DType::F16 => {
+                        "Reloading FLUX transformer (GPU, FP16)"
+                    }
+                    (false, false) => "Reloading FLUX transformer (GPU, BF16)",
                 };
                 progress.stage_start(xformer_label);
                 let reload_start = Instant::now();
@@ -1628,12 +1637,35 @@ impl InferenceEngine for FluxEngine {
                 } else {
                     flux::model::Config::dev()
                 };
-                loaded.flux_model = Some(if loaded.is_quantized {
+                loaded.flux_model = Some(if loaded.is_quantized && has_lora {
+                    // Quantized + LoRA: merge LoRA deltas during construction
+                    let lora = req.lora.as_ref().unwrap();
+                    let adapter = super::lora::LoraAdapter::load(std::path::Path::new(&lora.path))?;
+                    let vb = super::lora::gguf_lora_var_builder(
+                        &transformer_path,
+                        &adapter,
+                        lora.scale,
+                        &loaded.device,
+                        progress,
+                    )?;
+                    FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                } else if loaded.is_quantized {
                     let vb = quantized_var_builder::VarBuilder::from_gguf(
                         &transformer_path,
                         &loaded.device,
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                } else if has_lora {
+                    // BF16 + LoRA: merge LoRA deltas during construction
+                    let lora = req.lora.as_ref().unwrap();
+                    let flux_vb = flux_lora_var_builder(
+                        &transformer_path,
+                        lora,
+                        loaded.dtype,
+                        &loaded.device,
+                        progress,
+                    )?;
+                    FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 } else {
                     let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
                         &transformer_path,
