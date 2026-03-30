@@ -1,0 +1,31 @@
+# Build artifacts
+target/
+result
+
+# Nix / direnv
+.direnv/
+.cache/
+result
+
+# Generated images
+*.png
+*.jpeg
+*.jpg
+
+# IDE / editor
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+
+# Claude Code
+.claude/
+
+# Reference repos
+tmp/
+
+# Docs images (not needed in build)
+docs/

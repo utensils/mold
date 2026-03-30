@@ -528,6 +528,51 @@ services.mold.discord = {
 
 </details>
 
+## Docker / RunPod
+
+Run mold on any NVIDIA GPU host with Docker, including cloud GPU providers like [RunPod](https://www.runpod.io/).
+
+```bash
+# Build the image (default: Ada/RTX 4090, sm_89)
+docker build -t mold-server .
+
+# Build for a different GPU architecture
+docker build --build-arg CUDA_COMPUTE_CAP=90 -t mold-server-h100 .   # Hopper
+docker build --build-arg CUDA_COMPUTE_CAP=80 -t mold-server-a100 .   # Ampere
+docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-b200 .  # Blackwell
+
+# Run locally
+docker run --gpus all -p 7680:7680 mold-server
+
+# With a local models directory
+docker run --gpus all -p 7680:7680 -v ~/.mold:/workspace/.mold mold-server
+```
+
+<details>
+<summary>RunPod deployment</summary>
+
+1. Push your image to a registry:
+   ```bash
+   docker tag mold-server your-registry/mold-server
+   docker push your-registry/mold-server
+   ```
+
+2. Create a RunPod Pod template:
+   - **Container image**: `your-registry/mold-server`
+   - **HTTP port**: `7680`
+   - Attach a **network volume** for persistent model storage
+
+3. Generate from anywhere:
+   ```bash
+   MOLD_HOST=https://<pod-id>-7680.proxy.runpod.net mold run "a cat"
+   ```
+
+The entrypoint auto-detects RunPod network volumes at `/workspace` and stores models at `/workspace/.mold/models`. Models persist across pod restarts.
+
+Environment variables for customization: `MOLD_PORT`, `MOLD_LOG`, `MOLD_DEFAULT_MODEL`, `MOLD_MODELS_DIR`.
+
+</details>
+
 ## Requirements
 
 - **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal
