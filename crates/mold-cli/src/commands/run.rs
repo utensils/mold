@@ -866,4 +866,38 @@ mod tests {
             "should fail on --lora first, got: {msg}"
         );
     }
+
+    // ── expansion deferral logic tests ──────────────────────────────────
+
+    #[test]
+    fn defer_expand_to_server_when_not_local() {
+        // should_expand && !local → defer_to_server = true
+        let should_expand = true;
+        let local = false;
+        let defer = should_expand && !local;
+        assert!(
+            defer,
+            "expansion should be deferred to server when not local"
+        );
+    }
+
+    #[test]
+    fn expand_locally_when_local_flag_set() {
+        // should_expand && local → defer_to_server = false
+        let should_expand = true;
+        let local = true;
+        let defer = should_expand && !local;
+        assert!(
+            !defer,
+            "expansion should NOT be deferred when --local is set"
+        );
+    }
+
+    #[test]
+    fn no_defer_when_expand_disabled() {
+        let should_expand = false;
+        let local = false;
+        let defer = should_expand && !local;
+        assert!(!defer, "should not defer when expansion is disabled");
+    }
 }

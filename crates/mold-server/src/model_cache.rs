@@ -288,4 +288,78 @@ mod tests {
         assert!(evicted.is_none());
         assert_eq!(cache.len(), 2);
     }
+
+    #[test]
+    fn is_empty_and_clear() {
+        let mut cache = ModelCache::new(3);
+        assert!(cache.is_empty());
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        assert!(!cache.is_empty());
+        let cleared = cache.clear();
+        assert_eq!(cleared.len(), 1);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn unload_all_parks_all_models() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        cache.insert(Box::new(MockEngine::new("model-b")), 200);
+
+        let unloaded = cache.unload_all();
+        // Only model-b has Gpu residency (model-a was replaced when model-b was inserted
+        // — actually both are "loaded" since MockEngine::new starts loaded).
+        // unload_all should park everything that's on GPU.
+        assert!(!unloaded.is_empty());
+        assert!(cache.active_model().is_none());
+        // All entries still in cache
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn cached_model_names_reflects_lru_order() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        cache.insert(Box::new(MockEngine::new("model-b")), 200);
+        cache.insert(Box::new(MockEngine::new("model-c")), 300);
+        // LRU order: a, b, c (a is oldest)
+        assert_eq!(
+            cache.cached_model_names(),
+            vec!["model-a", "model-b", "model-c"]
+        );
+        // Touch model-a, making it MRU
+        cache.get_mut("model-a");
+        assert_eq!(
+            cache.cached_model_names(),
+            vec!["model-b", "model-c", "model-a"]
+        );
+    }
+
+    #[test]
+    fn get_mut_nonexistent_returns_none() {
+        let mut cache = ModelCache::new(3);
+        assert!(cache.get_mut("nonexistent").is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_none() {
+        let mut cache = ModelCache::new(3);
+        assert!(cache.remove("nonexistent").is_none());
+    }
+
+    #[test]
+    fn unload_active_when_empty_returns_none() {
+        let mut cache = ModelCache::new(3);
+        assert!(cache.unload_active().is_none());
+    }
+
+    #[test]
+    fn max_cached_clamped_to_at_least_one() {
+        let mut cache = ModelCache::new(0);
+        cache.insert(Box::new(MockEngine::new("model-a")), 100);
+        assert_eq!(cache.len(), 1);
+        // Should still allow at least 1 entry
+        assert!(cache.contains("model-a"));
+    }
 }
