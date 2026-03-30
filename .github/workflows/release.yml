@@ -100,6 +100,62 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm120
           path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
+  # Docker image — build and push to GHCR
+  # Tags: `latest` on main, `v1.2.3` + `latest` on version tags
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - cuda_cap: "89"
+            suffix: ""
+            tag_suffix: ""
+          - cuda_cap: "80"
+            suffix: "-sm80"
+            tag_suffix: "-sm80"
+          - cuda_cap: "120"
+            suffix: "-sm120"
+            tag_suffix: "-sm120"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            suffix=${{ matrix.suffix }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_COMPUTE_CAP=${{ matrix.cuda_cap }}
+          cache-from: type=gha,scope=docker${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=docker${{ matrix.suffix }}
+
   # Rolling pre-release on every push to main
   release-latest:
     if: github.ref == 'refs/heads/main'

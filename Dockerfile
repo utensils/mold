@@ -1,0 +1,104 @@
+# ── mold inference server ──
+# Multi-stage Docker build for RunPod (and any NVIDIA GPU host).
+#
+# Build:
+#   docker build -t mold-server .
+#   docker build --build-arg CUDA_COMPUTE_CAP=90 -t mold-server-h100 .
+#
+# Run (local):
+#   docker run --gpus all -p 7680:7680 mold-server
+#
+# CUDA_COMPUTE_CAP targets:
+#   80 = Ampere (A100)          86 = Ampere (RTX 3090, A40)
+#   89 = Ada Lovelace (RTX 4090, L40S)   90 = Hopper (H100)
+#   120 = Blackwell (RTX 5090, B200)
+
+# ── Stage 1: Build ──────────────────────────────────────────────────
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
+
+ARG CUDA_COMPUTE_CAP=89
+ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies for building (openssl, pkg-config, git for cargo)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        git \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (stable)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy manifests first for layer caching of dependency builds
+COPY Cargo.toml Cargo.lock ./
+COPY crates/mold-core/Cargo.toml crates/mold-core/Cargo.toml
+COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
+COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
+COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
+COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
+
+# Create stub source files so cargo can resolve and build dependencies
+RUN mkdir -p crates/mold-core/src \
+             crates/mold-inference/src \
+             crates/mold-server/src \
+             crates/mold-cli/src \
+             crates/mold-discord/src \
+    && echo "// stub" > crates/mold-core/src/lib.rs \
+    && echo "// stub" > crates/mold-inference/src/lib.rs \
+    && echo "// stub" > crates/mold-server/src/lib.rs \
+    && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
+    && echo "// stub" > crates/mold-discord/src/lib.rs
+
+# Build dependencies only (this layer is cached until Cargo.toml/lock changes)
+RUN cargo build --release -p mold-ai --features cuda,expand \
+    || true
+
+# Now copy the real source code
+COPY crates/ crates/
+
+# Touch source files to invalidate the stub builds but keep dep artifacts
+RUN find crates/ -name "*.rs" -exec touch {} +
+
+# Build the real binary
+RUN cargo build --release -p mold-ai --features cuda,expand
+
+# Verify no unexpected missing libraries (libcuda.so.1 is expected to be
+# absent — it's the NVIDIA driver, injected at runtime by the container toolkit)
+RUN ! ldd /build/target/release/mold | grep "not found" | grep -v "libcuda.so"
+
+# ── Stage 2: Runtime ────────────────────────────────────────────────
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# cuBLAS and cuRAND are already in the runtime image.
+# libcuda.so.1 (the NVIDIA driver) is injected at runtime by the NVIDIA
+# Container Toolkit on GPU hosts like RunPod — it is never in the image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the compiled binary
+COPY --from=builder /build/target/release/mold /usr/local/bin/mold
+
+# Copy the entrypoint script
+COPY docker/start.sh /start.sh
+
+# Server defaults
+ENV MOLD_LOG=info \
+    MOLD_PORT=7680
+
+EXPOSE 7680
+
+# Use tini as PID 1 for proper signal handling
+ENTRYPOINT ["tini", "--"]
+CMD ["/start.sh"]
