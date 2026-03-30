@@ -21,9 +21,9 @@ expand = []
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }
 anyhow = "1"
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle", rev = "96a6156a59cb597b6114ca33cdc375ea586f005d" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle", rev = "96a6156a59cb597b6114ca33cdc375ea586f005d" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle", rev = "96a6156a59cb597b6114ca33cdc375ea586f005d" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle", rev = "96a6156a" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle", rev = "96a6156a" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle", rev = "96a6156a" }
 image = "0.25"
 png = "0.18"
 rand = "0.8"
