@@ -96,6 +96,7 @@ pub async fn run(
     original_prompt: Option<String>,
     batch_prompts: Option<Vec<String>>,
     lora: Option<LoraWeight>,
+    expand: Option<bool>,
 ) -> Result<()> {
     let output_format = format;
     let piped = is_piped();
@@ -146,7 +147,7 @@ pub async fn run(
         control_model: control_model.clone(),
         control_scale,
         negative_prompt: negative_prompt.clone(),
-        expand: None,
+        expand,
         original_prompt,
         lora: lora.clone(),
     };

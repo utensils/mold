@@ -291,74 +291,135 @@ pub async fn run(
         expand || expand_settings.enabled
     };
 
-    let (final_prompt, original_prompt, batch_prompts) = if should_expand {
-        use colored::Colorize;
+    // Expansion strategy:
+    // - If --local or server unreachable: expand client-side (existing path)
+    // - If remote: delegate to server (single request: expand=true on GenerateRequest;
+    //   batch: call /api/expand for all variations upfront)
+    let defer_expand_to_server = should_expand && !local;
+    let (final_prompt, original_prompt, batch_prompts, server_expand) =
+        if should_expand && !defer_expand_to_server {
+            // --- Client-side expansion (--local mode or forced local) ---
+            use colored::Colorize;
 
-        let mut settings = expand_settings;
-        if let Some(ref backend) = expand_backend {
-            settings.backend = backend.clone();
-        }
-        if let Some(ref m) = expand_model {
-            if settings.is_local() {
-                settings.model = m.clone();
-            } else {
-                settings.api_model = m.clone();
+            let mut settings = expand_settings;
+            if let Some(ref backend) = expand_backend {
+                settings.backend = backend.clone();
             }
-        }
-
-        // Validate custom templates if present
-        let template_errors = settings.validate_templates();
-        if !template_errors.is_empty() {
-            for err in &template_errors {
-                eprintln!("{} {err}", crate::theme::prefix_warning());
+            if let Some(ref m) = expand_model {
+                if settings.is_local() {
+                    settings.model = m.clone();
+                } else {
+                    settings.api_model = m.clone();
+                }
             }
-        }
 
-        let model_family = super::expand::resolve_family_from_config(&model, &config);
-        let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
+            // Validate custom templates if present
+            let template_errors = settings.validate_templates();
+            if !template_errors.is_empty() {
+                for err in &template_errors {
+                    eprintln!("{} {err}", crate::theme::prefix_warning());
+                }
+            }
 
-        let expander = super::expand::create_expander(&settings, &config).await?;
+            let model_family = super::expand::resolve_family_from_config(&model, &config);
+            let expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
 
-        crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
+            let expander = super::expand::create_expander(&settings, &config).await?;
 
-        let result = expander.expand(&prompt, &expand_config)?;
+            crate::output::status!("{} Expanding prompt...", crate::theme::icon_info());
 
-        if result.expanded.len() == 1 {
-            let expanded = &result.expanded[0];
-            let display = if expanded.chars().count() > 80 {
-                let truncated: String = expanded.chars().take(77).collect();
-                format!("{truncated}...")
-            } else {
-                expanded.clone()
-            };
-            crate::output::status!(
-                "{} Expanded: \"{}\"",
-                crate::theme::icon_ok(),
-                display.dimmed()
-            );
-            (expanded.clone(), Some(prompt.clone()), None)
-        } else {
-            // Multiple variations: each batch image gets a different prompt.
-            crate::output::status!(
-                "{} Generated {} prompt variations",
-                crate::theme::icon_ok(),
-                result.expanded.len()
-            );
-            for (i, expanded) in result.expanded.iter().enumerate() {
-                let display = if expanded.chars().count() > 70 {
-                    let truncated: String = expanded.chars().take(67).collect();
+            let result = expander.expand(&prompt, &expand_config)?;
+
+            if result.expanded.len() == 1 {
+                let expanded = &result.expanded[0];
+                let display = if expanded.chars().count() > 80 {
+                    let truncated: String = expanded.chars().take(77).collect();
                     format!("{truncated}...")
                 } else {
                     expanded.clone()
                 };
-                crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
+                crate::output::status!(
+                    "{} Expanded: \"{}\"",
+                    crate::theme::icon_ok(),
+                    display.dimmed()
+                );
+                (expanded.clone(), Some(prompt.clone()), None, None)
+            } else {
+                // Multiple variations: each batch image gets a different prompt.
+                crate::output::status!(
+                    "{} Generated {} prompt variations",
+                    crate::theme::icon_ok(),
+                    result.expanded.len()
+                );
+                for (i, expanded) in result.expanded.iter().enumerate() {
+                    let display = if expanded.chars().count() > 70 {
+                        let truncated: String = expanded.chars().take(67).collect();
+                        format!("{truncated}...")
+                    } else {
+                        expanded.clone()
+                    };
+                    crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
+                }
+                let first = result.expanded[0].clone();
+                (first, Some(prompt.clone()), Some(result.expanded), None)
             }
-            let first = result.expanded[0].clone();
-            (first, Some(prompt.clone()), Some(result.expanded))
-        }
-    } else {
-        (prompt, None, None)
-    };
+        } else if defer_expand_to_server && batch > 1 {
+            // --- Server-side batch expansion: call /api/expand for all variations ---
+            #[allow(unused_imports)]
+            use colored::Colorize;
+
+            let model_family = super::expand::resolve_family_from_config(&model, &config);
+            let client = match host.as_deref() {
+                Some(h) => mold_core::MoldClient::new(h),
+                None => mold_core::MoldClient::from_env(),
+            };
+            let expand_req = mold_core::ExpandRequest {
+                prompt: prompt.clone(),
+                model_family,
+                variations: batch as usize,
+            };
+
+            crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());
+
+            match client.expand_prompt(&expand_req).await {
+                Ok(result) => {
+                    crate::output::status!(
+                        "{} Generated {} prompt variations (server)",
+                        crate::theme::icon_ok(),
+                        result.expanded.len()
+                    );
+                    for (i, expanded) in result.expanded.iter().enumerate() {
+                        let display = if expanded.chars().count() > 70 {
+                            let truncated: String = expanded.chars().take(67).collect();
+                            format!("{truncated}...")
+                        } else {
+                            expanded.clone()
+                        };
+                        crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
+                    }
+                    let first = result.expanded[0].clone();
+                    // Expansion done; don't also ask server to expand during generate
+                    (first, Some(prompt.clone()), Some(result.expanded), None)
+                }
+                Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
+                    // Server unreachable — fall back to no expansion (generate will also
+                    // fall back to local inference, which doesn't support server expand).
+                    // The local fallback in generate_remote() will run without expansion.
+                    crate::output::status!(
+                        "{} Server unreachable for expansion, deferring to local",
+                        crate::theme::prefix_warning()
+                    );
+                    (prompt, None, None, None)
+                }
+                Err(e) => return Err(e),
+            }
+        } else if defer_expand_to_server {
+            // --- Server-side single expansion: set expand=true on GenerateRequest ---
+            // The server's maybe_expand_prompt() will handle it during generate.
+            (prompt, None, None, Some(true))
+        } else {
+            (prompt, None, None, None)
+        };
 
     // Resolve effective negative prompt: CLI flag > per-model config > global config > None.
     // --no-negative suppresses all defaults (forces empty unconditional).
@@ -414,6 +475,7 @@ pub async fn run(
         original_prompt,
         batch_prompts,
         effective_lora,
+        server_expand,
     )
     .await
 }
