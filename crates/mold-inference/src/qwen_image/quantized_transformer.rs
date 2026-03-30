@@ -372,12 +372,17 @@ impl QwenImageTransformerBlock {
             txt_sin,
             img_seq_len,
         )?;
-        // Clamp after each residual — matches diffusers' BF16 type_as(x) cast
-        // which limits intermediate values to BF16 representable range (±65504)
+        // BF16 roundtrip on gated residuals — matches diffusers' BF16 computation.
+        // In diffusers, blocks run in BF16 so each `hidden += gate * attn` truncates
+        // to BF16 mantissa (7 bits). This natural precision limit prevents unconstrained
+        // activation growth that occurs in F32. Without this, values grow to ±1e8+ over
+        // 60 blocks, destroying spatial information in the output LayerNorm.
         let img_hidden =
-            (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
+            (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?
+                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
         let txt_hidden =
-            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
+            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
+                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -390,9 +395,11 @@ impl QwenImageTransformerBlock {
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
         let img_hidden =
-            (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
+            (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?
+                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
         let txt_hidden =
-            (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?;
+            (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -559,11 +566,8 @@ impl QuantizedQwenImageTransformer2DModel {
                 &txt_cos,
                 &txt_sin,
             )?;
-            // Clamp to prevent inf accumulation from quantized matmul artifacts.
-            // Normal operating range is ±62M at step 0; 1e8 provides headroom while
-            // preventing overflow that would cause NaN in the output LayerNorm.
-            img = new_img.clamp(-1e8f32, 1e8f32)?;
-            txt = new_txt.clamp(-1e8f32, 1e8f32)?;
+            img = new_img;
+            txt = new_txt;
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;
