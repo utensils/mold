@@ -239,6 +239,28 @@ async fn create_and_load_engine(
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
+    // Unload the current model (if any) before loading the new one to free
+    // GPU memory. Without this, loading a large model on top of an existing
+    // one causes OOM (e.g. switching between flux-dev:bf16 and flux-dev:q8).
+    {
+        let mut engine = state.engine.lock().await;
+        if let Some(ref old) = *engine {
+            tracing::info!(
+                from = %old.model_name(),
+                to = %model_name,
+                "unloading current model before loading new one"
+            );
+        }
+        if engine.is_some() {
+            *engine = None;
+            let mut snapshot = state.engine_snapshot.write().await;
+            snapshot.model_name = None;
+            snapshot.is_loaded = false;
+            drop(snapshot);
+            mold_inference::reclaim_gpu_memory();
+        }
+    }
+
     let config = state.config.read().await;
     let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let mut new_engine = mold_inference::create_engine(
@@ -279,17 +301,6 @@ async fn create_and_load_engine(
     // Place the loaded engine into shared state and update the snapshot
     // while holding the engine lock to prevent unload_model from racing.
     let mut engine = state.engine.lock().await;
-
-    if let Some(ref old) = *engine {
-        if old.model_name() != model_name {
-            tracing::info!(
-                from = %old.model_name(),
-                to = %model_name,
-                "hot-swapping model"
-            );
-        }
-    }
-
     *engine = Some(new_engine);
 
     {
