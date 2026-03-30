@@ -580,8 +580,10 @@ impl OutputLayer {
     fn forward(&self, x: &Tensor, temb: &Tensor) -> candle_core::Result<Tensor> {
         let mod_params = temb.silu()?.apply(&self.adaln_linear)?;
         let chunks = mod_params.chunk(2, D::Minus1)?;
-        let shift = chunks[0].unsqueeze(1)?;
-        let scale = chunks[1].unsqueeze(1)?;
+        // AdaLayerNormContinuous: scale = chunk[0], shift = chunk[1]
+        // (opposite of block-level modulation which uses shift, scale, gate order)
+        let scale = chunks[0].unsqueeze(1)?;
+        let shift = chunks[1].unsqueeze(1)?;
         let x = self
             .norm_final
             .forward(x)?

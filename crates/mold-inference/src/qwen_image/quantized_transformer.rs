@@ -12,6 +12,16 @@ use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 
+/// Apply a quantized linear layer and replace any NaN values with 0.0.
+/// Candle's CUDA QMatMul produces hidden NaN in some output elements when
+/// processing large tensors. This wrapper prevents NaN propagation.
+fn linear_nan_safe(linear: &Linear, x: &Tensor) -> Result<Tensor> {
+    let out = linear.forward(x)?;
+    let nan_mask = out.ne(&out)?; // NaN != NaN → true
+    let zero = Tensor::zeros_like(&out)?;
+    nan_mask.where_cond(&zero, &out)
+}
+
 #[derive(Debug, Clone)]
 struct LayerNormNoParams {
     eps: f64,
@@ -74,7 +84,7 @@ impl TimestepProjEmbeddings {
             .to_dtype(DType::F32)?
             .broadcast_mul(&freqs.unsqueeze(0)?)?;
         let embedding = Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?;
-        embedding.apply(&self.linear1)?.silu()?.apply(&self.linear2)
+        linear_nan_safe(&self.linear1, &embedding)?.silu()?.apply(&self.linear2)
     }
 }
 
@@ -92,7 +102,7 @@ impl ApproximateGelu {
 
 impl Module for ApproximateGelu {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.apply(&self.proj)?;
+        let x = linear_nan_safe(&self.proj, x)?;
         x.broadcast_mul(&candle_nn::ops::sigmoid(&(x.clone() * 1.702)?)?)
     }
 }
@@ -113,7 +123,7 @@ impl FeedForward {
 
 impl Module for FeedForward {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.apply(&self.act)?.apply(&self.out)
+        linear_nan_safe(&self.out, &self.act.forward(x)?)
     }
 }
 
@@ -199,37 +209,19 @@ impl JointAttention {
         let (b, _, _) = img_hidden.dims3()?;
         let txt_seq_len = txt_hidden.dim(1)?;
 
-        let q_img =
-            img_hidden
-                .apply(&self.to_q)?
-                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let k_img =
-            img_hidden
-                .apply(&self.to_k)?
-                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let v_img =
-            img_hidden
-                .apply(&self.to_v)?
-                .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let q_img = linear_nan_safe(&self.to_q, img_hidden)?
+            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let k_img = linear_nan_safe(&self.to_k, img_hidden)?
+            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let v_img = linear_nan_safe(&self.to_v, img_hidden)?
+            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
 
-        let q_txt = txt_hidden.apply(&self.add_q_proj)?.reshape((
-            b,
-            txt_seq_len,
-            self.n_heads,
-            self.head_dim,
-        ))?;
-        let k_txt = txt_hidden.apply(&self.add_k_proj)?.reshape((
-            b,
-            txt_seq_len,
-            self.n_heads,
-            self.head_dim,
-        ))?;
-        let v_txt = txt_hidden.apply(&self.add_v_proj)?.reshape((
-            b,
-            txt_seq_len,
-            self.n_heads,
-            self.head_dim,
-        ))?;
+        let q_txt = linear_nan_safe(&self.add_q_proj, txt_hidden)?
+            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
+        let k_txt = linear_nan_safe(&self.add_k_proj, txt_hidden)?
+            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
+        let v_txt = linear_nan_safe(&self.add_v_proj, txt_hidden)?
+            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
 
         let (q_img, k_img) = self.qk_norm.forward(&q_img, &k_img)?;
         let (q_txt, k_txt) = self.added_qk_norm.forward(&q_txt, &k_txt)?;
@@ -268,9 +260,9 @@ impl JointAttention {
         let img_attn = attn.narrow(1, 0, img_seq_len)?;
         let txt_attn = attn.narrow(1, img_seq_len, txt_seq_len)?;
 
-        let txt_out = txt_attn.apply(&self.add_out_proj)?;
+        let txt_out = linear_nan_safe(&self.add_out_proj, &txt_attn)?;
 
-        Ok((img_attn.apply(&self.to_out)?, txt_out))
+        Ok((linear_nan_safe(&self.to_out, &img_attn)?, txt_out))
     }
 }
 
@@ -316,8 +308,8 @@ impl QwenImageTransformerBlock {
         txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
-        let img_mod = temb.silu()?.apply(&self.img_mod)?.unsqueeze(1)?;
-        let txt_mod = temb.silu()?.apply(&self.txt_mod)?.unsqueeze(1)?;
+        let img_mod = linear_nan_safe(&self.img_mod, &temb.silu()?)?.unsqueeze(1)?;
+        let txt_mod = linear_nan_safe(&self.txt_mod, &temb.silu()?)?.unsqueeze(1)?;
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
         let (
@@ -371,8 +363,12 @@ impl QwenImageTransformerBlock {
             txt_sin,
             img_seq_len,
         )?;
-        let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
+        // Clamp after each residual — matches diffusers' BF16 type_as(x) cast
+        // which limits intermediate values to BF16 representable range (±65504)
+        let img_hidden =
+            (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
+        let txt_hidden =
+            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -419,18 +415,18 @@ impl OutputLayer {
     }
 
     fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
-        let mod_params = temb.silu()?.apply(&self.adaln_linear)?;
+        let mod_params = linear_nan_safe(&self.adaln_linear, &temb.silu()?)?;
         let chunks = mod_params.chunk(2, D::Minus1)?;
-        // GGUF stores shift first, scale second — opposite of diffusers Python convention
-        // because the GGUF conversion preserves the original Wan weight layout.
-        let shift = chunks[0].unsqueeze(1)?;
-        let scale = chunks[1].unsqueeze(1)?;
+        // AdaLayerNormContinuous: scale = chunk[0], shift = chunk[1]
+        // (opposite of block-level modulation which uses shift, scale, gate order)
+        let scale = chunks[0].unsqueeze(1)?;
+        let shift = chunks[1].unsqueeze(1)?;
         let x = self
             .norm_final
             .forward(x)?
             .broadcast_mul(&(scale + 1.0)?)?
             .broadcast_add(&shift)?;
-        x.apply(&self.linear)
+        linear_nan_safe(&self.linear, &x)
     }
 }
 
@@ -497,15 +493,14 @@ impl QuantizedQwenImageTransformer2DModel {
 
         let x_5d = x.unsqueeze(2)?;
         let (x_patches, orig_size) = patchify(&x_5d, patch_size, 1)?;
-        let mut img = x_patches.apply(&self.img_in)?;
+        let mut img = linear_nan_safe(&self.img_in, &x_patches)?;
+
         // Note: we do NOT mask padding text tokens here. The diffusers reference
         // passes encoder_hidden_states_mask=None to transformer blocks, meaning
         // padding tokens participate in attention and modulation. The model was
         // trained this way and expects to see all 1024 text tokens (valid + padding).
-        let mut txt = self
-            .txt_norm
-            .forward(&encoder_hidden_states)?
-            .apply(&self.txt_in)?;
+        let txt_normed = self.txt_norm.forward(&encoder_hidden_states)?;
+        let mut txt = linear_nan_safe(&self.txt_in, &txt_normed)?;
 
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
@@ -534,8 +529,13 @@ impl QuantizedQwenImageTransformer2DModel {
                 &txt_cos,
                 &txt_sin,
             )?;
-            img = new_img.clamp(-65504f32, 65504f32)?;
-            txt = new_txt.clamp(-65504f32, 65504f32)?;
+            // Match diffusers' `.type_as(hidden_states)` which casts F32 → BF16 after
+            // each block. This rounds to BF16 mantissa precision (7 bits) while preserving
+            // the full dynamic range (±3.4e38). Without this, intermediate values computed
+            // entirely in F32 accumulate slightly different rounding patterns than the
+            // reference, causing divergence over 60 blocks.
+            img = new_img.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+            txt = new_txt.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;

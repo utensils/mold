@@ -66,19 +66,40 @@ impl QwenImageScheduler {
     /// Create a new scheduler with the given number of inference steps and shift parameter.
     ///
     /// `mu` is the dynamic shift parameter from `calculate_shift()`.
+    ///
+    /// Matches the diffusers `FlowMatchEulerDiscreteScheduler.set_timesteps()`:
+    /// 1. Linspace from 1.0 to 1/num_train_timesteps
+    /// 2. Apply exponential time shift with mu
+    /// 3. Stretch-shift-to-terminal so the last sigma equals SHIFT_TERMINAL
+    /// 4. Append terminal sigma = 0.0
     pub fn new(num_inference_steps: usize, mu: f64) -> Self {
-        // Generate linearly spaced sigma values from 1.0 to shift_terminal
+        // Step 1: Linear spacing from 1.0 to 1/num_train_timesteps
+        let sigma_end = 1.0 / NUM_TRAIN_TIMESTEPS as f64;
         let mut sigmas: Vec<f64> = (0..num_inference_steps)
             .map(|i| {
                 let t = i as f64 / num_inference_steps as f64;
-                1.0 * (1.0 - t) + SHIFT_TERMINAL * t
+                1.0 * (1.0 - t) + sigma_end * t
             })
             .collect();
 
-        // Apply exponential time shift
+        // Step 2: Apply exponential time shift
         sigmas = sigmas.iter().map(|&s| time_shift(mu, s)).collect();
 
-        // Add terminal sigma = 0.0
+        // Step 3: Stretch-shift-to-terminal — linearly rescale so last sigma = SHIFT_TERMINAL
+        // This matches diffusers' `stretch_shift_to_terminal()`.
+        let sigma_max = sigmas[0];
+        let sigma_min = *sigmas.last().unwrap();
+        if (sigma_max - sigma_min).abs() > 1e-12 {
+            sigmas = sigmas
+                .iter()
+                .map(|&s| {
+                    (s - sigma_min) / (sigma_max - sigma_min) * (sigma_max - SHIFT_TERMINAL)
+                        + SHIFT_TERMINAL
+                })
+                .collect();
+        }
+
+        // Step 4: Add terminal sigma = 0.0
         sigmas.push(0.0);
 
         Self {
@@ -101,16 +122,25 @@ impl QwenImageScheduler {
     ///
     /// Uses the flow-matching Euler update:
     ///   x_{t-1} = x_t + (sigma_{t-1} - sigma_t) * model_output
+    ///
+    /// Matches diffusers: upcasts `sample` to F32 for the step, then casts back.
+    /// BF16 has ~3 decimal digits of precision; without upcast, rounding errors
+    /// compound over 30+ denoising steps and degrade image quality.
     pub fn step(&mut self, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
         let sigma = self.sigmas[self.step_index];
         let sigma_next = self.sigmas[self.step_index + 1];
         let dt = sigma_next - sigma;
 
+        // Upcast to F32 for precision (matches diffusers behavior)
+        let out_dtype = model_output.dtype();
+        let sample = sample.to_dtype(candle_core::DType::F32)?;
+        let model_output = model_output.to_dtype(candle_core::DType::F32)?;
+
         // prev_sample = sample + dt * model_output
         let prev_sample = (sample + (model_output * dt)?)?;
 
         self.step_index += 1;
-        Ok(prev_sample)
+        prev_sample.to_dtype(out_dtype)
     }
 }
 
@@ -178,6 +208,13 @@ mod tests {
         assert_eq!(scheduler.sigmas.len(), 21);
         // First sigma should be close to 1.0 (after time shift)
         assert!(scheduler.sigmas[0] > 0.5);
+        // Second-to-last sigma should equal SHIFT_TERMINAL (stretch target)
+        assert!(
+            (scheduler.sigmas[scheduler.sigmas.len() - 2] - SHIFT_TERMINAL).abs() < 1e-10,
+            "last non-terminal sigma should be stretch target ({}), got {}",
+            SHIFT_TERMINAL,
+            scheduler.sigmas[scheduler.sigmas.len() - 2],
+        );
         // Last sigma should be 0.0
         assert_eq!(*scheduler.sigmas.last().unwrap(), 0.0);
         // Monotonically decreasing
