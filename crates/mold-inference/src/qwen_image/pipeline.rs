@@ -617,6 +617,10 @@ impl QwenImageEngine {
                 Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
             }
             latents = scheduler.step(&noise_pred, &latents)?;
+            if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
+                let n = latents.ne(&latents)?.to_dtype(candle_core::DType::U32)?.sum_all()?.to_scalar::<u32>()?;
+                if n > 0 { eprintln!("[qwen-nan] NaN in latents AFTER step {step}: {n}/{}", latents.elem_count()); }
+            }
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,

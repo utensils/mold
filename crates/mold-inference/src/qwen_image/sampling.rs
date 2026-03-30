@@ -114,7 +114,7 @@ impl QwenImageScheduler {
     /// passes `timestep / 1000` to the transformer — so the model receives raw sigma ∈ [0, 1].
     /// The `QwenImageTransformer2DModel` sinusoidal embedding operates directly on sigma.
     pub fn current_timestep(&self) -> f64 {
-        self.sigmas[self.step_index]
+        self.sigmas[self.step_index] * NUM_TRAIN_TIMESTEPS as f64
     }
 
     /// Euler step: advance the latent sample from x_t to x_{t-1}.

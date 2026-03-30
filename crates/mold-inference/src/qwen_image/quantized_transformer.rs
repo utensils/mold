@@ -3,7 +3,7 @@
 use candle_core::{DType, Module, Result, Tensor, D};
 use candle_nn::RmsNorm as CandleRmsNorm;
 use candle_transformers::models::z_image::transformer::{
-    apply_rotary_emb, create_coordinate_grid, patchify, unpatchify, RopeEmbedder,
+    apply_rotary_emb, create_coordinate_grid, RopeEmbedder,
 };
 use candle_transformers::quantized_nn::{self, Linear};
 use candle_transformers::quantized_var_builder::VarBuilder;
@@ -12,14 +12,20 @@ use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 
-/// Apply a quantized linear layer and replace any NaN values with 0.0.
-/// Candle's CUDA QMatMul produces hidden NaN in some output elements when
-/// processing large tensors. This wrapper prevents NaN propagation.
-fn linear_nan_safe(linear: &Linear, x: &Tensor) -> Result<Tensor> {
+/// Apply a quantized linear layer and replace non-finite (NaN/inf) values with 0.
+/// Candle's CUDA QMatMul produces sporadic NaN and inf in some output elements
+/// when processing large-magnitude inputs. This wrapper prevents propagation.
+fn linear_safe(linear: &Linear, x: &Tensor) -> Result<Tensor> {
     let out = linear.forward(x)?;
-    let nan_mask = out.ne(&out)?; // NaN != NaN → true
+    // Detect non-finite: NaN (ne self) or inf (abs > finite max)
+    let is_nan = out.ne(&out)?;
+    let abs_out = out.abs()?;
+    let threshold = Tensor::new(f32::MAX, out.device())?.broadcast_as(abs_out.shape())?;
+    let is_inf = abs_out.gt(&threshold)?;
+    // Combined mask: NaN or inf
+    let bad = (is_nan.to_dtype(DType::U8)? + is_inf.to_dtype(DType::U8)?)?.gt(&Tensor::zeros_like(&is_nan)?.to_dtype(DType::U8)?)?;
     let zero = Tensor::zeros_like(&out)?;
-    nan_mask.where_cond(&zero, &out)
+    bad.where_cond(&zero, &out)
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +90,7 @@ impl TimestepProjEmbeddings {
             .to_dtype(DType::F32)?
             .broadcast_mul(&freqs.unsqueeze(0)?)?;
         let embedding = Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?;
-        linear_nan_safe(&self.linear1, &embedding)?.silu()?.apply(&self.linear2)
+        embedding.apply(&self.linear1)?.silu()?.apply(&self.linear2)
     }
 }
 
@@ -102,7 +108,7 @@ impl ApproximateGelu {
 
 impl Module for ApproximateGelu {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = linear_nan_safe(&self.proj, x)?;
+        let x = x.apply(&self.proj)?;
         x.broadcast_mul(&candle_nn::ops::sigmoid(&(x.clone() * 1.702)?)?)
     }
 }
@@ -123,7 +129,7 @@ impl FeedForward {
 
 impl Module for FeedForward {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        linear_nan_safe(&self.out, &self.act.forward(x)?)
+        self.act.forward(x)?.apply(&self.out)
     }
 }
 
@@ -209,18 +215,18 @@ impl JointAttention {
         let (b, _, _) = img_hidden.dims3()?;
         let txt_seq_len = txt_hidden.dim(1)?;
 
-        let q_img = linear_nan_safe(&self.to_q, img_hidden)?
+        let q_img = linear_safe(&self.to_q, img_hidden)?
             .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let k_img = linear_nan_safe(&self.to_k, img_hidden)?
+        let k_img = linear_safe(&self.to_k, img_hidden)?
             .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let v_img = linear_nan_safe(&self.to_v, img_hidden)?
+        let v_img = linear_safe(&self.to_v, img_hidden)?
             .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
 
-        let q_txt = linear_nan_safe(&self.add_q_proj, txt_hidden)?
+        let q_txt = linear_safe(&self.add_q_proj, txt_hidden)?
             .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let k_txt = linear_nan_safe(&self.add_k_proj, txt_hidden)?
+        let k_txt = linear_safe(&self.add_k_proj, txt_hidden)?
             .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let v_txt = linear_nan_safe(&self.add_v_proj, txt_hidden)?
+        let v_txt = linear_safe(&self.add_v_proj, txt_hidden)?
             .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
 
         let (q_img, k_img) = self.qk_norm.forward(&q_img, &k_img)?;
@@ -263,9 +269,9 @@ impl JointAttention {
         let txt_attn = attn.narrow(1, 0, txt_seq_len)?;
         let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
 
-        let txt_out = linear_nan_safe(&self.add_out_proj, &txt_attn)?;
+        let txt_out = linear_safe(&self.add_out_proj, &txt_attn)?;
 
-        Ok((linear_nan_safe(&self.to_out, &img_attn)?, txt_out))
+        Ok((linear_safe(&self.to_out, &img_attn)?, txt_out))
     }
 }
 
@@ -311,8 +317,8 @@ impl QwenImageTransformerBlock {
         txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
-        let img_mod = linear_nan_safe(&self.img_mod, &temb.silu()?)?.unsqueeze(1)?;
-        let txt_mod = linear_nan_safe(&self.txt_mod, &temb.silu()?)?.unsqueeze(1)?;
+        let img_mod = linear_safe(&self.img_mod, &temb.silu()?)?.unsqueeze(1)?;
+        let txt_mod = linear_safe(&self.txt_mod, &temb.silu()?)?.unsqueeze(1)?;
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
         let (
@@ -394,8 +400,8 @@ impl QwenImageTransformerBlock {
 
 struct OutputLayer {
     norm_final: LayerNormNoParams,
-    adaln_linear: Linear,
-    linear: Linear,
+    adaln_linear: candle_nn::Linear,
+    linear: candle_nn::Linear,
 }
 
 impl OutputLayer {
@@ -404,21 +410,28 @@ impl OutputLayer {
         out_channels: usize,
         patch_size: usize,
         vb: VarBuilder,
+        device: &candle_core::Device,
     ) -> Result<Self> {
         let output_dim = patch_size * patch_size * out_channels;
+        // Dequantize to standard F32 linear — these weights are BF16 in the GGUF
+        // and candle's QMatMul produces NaN for certain F32 input × BF16 weight combos.
+        let adaln_vb = vb.pp("norm_out").pp("linear");
+        let adaln_w = adaln_vb.get((2 * inner_dim, inner_dim), "weight")?.dequantize(device)?;
+        let adaln_b = adaln_vb.get(2 * inner_dim, "bias")?.dequantize(device)?;
+
+        let proj_vb = vb.pp("proj_out");
+        let proj_w = proj_vb.get((output_dim, inner_dim), "weight")?.dequantize(device)?;
+        let proj_b = proj_vb.get(output_dim, "bias")?.dequantize(device)?;
+
         Ok(Self {
             norm_final: LayerNormNoParams::new(1e-6),
-            adaln_linear: quantized_nn::linear(
-                inner_dim,
-                2 * inner_dim,
-                vb.pp("norm_out").pp("linear"),
-            )?,
-            linear: quantized_nn::linear(inner_dim, output_dim, vb.pp("proj_out"))?,
+            adaln_linear: candle_nn::Linear::new(adaln_w, Some(adaln_b)),
+            linear: candle_nn::Linear::new(proj_w, Some(proj_b)),
         })
     }
 
     fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
-        let mod_params = linear_nan_safe(&self.adaln_linear, &temb.silu()?)?;
+        let mod_params = temb.silu()?.apply(&self.adaln_linear)?;
         let chunks = mod_params.chunk(2, D::Minus1)?;
         // AdaLayerNormContinuous: scale = chunk[0], shift = chunk[1]
         // (opposite of block-level modulation which uses shift, scale, gate order)
@@ -429,13 +442,13 @@ impl OutputLayer {
             .forward(x)?
             .broadcast_mul(&(scale + 1.0)?)?
             .broadcast_add(&shift)?;
-        linear_nan_safe(&self.linear, &x)
+        x.apply(&self.linear)
     }
 }
 
 pub(crate) struct QuantizedQwenImageTransformer2DModel {
     time_embed: TimestepProjEmbeddings,
-    img_in: Linear,
+    img_in: candle_nn::Linear,
     txt_in: Linear,
     txt_norm: quantized_nn::RmsNorm,
     blocks: Vec<QwenImageTransformerBlock>,
@@ -454,9 +467,18 @@ impl QuantizedQwenImageTransformer2DModel {
                 vb.pp("transformer_blocks").pp(i),
             )?);
         }
+        // Dequantize img_in to standard F32 linear — its weight is BF16 in the GGUF
+        // and candle's QMatMul produces NaN for certain F32 input ranges with BF16 weights.
+        // img_in is small (64→3072 = 768KB) so the VRAM cost is negligible.
+        let img_in_w = vb.pp("img_in").get((cfg.inner_dim, cfg.in_channels), "weight")?
+            .dequantize(&device)?;
+        let img_in_b = vb.pp("img_in").get(cfg.inner_dim, "bias")?
+            .dequantize(&device)?;
+        let img_in = candle_nn::Linear::new(img_in_w, Some(img_in_b));
+
         Ok(Self {
             time_embed: TimestepProjEmbeddings::new(cfg.inner_dim, vb.clone())?,
-            img_in: quantized_nn::linear(cfg.in_channels, cfg.inner_dim, vb.pp("img_in"))?,
+            img_in,
             txt_in: quantized_nn::linear(cfg.joint_attention_dim, cfg.inner_dim, vb.pp("txt_in"))?,
             txt_norm: quantized_nn::RmsNorm::new(
                 cfg.joint_attention_dim,
@@ -471,7 +493,7 @@ impl QuantizedQwenImageTransformer2DModel {
                 &device,
                 DType::F32,
             )?,
-            output_layer: OutputLayer::new(cfg.inner_dim, cfg.out_channels, cfg.patch_size, vb)?,
+            output_layer: OutputLayer::new(cfg.inner_dim, cfg.out_channels, cfg.patch_size, vb, &device)?,
             cfg: cfg.clone(),
         })
     }
@@ -490,20 +512,25 @@ impl QuantizedQwenImageTransformer2DModel {
         let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
         let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
 
-        let (_b, _c, h, w) = x.dims4()?;
+        let (b, c, h, w) = x.dims4()?;
         let patch_size = self.cfg.patch_size;
         let temb = self.time_embed.forward(&t)?;
 
-        let x_5d = x.unsqueeze(2)?;
-        let (x_patches, orig_size) = patchify(&x_5d, patch_size, 1)?;
-        let mut img = linear_nan_safe(&self.img_in, &x_patches)?;
+        // Pack latents: [B, C, H, W] → [B, (H/p)*(W/p), C*p*p]
+        // Matches diffusers' _pack_latents — simple reshape, NOT Conv3d patchify
+        let hp = h / patch_size;
+        let wp = w / patch_size;
+        let x_packed = x
+            .reshape((b, c, hp, patch_size, wp, patch_size))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((b, hp * wp, c * patch_size * patch_size))?
+            .contiguous()?;
 
-        // Note: we do NOT mask padding text tokens here. The diffusers reference
-        // passes encoder_hidden_states_mask=None to transformer blocks, meaning
-        // padding tokens participate in attention and modulation. The model was
-        // trained this way and expects to see all 1024 text tokens (valid + padding).
+        let mut img = x_packed.apply(&self.img_in)?;
+
+        // Note: we do NOT mask padding text tokens here.
         let txt_normed = self.txt_norm.forward(&encoder_hidden_states)?;
-        let mut txt = linear_nan_safe(&self.txt_in, &txt_normed)?;
+        let mut txt = txt_normed.apply(&self.txt_in)?;
 
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
@@ -532,17 +559,23 @@ impl QuantizedQwenImageTransformer2DModel {
                 &txt_cos,
                 &txt_sin,
             )?;
-            // Match diffusers' `.type_as(hidden_states)` which casts F32 → BF16 after
-            // each block. This rounds to BF16 mantissa precision (7 bits) while preserving
-            // the full dynamic range (±3.4e38). Without this, intermediate values computed
-            // entirely in F32 accumulate slightly different rounding patterns than the
-            // reference, causing divergence over 60 blocks.
-            img = new_img.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
-            txt = new_txt.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+            // Clamp to prevent inf accumulation from quantized matmul artifacts.
+            // Normal operating range is ±62M at step 0; 1e8 provides headroom while
+            // preventing overflow that would cause NaN in the output LayerNorm.
+            img = new_img.clamp(-1e8f32, 1e8f32)?;
+            txt = new_txt.clamp(-1e8f32, 1e8f32)?;
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;
-        let x_out = unpatchify(&img_out, orig_size, patch_size, 1, self.cfg.out_channels)?;
-        x_out.squeeze(2)?.to_dtype(out_dtype)
+
+        // Unpack latents: [B, (H/p)*(W/p), out_channels*p*p] → [B, out_channels, H, W]
+        // Matches diffusers' _unpack_latents — simple reshape, NOT Conv3d unpatchify
+        let out_c = self.cfg.out_channels;
+        let x_out = img_out
+            .reshape((b, hp, wp, out_c, patch_size, patch_size))?
+            .permute((0, 3, 1, 4, 2, 5))?
+            .reshape((b, out_c, h, w))?
+            .contiguous()?;
+        x_out.to_dtype(out_dtype)
     }
 }
