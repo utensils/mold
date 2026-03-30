@@ -6,6 +6,7 @@ use mold_core::manifest::{
 };
 use mold_core::{Config, LoraWeight, OutputFormat, Scheduler};
 use std::io::{IsTerminal, Read};
+use std::path::Path;
 
 use super::generate;
 
@@ -65,6 +66,114 @@ fn resolve_run_args(
     Ok((resolve_model_name(&config.resolved_default_model()), None))
 }
 
+/// Validate file-based CLI arguments early, before expansion or inference.
+///
+/// Checks:
+/// - `--lora`: must exist, be a file (not directory), end in `.safetensors`
+/// - `--image`: must exist (unless `-` for stdin)
+/// - `--mask`: must exist
+/// - `--control`: must exist
+/// - `--output`: parent directory must exist; if path is a directory, error with hint
+fn validate_file_args(
+    lora: Option<&str>,
+    image: Option<&str>,
+    mask: Option<&str>,
+    control: Option<&str>,
+    output: Option<&str>,
+) -> Result<()> {
+    // -- --lora validation --
+    if let Some(lora_path) = lora {
+        let p = Path::new(lora_path);
+        if p.is_dir() {
+            // List .safetensors files in the directory as suggestions
+            let mut suggestions: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if let Some(name_str) = name.to_str() {
+                        if name_str.ends_with(".safetensors") {
+                            suggestions.push(entry.path().display().to_string());
+                        }
+                    }
+                }
+            }
+            suggestions.sort();
+            let mut msg = format!("--lora path '{}' is a directory, not a file", lora_path);
+            if suggestions.is_empty() {
+                msg.push_str(" (no .safetensors files found inside)");
+            } else {
+                msg.push_str(". Did you mean one of these?");
+                for s in &suggestions {
+                    msg.push_str(&format!("\n    {s}"));
+                }
+            }
+            anyhow::bail!(msg);
+        }
+        if !p.exists() {
+            anyhow::bail!("--lora file not found: {lora_path}");
+        }
+        if !lora_path.ends_with(".safetensors") {
+            anyhow::bail!("--lora file must be a .safetensors file, got: {lora_path}");
+        }
+    }
+
+    // -- --image validation --
+    if let Some(img_path) = image {
+        if img_path != "-" {
+            let p = Path::new(img_path);
+            if !p.exists() {
+                anyhow::bail!("--image file not found: {img_path}");
+            }
+            if p.is_dir() {
+                anyhow::bail!("--image path is a directory, not an image file: {img_path}");
+            }
+        }
+    }
+
+    // -- --mask validation --
+    if let Some(mask_path) = mask {
+        let p = Path::new(mask_path);
+        if !p.exists() {
+            anyhow::bail!("--mask file not found: {mask_path}");
+        }
+        if p.is_dir() {
+            anyhow::bail!("--mask path is a directory, not an image file: {mask_path}");
+        }
+    }
+
+    // -- --control validation --
+    if let Some(ctrl_path) = control {
+        let p = Path::new(ctrl_path);
+        if !p.exists() {
+            anyhow::bail!("--control file not found: {ctrl_path}");
+        }
+        if p.is_dir() {
+            anyhow::bail!("--control path is a directory, not an image file: {ctrl_path}");
+        }
+    }
+
+    // -- --output validation --
+    if let Some(out_path) = output {
+        if out_path != "-" {
+            let p = Path::new(out_path);
+            if p.is_dir() {
+                anyhow::bail!(
+                    "--output '{}' is a directory. Provide a filename, e.g.: {}/image.png",
+                    out_path,
+                    out_path.trim_end_matches('/')
+                );
+            }
+            if let Some(parent) = p.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    anyhow::bail!("output directory does not exist: {}", parent.display());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     model_or_prompt: Option<String>,
@@ -102,6 +211,16 @@ pub async fn run(
     expand_model: Option<String>,
 ) -> Result<()> {
     let config = Config::load_or_default();
+
+    // Validate file-based arguments early — before expansion or inference.
+    validate_file_args(
+        lora.as_deref(),
+        image.as_deref(),
+        mask.as_deref(),
+        control.as_deref(),
+        output.as_deref(),
+    )?;
+
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
 
     // Read source image if --image specified
@@ -436,5 +555,253 @@ mod tests {
     fn completions_return_models() {
         let candidates = complete_model_name();
         assert!(!candidates.is_empty());
+    }
+
+    // ── validate_file_args tests ──────────────────────────────────────────
+
+    #[test]
+    fn validate_no_file_args_passes() {
+        assert!(validate_file_args(None, None, None, None, None).is_ok());
+    }
+
+    // -- --lora tests --
+
+    #[test]
+    fn validate_lora_nonexistent_file() {
+        let err = validate_file_args(
+            Some("/tmp/mold-test-nonexistent-lora.safetensors"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--lora file not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_lora_directory_instead_of_file() {
+        let dir = std::env::temp_dir().join("mold-test-lora-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create a .safetensors file inside so it gets suggested
+        let adapter = dir.join("adapter.safetensors");
+        std::fs::write(&adapter, b"dummy").unwrap();
+
+        let err =
+            validate_file_args(Some(dir.to_str().unwrap()), None, None, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+        assert!(
+            msg.contains("adapter.safetensors"),
+            "should suggest files, got: {msg}"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_lora_directory_empty() {
+        let dir = std::env::temp_dir().join("mold-test-lora-empty-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            validate_file_args(Some(dir.to_str().unwrap()), None, None, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+        assert!(msg.contains("no .safetensors files found"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_lora_wrong_extension() {
+        let path = std::env::temp_dir().join("mold-test-lora.bin");
+        std::fs::write(&path, b"dummy").unwrap();
+
+        let err =
+            validate_file_args(Some(path.to_str().unwrap()), None, None, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(".safetensors"), "got: {msg}");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn validate_lora_valid_file() {
+        let path = std::env::temp_dir().join("mold-test-valid-adapter.safetensors");
+        std::fs::write(&path, b"dummy").unwrap();
+
+        assert!(validate_file_args(Some(path.to_str().unwrap()), None, None, None, None,).is_ok());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    // -- --image tests --
+
+    #[test]
+    fn validate_image_nonexistent() {
+        let err = validate_file_args(
+            None,
+            Some("/tmp/mold-test-nonexistent-image.png"),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--image file not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_image_stdin_skips_check() {
+        assert!(validate_file_args(None, Some("-"), None, None, None).is_ok());
+    }
+
+    #[test]
+    fn validate_image_is_directory() {
+        let dir = std::env::temp_dir().join("mold-test-image-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            validate_file_args(None, Some(dir.to_str().unwrap()), None, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_image_valid_file() {
+        let path = std::env::temp_dir().join("mold-test-valid-image.png");
+        std::fs::write(&path, b"dummy png").unwrap();
+
+        assert!(validate_file_args(None, Some(path.to_str().unwrap()), None, None, None,).is_ok());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    // -- --mask tests --
+
+    #[test]
+    fn validate_mask_nonexistent() {
+        let err = validate_file_args(
+            None,
+            None,
+            Some("/tmp/mold-test-nonexistent-mask.png"),
+            None,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--mask file not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_mask_is_directory() {
+        let dir = std::env::temp_dir().join("mold-test-mask-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            validate_file_args(None, None, Some(dir.to_str().unwrap()), None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- --control tests --
+
+    #[test]
+    fn validate_control_nonexistent() {
+        let err = validate_file_args(
+            None,
+            None,
+            None,
+            Some("/tmp/mold-test-nonexistent-control.png"),
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--control file not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_control_is_directory() {
+        let dir = std::env::temp_dir().join("mold-test-control-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            validate_file_args(None, None, None, Some(dir.to_str().unwrap()), None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- --output tests --
+
+    #[test]
+    fn validate_output_parent_not_exist() {
+        let err = validate_file_args(None, None, None, None, Some("/nonexistent/dir/image.png"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("output directory does not exist"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_output_is_directory() {
+        let dir = std::env::temp_dir().join("mold-test-output-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            validate_file_args(None, None, None, None, Some(dir.to_str().unwrap())).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is a directory"), "got: {msg}");
+        assert!(msg.contains("Provide a filename"), "got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_output_stdout_passes() {
+        assert!(validate_file_args(None, None, None, None, Some("-")).is_ok());
+    }
+
+    #[test]
+    fn validate_output_valid_path() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("mold-test-output.png");
+        assert!(validate_file_args(None, None, None, None, Some(path.to_str().unwrap()),).is_ok());
+    }
+
+    #[test]
+    fn validate_output_relative_filename() {
+        // Just a filename like "output.png" — parent is "" which is fine
+        assert!(validate_file_args(None, None, None, None, Some("output.png")).is_ok());
+    }
+
+    // -- combined tests --
+
+    #[test]
+    fn validate_multiple_bad_args_fails_on_first() {
+        // --lora is checked first, so it should fail on the lora error
+        let err = validate_file_args(
+            Some("/tmp/mold-test-nonexistent.safetensors"),
+            Some("/tmp/mold-test-nonexistent.png"),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--lora"),
+            "should fail on --lora first, got: {msg}"
+        );
     }
 }

@@ -211,18 +211,6 @@ pub async fn run(
     );
     status!("{}", "─".repeat(40).dimmed());
 
-    // Validate output directory exists
-    if let Some(ref path) = output {
-        if path != "-" {
-            let out_path = std::path::Path::new(path);
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() && !parent.exists() {
-                    anyhow::bail!("output directory does not exist: {}", parent.display());
-                }
-            }
-        }
-    }
-
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let response = if local {
         print_using_local_inference();
