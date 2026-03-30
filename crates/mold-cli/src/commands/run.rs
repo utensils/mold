@@ -363,11 +363,14 @@ pub async fn run(
                 let first = result.expanded[0].clone();
                 (first, Some(prompt.clone()), Some(result.expanded), None)
             }
-        } else if defer_expand_to_server && batch > 1 {
-            // --- Server-side batch expansion: call /api/expand for all variations ---
+        } else if defer_expand_to_server {
+            // --- Server-side expansion via /api/expand ---
+            // Always expand upfront so the prompt is ready before generate_remote.
+            // This ensures the local fallback path also gets the expanded prompt.
             #[allow(unused_imports)]
             use colored::Colorize;
 
+            let variations = batch.max(1) as usize;
             let model_family = super::expand::resolve_family_from_config(&model, &config);
             let client = match host.as_deref() {
                 Some(h) => mold_core::MoldClient::new(h),
@@ -376,12 +379,27 @@ pub async fn run(
             let expand_req = mold_core::ExpandRequest {
                 prompt: prompt.clone(),
                 model_family,
-                variations: batch as usize,
+                variations,
             };
 
             crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());
 
             match client.expand_prompt(&expand_req).await {
+                Ok(result) if result.expanded.len() == 1 => {
+                    let expanded = &result.expanded[0];
+                    let display = if expanded.chars().count() > 80 {
+                        let truncated: String = expanded.chars().take(77).collect();
+                        format!("{truncated}...")
+                    } else {
+                        expanded.clone()
+                    };
+                    crate::output::status!(
+                        "{} Expanded (server): \"{}\"",
+                        crate::theme::icon_ok(),
+                        display.dimmed()
+                    );
+                    (expanded.clone(), Some(prompt.clone()), None, None)
+                }
                 Ok(result) => {
                     crate::output::status!(
                         "{} Generated {} prompt variations (server)",
@@ -398,25 +416,45 @@ pub async fn run(
                         crate::output::status!("  {}: \"{}\"", i + 1, display.dimmed());
                     }
                     let first = result.expanded[0].clone();
-                    // Expansion done; don't also ask server to expand during generate
                     (first, Some(prompt.clone()), Some(result.expanded), None)
                 }
                 Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
-                    // Server unreachable — fall back to no expansion (generate will also
-                    // fall back to local inference, which doesn't support server expand).
-                    // The local fallback in generate_remote() will run without expansion.
+                    // Server unreachable — fall back to local expansion so the prompt
+                    // is expanded even when generate_remote also falls back to local.
                     crate::output::status!(
-                        "{} Server unreachable for expansion, deferring to local",
+                        "{} Server unreachable, expanding locally",
                         crate::theme::prefix_warning()
                     );
-                    (prompt, None, None, None)
+                    let mut settings = expand_settings;
+                    if let Some(ref backend) = expand_backend {
+                        settings.backend = backend.clone();
+                    }
+                    if let Some(ref m) = expand_model {
+                        if settings.is_local() {
+                            settings.model = m.clone();
+                        } else {
+                            settings.api_model = m.clone();
+                        }
+                    }
+                    let family = super::expand::resolve_family_from_config(&model, &config);
+                    let expand_config = settings.to_expand_config(&family, batch.max(1) as usize);
+                    match super::expand::create_expander(&settings, &config).await {
+                        Ok(expander) => match expander.expand(&prompt, &expand_config) {
+                            Ok(result) => {
+                                let first = result.expanded[0].clone();
+                                if result.expanded.len() == 1 {
+                                    (first, Some(prompt.clone()), None, None)
+                                } else {
+                                    (first, Some(prompt.clone()), Some(result.expanded), None)
+                                }
+                            }
+                            Err(_) => (prompt, None, None, None),
+                        },
+                        Err(_) => (prompt, None, None, None),
+                    }
                 }
                 Err(e) => return Err(e),
             }
-        } else if defer_expand_to_server {
-            // --- Server-side single expansion: set expand=true on GenerateRequest ---
-            // The server's maybe_expand_prompt() will handle it during generate.
-            (prompt, None, None, Some(true))
         } else {
             (prompt, None, None, None)
         };
