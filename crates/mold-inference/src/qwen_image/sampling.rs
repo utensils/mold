@@ -110,12 +110,11 @@ impl QwenImageScheduler {
 
     /// Get the current timestep for model input.
     ///
-    /// The diffusers pipeline computes `timesteps = sigmas * num_train_timesteps` then
-    /// passes `timestep / 1000` to the transformer. Its internal `Timesteps(scale=1000)`
-    /// multiplies back, giving `sigma * freqs * 1000`. Our embedding has no internal
-    /// scale, so we pass `sigma * 1000` directly to get the same result.
+    /// The diffusers `pipeline_qwenimage.py` computes `timesteps = sigmas * 1000` then
+    /// passes `timestep / 1000` to the transformer — so the model receives raw sigma ∈ [0, 1].
+    /// The `QwenImageTransformer2DModel` sinusoidal embedding operates directly on sigma.
     pub fn current_timestep(&self) -> f64 {
-        self.sigmas[self.step_index] * NUM_TRAIN_TIMESTEPS as f64
+        self.sigmas[self.step_index]
     }
 
     /// Euler step: advance the latent sample from x_t to x_{t-1}.

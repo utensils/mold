@@ -231,19 +231,21 @@ impl JointAttention {
         let q_txt = apply_rotary_emb(&q_txt, txt_cos, txt_sin)?;
         let k_txt = apply_rotary_emb(&k_txt, txt_cos, txt_sin)?;
 
-        let q = Tensor::cat(&[&q_img, &q_txt], 1)?;
-        let k = Tensor::cat(&[&k_img, &k_txt], 1)?;
-        let v = Tensor::cat(&[&v_img, &v_txt], 1)?;
+        // Concatenate in [text, image] order (matches diffusers QwenDoubleStreamAttnProcessor2_0)
+        let q = Tensor::cat(&[&q_txt, &q_img], 1)?;
+        let k = Tensor::cat(&[&k_txt, &k_img], 1)?;
+        let v = Tensor::cat(&[&v_txt, &v_img], 1)?;
 
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
         let v = v.transpose(1, 2)?.contiguous()?;
 
-        // Attention with key masking for text padding (matches ComfyUI/diffusers)
+        // Attention with key masking for text padding (matches diffusers)
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
         let img_mask = Tensor::ones((b, img_seq_len), DType::U8, img_hidden.device())?;
-        let key_mask = Tensor::cat(&[&img_mask, txt_mask], 1)?
+        // Key mask order: [text, image] to match concatenation
+        let key_mask = Tensor::cat(&[txt_mask, &img_mask], 1)?
             .unsqueeze(1)?
             .unsqueeze(1)?;
         let on_true = key_mask.zeros_like()?.to_dtype(attn_weights.dtype())?;
@@ -257,8 +259,9 @@ impl JointAttention {
 
         let total_seq = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((b, total_seq, ()))?;
-        let img_attn = attn.narrow(1, 0, img_seq_len)?;
-        let txt_attn = attn.narrow(1, img_seq_len, txt_seq_len)?;
+        // Split in [text, image] order
+        let txt_attn = attn.narrow(1, 0, txt_seq_len)?;
+        let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
 
         let txt_out = linear_nan_safe(&self.add_out_proj, &txt_attn)?;
 

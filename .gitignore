@@ -1,24 +1,21 @@
-/target
-**/target
-*.swp
-*.swo
-*~
-.DS_Store
-.env
-.agents/
-*.png
-*.jpeg
-*.jpg
-!docs/**/*.png
 
+*~
+.agents/
+.cache/
 # Claude Code
 .claude/worktrees/
-
-# Reference repos for architecture research
-/tmp/
-
-# Nix / direnv
 .direnv/
-.cache/
+!docs/**/*.png
+.DS_Store
+.env
+*.jpeg
+*.jpg
+# Nix / direnv
+*.png
 result
+*.swo
+*.swp
+**/target
+/target
 /target/coverage/
+tmp/
