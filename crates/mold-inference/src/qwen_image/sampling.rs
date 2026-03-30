@@ -3,19 +3,22 @@
 //! Implements `FlowMatchEulerDiscreteScheduler` with dynamic exponential time shifting,
 //! matching the HuggingFace diffusers scheduler configuration for Qwen-Image.
 //!
-//! Key parameters from `scheduler_config.json`:
-//! - base_shift=0.5, max_shift=0.9
+//! Key parameters from the diffusers Qwen-Image pipeline:
+//! - base_shift=0.5, max_shift=1.15
 //! - shift_terminal=0.02
 //! - exponential time shift type
 //! - base_image_seq_len=256, num_train_timesteps=1000
 
 use candle_core::{Result, Tensor};
 
-/// Scheduler shift constants for Qwen-Image (from `scheduler_config.json`).
+/// Scheduler shift constants for Qwen-Image.
+///
+/// These match the defaults used by diffusers' `pipeline_qwenimage.py`
+/// `calculate_shift()` helper.
 pub(crate) const BASE_IMAGE_SEQ_LEN: usize = 256;
-pub(crate) const MAX_IMAGE_SEQ_LEN: usize = 8192;
+pub(crate) const MAX_IMAGE_SEQ_LEN: usize = 4096;
 pub(crate) const BASE_SHIFT: f64 = 0.5;
-pub(crate) const MAX_SHIFT: f64 = 0.9;
+pub(crate) const MAX_SHIFT: f64 = 1.15;
 pub(crate) const SHIFT_TERMINAL: f64 = 0.02;
 pub(crate) const NUM_TRAIN_TIMESTEPS: usize = 1000;
 
@@ -110,9 +113,12 @@ impl QwenImageScheduler {
 
     /// Get the current timestep for model input.
     ///
-    /// The diffusers `pipeline_qwenimage.py` computes `timesteps = sigmas * 1000` then
-    /// passes `timestep / 1000` to the transformer — so the model receives raw sigma ∈ [0, 1].
-    /// The `QwenImageTransformer2DModel` sinusoidal embedding operates directly on sigma.
+    /// Diffusers stores scheduler timesteps as `sigmas * 1000`, then divides by 1000 before
+    /// calling the transformer because `QwenTimestepProjEmbeddings` multiplies by 1000
+    /// internally via `Timesteps(..., scale=1000)`.
+    ///
+    /// Our Rust embedding omits that internal `scale=1000`, so we keep the equivalent
+    /// convention here and feed the transformer `sigma * 1000` directly.
     pub fn current_timestep(&self) -> f64 {
         self.sigmas[self.step_index] * NUM_TRAIN_TIMESTEPS as f64
     }
@@ -220,5 +226,14 @@ mod tests {
         for w in scheduler.sigmas.windows(2) {
             assert!(w[0] >= w[1], "sigmas should be monotonically decreasing");
         }
+    }
+
+    #[test]
+    fn current_timestep_uses_prescaled_sigma_for_qwen_embedding() {
+        let scheduler = QwenImageScheduler::new(20, 0.7);
+        assert!(
+            (scheduler.current_timestep() - scheduler.sigmas[0] * NUM_TRAIN_TIMESTEPS as f64).abs()
+                < 1e-10
+        );
     }
 }

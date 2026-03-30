@@ -17,7 +17,7 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::{linear, linear_no_bias, VarBuilder};
 use candle_transformers::models::with_tracing::RmsNorm;
 use candle_transformers::models::z_image::transformer::{
-    apply_rotary_emb, create_coordinate_grid, patchify, unpatchify, FeedForward, RopeEmbedder,
+    apply_rotary_emb, create_coordinate_grid, FeedForward, RopeEmbedder,
 };
 
 // ==================== Layer Norm (No Params) ====================
@@ -683,7 +683,7 @@ impl QwenImageTransformer2DModel {
     ///
     /// # Arguments
     /// * `x` - Latent tensor (B, C, H, W) where C=16
-    /// * `t` - Timestep tensor (B,) — raw timestep values from scheduler
+    /// * `t` - Timestep tensor (B,) — Qwen pre-scaled sigma values (`sigma * 1000`)
     /// * `encoder_hidden_states` - Text encoder output (B, text_len, 3584)
     ///
     /// # Returns
@@ -702,10 +702,16 @@ impl QwenImageTransformer2DModel {
         // 1. Timestep embedding -> (B, inner_dim)
         let temb = self.time_embed.forward(t)?;
 
-        // 2. Patchify image: (B, C, H, W) -> (B, C, 1, H, W) -> patchify -> (B, num_patches, patch_dim)
-        let x_5d = x.unsqueeze(2)?;
-        let (x_patches, orig_size) = patchify(&x_5d, patch_size, 1)?;
-        let img_hidden = x_patches.apply(&self.img_in)?; // (B, img_seq, inner_dim)
+        // 2. Pack latents like diffusers `_pack_latents`:
+        //    (B, C, H, W) -> (B, (H/p)*(W/p), C*p*p)
+        let hp = h / patch_size;
+        let wp = w / patch_size;
+        let x_packed = x
+            .reshape((_b, _c, hp, patch_size, wp, patch_size))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((_b, hp * wp, _c * patch_size * patch_size))?
+            .contiguous()?;
+        let img_hidden = x_packed.apply(&self.img_in)?;
 
         // 3. Text embedding: norm + project
         let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
@@ -754,8 +760,13 @@ impl QwenImageTransformer2DModel {
         // 6. Output layer (image only)
         let img_out = self.output_layer.forward(&img, &temb)?;
 
-        // 7. Unpatchify: (B, num_patches, patch_dim) -> (B, C, 1, H, W) -> squeeze -> (B, C, H, W)
-        let x_out = unpatchify(&img_out, orig_size, patch_size, 1, self.cfg.out_channels)?;
-        x_out.squeeze(2)
+        // 7. Unpack latents like diffusers `_unpack_latents`:
+        //    (B, (H/p)*(W/p), out_channels*p*p) -> (B, out_channels, H, W)
+        let x_out = img_out
+            .reshape((_b, hp, wp, self.cfg.out_channels, patch_size, patch_size))?
+            .permute((0, 3, 1, 4, 2, 5))?
+            .reshape((_b, self.cfg.out_channels, h, w))?
+            .contiguous()?;
+        Ok(x_out)
     }
 }
