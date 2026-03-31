@@ -420,9 +420,11 @@ impl Progress for CallbackProgress {
     }
 }
 
-/// Check if a file is already placed at its clean path with the expected size
-/// and passes integrity verification (if a SHA-256 hash is available).
-/// Used to skip re-downloading files that succeeded in a previous (partial) pull.
+/// Returns `true` if the file already exists at `clean_path` with the correct
+/// size and (if a SHA-256 is available) the correct digest.
+///
+/// **Side-effect**: if the file exists with matching size but failing integrity,
+/// `verify_file_integrity` will delete the corrupted file before returning `false`.
 fn is_already_placed(
     clean_path: &std::path::Path,
     file: &ModelFile,
@@ -524,18 +526,31 @@ pub async fn pull_model_with_callback(
 
     let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
-    let total_files = manifest.files.len();
 
-    for (idx, file) in manifest.files.iter().enumerate() {
-        // Skip files already at their clean path with correct size (resume after partial failure)
+    // Pre-compute which files need downloading so callback indices are sequential
+    let files_to_download: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .collect();
+    let total_to_download = files_to_download.len();
+    let mut download_idx = 0;
+
+    for file in &manifest.files {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
+
+        // Skip files already at their clean path (resume after partial failure)
         if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
             downloads.push((file.component, clean_path));
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
@@ -620,17 +635,29 @@ async fn pull_model_files_only_with_callback(
     let api = builder.build()?;
 
     let mdir = models_dir();
-    let total_files = manifest.files.len();
 
-    for (idx, file) in manifest.files.iter().enumerate() {
-        // Skip files already at their clean path with correct size (resume after partial failure)
+    // Pre-compute which files need downloading so callback indices are sequential
+    let total_to_download = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .count();
+    let mut download_idx = 0;
+
+    for file in &manifest.files {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
+
+        // Skip files already at their clean path (resume after partial failure)
         if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
