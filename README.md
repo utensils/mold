@@ -429,7 +429,9 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
-### Qwen-Image
+### Qwen-Image (alpha)
+
+> **Note**: Qwen-Image is partially working and still in active alpha development. Results may vary.
 
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
