@@ -23,10 +23,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
-use super::sampling::{
-    calculate_shift, QwenImageScheduler, BASE_IMAGE_SEQ_LEN, BASE_SHIFT, MAX_IMAGE_SEQ_LEN,
-    MAX_SHIFT,
-};
+use super::sampling::{QwenImageScheduler, DEFAULT_SHIFT};
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
 use super::vae::QwenImageVae;
 use crate::cache::{
@@ -558,22 +555,13 @@ impl QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        let patch_size = transformer_cfg.patch_size;
-        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
-            image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
-        );
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
 
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
-
-        // Use BF16 for quantized path — matches Flux2 GGUF approach.
-        // F32 latents + BF16 dequantized weights cause activation explosion over 60 blocks.
+        // Initial noise scaled by sigma[0] — matches ComfyUI's CONST noise scaling.
+        // For txt2img: initial_sample = sigma[0] * randn()
         let mut latents =
             crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+        latents = (latents * scheduler.initial_sigma())?;
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
@@ -582,8 +570,8 @@ impl QwenImageEngine {
 
         if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
             eprintln!(
-                "[qwen-debug] cfg={} guidance={:.1} mu={:.4} sigmas[0]={:.4} sigmas[last]={:.4}",
-                use_cfg, req.guidance, mu, scheduler.sigmas[0], scheduler.sigmas[num_steps],
+                "[qwen-debug] cfg={} guidance={:.1} shift={:.2} sigmas[0]={:.4} sigmas[last]={:.4}",
+                use_cfg, req.guidance, DEFAULT_SHIFT, scheduler.sigmas[0], scheduler.sigmas[num_steps],
             );
         }
 
@@ -849,27 +837,17 @@ impl InferenceEngine for QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        // 4. Calculate scheduler shift
-        let patch_size = loaded.transformer_cfg.patch_size;
-        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
-            image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
-        );
+        // 4. Initialize scheduler (ComfyUI-style SNR shift)
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
 
-        // 5. Initialize scheduler
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
-
-        // 6. Generate initial noise (BF16 for quantized, matching Flux2 GGUF approach)
+        // 5. Generate initial noise scaled by sigma[0] (ComfyUI CONST noise scaling)
         let mut latents = crate::engine::seeded_randn(
             seed,
             &[1, 16, latent_h, latent_w],
             &loaded.device,
             loaded.dtype,
         )?;
+        latents = (latents * scheduler.initial_sigma())?;
 
         // 7. Denoising loop
         let num_steps = req.steps as usize;
