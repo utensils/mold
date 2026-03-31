@@ -87,3 +87,21 @@
 .dark .gallery-grid img:hover {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
+
+.gallery-grid figure {
+  margin: 0;
+  text-align: center;
+}
+
+.gallery-grid figure strong {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.85em;
+  color: var(--vp-c-brand-1);
+}
+
+.gallery-grid figure em {
+  display: block;
+  font-size: 0.85em;
+  color: var(--vp-c-text-2);
+  margin-top: 0.25rem;
+}

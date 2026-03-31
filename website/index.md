@@ -72,18 +72,56 @@ mold run "neon cityscape" | viu -
 
 ## Gallery
 
+All images generated locally with mold — click any to see the model and prompt.
+
 <div class="gallery-grid">
+<figure>
 
 ![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
+**flux-schnell:q8** — 4 steps, seed 42 _"A majestic snow leopard perched on a
+Himalayan cliff at golden hour, cinematic lighting, photorealistic"_
+
+</figure>
+<figure>
+
 ![Tea house — FLUX Dev](/gallery/flux-dev-teahouse.png)
+
+**flux-dev:q4** — 25 steps, seed 1337 _"A cozy Japanese tea house interior with
+warm lantern light, steam rising from ceramic cups, watercolor style"_
+
+</figure>
+<figure>
 
 ![Astronaut — Z-Image Turbo](/gallery/zimage-astronaut.png)
 
+**z-image-turbo:q8** — 9 steps, seed 777 _"An astronaut floating through a
+bioluminescent underwater cave, reflections on the helmet visor, science fiction
+art"_
+
+</figure>
+<figure>
+
 ![Clocktower — SD 3.5](/gallery/sd35-clocktower.png)
+
+**sd3.5-large:q8** — 28 steps, seed 2024 _"A steampunk clocktower in a Victorian
+city at sunset, gears and cogs visible through glass walls, dramatic clouds"_
+
+</figure>
+<figure>
 
 ![Street market — SDXL Turbo](/gallery/sdxl-turbo-market.png)
 
+**sdxl-turbo:fp16** — 4 steps, seed 88 _"A vibrant street food market in Bangkok
+at night, neon signs, steam from woks, bustling crowd"_
+
+</figure>
+<figure>
+
 ![Fantasy castle — DreamShaper v8](/gallery/sd15-castle.png)
 
+**dreamshaper-v8:fp16** (SD 1.5) — 25 steps, seed 555 _"A fantasy castle perched
+on floating islands above clouds, magical waterfalls, ethereal glow"_
+
+</figure>
 </div>
