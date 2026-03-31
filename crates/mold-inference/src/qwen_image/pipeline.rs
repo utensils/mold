@@ -61,6 +61,7 @@ struct LoadedQwenImage {
     /// Device where the VAE lives (may be CPU if VRAM is tight)
     vae_device: Device,
     dtype: DType,
+    #[allow(dead_code)]
     transformer_is_quantized: bool,
 }
 
@@ -581,8 +582,7 @@ impl QwenImageEngine {
         for step in 0..num_steps {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
-            let t_tensor =
-                Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+            let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
             let noise_pred = if use_cfg {
                 let cond_pred = transformer.forward(
                     &latents,
@@ -615,8 +615,17 @@ impl QwenImageEngine {
             }
             latents = scheduler.step(&noise_pred, &latents)?;
             if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
-                let n = latents.ne(&latents)?.to_dtype(candle_core::DType::U32)?.sum_all()?.to_scalar::<u32>()?;
-                if n > 0 { eprintln!("[qwen-nan] NaN in latents AFTER step {step}: {n}/{}", latents.elem_count()); }
+                let n = latents
+                    .ne(&latents)?
+                    .to_dtype(candle_core::DType::U32)?
+                    .sum_all()?
+                    .to_scalar::<u32>()?;
+                if n > 0 {
+                    eprintln!(
+                        "[qwen-nan] NaN in latents AFTER step {step}: {n}/{}",
+                        latents.elem_count()
+                    );
+                }
             }
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,

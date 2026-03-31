@@ -23,7 +23,8 @@ fn linear_safe(linear: &Linear, x: &Tensor) -> Result<Tensor> {
     let threshold = Tensor::new(f32::MAX, out.device())?.broadcast_as(abs_out.shape())?;
     let is_inf = abs_out.gt(&threshold)?;
     // Combined mask: NaN or inf
-    let bad = (is_nan.to_dtype(DType::U8)? + is_inf.to_dtype(DType::U8)?)?.gt(&Tensor::zeros_like(&is_nan)?.to_dtype(DType::U8)?)?;
+    let bad = (is_nan.to_dtype(DType::U8)? + is_inf.to_dtype(DType::U8)?)?
+        .gt(&Tensor::zeros_like(&is_nan)?.to_dtype(DType::U8)?)?;
     let zero = Tensor::zeros_like(&out)?;
     bad.where_cond(&zero, &out)
 }
@@ -215,19 +216,43 @@ impl JointAttention {
         let (b, _, _) = img_hidden.dims3()?;
         let txt_seq_len = txt_hidden.dim(1)?;
 
-        let q_img = linear_safe(&self.to_q, img_hidden)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let k_img = linear_safe(&self.to_k, img_hidden)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
-        let v_img = linear_safe(&self.to_v, img_hidden)?
-            .reshape((b, img_seq_len, self.n_heads, self.head_dim))?;
+        let q_img = linear_safe(&self.to_q, img_hidden)?.reshape((
+            b,
+            img_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let k_img = linear_safe(&self.to_k, img_hidden)?.reshape((
+            b,
+            img_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let v_img = linear_safe(&self.to_v, img_hidden)?.reshape((
+            b,
+            img_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
 
-        let q_txt = linear_safe(&self.add_q_proj, txt_hidden)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let k_txt = linear_safe(&self.add_k_proj, txt_hidden)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
-        let v_txt = linear_safe(&self.add_v_proj, txt_hidden)?
-            .reshape((b, txt_seq_len, self.n_heads, self.head_dim))?;
+        let q_txt = linear_safe(&self.add_q_proj, txt_hidden)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let k_txt = linear_safe(&self.add_k_proj, txt_hidden)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
+        let v_txt = linear_safe(&self.add_v_proj, txt_hidden)?.reshape((
+            b,
+            txt_seq_len,
+            self.n_heads,
+            self.head_dim,
+        ))?;
 
         let (q_img, k_img) = self.qk_norm.forward(&q_img, &k_img)?;
         let (q_txt, k_txt) = self.added_qk_norm.forward(&q_txt, &k_txt)?;
@@ -376,9 +401,11 @@ impl QwenImageTransformerBlock {
         // QMatMul requires F32 but the model was trained in BF16; rounding after each
         // residual prevents activation growth that occurs in pure F32.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?
-            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+            .to_dtype(DType::BF16)?
+            .to_dtype(DType::F32)?;
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+            .to_dtype(DType::BF16)?
+            .to_dtype(DType::F32)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -390,10 +417,14 @@ impl QwenImageTransformerBlock {
             .forward(&txt_hidden)?
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
-        let img_hidden = (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?
-            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
-        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        let img_hidden = (img_hidden
+            + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?
+        .to_dtype(DType::BF16)?
+        .to_dtype(DType::F32)?;
+        let txt_hidden = (txt_hidden
+            + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+        .to_dtype(DType::BF16)?
+        .to_dtype(DType::F32)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -417,11 +448,15 @@ impl OutputLayer {
         // Dequantize to standard F32 linear — these weights are BF16 in the GGUF
         // and candle's QMatMul produces NaN for certain F32 input × BF16 weight combos.
         let adaln_vb = vb.pp("norm_out").pp("linear");
-        let adaln_w = adaln_vb.get((2 * inner_dim, inner_dim), "weight")?.dequantize(device)?;
+        let adaln_w = adaln_vb
+            .get((2 * inner_dim, inner_dim), "weight")?
+            .dequantize(device)?;
         let adaln_b = adaln_vb.get(2 * inner_dim, "bias")?.dequantize(device)?;
 
         let proj_vb = vb.pp("proj_out");
-        let proj_w = proj_vb.get((output_dim, inner_dim), "weight")?.dequantize(device)?;
+        let proj_w = proj_vb
+            .get((output_dim, inner_dim), "weight")?
+            .dequantize(device)?;
         let proj_b = proj_vb.get(output_dim, "bias")?.dequantize(device)?;
 
         Ok(Self {
@@ -471,9 +506,13 @@ impl QuantizedQwenImageTransformer2DModel {
         // Dequantize img_in to standard F32 linear — its weight is BF16 in the GGUF
         // and candle's QMatMul produces NaN for certain F32 input ranges with BF16 weights.
         // img_in is small (64→3072 = 768KB) so the VRAM cost is negligible.
-        let img_in_w = vb.pp("img_in").get((cfg.inner_dim, cfg.in_channels), "weight")?
+        let img_in_w = vb
+            .pp("img_in")
+            .get((cfg.inner_dim, cfg.in_channels), "weight")?
             .dequantize(&device)?;
-        let img_in_b = vb.pp("img_in").get(cfg.inner_dim, "bias")?
+        let img_in_b = vb
+            .pp("img_in")
+            .get(cfg.inner_dim, "bias")?
             .dequantize(&device)?;
         let img_in = candle_nn::Linear::new(img_in_w, Some(img_in_b));
 
@@ -494,7 +533,13 @@ impl QuantizedQwenImageTransformer2DModel {
                 &device,
                 DType::F32,
             )?,
-            output_layer: OutputLayer::new(cfg.inner_dim, cfg.out_channels, cfg.patch_size, vb, &device)?,
+            output_layer: OutputLayer::new(
+                cfg.inner_dim,
+                cfg.out_channels,
+                cfg.patch_size,
+                vb,
+                &device,
+            )?,
             cfg: cfg.clone(),
         })
     }

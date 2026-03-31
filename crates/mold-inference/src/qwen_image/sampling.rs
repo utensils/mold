@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn calculate_shift_1024x1024() {
-        // 1024x1024 -> latent 128x128 -> patches 64x64 = 4096 seq_len
+        // 1024x1024 -> latent 128x128 -> patches 64x64 = 4096 seq_len = MAX_IMAGE_SEQ_LEN
         let mu = calculate_shift(
             4096,
             BASE_IMAGE_SEQ_LEN,
@@ -188,7 +188,7 @@ mod tests {
             MAX_SHIFT,
         );
         assert!(mu > BASE_SHIFT);
-        assert!(mu < MAX_SHIFT);
+        assert!((mu - MAX_SHIFT).abs() < 1e-10); // 4096 == MAX_IMAGE_SEQ_LEN → mu == MAX_SHIFT
     }
 
     #[test]
