@@ -61,8 +61,6 @@ struct LoadedQwenImage {
     /// Device where the VAE lives (may be CPU if VRAM is tight)
     vae_device: Device,
     dtype: DType,
-    #[allow(dead_code)]
-    transformer_is_quantized: bool,
 }
 
 #[allow(clippy::large_enum_variant)] // both variants heap-allocate (Vec<Block>)
@@ -421,7 +419,6 @@ impl QwenImageEngine {
             device,
             vae_device,
             dtype,
-            transformer_is_quantized,
         });
 
         tracing::info!(model = %self.base.model_name, "all Qwen-Image components loaded");
@@ -588,29 +585,38 @@ impl QwenImageEngine {
             );
         }
 
+        // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
+        // Each forward pass streams 60 blocks CPU→GPU; batching cond+uncond avoids
+        // doing that twice per step.
+        let (batched_hs, batched_mask) = if use_cfg {
+            let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
+            let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
+            (hs, mask)
+        } else {
+            (
+                encoder_hidden_states.clone(),
+                encoder_attention_mask.clone(),
+            )
+        };
+
         for step in 0..num_steps {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
-            let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
             let noise_pred = if use_cfg {
-                let cond_pred = transformer.forward(
-                    &latents,
-                    &t_tensor,
-                    &encoder_hidden_states,
-                    &encoder_attention_mask,
-                )?;
-                let uncond_pred = transformer.forward(
-                    &latents,
-                    &t_tensor,
-                    uncond_hs.as_ref().unwrap(),
-                    uncond_mask.as_ref().unwrap(),
-                )?;
+                let t_tensor =
+                    Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
+                let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                let batched_pred =
+                    transformer.forward(&batched_latents, &t_tensor, &batched_hs, &batched_mask)?;
+                let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                let uncond_pred = batched_pred.narrow(0, 1, 1)?;
                 if step == 0 {
                     Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
                     Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
                 }
                 (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
             } else {
+                let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
                 transformer.forward(
                     &latents,
                     &t_tensor,
@@ -873,26 +879,38 @@ impl InferenceEngine for QwenImageEngine {
                 .as_ref()
                 .expect("transformer must be loaded for denoising");
 
+            // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
+            let (batched_hs, batched_mask) = if use_cfg {
+                let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
+                let mask =
+                    Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
+                (hs, mask)
+            } else {
+                (
+                    encoder_hidden_states.clone(),
+                    encoder_attention_mask.clone(),
+                )
+            };
+
             for step in 0..num_steps {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
-                let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
-                    .to_dtype(loaded.dtype)?;
                 let noise_pred = if use_cfg {
-                    let cond_pred = transformer.forward(
-                        &latents,
+                    let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?;
+                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                    let batched_pred = transformer.forward(
+                        &batched_latents,
                         &t_tensor,
-                        &encoder_hidden_states,
-                        &encoder_attention_mask,
+                        &batched_hs,
+                        &batched_mask,
                     )?;
-                    let uncond_pred = transformer.forward(
-                        &latents,
-                        &t_tensor,
-                        uncond_hs.as_ref().unwrap(),
-                        uncond_mask.as_ref().unwrap(),
-                    )?;
+                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
                     (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
                 } else {
+                    let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?;
                     transformer.forward(
                         &latents,
                         &t_tensor,

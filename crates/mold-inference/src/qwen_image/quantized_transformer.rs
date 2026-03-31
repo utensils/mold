@@ -12,7 +12,7 @@ use candle_transformers::quantized_var_builder::VarBuilder;
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
-const ROPE_CACHE_LEN: usize = 4096;
+pub(crate) const ROPE_CACHE_LEN: usize = 4096;
 
 fn dequant_tensor(vb: &VarBuilder, name: &str, dtype: DType, target: &Device) -> Result<Tensor> {
     vb.get_no_shape(name)?
@@ -76,7 +76,8 @@ impl Module for LayerNormNoParams {
     }
 }
 
-struct QwenRopeEmbedder {
+#[derive(Debug, Clone)]
+pub(crate) struct QwenRopeEmbedder {
     axes_dims: Vec<usize>,
     axis_half_dims: Vec<usize>,
     axis_offsets: Vec<usize>,
@@ -88,7 +89,12 @@ struct QwenRopeEmbedder {
 }
 
 impl QwenRopeEmbedder {
-    fn new(theta: f64, axes_dims: Vec<usize>, cpu_device: &Device, dtype: DType) -> Result<Self> {
+    pub(crate) fn new(
+        theta: f64,
+        axes_dims: Vec<usize>,
+        cpu_device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
         let mut axis_half_dims = Vec::with_capacity(axes_dims.len());
         let mut axis_offsets = Vec::with_capacity(axes_dims.len());
         let mut running_offset = 0;
@@ -191,7 +197,7 @@ impl QwenRopeEmbedder {
         tensor.to_device(device)?.to_dtype(self.dtype)
     }
 
-    fn forward(
+    pub(crate) fn forward(
         &self,
         frame: usize,
         height: usize,

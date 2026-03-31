@@ -16,9 +16,9 @@
 use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::{linear, linear_no_bias, VarBuilder};
 use candle_transformers::models::with_tracing::RmsNorm;
-use candle_transformers::models::z_image::transformer::{
-    apply_rotary_emb, create_coordinate_grid, FeedForward, RopeEmbedder,
-};
+use candle_transformers::models::z_image::transformer::{apply_rotary_emb, FeedForward};
+
+use super::quantized_transformer::QwenRopeEmbedder;
 
 // ==================== Layer Norm (No Params) ====================
 
@@ -616,8 +616,8 @@ pub(crate) struct QwenImageTransformer2DModel {
     txt_norm: RmsNorm,
     /// Transformer blocks
     blocks: Vec<QwenImageTransformerBlock>,
-    /// RoPE embedder for 3D positional encoding
-    rope_embedder: RopeEmbedder,
+    /// RoPE embedder for 3D positional encoding (centered positions, scale_rope=True)
+    rope_embedder: QwenRopeEmbedder,
     /// Output layer
     output_layer: OutputLayer,
     /// Configuration
@@ -652,16 +652,11 @@ impl QwenImageTransformer2DModel {
             blocks.push(QwenImageTransformerBlock::new(cfg, vb_blocks.pp(i))?);
         }
 
-        // 3D RoPE embedder
-        // axes_lens = axes_dims_rope values used as max sequence lengths per axis
-        let axes_lens = vec![2048, 2048, 2048];
-        let rope_embedder = RopeEmbedder::new(
-            10000.0, // rope_theta
-            cfg.axes_dims_rope.clone(),
-            axes_lens,
-            device,
-            dtype,
-        )?;
+        // 3D RoPE embedder with Qwen centered positions (scale_rope=True).
+        // Uses negative+positive frequency tables for height/width (centered),
+        // positive-only for temporal axis.
+        let rope_embedder =
+            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), device, dtype)?;
 
         // Output layer
         let output_layer =
@@ -722,22 +717,14 @@ impl QwenImageTransformer2DModel {
             .apply(&self.txt_in)?
             .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?)?;
 
-        // 4. Create position IDs and RoPE embeddings for image tokens
+        // 4. RoPE embeddings: centered positions for image (scale_rope=True),
+        //    offset-based for text.
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
-        let img_pos_ids = create_coordinate_grid((1, h_tokens, w_tokens), (0, 0, 0), device)?;
-        let (img_cos, img_sin) = self.rope_embedder.forward(&img_pos_ids)?;
         let txt_seq_len = encoder_hidden_states.dim(1)?;
-        let txt_offset = h_tokens.max(w_tokens) as u32;
-        let mut txt_coords = Vec::with_capacity(txt_seq_len * 3);
-        for i in 0..txt_seq_len {
-            let pos = txt_offset + i as u32;
-            txt_coords.push(pos);
-            txt_coords.push(pos);
-            txt_coords.push(pos);
-        }
-        let txt_pos_ids = Tensor::from_vec(txt_coords, (txt_seq_len, 3), device)?;
-        let (txt_cos, txt_sin) = self.rope_embedder.forward(&txt_pos_ids)?;
+        let (img_cos, img_sin, txt_cos, txt_sin) =
+            self.rope_embedder
+                .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
 
         // 5. Process through all transformer blocks
         let mut img = img_hidden;
