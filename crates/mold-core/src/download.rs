@@ -420,6 +420,28 @@ impl Progress for CallbackProgress {
     }
 }
 
+/// Returns `true` if the file already exists at `clean_path` with the correct
+/// size and (if a SHA-256 is available) the correct digest.
+///
+/// **Side-effect**: if the file exists with matching size but failing integrity,
+/// `verify_file_integrity` will delete the corrupted file before returning `false`.
+fn is_already_placed(
+    clean_path: &std::path::Path,
+    file: &ModelFile,
+    model_name: &str,
+    skip_verify: bool,
+) -> bool {
+    let size_ok = clean_path
+        .metadata()
+        .map(|m| m.len() == file.size_bytes)
+        .unwrap_or(false);
+    if !size_ok {
+        return false;
+    }
+    // Verify integrity — a same-size but corrupted file must not be accepted
+    verify_file_integrity(clean_path, file, model_name, skip_verify).is_ok()
+}
+
 /// Download all files for a model manifest, returning resolved paths.
 ///
 /// Downloads go to a hidden hf-hub cache (`.hf-cache/`) for resume/dedup support,
@@ -453,6 +475,14 @@ pub async fn pull_model(
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
     for file in &manifest.files {
+        // Skip files already at their clean path with correct size (resume after partial failure)
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+            downloads.push((file.component, clean_path));
+            continue;
+        }
+
         let bar = multi.add(ProgressBar::new(file.size_bytes));
         bar.set_style(bar_style.clone());
         bar.set_message(truncate_filename(&file.hf_filename, msg_width));
@@ -466,8 +496,6 @@ pub async fn pull_model(
         .await?;
 
         // Place at clean path via hardlink (or copy as fallback)
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
@@ -498,15 +526,34 @@ pub async fn pull_model_with_callback(
 
     let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
-    let total_files = manifest.files.len();
 
-    for (idx, file) in manifest.files.iter().enumerate() {
-        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+    // Pre-compute which files need downloading so callback indices are sequential
+    let files_to_download: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .collect();
+    let total_to_download = files_to_download.len();
+    let mut download_idx = 0;
+
+    for file in &manifest.files {
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+
+        // Skip files already at their clean path (resume after partial failure)
+        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+            downloads.push((file.component, clean_path));
+            continue;
+        }
+
+        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
@@ -545,6 +592,13 @@ async fn pull_model_files_only(
     let mdir = models_dir();
 
     for file in &manifest.files {
+        // Skip files already at their clean path with correct size (resume after partial failure)
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+            continue;
+        }
+
         let bar = multi.add(ProgressBar::new(file.size_bytes));
         bar.set_style(bar_style.clone());
         bar.set_message(truncate_filename(&file.hf_filename, msg_width));
@@ -557,8 +611,6 @@ async fn pull_model_files_only(
         )
         .await?;
 
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
@@ -583,15 +635,32 @@ async fn pull_model_files_only_with_callback(
     let api = builder.build()?;
 
     let mdir = models_dir();
-    let total_files = manifest.files.len();
 
-    for (idx, file) in manifest.files.iter().enumerate() {
-        let progress = CallbackProgress::new(callback.clone(), idx, total_files);
+    // Pre-compute which files need downloading so callback indices are sequential
+    let total_to_download = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .count();
+    let mut download_idx = 0;
+
+    for file in &manifest.files {
+        let clean_rel = crate::manifest::storage_path(manifest, file);
+        let clean_path = mdir.join(&clean_rel);
+
+        // Skip files already at their clean path (resume after partial failure)
+        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+            continue;
+        }
+
+        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
