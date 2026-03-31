@@ -435,15 +435,20 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 |-------|-------|------|-------|
 | `wuerstchen-v2:fp16` | 60 | 5.6GB | 3-stage cascade with 42x latent compression, includes default negative prompt |
 
-### Flux.2 / Qwen-Image (alpha, improving on CUDA/MPS)
+### Flux.2 Klein (fast + lightweight)
 
-> **Warning**: These model families are still in active alpha development. Results vary by backend and may be better on CUDA than Apple Silicon (MPS/Metal).
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `flux2-klein:q8` | 4 | 4.3GB | Fast 4B model, good quality at low VRAM |
+| `flux2-klein:q4` | 4 | 2.6GB | Smallest FLUX variant |
+| `flux2-klein:bf16` | 4 | 7.8GB | Full precision 4B |
+
+### Qwen-Image (alpha)
+
+> **Note**: Qwen-Image is still in active alpha development. Results may vary by backend.
 
 | Model | Steps | Size | Notes |
 |-------|-------|------|-------|
-| `flux2-klein:q8` | 4 | 4.3GB | Alpha Flux.2 Klein 4B Q8, actively being improved |
-| `flux2-klein:q4` | 4 | 2.6GB | Alpha Flux.2 Klein 4B Q4, smaller footprint |
-| `flux2-klein:bf16` | 4 | 7.8GB | Alpha Flux.2 Klein 4B BF16, backend-dependent output quality |
 | `qwen-image:q8` | 28 | 21.8GB | Alpha Qwen-Image-2512, actively being improved |
 | `qwen-image:q4` | 28 | 12.3GB | Alpha Qwen-Image, smallest footprint |
 
