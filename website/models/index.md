@@ -14,6 +14,22 @@ and VRAM requirements.
 | Fast + great      | `z-image-turbo:q8`              | 9 steps, excellent quality     |
 | SDXL              | `sdxl-turbo:fp16`               | 4 steps, 1024x1024             |
 
+<div class="gallery-grid">
+
+![FLUX Schnell — 4 steps](/gallery/flux-schnell-leopard.png)
+
+![FLUX Dev Q4 — 25 steps](/gallery/flux-dev-teahouse.png)
+
+![Z-Image Turbo — 9 steps](/gallery/zimage-astronaut.png)
+
+![SD 3.5 Large — 28 steps](/gallery/sd35-clocktower.png)
+
+![SDXL Turbo — 4 steps](/gallery/sdxl-turbo-market.png)
+
+![DreamShaper v8 — 25 steps](/gallery/sd15-castle.png)
+
+</div>
+
 ## Model Management
 
 ```bash

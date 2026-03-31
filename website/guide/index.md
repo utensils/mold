@@ -21,6 +21,8 @@ mold tries to connect to a running `mold serve` instance first. If no server is
 available, it falls back to local GPU inference — auto-downloading the model if
 needed.
 
+![Tea house — generated with FLUX Dev Q4](/gallery/flux-dev-teahouse.png)
+
 ## Quick Start
 
 ```bash

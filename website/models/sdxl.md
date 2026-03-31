@@ -22,6 +22,16 @@ and classifier-free guidance.
 - **Guidance**: 7.5 (0.0 for turbo)
 - **Scheduler**: DDIM (also supports euler-ancestral, uni-pc)
 
+## Example
+
+**SDXL Turbo** — 4 steps, seed 88:
+
+```bash
+mold run sdxl-turbo:fp16 "A vibrant street food market in Bangkok at night, neon signs, steam from woks, bustling crowd" --seed 88
+```
+
+![Street market — SDXL Turbo](/gallery/sdxl-turbo-market.png)
+
 ## Negative Prompts
 
 SDXL uses classifier-free guidance — negative prompts have a strong effect:

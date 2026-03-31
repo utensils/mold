@@ -5,10 +5,12 @@
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
 <p align="center">
-  <img src="docs/mold.png" alt="mold logo" width="256">
+  <img src="docs/mold-transparent.png" alt="mold logo" width="256">
 </p>
 
 Generate images from text on your own GPU. No cloud, no Python, no fuss.
+
+**[Documentation](https://utensils.github.io/mold/)** | **[Getting Started](https://utensils.github.io/mold/guide/)** | **[Models](https://utensils.github.io/mold/models/)** | **[API](https://utensils.github.io/mold/api/)**
 
 ```bash
 mold run "a cat riding a motorcycle through neon-lit streets"

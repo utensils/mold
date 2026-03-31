@@ -25,6 +25,10 @@ mold run "abstract art" --batch 4 --seed 100
 mold run "a sunset" --format jpeg -o sunset.jpg
 ```
 
+Here's what that looks like — FLUX Schnell Q8, seed 42:
+
+![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
+
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,

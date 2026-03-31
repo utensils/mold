@@ -17,6 +17,16 @@ requirements.
 - **Guidance**: 0.0
 - **Steps**: 4
 
+## Example
+
+**Flux.2 Klein Q8** — 4 steps, seed 100:
+
+```bash
+mold run flux2-klein:q8 "A minimalist zen garden with raked sand patterns, a single cherry blossom tree, morning mist" --seed 100
+```
+
+![Zen garden — Flux.2 Klein](/gallery/flux2-klein-zen.png)
+
 ## Architecture
 
 Flux.2 Klein uses a Qwen3 text encoder (BF16 or GGUF, layers 9/18/27), a shared
