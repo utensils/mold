@@ -342,7 +342,7 @@ impl Qwen2TextModel {
         mask.where_cond(&on_true, &on_false).map_err(Into::into)
     }
 
-    fn forward_penultimate(
+    fn forward_last_hidden(
         &self,
         input_ids: &Tensor,
         attn_mask: Option<&Tensor>,
@@ -360,7 +360,10 @@ impl Qwen2TextModel {
         };
 
         let mut xs = self.embed_tokens.forward(input_ids)?;
-        let target_layer = self.layers.len().saturating_sub(2);
+        // Return the LAST hidden layer output (hidden_states[-1]),
+        // matching diffusers pipeline_qwenimage.py line 210.
+        // Previously used penultimate (layer N-2) which was wrong.
+        let target_layer = self.layers.len().saturating_sub(1);
         for (idx, layer) in self.layers.iter().enumerate() {
             xs = layer.forward(&xs, attention_mask.as_ref(), 0)?;
             if idx == target_layer {
@@ -502,7 +505,7 @@ impl Qwen2TextEncoder {
         }
         let attn_mask = Tensor::from_vec(mask, (1, TEXT_WINDOW + drop_idx), &self.device)?;
 
-        let emb = model.forward_penultimate(&input_ids, Some(&attn_mask))?;
+        let emb = model.forward_last_hidden(&input_ids, Some(&attn_mask))?;
         let emb = emb.narrow(1, drop_idx, TEXT_WINDOW)?;
 
         let mut text_mask = vec![0u8; TEXT_WINDOW];
