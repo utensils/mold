@@ -9,9 +9,12 @@ export default defineConfig({
 
   vite: {
     plugins: [tailwindcss()],
+    server: {
+      allowedHosts: true,
+    },
   },
 
-  head: [['link', { rel: 'icon', href: '/mold/favicon.svg' }]],
+  head: [['link', { rel: 'icon', href: '/mold/logo-transparent.png' }]],
 
   lastUpdated: true,
 
@@ -20,7 +23,7 @@ export default defineConfig({
   },
 
   themeConfig: {
-    logo: '/favicon.svg',
+    logo: '/logo-transparent.png',
 
     nav: [
       { text: 'Guide', link: '/guide/' },

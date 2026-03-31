@@ -8,7 +8,7 @@ hero:
     'FLUX, SD3.5, SDXL, SD 1.5, Z-Image, Flux.2 Klein & more — no cloud, no
     Python, no fuss.'
   image:
-    src: /logo.png
+    src: /logo-transparent.png
     alt: mold logo
   actions:
     - theme: brand
