@@ -72,10 +72,13 @@ impl QwenImageScheduler {
 
     /// Get the current timestep for model input.
     ///
-    /// ComfyUI with `ModelSamplingAuraFlow(multiplier=1.0)` feeds raw sigma
-    /// as the timestep, not sigma*1000.
+    /// Feed sigma×1000 as the timestep to match diffusers' convention.
+    ///
+    /// The model's `TimestepProjEmbeddings` sinusoidal embedding was trained
+    /// with sigma×1000 inputs. ComfyUI uses multiplier=1.0 but compensates
+    /// with different internal scaling — our embedding expects the ×1000 range.
     pub fn current_timestep(&self) -> f64 {
-        self.sigmas[self.step_index]
+        self.sigmas[self.step_index] * 1000.0
     }
 
     /// Get sigma[0] for initial noise scaling.
@@ -89,8 +92,11 @@ impl QwenImageScheduler {
 
     /// Euler step: advance the latent sample from x_t to x_{t-1}.
     ///
-    /// Uses the flow-matching Euler update:
+    /// Uses the flow-matching Euler update (velocity formulation):
     ///   x_{t-1} = x_t + (sigma_{t-1} - sigma_t) * model_output
+    ///
+    /// This is equivalent to ComfyUI's CONST + to_d formulation since
+    /// CONST computes `denoised = x - sigma * v`, making `to_d = v`.
     ///
     /// Upcasts to F32 for the step to prevent BF16 precision loss.
     pub fn step(&mut self, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
@@ -142,7 +148,11 @@ mod tests {
         // num_inference_steps + 1 sigmas (including terminal 0.0)
         assert_eq!(scheduler.sigmas.len(), 51);
         // First sigma should be close to 1.0
-        assert!(scheduler.sigmas[0] > 0.9, "sigma[0]={}", scheduler.sigmas[0]);
+        assert!(
+            scheduler.sigmas[0] > 0.9,
+            "sigma[0]={}",
+            scheduler.sigmas[0]
+        );
         // Last sigma should be 0.0
         assert_eq!(*scheduler.sigmas.last().unwrap(), 0.0);
         // Monotonically decreasing
@@ -152,16 +162,11 @@ mod tests {
     }
 
     #[test]
-    fn current_timestep_is_raw_sigma() {
+    fn current_timestep_is_sigma_times_1000() {
         let scheduler = QwenImageScheduler::new(50, DEFAULT_SHIFT);
-        // ComfyUI feeds raw sigma, not sigma*1000
         assert!(
-            (scheduler.current_timestep() - scheduler.sigmas[0]).abs() < 1e-10,
-            "current_timestep should be raw sigma"
-        );
-        assert!(
-            scheduler.current_timestep() <= 1.0,
-            "raw sigma should be <= 1.0"
+            (scheduler.current_timestep() - scheduler.sigmas[0] * 1000.0).abs() < 1e-10,
+            "current_timestep should be sigma * 1000"
         );
     }
 

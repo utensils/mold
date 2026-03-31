@@ -12,7 +12,7 @@
 //! - 60 identical dual-stream blocks (no noise_refiner/context_refiner)
 //! - Qwen2.5-VL text encoder (hidden_size=3584) instead of Qwen3 (2560)
 //! - Custom VAE with per-channel latent normalization
-//! - Exponential time shift scheduling
+//! - ComfyUI-style SNR time shift scheduling (shift=3.1)
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -571,7 +571,11 @@ impl QwenImageEngine {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
             eprintln!(
                 "[qwen-debug] cfg={} guidance={:.1} shift={:.2} sigmas[0]={:.4} sigmas[last]={:.4}",
-                use_cfg, req.guidance, DEFAULT_SHIFT, scheduler.sigmas[0], scheduler.sigmas[num_steps],
+                use_cfg,
+                req.guidance,
+                DEFAULT_SHIFT,
+                scheduler.sigmas[0],
+                scheduler.sigmas[num_steps],
             );
         }
 
@@ -604,7 +608,18 @@ impl QwenImageEngine {
                     Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
                     Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
                 }
-                (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
+                // CFG in F32 to avoid BF16 cancellation error, then norm rescale
+                // to match diffusers' Qwen-Image pipeline.
+                let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                // Rescale: comb * (norm(cond) / norm(comb)) per-pixel along channels.
+                // Diffusers computes dim=-1 on token-format [B, seq, C*P*P]; our output
+                // is spatial [B, C, H, W] so we norm across C (dim=1).
+                let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                rescaled.to_dtype(dtype)?
             } else {
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
                 transformer.forward(
@@ -889,7 +904,14 @@ impl InferenceEngine for QwenImageEngine {
                     )?;
                     let cond_pred = batched_pred.narrow(0, 0, 1)?;
                     let uncond_pred = batched_pred.narrow(0, 1, 1)?;
-                    (&uncond_pred + ((&cond_pred - &uncond_pred)? * req.guidance)?)?
+                    // CFG in F32 + norm rescale (matches diffusers Qwen-Image pipeline)
+                    let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                    let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                    let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                    let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                    let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                    let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                    rescaled.to_dtype(loaded.dtype)?
                 } else {
                     let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                         .to_dtype(loaded.dtype)?;
