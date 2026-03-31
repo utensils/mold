@@ -379,11 +379,13 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // Always decode in F32 — BF16 convolutions accumulate quantization noise across
+        // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
+        let vae_dtype = DType::F32;
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         // Load VAE
-        let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
+        let vae_label = format!("Loading Qwen-Image VAE ({}, F32)", vae_device_label);
         self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
@@ -679,10 +681,12 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // Always decode in F32 — BF16 convolutions accumulate quantization noise across
+        // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
+        let vae_dtype = DType::F32;
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
-        let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
+        let vae_label = format!("Loading Qwen-Image VAE ({}, F32)", vae_device_label);
         self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
@@ -947,14 +951,10 @@ impl InferenceEngine for QwenImageEngine {
         progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
-        let latents =
-            latents
-                .to_device(&loaded.vae_device)?
-                .to_dtype(if loaded.vae_device.is_cpu() {
-                    DType::F32
-                } else {
-                    loaded.dtype
-                })?;
+        // Always decode in F32 — matches sequential path and diffusers' force_upcast.
+        let latents = latents
+            .to_device(&loaded.vae_device)?
+            .to_dtype(DType::F32)?;
         Self::debug_tensor_stats("latents_pre_vae", &latents);
         let image = loaded.vae.decode(&latents)?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);
