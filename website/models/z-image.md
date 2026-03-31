@@ -3,6 +3,11 @@
 Qwen3 text encoder with a flow-matching transformer using 3D RoPE positional
 encoding. Excellent quality at just 9 steps.
 
+- **Developer**: [Z-Potentials](https://huggingface.co/Z-Potentials)
+- **License**: Apache 2.0
+- **HuggingFace**:
+  [Z-Potentials/Z-Image-v1-Turbo](https://huggingface.co/Z-Potentials/Z-Image-v1-Turbo)
+
 ## Variants
 
 | Model                | Steps | Size    | Notes          |

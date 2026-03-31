@@ -22,36 +22,54 @@ hero:
       link: https://github.com/utensils/mold
 
 features:
-  - icon: ⚡
+  - icon:
+      src: /icons/terminal.svg
     title: One Command
     details:
       'mold run "a cat" — that''s it. Auto-downloads the model, generates an
       image, saves to disk.'
-  - icon: 🎯
+  - icon:
+      src: /icons/grid.svg
     title: 8 Model Families
     details:
       FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image, and
       Wuerstchen v2. Quantized variants fit any GPU.
-  - icon: 🔧
-    title: Pure Rust
+  - icon:
+      src: /icons/rust.svg
+    title: Pure Rust — Linux & macOS
     details:
-      Single binary built on candle. No Python runtime, no libtorch, no ONNX.
-      CUDA on Linux, Metal on macOS.
-  - icon: 🌐
+      Single binary built on candle. CUDA on Linux (NVIDIA), Metal on macOS
+      (Apple Silicon). No Python, no libtorch, no ONNX.
+  - icon:
+      src: /icons/server.svg
     title: Client-Server
     details:
-      Run mold serve on a GPU host, generate from anywhere. REST API, SSE
-      streaming, Discord bot included.
-  - icon: 🖼️
+      Run mold serve on a GPU host, generate from anywhere. REST API with SSE
+      streaming for real-time progress.
+  - icon:
+      src: /icons/discord.svg
+    title: Discord Bot
+    details:
+      Built-in Discord bot with /generate, /expand, /models, and /status slash
+      commands. Run standalone or embedded in the server.
+  - icon:
+      src: /icons/layers.svg
     title: img2img & ControlNet
     details:
       Transform existing images, inpaint regions with masks, guide generation
-      with ControlNet conditioning.
-  - icon: 📦
+      with ControlNet conditioning. LoRA adapters for FLUX.
+  - icon:
+      src: /icons/runpod.svg
     title: Deploy Anywhere
     details:
       Docker images for RunPod and any NVIDIA host. Nix flake, systemd service,
       NixOS module included.
+  - icon:
+      src: /icons/cloud.svg
+    title: Prompt Expansion
+    details:
+      Local LLM expands short prompts into detailed descriptions. Auto-downloads
+      Qwen3-1.7B, dropped before diffusion runs.
 ---
 
 ## Quick Example

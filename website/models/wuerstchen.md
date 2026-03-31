@@ -3,6 +3,11 @@
 A unique 3-stage cascade architecture with 42x latent compression. CLIP-G text
 encoder feeds into Prior → Decoder → VQ-GAN stages.
 
+- **Developer**: [Wuerstchen Team](https://huggingface.co/warp-ai)
+- **License**: MIT
+- **HuggingFace**:
+  [warp-ai/wuerstchen](https://huggingface.co/warp-ai/wuerstchen)
+
 ## Variants
 
 | Model                | Steps | Size   | Notes                 |

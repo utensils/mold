@@ -3,6 +3,11 @@
 A lightweight 4B parameter FLUX variant. Fast 4-step generation with low VRAM
 requirements.
 
+- **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
+- **License**: Apache 2.0
+- **HuggingFace**:
+  [black-forest-labs/FLUX.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-Klein)
+
 ## Variants
 
 | Model              | Steps | Size   | Notes             |

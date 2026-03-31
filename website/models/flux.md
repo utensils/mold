@@ -3,6 +3,10 @@
 The highest quality model family. T5-XXL + CLIP-L text encoding with a
 flow-matching transformer.
 
+- **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
+- **License**: Apache 2.0 (Schnell), [FLUX.1 Dev Non-Commercial](https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md) (Dev)
+- **HuggingFace**: [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell), [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev)
+
 ## Variants
 
 | Model               | Steps | Size    | Notes                        |
