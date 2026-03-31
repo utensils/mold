@@ -6,14 +6,13 @@
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{Linear, RmsNorm};
-use candle_transformers::models::z_image::transformer::{
-    apply_rotary_emb, create_coordinate_grid, RopeEmbedder,
-};
+use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 use candle_transformers::quantized_var_builder::VarBuilder;
 
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
+const ROPE_CACHE_LEN: usize = 4096;
 
 fn dequant_tensor(vb: &VarBuilder, name: &str, dtype: DType, target: &Device) -> Result<Tensor> {
     vb.get_no_shape(name)?
@@ -74,6 +73,207 @@ impl Module for LayerNormNoParams {
         let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
         let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
         x_normed.to_dtype(x_dtype)
+    }
+}
+
+struct QwenRopeEmbedder {
+    axes_dims: Vec<usize>,
+    axis_half_dims: Vec<usize>,
+    axis_offsets: Vec<usize>,
+    pos_cos: Tensor,
+    pos_sin: Tensor,
+    neg_cos: Tensor,
+    neg_sin: Tensor,
+    dtype: DType,
+}
+
+impl QwenRopeEmbedder {
+    fn new(theta: f64, axes_dims: Vec<usize>, cpu_device: &Device, dtype: DType) -> Result<Self> {
+        let mut axis_half_dims = Vec::with_capacity(axes_dims.len());
+        let mut axis_offsets = Vec::with_capacity(axes_dims.len());
+        let mut running_offset = 0;
+        for &dim in &axes_dims {
+            if dim % 2 != 0 {
+                candle_core::bail!("Qwen RoPE axis dim {dim} must be even");
+            }
+            axis_offsets.push(running_offset);
+            let half_dim = dim / 2;
+            axis_half_dims.push(half_dim);
+            running_offset += half_dim;
+        }
+
+        let pos_index: Vec<f32> = (0..ROPE_CACHE_LEN).map(|i| i as f32).collect();
+        let neg_index: Vec<f32> = (0..ROPE_CACHE_LEN)
+            .rev()
+            .map(|i| -(i as i32) as f32 - 1.0)
+            .collect();
+
+        let mut pos_cos_parts = Vec::with_capacity(axes_dims.len());
+        let mut pos_sin_parts = Vec::with_capacity(axes_dims.len());
+        let mut neg_cos_parts = Vec::with_capacity(axes_dims.len());
+        let mut neg_sin_parts = Vec::with_capacity(axes_dims.len());
+        for &dim in &axes_dims {
+            let (pos_cos, pos_sin) = Self::rope_params(&pos_index, dim, theta, cpu_device)?;
+            let (neg_cos, neg_sin) = Self::rope_params(&neg_index, dim, theta, cpu_device)?;
+            pos_cos_parts.push(pos_cos);
+            pos_sin_parts.push(pos_sin);
+            neg_cos_parts.push(neg_cos);
+            neg_sin_parts.push(neg_sin);
+        }
+
+        Ok(Self {
+            axes_dims,
+            axis_half_dims,
+            axis_offsets,
+            pos_cos: Tensor::cat(&pos_cos_parts, D::Minus1)?,
+            pos_sin: Tensor::cat(&pos_sin_parts, D::Minus1)?,
+            neg_cos: Tensor::cat(&neg_cos_parts, D::Minus1)?,
+            neg_sin: Tensor::cat(&neg_sin_parts, D::Minus1)?,
+            dtype,
+        })
+    }
+
+    fn rope_params(
+        index: &[f32],
+        dim: usize,
+        theta: f64,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor)> {
+        let inv_freq: Vec<f32> = (0..dim)
+            .step_by(2)
+            .map(|k| 1.0 / (theta as f32).powf(k as f32 / dim as f32))
+            .collect();
+        let index = Tensor::from_vec(index.to_vec(), index.len(), device)?;
+        let inv_freq = Tensor::from_vec(inv_freq, dim / 2, device)?;
+        let freqs = index.unsqueeze(1)?.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
+        Ok((freqs.cos()?, freqs.sin()?))
+    }
+
+    fn axis_slice(&self, table: &Tensor, axis: usize) -> Result<Tensor> {
+        table.narrow(1, self.axis_offsets[axis], self.axis_half_dims[axis])
+    }
+
+    fn leading_axis_freqs(&self, table: &Tensor, axis: usize, len: usize) -> Result<Tensor> {
+        if len > ROPE_CACHE_LEN {
+            candle_core::bail!("Qwen RoPE length {len} exceeds cache size {ROPE_CACHE_LEN}");
+        }
+        self.axis_slice(table, axis)?.narrow(0, 0, len)
+    }
+
+    fn centered_axis_freqs(
+        &self,
+        pos_table: &Tensor,
+        neg_table: &Tensor,
+        axis: usize,
+        len: usize,
+    ) -> Result<Tensor> {
+        if len > ROPE_CACHE_LEN {
+            candle_core::bail!("Qwen RoPE length {len} exceeds cache size {ROPE_CACHE_LEN}");
+        }
+        let pos_len = len / 2;
+        let neg_len = len - pos_len;
+        let pos_axis = self.axis_slice(pos_table, axis)?;
+        let neg_axis = self.axis_slice(neg_table, axis)?;
+        match (neg_len, pos_len) {
+            (0, _) => pos_axis.narrow(0, 0, pos_len),
+            (_, 0) => neg_axis.narrow(0, ROPE_CACHE_LEN - neg_len, neg_len),
+            _ => Tensor::cat(
+                &[
+                    neg_axis.narrow(0, ROPE_CACHE_LEN - neg_len, neg_len)?,
+                    pos_axis.narrow(0, 0, pos_len)?,
+                ],
+                0,
+            ),
+        }
+    }
+
+    fn to_target(&self, tensor: Tensor, device: &Device) -> Result<Tensor> {
+        tensor.to_device(device)?.to_dtype(self.dtype)
+    }
+
+    fn forward(
+        &self,
+        frame: usize,
+        height: usize,
+        width: usize,
+        max_txt_seq_len: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        if self.axes_dims.len() != 3 {
+            candle_core::bail!(
+                "Qwen RoPE expects exactly 3 axes, got {}",
+                self.axes_dims.len()
+            );
+        }
+
+        let frame_cos = self.leading_axis_freqs(&self.pos_cos, 0, frame)?;
+        let frame_sin = self.leading_axis_freqs(&self.pos_sin, 0, frame)?;
+        let height_cos = self.centered_axis_freqs(&self.pos_cos, &self.neg_cos, 1, height)?;
+        let height_sin = self.centered_axis_freqs(&self.pos_sin, &self.neg_sin, 1, height)?;
+        let width_cos = self.centered_axis_freqs(&self.pos_cos, &self.neg_cos, 2, width)?;
+        let width_sin = self.centered_axis_freqs(&self.pos_sin, &self.neg_sin, 2, width)?;
+
+        let frame_half = self.axis_half_dims[0];
+        let height_half = self.axis_half_dims[1];
+        let width_half = self.axis_half_dims[2];
+        let total_half = frame_half + height_half + width_half;
+        let seq_len = frame * height * width;
+
+        let img_cos = Tensor::cat(
+            &[
+                frame_cos
+                    .reshape((frame, 1, 1, frame_half))?
+                    .expand((frame, height, width, frame_half))?,
+                height_cos.reshape((1, height, 1, height_half))?.expand((
+                    frame,
+                    height,
+                    width,
+                    height_half,
+                ))?,
+                width_cos
+                    .reshape((1, 1, width, width_half))?
+                    .expand((frame, height, width, width_half))?,
+            ],
+            D::Minus1,
+        )?
+        .reshape((seq_len, total_half))?;
+        let img_sin = Tensor::cat(
+            &[
+                frame_sin
+                    .reshape((frame, 1, 1, frame_half))?
+                    .expand((frame, height, width, frame_half))?,
+                height_sin.reshape((1, height, 1, height_half))?.expand((
+                    frame,
+                    height,
+                    width,
+                    height_half,
+                ))?,
+                width_sin
+                    .reshape((1, 1, width, width_half))?
+                    .expand((frame, height, width, width_half))?,
+            ],
+            D::Minus1,
+        )?
+        .reshape((seq_len, total_half))?;
+
+        let max_vid_index = (height / 2).max(width / 2);
+        if max_vid_index + max_txt_seq_len > ROPE_CACHE_LEN {
+            candle_core::bail!(
+                "Qwen text RoPE slice [{}..{}) exceeds cache size {}",
+                max_vid_index,
+                max_vid_index + max_txt_seq_len,
+                ROPE_CACHE_LEN
+            );
+        }
+        let txt_cos = self.pos_cos.narrow(0, max_vid_index, max_txt_seq_len)?;
+        let txt_sin = self.pos_sin.narrow(0, max_vid_index, max_txt_seq_len)?;
+
+        Ok((
+            self.to_target(img_cos, device)?,
+            self.to_target(img_sin, device)?,
+            self.to_target(txt_cos, device)?,
+            self.to_target(txt_sin, device)?,
+        ))
     }
 }
 
@@ -544,7 +744,7 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
     txt_in: Linear,
     txt_norm: RmsNorm,
     blocks: Vec<QwenImageTransformerBlock>,
-    rope_embedder: RopeEmbedder,
+    rope_embedder: QwenRopeEmbedder,
     output_layer: OutputLayer,
     cfg: QwenImageConfig,
     gpu_device: Device,
@@ -578,13 +778,8 @@ impl QuantizedQwenImageTransformer2DModel {
             )?);
         }
 
-        let rope_embedder = RopeEmbedder::new(
-            10000.0,
-            cfg.axes_dims_rope.clone(),
-            vec![2048, 2048, 2048],
-            gpu_device,
-            dtype,
-        )?;
+        let rope_embedder =
+            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, dtype)?;
         let output_layer = OutputLayer::new(
             cfg.inner_dim,
             cfg.out_channels,
@@ -663,19 +858,10 @@ impl QuantizedQwenImageTransformer2DModel {
 
         let h_tokens = height / patch_size;
         let w_tokens = width / patch_size;
-        let img_pos_ids = create_coordinate_grid((1, h_tokens, w_tokens), (0, 0, 0), device)?;
-        let (img_cos, img_sin) = self.rope_embedder.forward(&img_pos_ids)?;
         let txt_seq_len = encoder_hidden_states.dim(1)?;
-        let txt_offset = h_tokens.max(w_tokens) as u32;
-        let mut txt_coords = Vec::with_capacity(txt_seq_len * 3);
-        for i in 0..txt_seq_len {
-            let pos = txt_offset + i as u32;
-            txt_coords.push(pos);
-            txt_coords.push(pos);
-            txt_coords.push(pos);
-        }
-        let txt_pos_ids = Tensor::from_vec(txt_coords, (txt_seq_len, 3), device)?;
-        let (txt_cos, txt_sin) = self.rope_embedder.forward(&txt_pos_ids)?;
+        let (img_cos, img_sin, txt_cos, txt_sin) =
+            self.rope_embedder
+                .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
 
         for block in &self.blocks {
             let gpu_block = block.to_device(&self.gpu_device)?;
