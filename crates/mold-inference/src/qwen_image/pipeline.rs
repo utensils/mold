@@ -12,7 +12,7 @@
 //! - 60 identical dual-stream blocks (no noise_refiner/context_refiner)
 //! - Qwen2.5-VL text encoder (hidden_size=3584) instead of Qwen3 (2560)
 //! - Custom VAE with per-channel latent normalization
-//! - Exponential time shift scheduling
+//! - ComfyUI-style SNR time shift scheduling (shift=3.1)
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -23,10 +23,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
-use super::sampling::{
-    calculate_shift, QwenImageScheduler, BASE_IMAGE_SEQ_LEN, BASE_SHIFT, MAX_IMAGE_SEQ_LEN,
-    MAX_SHIFT,
-};
+use super::sampling::{QwenImageScheduler, DEFAULT_SHIFT};
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
 use super::vae::QwenImageVae;
 use crate::cache::{
@@ -61,9 +58,9 @@ struct LoadedQwenImage {
     /// Device where the VAE lives (may be CPU if VRAM is tight)
     vae_device: Device,
     dtype: DType,
-    transformer_is_quantized: bool,
 }
 
+#[allow(clippy::large_enum_variant)] // both variants heap-allocate (Vec<Block>)
 enum QwenImageTransformer {
     BF16(QwenImageTransformer2DModel),
     Quantized(QuantizedQwenImageTransformer2DModel),
@@ -250,10 +247,19 @@ impl QwenImageEngine {
         cfg: &QwenImageConfig,
     ) -> Result<QwenImageTransformer> {
         if self.detect_is_quantized() {
-            let vb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            let cpu_device = Device::Cpu;
+            let vb = quantized_var_builder::VarBuilder::from_gguf(
+                &self.base.paths.transformer,
+                &cpu_device,
+            )?;
             Ok(QwenImageTransformer::Quantized(
-                QuantizedQwenImageTransformer2DModel::new(cfg, vb)?,
+                QuantizedQwenImageTransformer2DModel::new(
+                    cfg,
+                    vb,
+                    &cpu_device,
+                    device,
+                    DType::BF16,
+                )?,
             ))
         } else {
             let xformer_paths = self.transformer_paths();
@@ -339,7 +345,7 @@ impl QwenImageEngine {
         // Load transformer
         let xformer_paths = self.transformer_paths();
         let xformer_label = if transformer_is_quantized {
-            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+            "Loading Qwen-Image transformer (offloaded, blocks on CPU)".to_string()
         } else {
             format!(
                 "Loading Qwen-Image transformer ({} shards)",
@@ -370,11 +376,13 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // Always decode in F32 — BF16 convolutions accumulate quantization noise across
+        // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
+        let vae_dtype = DType::F32;
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         // Load VAE
-        let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
+        let vae_label = format!("Loading Qwen-Image VAE ({}, F32)", vae_device_label);
         self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
@@ -410,7 +418,6 @@ impl QwenImageEngine {
             device,
             vae_device,
             dtype,
-            transformer_is_quantized,
         });
 
         tracing::info!(model = %self.base.model_name, "all Qwen-Image components loaded");
@@ -495,6 +502,22 @@ impl QwenImageEngine {
             dtype,
         )?;
 
+        // Encode unconditional (empty) prompt for classifier-free guidance
+        let use_cfg = req.guidance > 1.0;
+        let (uncond_hs, uncond_mask) = if use_cfg {
+            let (hs, mask) = Self::encode_prompt_cached(
+                &self.base.progress,
+                &self.prompt_cache,
+                &mut text_encoder,
+                "",
+                &device,
+                dtype,
+            )?;
+            (Some(hs), Some(mask))
+        } else {
+            (None, None)
+        };
+
         // Drop text encoder to free memory
         drop(text_encoder);
         self.base.progress.info("Freed Qwen2.5 text encoder");
@@ -513,7 +536,7 @@ impl QwenImageEngine {
         }
 
         let xformer_label = if transformer_is_quantized {
-            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+            "Loading Qwen-Image transformer (offloaded, blocks on CPU)".to_string()
         } else {
             format!(
                 "Loading Qwen-Image transformer ({} shards)",
@@ -532,46 +555,98 @@ impl QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        let patch_size = transformer_cfg.patch_size;
-        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
-            image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
-        );
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
 
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
-
-        let latent_dtype = if transformer_is_quantized {
-            DType::F32
-        } else {
-            dtype
-        };
+        // Initial noise scaled by sigma[0] — matches ComfyUI's CONST noise scaling.
+        // For txt2img: initial_sample = sigma[0] * randn()
         let mut latents =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, latent_dtype)?;
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+        latents = (latents * scheduler.initial_sigma())?;
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
+        if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
+            eprintln!(
+                "[qwen-debug] cfg={} guidance={:.1} shift={:.2} sigmas[0]={:.4} sigmas[last]={:.4}",
+                use_cfg,
+                req.guidance,
+                DEFAULT_SHIFT,
+                scheduler.sigmas[0],
+                scheduler.sigmas[num_steps],
+            );
+        }
+
+        // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
+        // Each forward pass streams 60 blocks CPU→GPU; batching cond+uncond avoids
+        // doing that twice per step.
+        let (batched_hs, batched_mask) = if use_cfg {
+            let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
+            let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
+            (hs, mask)
+        } else {
+            (
+                encoder_hidden_states.clone(),
+                encoder_attention_mask.clone(),
+            )
+        };
+
         for step in 0..num_steps {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
-            let t_tensor =
-                Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(latent_dtype)?;
-            let noise_pred = transformer.forward(
-                &latents,
-                &t_tensor,
-                &encoder_hidden_states,
-                &encoder_attention_mask,
-            )?;
-            if step == 0 {
-                Self::debug_tensor_stats("noise_pred", &noise_pred);
+            let noise_pred = if use_cfg {
+                let t_tensor =
+                    Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
+                let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                let batched_pred =
+                    transformer.forward(&batched_latents, &t_tensor, &batched_hs, &batched_mask)?;
+                let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                if step == 0 {
+                    Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
+                    Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
+                }
+                // CFG in F32 to avoid BF16 cancellation error, then norm rescale
+                // to match diffusers' Qwen-Image pipeline.
+                let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                // Rescale: comb * (norm(cond) / norm(comb)) per-pixel along channels.
+                // Diffusers computes dim=-1 on token-format [B, seq, C*P*P]; our output
+                // is spatial [B, C, H, W] so we norm across C (dim=1).
+                let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                rescaled.to_dtype(dtype)?
+            } else {
+                let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+                transformer.forward(
+                    &latents,
+                    &t_tensor,
+                    &encoder_hidden_states,
+                    &encoder_attention_mask,
+                )?
+            };
+            if step == 0 || step == num_steps / 2 || step == num_steps - 1 {
+                Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
+                Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
             }
             latents = scheduler.step(&noise_pred, &latents)?;
+            if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
+                let n = latents
+                    .ne(&latents)?
+                    .to_dtype(candle_core::DType::U32)?
+                    .sum_all()?
+                    .to_scalar::<u32>()?;
+                if n > 0 {
+                    eprintln!(
+                        "[qwen-nan] NaN in latents AFTER step {step}: {n}/{}",
+                        latents.elem_count()
+                    );
+                }
+            }
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,
@@ -587,6 +662,8 @@ impl QwenImageEngine {
         drop(transformer);
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
+        drop(uncond_hs);
+        drop(uncond_mask);
         device.synchronize()?;
         self.base.progress.info("Freed Qwen-Image transformer");
 
@@ -607,10 +684,12 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // Always decode in F32 — BF16 convolutions accumulate quantization noise across
+        // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
+        let vae_dtype = DType::F32;
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
-        let vae_label = format!("Loading Qwen-Image VAE ({})", vae_device_label);
+        let vae_label = format!("Loading Qwen-Image VAE ({}, F32)", vae_device_label);
         self.base.progress.stage_start(&vae_label);
         let vae_start = Instant::now();
         let vae = self.load_vae(&vae_device, vae_dtype)?;
@@ -746,6 +825,22 @@ impl InferenceEngine for QwenImageEngine {
             loaded.dtype,
         )?;
 
+        // Encode unconditional (empty) prompt for classifier-free guidance
+        let use_cfg = req.guidance > 1.0;
+        let (uncond_hs, uncond_mask) = if use_cfg {
+            let (hs, mask) = Self::encode_prompt_cached(
+                progress,
+                &self.prompt_cache,
+                &mut loaded.text_encoder,
+                "",
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (Some(hs), Some(mask))
+        } else {
+            (None, None)
+        };
+
         // Drop text encoder from GPU to free VRAM for denoising
         if loaded.text_encoder.on_gpu {
             loaded.text_encoder.drop_weights();
@@ -757,32 +852,17 @@ impl InferenceEngine for QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        // 4. Calculate scheduler shift
-        let patch_size = loaded.transformer_cfg.patch_size;
-        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
-            image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
-        );
+        // 4. Initialize scheduler (ComfyUI-style SNR shift)
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
 
-        // 5. Initialize scheduler
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
-
-        // 6. Generate initial noise
-        let latent_dtype = if loaded.transformer_is_quantized {
-            DType::F32
-        } else {
-            loaded.dtype
-        };
+        // 5. Generate initial noise scaled by sigma[0] (ComfyUI CONST noise scaling)
         let mut latents = crate::engine::seeded_randn(
             seed,
             &[1, 16, latent_h, latent_w],
             &loaded.device,
-            latent_dtype,
+            loaded.dtype,
         )?;
+        latents = (latents * scheduler.initial_sigma())?;
 
         // 7. Denoising loop
         let num_steps = req.steps as usize;
@@ -796,17 +876,52 @@ impl InferenceEngine for QwenImageEngine {
                 .as_ref()
                 .expect("transformer must be loaded for denoising");
 
+            // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
+            let (batched_hs, batched_mask) = if use_cfg {
+                let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
+                let mask =
+                    Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
+                (hs, mask)
+            } else {
+                (
+                    encoder_hidden_states.clone(),
+                    encoder_attention_mask.clone(),
+                )
+            };
+
             for step in 0..num_steps {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
-                let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
-                    .to_dtype(latent_dtype)?;
-                let noise_pred = transformer.forward(
-                    &latents,
-                    &t_tensor,
-                    &encoder_hidden_states,
-                    &encoder_attention_mask,
-                )?;
+                let noise_pred = if use_cfg {
+                    let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?;
+                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                    let batched_pred = transformer.forward(
+                        &batched_latents,
+                        &t_tensor,
+                        &batched_hs,
+                        &batched_mask,
+                    )?;
+                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                    // CFG in F32 + norm rescale (matches diffusers Qwen-Image pipeline)
+                    let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                    let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                    let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                    let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                    let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                    let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                    rescaled.to_dtype(loaded.dtype)?
+                } else {
+                    let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?;
+                    transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        &encoder_hidden_states,
+                        &encoder_attention_mask,
+                    )?
+                };
                 if step == 0 {
                     Self::debug_tensor_stats("noise_pred", &noise_pred);
                 }
@@ -824,6 +939,8 @@ impl InferenceEngine for QwenImageEngine {
         // Free text embeddings and transformer
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
+        drop(uncond_hs);
+        drop(uncond_mask);
         loaded.transformer = None;
         // Synchronize to ensure CUDA's caching allocator reclaims the freed memory
         // before VAE decode allocates workspace buffers.
@@ -834,14 +951,10 @@ impl InferenceEngine for QwenImageEngine {
         progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
-        let latents =
-            latents
-                .to_device(&loaded.vae_device)?
-                .to_dtype(if loaded.vae_device.is_cpu() {
-                    DType::F32
-                } else {
-                    loaded.dtype
-                })?;
+        // Always decode in F32 — matches sequential path and diffusers' force_upcast.
+        let latents = latents
+            .to_device(&loaded.vae_device)?
+            .to_dtype(DType::F32)?;
         Self::debug_tensor_stats("latents_pre_vae", &latents);
         let image = loaded.vae.decode(&latents)?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);

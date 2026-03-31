@@ -429,6 +429,14 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
+### Qwen-Image
+
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `qwen-image:q8` | 30 | 21.8GB | Qwen-Image-2512, best quality |
+| `qwen-image:q6` | 30 | 16.8GB | Best quality/size trade-off |
+| `qwen-image:q4` | 30 | 12.3GB | Smallest practical footprint |
+
 ### Wuerstchen v2
 
 | Model | Steps | Size | Notes |

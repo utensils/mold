@@ -168,7 +168,7 @@ Default model if none specified: `flux-schnell:q8`
 
 **Wuerstchen**: `wuerstchen-v2:fp16`
 
-**Alpha**: `qwen-image:bf16`, `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`
+**Qwen-Image**: `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `qwen-image:bf16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
