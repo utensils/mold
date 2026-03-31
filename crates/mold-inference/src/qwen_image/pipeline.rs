@@ -252,10 +252,19 @@ impl QwenImageEngine {
         cfg: &QwenImageConfig,
     ) -> Result<QwenImageTransformer> {
         if self.detect_is_quantized() {
-            let vb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            let cpu_device = Device::Cpu;
+            let vb = quantized_var_builder::VarBuilder::from_gguf(
+                &self.base.paths.transformer,
+                &cpu_device,
+            )?;
             Ok(QwenImageTransformer::Quantized(
-                QuantizedQwenImageTransformer2DModel::new(cfg, vb)?,
+                QuantizedQwenImageTransformer2DModel::new(
+                    cfg,
+                    vb,
+                    &cpu_device,
+                    device,
+                    DType::BF16,
+                )?,
             ))
         } else {
             let xformer_paths = self.transformer_paths();
@@ -341,7 +350,7 @@ impl QwenImageEngine {
         // Load transformer
         let xformer_paths = self.transformer_paths();
         let xformer_label = if transformer_is_quantized {
-            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+            "Loading Qwen-Image transformer (offloaded, blocks on CPU)".to_string()
         } else {
             format!(
                 "Loading Qwen-Image transformer ({} shards)",
@@ -531,7 +540,7 @@ impl QwenImageEngine {
         }
 
         let xformer_label = if transformer_is_quantized {
-            "Loading Qwen-Image transformer (GPU, quantized)".to_string()
+            "Loading Qwen-Image transformer (offloaded, blocks on CPU)".to_string()
         } else {
             format!(
                 "Loading Qwen-Image transformer ({} shards)",
