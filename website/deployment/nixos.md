@@ -83,6 +83,7 @@ system user, and manages the data directory at `/var/lib/mold`.
     # Discord bot
     discord = {
       enable = true;
+      # Must be an EnvironmentFile: MOLD_DISCORD_TOKEN=your-token-here
       tokenFile = config.age.secrets.discord-token.path;
       # moldHost = "http://localhost:7680";  # defaults to main server
       cooldownSeconds = 10;

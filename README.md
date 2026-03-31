@@ -537,7 +537,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 ```nix
 services.mold.discord = {
   enable = true;
-  tokenFile = config.age.secrets.discord-token.path; # agenix secret
+  tokenFile = config.age.secrets.discord-token.path; # EnvironmentFile: MOLD_DISCORD_TOKEN=...
   moldHost = "http://localhost:7680";
   cooldownSeconds = 10;
 };

@@ -19,8 +19,8 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
    [Developer Portal](https://discord.com/developers/applications)
 2. Create a bot user and copy the token
 3. Invite with:
-   `https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=51200&scope=bot`
-   (Send Messages, Attach Files, Embed Links)
+   `https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=51200&scope=bot%20applications.commands`
+   (Send Messages, Attach Files, Embed Links + slash command registration)
 4. No privileged intents are needed (slash commands only)
 
 ## Slash Commands
@@ -45,7 +45,8 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 ```nix
 services.mold.discord = {
   enable = true;
-  package = inputs.mold.packages.${system}.mold-discord;
+  # tokenFile is loaded via systemd EnvironmentFile —
+  # the file must contain: MOLD_DISCORD_TOKEN=your-token-here
   tokenFile = config.age.secrets.discord-token.path;
   moldHost = "http://localhost:7680";
   cooldownSeconds = 10;

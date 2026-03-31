@@ -1,7 +1,7 @@
 # Configuration
 
 mold looks for `config.toml` inside the base mold directory (`~/.mold/` by
-default, or `~/.config/mold/` via XDG).
+default, or override with `MOLD_HOME`).
 
 ## Config File
 
