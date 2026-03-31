@@ -349,9 +349,26 @@ temperature = 0.7
 
 **Docker / RunPod**: Multi-stage `Dockerfile` at project root. Stage 1 builds with `nvidia/cuda:12.8.1-devel-ubuntu22.04` + Rust + cargo (`--features cuda,expand`). Stage 2 copies the binary into `nvidia/cuda:12.8.1-runtime-ubuntu22.04` (~3.4 GB image, 33 MB binary). `CUDA_COMPUTE_CAP` build arg (default `89`) targets the GPU architecture. `docker/start.sh` is the RunPod-convention entrypoint: detects `/workspace` network volume, sets `MOLD_HOME`/`MOLD_MODELS_DIR`, runs `mold serve --bind 0.0.0.0`. Note: `libcuda.so.1` (NVIDIA driver) is injected at runtime by the NVIDIA Container Toolkit — the binary cannot run without GPU access.
 
+**Documentation site**: VitePress 1.6 + Tailwind CSS v4 + bun in `website/`. Dev server: `cd website && bun install && bun run dev -- --host 0.0.0.0`. Build: `bun run build`. Deployed to GitHub Pages via `.github/workflows/pages.yml` on push to `main` (website/** paths). Base path is `/mold/` (served at `utensils.github.io/mold/`).
+
+**Transparent logo generation** — The site logo (`website/public/logo-transparent.png`) is derived from `docs/mold.png`:
+```bash
+# 1. Crop to remove text, remove black background, trim, add padding
+magick docs/mold.png -crop 1024x650+0+30 +repage \
+  -fuzz 25% -transparent black -trim +repage \
+  -bordercolor none -border 40 /tmp/mold-cropped.png
+# 2. Extract alpha, erode jagged edges, gaussian blur for feathering
+magick /tmp/mold-cropped.png -alpha extract \
+  -morphology Erode Disk:1 -gaussian-blur 0x3 /tmp/mold-mask.png
+# 3. Reapply softened mask
+magick /tmp/mold-cropped.png /tmp/mold-mask.png \
+  -compose CopyOpacity -composite website/public/logo-transparent.png
+```
+
 ## Maintenance Notes
 
 - **Keep `.claude/skills/mold/SKILL.md` in sync** — This skill file is used by OpenClaw, ClawdBot, and other AI agents. Update it whenever models, CLI flags, env vars, or features change.
+- **Keep `website/` docs in sync** — Update the VitePress docs site when models, CLI flags, env vars, API endpoints, or deployment options change.
 
 ## Key Design Decisions
 
