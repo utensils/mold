@@ -6,6 +6,12 @@
 .claude/worktrees/
 .direnv/
 !docs/**/*.png
+!website/public/**/*.png
+
+# Website
+website/node_modules/
+website/.vitepress/cache/
+website/.vitepress/dist/
 .DS_Store
 .env
 *.jpeg

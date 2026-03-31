@@ -228,6 +228,8 @@
               pkgs.git
               pkgs.viu
               pkgs.cargo-llvm-cov
+              pkgs.bun
+              pkgs.nodePackages.prettier
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
@@ -428,6 +430,30 @@
                 name = "discord-bot";
                 help = "start the mold Discord bot";
                 command = "cargo run -p mold-ai --features ${devFeatures} -- discord \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "docs-dev";
+                help = "start VitePress dev server for docs";
+                command = "cd website && bun install && bun run dev \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "docs-build";
+                help = "build the documentation site";
+                command = "cd website && bun install && bun run build";
+              }
+              {
+                category = "docs";
+                name = "docs-preview";
+                help = "preview the built documentation site";
+                command = "cd website && bun run preview \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "docs-fmt";
+                help = "format documentation with prettier";
+                command = "cd website && bun run fmt";
               }
             ];
           };

@@ -1,0 +1,24 @@
+# Z-Image
+
+Qwen3 text encoder with a flow-matching transformer using 3D RoPE positional
+encoding. Excellent quality at just 9 steps.
+
+## Variants
+
+| Model                | Steps | Size    | Notes          |
+| -------------------- | ----- | ------- | -------------- |
+| `z-image-turbo:q8`   | 9     | 6.6 GB  | Fast, great    |
+| `z-image-turbo:q4`   | 9     | 3.8 GB  | Lighter        |
+| `z-image-turbo:bf16` | 9     | 12.2 GB | Full precision |
+
+## Defaults
+
+- **Resolution**: 1024x1024
+- **Guidance**: 0.0
+- **Steps**: 9
+
+## Notes
+
+Z-Image uses a Qwen3 text encoder (BF16 or GGUF with auto-fallback). The
+quantized transformer is implemented directly in mold (not upstream candle) due
+to GGUF tensor naming differences.

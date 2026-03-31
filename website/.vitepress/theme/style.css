@@ -1,0 +1,89 @@
+@import 'tailwindcss';
+
+/* mold brand colors — magenta/cyan gradient accent */
+:root {
+  --vp-c-brand-1: #e879f9;
+  --vp-c-brand-2: #c026d3;
+  --vp-c-brand-3: #a21caf;
+  --vp-c-brand-soft: rgba(232, 121, 249, 0.14);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(
+    135deg,
+    #06b6d4 0%,
+    #e879f9 50%,
+    #c026d3 100%
+  );
+  --vp-home-hero-image-background-image: linear-gradient(
+    135deg,
+    rgba(6, 182, 212, 0.2) 0%,
+    rgba(232, 121, 249, 0.2) 50%,
+    rgba(192, 38, 211, 0.15) 100%
+  );
+  --vp-home-hero-image-filter: blur(44px);
+}
+
+.dark {
+  --vp-c-brand-1: #f0abfc;
+  --vp-c-brand-2: #e879f9;
+  --vp-c-brand-3: #c026d3;
+  --vp-c-brand-soft: rgba(240, 171, 252, 0.14);
+}
+
+/* Brand buttons */
+.VPButton.brand {
+  border-color: var(--vp-c-brand-1);
+  background-color: var(--vp-c-brand-1);
+}
+
+.VPButton.brand:hover {
+  border-color: var(--vp-c-brand-2);
+  background-color: var(--vp-c-brand-2);
+}
+
+/* Code block styling */
+.vp-doc div[class*='language-'] {
+  border-radius: 8px;
+}
+
+/* Feature cards */
+.VPFeature {
+  border-radius: 12px;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.VPFeature:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+}
+
+.dark .VPFeature:hover {
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Gallery grid */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.gallery-grid img {
+  border-radius: 8px;
+  width: 100%;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.gallery-grid img:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.dark .gallery-grid img:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}

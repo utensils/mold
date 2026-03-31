@@ -1,0 +1,53 @@
+# Discord Bot
+
+mold includes a built-in Discord bot that connects to `mold serve`, allowing
+users to generate images via slash commands.
+
+## Running
+
+```bash
+# Server + bot in one process
+MOLD_DISCORD_TOKEN="your-token" mold serve --discord
+
+# Or run the bot separately (connects to a remote server)
+MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
+```
+
+## Setup
+
+1. Create a Discord application at the
+   [Developer Portal](https://discord.com/developers/applications)
+2. Create a bot user and copy the token
+3. Invite with:
+   `https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=51200&scope=bot`
+   (Send Messages, Attach Files, Embed Links)
+4. No privileged intents are needed (slash commands only)
+
+## Slash Commands
+
+| Command     | Description                                                             |
+| ----------- | ----------------------------------------------------------------------- |
+| `/generate` | Generate an image (prompt, model, width, height, steps, guidance, seed) |
+| `/expand`   | Expand a short prompt into detailed generation prompts                  |
+| `/models`   | List available models with download/loaded status                       |
+| `/status`   | Show server health, GPU info, uptime                                    |
+
+## Configuration
+
+| Variable                | Default                 | Description           |
+| ----------------------- | ----------------------- | --------------------- |
+| `MOLD_DISCORD_TOKEN`    | —                       | Bot token (required)  |
+| `MOLD_HOST`             | `http://localhost:7680` | mold server URL       |
+| `MOLD_DISCORD_COOLDOWN` | `10`                    | Per-user cooldown (s) |
+
+## NixOS
+
+```nix
+services.mold.discord = {
+  enable = true;
+  package = inputs.mold.packages.${system}.mold-discord;
+  tokenFile = config.age.secrets.discord-token.path;
+  moldHost = "http://localhost:7680";
+  cooldownSeconds = 10;
+};
+```
