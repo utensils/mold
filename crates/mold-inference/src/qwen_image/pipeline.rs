@@ -561,13 +561,10 @@ impl QwenImageEngine {
 
         let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
 
-        let latent_dtype = if transformer_is_quantized {
-            DType::F32
-        } else {
-            dtype
-        };
+        // Use BF16 for quantized path — matches Flux2 GGUF approach.
+        // F32 latents + BF16 dequantized weights cause activation explosion over 60 blocks.
         let mut latents =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, latent_dtype)?;
+            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
 
         let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
@@ -585,7 +582,7 @@ impl QwenImageEngine {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let t_tensor =
-                Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(latent_dtype)?;
+                Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
             let noise_pred = if use_cfg {
                 let cond_pred = transformer.forward(
                     &latents,
@@ -838,17 +835,12 @@ impl InferenceEngine for QwenImageEngine {
         // 5. Initialize scheduler
         let mut scheduler = QwenImageScheduler::new(req.steps as usize, mu);
 
-        // 6. Generate initial noise
-        let latent_dtype = if loaded.transformer_is_quantized {
-            DType::F32
-        } else {
-            loaded.dtype
-        };
+        // 6. Generate initial noise (BF16 for quantized, matching Flux2 GGUF approach)
         let mut latents = crate::engine::seeded_randn(
             seed,
             &[1, 16, latent_h, latent_w],
             &loaded.device,
-            latent_dtype,
+            loaded.dtype,
         )?;
 
         // 7. Denoising loop
@@ -867,7 +859,7 @@ impl InferenceEngine for QwenImageEngine {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
-                    .to_dtype(latent_dtype)?;
+                    .to_dtype(loaded.dtype)?;
                 let noise_pred = if use_cfg {
                     let cond_pred = transformer.forward(
                         &latents,

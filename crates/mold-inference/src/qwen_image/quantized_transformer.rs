@@ -372,17 +372,13 @@ impl QwenImageTransformerBlock {
             txt_sin,
             img_seq_len,
         )?;
-        // BF16 roundtrip on gated residuals — matches diffusers' BF16 computation.
-        // In diffusers, blocks run in BF16 so each `hidden += gate * attn` truncates
-        // to BF16 mantissa (7 bits). This natural precision limit prevents unconstrained
-        // activation growth that occurs in F32. Without this, values grow to ±1e8+ over
-        // 60 blocks, destroying spatial information in the output LayerNorm.
-        let img_hidden =
-            (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?
-                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
-        let txt_hidden =
-            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        // BF16 roundtrip on gated residuals — matches diffusers' BF16 precision.
+        // QMatMul requires F32 but the model was trained in BF16; rounding after each
+        // residual prevents activation growth that occurs in pure F32.
+        let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?
+            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
+            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -394,12 +390,10 @@ impl QwenImageTransformerBlock {
             .forward(&txt_hidden)?
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
-        let img_hidden =
-            (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?
-                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
-        let txt_hidden =
-            (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-                .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        let img_hidden = (img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?
+            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+            .to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -514,6 +508,8 @@ impl QuantizedQwenImageTransformer2DModel {
     ) -> Result<Tensor> {
         let out_dtype = x.dtype();
         let device = x.device();
+        // QMatMul requires F32 input — cast here, BF16 roundtrip between blocks
+        // prevents activation growth (matching diffusers' BF16 precision).
         let x = x.to_dtype(DType::F32)?;
         let t = t.to_dtype(DType::F32)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
