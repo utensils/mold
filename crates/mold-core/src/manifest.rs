@@ -2003,24 +2003,54 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             description: "Qwen-Image-2512 BF16 — 60-block flow-matching transformer".to_string(),
             files: {
                 let mut files = shared_qwen_image_files();
-                files.push(ModelFile {
-                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
-                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
-                        .to_string(),
-                    component: ModelComponent::TransformerShard,
-                    size_bytes: 9_936_487_568,
-                    gated: false,
-                    sha256: None,
-                });
-                files.push(ModelFile {
-                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
-                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
-                        .to_string(),
-                    component: ModelComponent::TransformerShard,
-                    size_bytes: 4_660_555_432,
-                    gated: false,
-                    sha256: None,
-                });
+                let shards: &[(&str, u64)] = &[
+                    (
+                        "transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
+                        4_989_364_312,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00002-of-00009.safetensors",
+                        4_984_214_160,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00003-of-00009.safetensors",
+                        4_946_470_000,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00004-of-00009.safetensors",
+                        4_984_213_736,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00005-of-00009.safetensors",
+                        4_946_471_896,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00006-of-00009.safetensors",
+                        4_946_451_560,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00007-of-00009.safetensors",
+                        4_908_690_520,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00008-of-00009.safetensors",
+                        4_984_232_856,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00009-of-00009.safetensors",
+                        1_170_918_840,
+                    ),
+                ];
+                for (filename, size) in shards {
+                    files.push(ModelFile {
+                        hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                        hf_filename: filename.to_string(),
+                        component: ModelComponent::TransformerShard,
+                        size_bytes: *size,
+                        gated: false,
+                        sha256: None,
+                    });
+                }
                 files
             },
             defaults: defaults.clone(),
