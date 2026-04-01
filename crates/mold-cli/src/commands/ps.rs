@@ -4,7 +4,6 @@ use colored::Colorize;
 use crate::control::CliContext;
 use crate::procinfo;
 use crate::theme;
-use crate::ui::print_server_unavailable;
 
 pub async fn run() -> Result<()> {
     let ctx = CliContext::new(None);
@@ -60,44 +59,51 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
-        Err(e) => {
-            print_server_unavailable(ctx.client().host(), &e);
-            print_local_processes();
+        Err(_) => {
+            let procs = procinfo::find_mold_processes();
+            if procs.is_empty() {
+                println!(
+                    "{} No mold server or processes running.",
+                    theme::icon_bullet()
+                );
+                println!(
+                    "  {} start the server with {}",
+                    theme::prefix_hint(),
+                    "mold serve".bold()
+                );
+            } else {
+                println!("{}", "Running mold processes:".bold());
+                for p in &procs {
+                    let args_display = if p.args.is_empty() {
+                        String::new()
+                    } else {
+                        let joined = p.args.join(" ");
+                        if joined.len() > 60 {
+                            let truncated: String = joined.chars().take(57).collect();
+                            format!(" {truncated}...")
+                        } else {
+                            format!(" {joined}")
+                        }
+                    };
+                    println!(
+                        "  {} {} {}{} {} ({})",
+                        theme::icon_bullet(),
+                        format!("[{}]", p.pid).dimmed(),
+                        p.subcommand.green(),
+                        args_display.dimmed(),
+                        procinfo::format_duration(p.run_time_secs).dimmed(),
+                        procinfo::format_memory_mb(p.memory_bytes).dimmed(),
+                    );
+                }
+                println!();
+                println!(
+                    "  {} no mold server running — start with {}",
+                    theme::prefix_hint(),
+                    "mold serve".bold()
+                );
+            }
         }
     }
 
     Ok(())
-}
-
-/// Scan for running mold processes and display them when the server is unreachable.
-fn print_local_processes() {
-    let procs = procinfo::find_mold_processes();
-    if procs.is_empty() {
-        return;
-    }
-
-    eprintln!();
-    eprintln!("{}", "Running mold processes:".bold());
-    for p in &procs {
-        let args_display = if p.args.is_empty() {
-            String::new()
-        } else {
-            let joined = p.args.join(" ");
-            if joined.len() > 60 {
-                let truncated: String = joined.chars().take(57).collect();
-                format!(" {truncated}...")
-            } else {
-                format!(" {joined}")
-            }
-        };
-        eprintln!(
-            "  {} {} {}{} {} ({})",
-            theme::icon_bullet(),
-            format!("[{}]", p.pid).dimmed(),
-            p.subcommand.green(),
-            args_display.dimmed(),
-            procinfo::format_duration(p.run_time_secs).dimmed(),
-            procinfo::format_memory_mb(p.memory_bytes).dimmed(),
-        );
-    }
 }

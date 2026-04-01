@@ -10,9 +10,11 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "serve",
     "pull",
     "list",
+    "ls", // alias for list
     "ps",
     "info",
     "rm",
+    "remove", // alias for rm
     "unload",
     "default",
     "expand",
