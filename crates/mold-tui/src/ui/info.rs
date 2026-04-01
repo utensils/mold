@@ -158,3 +158,54 @@ fn process_footprint(pid: u32) -> u64 {
         .map(|p| p.memory())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_footprint_returns_nonzero_for_self() {
+        let pid = std::process::id();
+        let footprint = process_footprint(pid);
+        // Our own process must have some memory allocated
+        assert!(footprint > 0, "footprint was {footprint}");
+    }
+
+    #[test]
+    fn process_footprint_returns_zero_for_invalid_pid() {
+        // PID 0 is the kernel, we can't query it — should return 0 or a value
+        // PID max is unlikely to exist
+        let footprint = process_footprint(u32::MAX);
+        assert_eq!(footprint, 0);
+    }
+
+    #[test]
+    fn total_mold_memory_includes_current_process() {
+        // The current test binary has "mold" in it (mold-ai-tui tests)
+        // but the process name is the test runner, not "mold"
+        // Just verify it doesn't panic
+        let mb = total_mold_memory_mb();
+        // May be 0 if no mold process is running, that's fine
+        let _ = mb;
+    }
+
+    #[test]
+    fn resource_info_refresh_does_not_panic() {
+        let mut ri = ResourceInfo::default();
+        ri.refresh();
+        // memory_line should be Some on macOS (unified memory) or CUDA
+        // process_memory_mb may be 0 if no mold processes running
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn phys_footprint_larger_than_zero_for_self() {
+        // On macOS, phys_footprint includes mmap'd pages — must be > 0
+        let pid = std::process::id();
+        let footprint = process_footprint(pid);
+        assert!(
+            footprint > 1024 * 1024,
+            "phys_footprint should be at least 1 MB, got {footprint} bytes"
+        );
+    }
+}

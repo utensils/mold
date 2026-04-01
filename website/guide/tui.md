@@ -1,4 +1,4 @@
-# Terminal UI
+# Terminal UI <Badge type="warning" text="beta" />
 
 mold includes an interactive terminal UI for browsing models, tuning parameters,
 generating images with live progress, and previewing results — all without
@@ -7,6 +7,12 @@ leaving the terminal.
 Built on [ratatui](https://ratatui.rs) with Kitty graphics protocol support for
 pixel-perfect image preview in terminals like Ghostty, kitty, and WezTerm. Falls
 back to halfblock rendering in other terminals.
+
+<!-- prettier-ignore-start -->
+::: warning Beta
+The TUI is under active development. Core generation, model management, and image preview work well. Some features (prompt expansion, gallery actions, theme customization) are planned but not yet implemented.
+:::
+<!-- prettier-ignore-end -->
 
 ![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
 
@@ -18,13 +24,24 @@ mold tui
 
 The TUI launches in the **Generate** view with your cursor in the prompt field.
 Type a prompt, press **Enter**, and watch the progress panel as your image
-generates. The result appears in the Preview panel.
+generates. The result appears in the Preview panel and is saved to the current
+directory.
 
 <!-- prettier-ignore-start -->
 ::: tip
 The `tui` feature must be compiled in. Pre-built releases and the Nix package include it by default. If building from source, add `--features tui` to your build command.
 :::
 <!-- prettier-ignore-end -->
+
+## Auto-Start Server
+
+By default, `mold tui` automatically starts a background `mold serve` process if
+no server is already running. This keeps models hot between generations for
+faster subsequent runs. The server is killed when you quit the TUI.
+
+- `mold tui` — auto-starts server on `localhost:7680`
+- `mold tui --local` — skip server, use local GPU only
+- `mold tui --host http://gpu:7680` — connect to an existing remote server
 
 ## Views
 
@@ -33,106 +50,122 @@ The TUI has three main views, shown as tabs at the top of the screen:
 | View     | Purpose                                         |
 | -------- | ----------------------------------------------- |
 | Generate | Write prompts, tune parameters, generate images |
-| Gallery  | Browse previously generated images              |
+| Gallery  | Browse generated images with preview            |
 | Models   | View installed and available models             |
 
-Switch between views by pressing **Esc** to enter navigation mode, then **1**,
-**2**, or **3**. Or use **Alt+1**/**Alt+2**/**Alt+3** from anywhere.
+Switch views with **Esc** then **1**/**2**/**3**, arrow keys, or click the tabs.
+**Alt+1**/**Alt+2**/**Alt+3** works from anywhere.
 
 ## Generate View
 
-The main workspace, split into four panels:
+The main workspace with five panels:
 
-- **Prompt** — Multi-line text area for your image prompt
+- **Prompt** — Multi-line text area (Shift+Enter for newlines, emacs
+  keybindings)
 - **Negative** — (CFG models only) Describes what to avoid
-- **Parameters** — Model, dimensions, steps, guidance, and more
-- **Preview** — Shows the generated image with Kitty/sixel/halfblock rendering
-
-### Workflow
-
-1. Type your prompt in the Prompt panel
-2. Press **Tab** to move to Parameters and adjust settings
-3. Press **Enter** on the Model field to open the model selector
-4. Press **Enter** in the Prompt panel (or **Ctrl+G** from anywhere) to generate
-5. Watch the Progress panel for loading stages and denoising progress
-6. The result appears in Preview when done
+- **Parameters** — Model, dimensions, steps, guidance, seed, and more
+- **Info** — Model description, system memory, process memory usage
+- **Preview** — Generated image with Kitty/sixel/halfblock rendering
 
 ### Editing Parameters
 
-Navigate to the Parameters panel with **Tab**, then:
+Navigate to Parameters with **Tab** or click, then:
 
 - **j**/**k** or arrow keys to move between fields
-- **+**/**-** or arrow left/right to adjust numeric values
-- **Enter** to activate a field:
+- **+**/**-** or left/right to adjust numeric values
+- **Enter** or click to activate a field:
   - **Model** — opens the fuzzy model selector
+  - **Seed** — opens seed value input popup
   - **Format** / **Mode** / **Expand** / **Offload** — toggles the value
   - **Scheduler** — cycles through Ddim, Euler Ancestral, UniPC
-  - **Seed** — randomizes it
+  - **Reset** — restores all parameters to model defaults (keeps prompt)
 
-Width and height change in steps of 64. Steps increment by 1, guidance by 0.5.
+### Seed Modes
+
+Cycle with **Ctrl+R** or **+/-** on the Seed field:
+
+| Mode      | Behavior                               |
+| --------- | -------------------------------------- |
+| random    | New random seed each generation        |
+| fixed     | Same seed every time (reproducibility) |
+| increment | Seed +1 after each generation          |
+
+Press **Enter** on Seed to type an exact value.
 
 ### Model Selector
 
-Press **Enter** on the Model field or **Ctrl+M** from anywhere to open the model
-selector popup:
+Press **Enter** on the Model field or **Ctrl+M** from anywhere:
 
 - Type to fuzzy-filter the model list
-- **j**/**k** or arrow keys to navigate
-- **Enter** to select — parameters update to the model's defaults
+- **j**/**k**, arrow keys, or scroll wheel to navigate
+- **Enter** to select — parameters update to model defaults
 - **Esc** to cancel
 
-### Auto-Pull
+### Prompt History
 
-If you generate with a model that isn't downloaded, the TUI automatically pulls
-it — just like the CLI. Download progress appears in the Progress panel with
-per-file progress bars. Generation continues automatically once the pull
-completes.
+Previous prompts persist across sessions in `~/.mold/prompt-history.jsonl`:
+
+- **Up/Down** arrows at top/bottom of prompt recall history
+- **Ctrl+P**/**Ctrl+N** also navigate history
+- **/** in navigation mode opens fuzzy search over all prompts
+
+### Shell Keybindings
+
+The prompt editor supports standard emacs/shell keybindings:
+
+| Key    | Action              |
+| ------ | ------------------- |
+| Ctrl+A | Beginning of line   |
+| Ctrl+E | End of line         |
+| Ctrl+K | Kill to end of line |
+| Ctrl+U | Kill to start       |
+| Ctrl+W | Delete word back    |
+| Ctrl+D | Delete forward      |
+| Ctrl+F | Forward char        |
+| Ctrl+B | Backward char       |
 
 ## Gallery View
 
-Browse images from the current session. Select an entry to see it in the preview
-panel with generation metadata.
+Browse generated images from the current directory and `MOLD_OUTPUT_DIR`. Reads
+PNG metadata (prompt, model, seed) from mold-generated files. All `.png`/`.jpg`
+files are shown for future img2img selection.
 
 | Key   | Action                               |
 | ----- | ------------------------------------ |
 | j/k   | Navigate the history list            |
 | Enter | Re-generate with the same parameters |
-| e     | Load parameters into Generate view   |
-| d     | Delete the image file                |
-| o     | Open in system image viewer          |
 | Esc   | Back to Generate                     |
 
 ## Models View
 
-See all installed and available models with their families, sizes, default
-steps, guidance, and dimensions.
+See all installed and available models with family, size, defaults, and status.
 
 | Key   | Action                        |
 | ----- | ----------------------------- |
 | j/k   | Navigate the model list       |
 | Enter | Set as default model          |
 | p     | Pull (download) a model       |
-| r     | Remove a downloaded model     |
 | u     | Unload the active model (GPU) |
 | Esc   | Back to Generate              |
 
 ## Navigation
 
-The TUI uses a focus-based navigation model. Press **Esc** to unfocus and enter
-navigation mode, where number keys switch views.
+Press **Esc** to enter navigation mode, where number keys and arrows switch
+views.
 
 ### Global Shortcuts
 
-| Key       | Action                            |
-| --------- | --------------------------------- |
-| Esc       | Unfocus / navigation mode         |
-| 1 / 2 / 3 | Switch views (in navigation mode) |
-| Alt+1/2/3 | Switch views (from anywhere)      |
-| Tab       | Cycle focus to next panel         |
-| Shift+Tab | Cycle focus to previous panel     |
-| Ctrl+C    | Quit                              |
-| q         | Quit (when not in a text field)   |
-| ?         | Show help overlay                 |
+| Key           | Action                            |
+| ------------- | --------------------------------- |
+| Esc           | Unfocus / navigation mode         |
+| 1 / 2 / 3     | Switch views (in navigation mode) |
+| Left / Right  | Cycle views (in navigation mode)  |
+| Alt+1 / 2 / 3 | Switch views (from anywhere)      |
+| Tab           | Cycle focus to next panel         |
+| Shift+Tab     | Cycle focus to previous panel     |
+| Ctrl+C        | Quit                              |
+| q             | Quit (when not in a text field)   |
+| ?             | Show help overlay                 |
 
 ### Generate Shortcuts
 
@@ -142,27 +175,52 @@ navigation mode, where number keys switch views.
 | Enter  | Parameters | Activate field (selector/toggle) |
 | Ctrl+G | Any        | Start generation                 |
 | Ctrl+M | Any        | Open model selector              |
-| Ctrl+R | Any        | Randomize seed                   |
-| Ctrl+E | Any        | Expand prompt via LLM            |
-| Ctrl+S | Any        | Save current image               |
+| Ctrl+R | Any        | Cycle seed mode                  |
 | +/-    | Parameters | Adjust numeric value             |
 | j/k    | Parameters | Navigate fields                  |
 
+### Mouse Support
+
+- Click tabs to switch views
+- Click panels to focus them
+- Click parameter rows to select and activate
+- Click gallery/model rows to select
+- Scroll wheel navigates lists and popups
+
+## Session Persistence
+
+All settings are saved to `~/.mold/tui-session.json` after each generation and
+restored on next launch:
+
+- Prompt and negative prompt text
+- Model selection
+- All generation parameters (dimensions, steps, guidance, seed mode, batch,
+  format, scheduler, lora, expand, offload, strength)
+
+Use **Reset** at the bottom of Parameters to restore model defaults without
+losing your prompt.
+
+## Info Panel
+
+The Info panel below Parameters shows:
+
+- **Model description** from the manifest
+- **System memory** — free and available (macOS unified memory / NVIDIA VRAM)
+- **Mold memory** — total physical footprint of all mold processes (includes
+  mmap'd model weights)
+
 ## Server Fallback
 
-The TUI mirrors the CLI's connection behavior:
+The TUI uses a three-mode inference system:
 
-1. **Remote first** — connects to the server at `MOLD_HOST` (default
-   `localhost:7680`)
-2. **Auto fallback** — if the server is unreachable, transparently falls back to
-   local GPU inference
-3. **Local mode** — force local-only with `mold tui --local`
+| Mode   | Behavior                                           |
+| ------ | -------------------------------------------------- |
+| auto   | Try server first, fall back to local GPU (default) |
+| local  | Force local GPU only                               |
+| remote | Force remote server only (error if unreachable)    |
 
-Override the server URL:
-
-```bash
-mold tui --host http://gpu-server:7680
-```
+Cycle with **+/-** on the Mode field. The Host field (visible in auto/remote
+mode) can be edited with **Enter** to point at a custom server.
 
 ## Image Preview
 
@@ -174,19 +232,6 @@ The TUI auto-detects your terminal's graphics protocol at startup:
 | Sixel      | foot, xterm, mlterm     | Full color     |
 | iTerm2     | iTerm2, Hyper           | Full color     |
 | Halfblocks | Everything else         | Unicode blocks |
-
-No configuration needed — the best available protocol is used automatically.
-
-## Progress Display
-
-The Progress panel shows real-time feedback during generation:
-
-- **Stage completion** — checkmarks with elapsed time (Loading T5, Encoding
-  prompt, VAE decode, etc.)
-- **Denoising** — progress gauge with step count and iterations/sec
-- **Weight loading** — progress gauge with bytes loaded/total
-- **Downloads** — yellow progress gauge for model auto-pull
-- **Info messages** — server fallback notices, cache hits
 
 ## Building with TUI Support
 
@@ -212,5 +257,5 @@ The Nix flake, pre-built releases, and Docker images include the TUI by default.
 
 ## Theme
 
-The TUI uses a Catppuccin Mocha color palette by default. Theme customization
-via `config.toml` is planned for a future release.
+The TUI uses a Catppuccin Mocha color palette. Theme customization via
+`config.toml` is planned for a future release.

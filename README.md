@@ -139,9 +139,9 @@ In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 embed_metadata = false
 ```
 
-### Terminal UI
+### Terminal UI (beta)
 
-Launch a full interactive TUI for generating images, browsing models, and previewing results — all without leaving the terminal.
+Launch a full interactive TUI for generating images, browsing models, and previewing results — all without leaving the terminal. The TUI is under active development; core features work well but some are still being built.
 
 ```bash
 mold tui
@@ -154,14 +154,19 @@ mold tui
 </p>
 
 Features:
-- **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3 or arrow keys)
+- **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3, arrows, or click)
 - **Live image preview** — Kitty, Sixel, iTerm2, or halfblock auto-detected
+- **Auto-start server** — background `mold serve` keeps models hot between generations
 - **Model selector** — fuzzy-filtered popup (Ctrl+M or Enter on Model field)
 - **Auto-pull** — generates with any model, auto-downloads if not installed
+- **Prompt history** — Up/Down arrows or `/` for fuzzy search, persisted across sessions
+- **Session persistence** — all settings saved and restored on next launch
+- **Shell keybindings** — Ctrl+A/E/K/U/W in prompt fields
+- **Mouse support** — click panels, tabs, parameters; scroll wheel in lists
 - **Real-time progress** — stage completion, denoising gauge, download bars
-- **Server fallback** — tries remote server first, falls back to local GPU
+- **Info panel** — model details, system memory, process memory (mmap-aware)
 
-See the full [TUI documentation](https://utensils.github.io/mold/guide/tui) for keybindings and configuration.
+Use `mold tui --local` to skip the server and run locally. See the full [TUI documentation](https://utensils.github.io/mold/guide/tui) for keybindings and configuration.
 
 ### Image-to-image
 
