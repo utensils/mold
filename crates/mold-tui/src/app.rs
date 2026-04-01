@@ -1455,20 +1455,60 @@ impl App {
                     self.generate.params.seed =
                         self.generate.params.seed_mode.advance(response.seed_used);
 
-                    if let Some(img_data) = response.images.first() {
-                        if let Ok(img) = image::load_from_memory(&img_data.data) {
-                            let protocol = self.picker.new_resize_protocol(img.clone());
-                            self.generate.preview_image = Some(img);
-                            self.generate.image_state = Some(protocol);
+                    // Save images to disk and display preview
+                    let mut saved_path = std::path::PathBuf::new();
+                    let ts_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    for (i, img_data) in response.images.iter().enumerate() {
+                        // Save to disk
+                        let ext = match img_data.format {
+                            OutputFormat::Png => "png",
+                            OutputFormat::Jpeg => "jpeg",
+                        };
+                        let filename = mold_core::default_output_filename(
+                            &self.generate.params.model,
+                            ts_secs,
+                            ext,
+                            response.images.len() as u32,
+                            i as u32,
+                        );
+                        let path = std::path::PathBuf::from(&filename);
+                        if std::fs::write(&path, &img_data.data).is_ok() && i == 0 {
+                            saved_path = path;
+                        }
+
+                        // Display preview for first image
+                        if i == 0 {
+                            if let Ok(img) = image::load_from_memory(&img_data.data) {
+                                let protocol = self.picker.new_resize_protocol(img.clone());
+                                self.generate.preview_image = Some(img);
+                                self.generate.image_state = Some(protocol);
+                            }
                         }
                     }
 
+                    let saved_name = saved_path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
                     self.generate.progress.log.push(ProgressLogEntry {
-                        message: format!(
-                            "Done in {:.1}s (seed: {})",
-                            response.generation_time_ms as f64 / 1000.0,
-                            response.seed_used
-                        ),
+                        message: if saved_name.is_empty() {
+                            format!(
+                                "Done in {:.1}s (seed: {})",
+                                response.generation_time_ms as f64 / 1000.0,
+                                response.seed_used
+                            )
+                        } else {
+                            format!(
+                                "Saved {} ({:.1}s)",
+                                saved_name,
+                                response.generation_time_ms as f64 / 1000.0,
+                            )
+                        },
                         style: ProgressStyle::Done,
                     });
 
@@ -1518,7 +1558,7 @@ impl App {
                         self.gallery.entries.insert(
                             0,
                             GalleryEntry {
-                                path: std::path::PathBuf::new(), // in-memory, not saved yet
+                                path: saved_path,
                                 prompt_preview: if prompt_text.len() > 60 {
                                     format!("{}...", &prompt_text[..57])
                                 } else {

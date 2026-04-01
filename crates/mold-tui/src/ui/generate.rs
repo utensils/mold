@@ -207,7 +207,13 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             (app.generate.last_seed, app.generate.last_generation_time_ms)
         {
             if inner.height > 2 {
-                let info = format!("seed: {} | {:.1}s", seed, time_ms as f64 / 1000.0);
+                let seed_str = seed.to_string();
+                let seed_display = if seed_str.len() > 10 {
+                    format!("{}...", &seed_str[..8])
+                } else {
+                    seed_str
+                };
+                let info = format!("{seed_display} | {:.1}s", time_ms as f64 / 1000.0);
                 let info_area = Rect {
                     x: inner.x,
                     y: inner.y + inner.height - 1,
