@@ -1731,14 +1731,19 @@ impl InferenceEngine for FluxEngine {
             tracing::info!("CLIP encoding complete");
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
-            if loaded.t5.on_gpu {
-                loaded.t5.drop_weights();
-                tracing::info!("T5 encoder dropped from GPU to free VRAM for denoising");
-            }
-            if loaded.clip.on_gpu {
-                loaded.clip.drop_weights();
-                tracing::info!("CLIP encoder dropped from GPU to free VRAM for denoising");
-            }
+            // Drop encoders to free memory for denoising.
+            // On unified-memory systems (Apple Silicon), CPU-loaded weights share the
+            // same physical RAM as Metal GPU allocations, so we must drop unconditionally.
+            loaded.t5.drop_weights();
+            tracing::info!(
+                on_gpu = loaded.t5.on_gpu,
+                "T5 encoder dropped to free memory for denoising"
+            );
+            loaded.clip.drop_weights();
+            tracing::info!(
+                on_gpu = loaded.clip.on_gpu,
+                "CLIP encoder dropped to free memory for denoising"
+            );
 
             Self::generate_with_embeddings(
                 progress,

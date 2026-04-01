@@ -647,11 +647,14 @@ impl InferenceEngine for Flux2Engine {
         )?;
         tracing::info!("Qwen3 encoding complete");
 
-        // Drop Qwen3 from GPU to free VRAM for denoising
-        if loaded.text_encoder.on_gpu {
-            loaded.text_encoder.drop_weights();
-            tracing::info!("Qwen3 encoder dropped from GPU to free VRAM for denoising");
-        }
+        // Drop Qwen3 to free memory for denoising.
+        // On unified-memory systems (Apple Silicon), CPU-loaded weights share the
+        // same physical RAM as Metal GPU allocations, so we must drop unconditionally.
+        loaded.text_encoder.drop_weights();
+        tracing::info!(
+            on_gpu = loaded.text_encoder.on_gpu,
+            "Qwen3 encoder dropped to free memory for denoising"
+        );
 
         // 2. Generate initial noise with seed for reproducibility
         let latent_h = height.div_ceil(8);

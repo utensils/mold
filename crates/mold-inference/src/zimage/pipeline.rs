@@ -743,12 +743,15 @@ impl InferenceEngine for ZImageEngine {
         )?;
         tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
 
-        // Drop text encoder from GPU to free VRAM for denoising + VAE decode.
+        // Drop text encoder to free memory for denoising + VAE decode.
         // It will be reloaded on the next generate() call.
-        if loaded.text_encoder.on_gpu {
-            loaded.text_encoder.drop_weights();
-            tracing::info!("Qwen3 text encoder dropped from GPU to free VRAM for denoising");
-        }
+        // On unified-memory systems (Apple Silicon), CPU-loaded weights share the
+        // same physical RAM as Metal GPU allocations, so we must drop unconditionally.
+        loaded.text_encoder.drop_weights();
+        tracing::info!(
+            on_gpu = loaded.text_encoder.on_gpu,
+            "Qwen3 text encoder dropped to free memory for denoising"
+        );
 
         // 3. Calculate latent dimensions: 2 * (image_size / 16)
         let vae_align = 16;
