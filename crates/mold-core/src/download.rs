@@ -528,15 +528,14 @@ pub async fn pull_model_with_callback(
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
     // Pre-compute which files need downloading so callback indices are sequential
-    let files_to_download: Vec<_> = manifest
+    let total_to_download = manifest
         .files
         .iter()
         .filter(|file| {
             let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
             !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
         })
-        .collect();
-    let total_to_download = files_to_download.len();
+        .count();
     let mut download_idx = 0;
 
     for file in &manifest.files {

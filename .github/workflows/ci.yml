@@ -13,6 +13,26 @@ env:
 # CI only checks non-CUDA compilation, lints, and tests.
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install docs dependencies
+        working-directory: website
+        run: bun install
+      - name: Check docs formatting
+        working-directory: website
+        run: bun run fmt:check
+      - name: Verify docs references
+        working-directory: website
+        run: bun run verify
+      - name: Build docs
+        working-directory: website
+        run: bun run build
+
   check:
     runs-on: ubuntu-latest
     steps:

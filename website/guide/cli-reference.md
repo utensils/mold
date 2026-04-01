@@ -1,0 +1,172 @@
+# CLI Reference
+
+## `mold run`
+
+Generate images from text prompts.
+
+```
+mold run [MODEL] [PROMPT...] [OPTIONS]
+```
+
+The first positional argument is treated as MODEL if it matches a known model
+name; otherwise it is the prompt. Prompt can also be piped via stdin.
+
+### Options
+
+| Flag                      | Description                                      |
+| ------------------------- | ------------------------------------------------ |
+| `-m, --model <MODEL>`     | Explicit model override                          |
+| `-o, --output <PATH>`     | Output file (default: `./mold-{model}-{ts}.png`) |
+| `--width <N>`             | Image width                                      |
+| `--height <N>`            | Image height                                     |
+| `--steps <N>`             | Inference steps                                  |
+| `--seed <N>`              | Random seed                                      |
+| `--batch <N>`             | Number of images (1–16)                          |
+| `--guidance <N>`          | Guidance scale                                   |
+| `--format <FMT>`          | `png` or `jpeg`                                  |
+| `--local`                 | Skip server, run locally                         |
+| `--eager`                 | Keep all components loaded (more VRAM)           |
+| `--offload`               | CPU↔GPU block streaming (less VRAM)              |
+| `--lora <PATH>`           | LoRA adapter safetensors                         |
+| `--lora-scale <FLOAT>`    | LoRA strength (0.0–2.0)                          |
+| `-i, --image <PATH>`      | Source image for img2img (`-` for stdin)         |
+| `--strength <FLOAT>`      | Denoising strength (0.0–1.0)                     |
+| `--mask <PATH>`           | Inpainting mask                                  |
+| `--control <PATH>`        | ControlNet control image                         |
+| `--control-model <NAME>`  | ControlNet model name                            |
+| `--control-scale <FLOAT>` | ControlNet scale (0.0–2.0)                       |
+| `-n, --negative-prompt`   | Negative prompt (CFG models)                     |
+| `--no-negative`           | Suppress config default negative                 |
+| `--no-metadata`           | Disable PNG metadata                             |
+| `--preview`               | Display image inline in terminal                 |
+| `--expand`                | Enable prompt expansion                          |
+| `--no-expand`             | Disable prompt expansion                         |
+| `--expand-backend <URL>`  | Expansion backend URL                            |
+| `--expand-model <MODEL>`  | LLM model for expansion                          |
+| `--t5-variant <TAG>`      | T5 encoder variant                               |
+| `--qwen3-variant <TAG>`   | Qwen3 encoder variant                            |
+| `--scheduler <SCHED>`     | Noise scheduler (ddim, euler-ancestral, uni-pc)  |
+| `--host <URL>`            | Override MOLD_HOST                               |
+
+## `mold expand`
+
+Preview prompt expansion without generating.
+
+```bash
+mold expand <PROMPT> [OPTIONS]
+```
+
+| Flag                     | Description                |
+| ------------------------ | -------------------------- |
+| `-m, --model <MODEL>`    | Target model (for style)   |
+| `--variations <N>`       | Number of variations       |
+| `--json`                 | Output as JSON array       |
+| `--backend <URL>`        | Expansion backend override |
+| `--expand-model <MODEL>` | LLM model override         |
+
+## `mold serve`
+
+Start the HTTP inference server.
+
+```bash
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text] [--discord]
+```
+
+| Flag                  | Description                                                       |
+| --------------------- | ----------------------------------------------------------------- |
+| `--port <N>`          | Port to listen on, defaults to `7680` or `MOLD_PORT`              |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                               |
+| `--models-dir <PATH>` | Override the models directory for this process                    |
+| `--log-format <FMT>`  | `json` or `text`; defaults to `json` for production-friendly logs |
+| `--discord`           | Also starts the built-in Discord bot in the same process          |
+
+`--discord` is only available when the binary was built with the `discord`
+feature. The bot still talks to the same local server API and reads
+`MOLD_DISCORD_TOKEN` or `DISCORD_TOKEN` from the environment.
+
+## `mold pull`
+
+Download a model from HuggingFace.
+
+```bash
+mold pull <MODEL> [--skip-verify]
+```
+
+`mold pull` writes a `.pulling` marker while a download is in progress and
+removes it on success. If a pull is interrupted, `mold list` will show the model
+as incomplete and a later `mold pull` or `mold rm` can clean things up.
+
+`--skip-verify` disables the post-download SHA-256 integrity check. That is
+mainly useful when an upstream file has intentionally changed before the
+expected checksum in `manifest.rs` has been updated yet.
+
+## `mold list`
+
+List configured and available models with download status and disk usage.
+
+Installed models are shown with these columns:
+
+| Column        | Meaning                                                      |
+| ------------- | ------------------------------------------------------------ |
+| `NAME`        | Model name, with `★` for the default model and `●` if loaded |
+| `FAMILY`      | Model family such as FLUX, SDXL, or Z-Image                  |
+| `SIZE`        | Model-specific download size                                 |
+| `DISK`        | Actual local disk usage for that model                       |
+| `STEPS`       | Default inference step count                                 |
+| `GUIDANCE`    | Default guidance value                                       |
+| `WIDTH`       | Default image width                                          |
+| `HEIGHT`      | Default image height                                         |
+| `DESCRIPTION` | Summary, plus `[gated]` or `[incomplete]` when relevant      |
+
+The "Available to pull" section adds a `FETCH` column, which is how much data
+still needs to be downloaded after accounting for shared cached files.
+
+## `mold info`
+
+Show installation overview, or model details with optional SHA-256 verification.
+
+```bash
+mold info              # overview
+mold info flux-dev:q4  # model details
+mold info --verify     # verify all checksums
+```
+
+## `mold default`
+
+Get or set the default model.
+
+```bash
+mold default              # show current
+mold default flux-dev:q4  # set default
+```
+
+## `mold rm`
+
+Remove downloaded models.
+
+```bash
+mold rm <MODELS...> [--force]
+```
+
+`--force` skips the interactive confirmation prompt. Shared files such as VAEs,
+encoders, and tokenizers are preserved until no remaining model references them.
+
+## `mold ps`
+
+Show server status and loaded model.
+
+## `mold unload`
+
+Unload the current model from the server to free GPU memory.
+
+## `mold version`
+
+Show version, build date, and git SHA.
+
+## `mold completions`
+
+Generate shell completions.
+
+```bash
+mold completions bash | zsh | fish
+```

@@ -5,10 +5,12 @@
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
 <p align="center">
-  <img src="docs/mold.png" alt="mold logo" width="256">
+  <img src="docs/mold-transparent.png" alt="mold logo" width="256">
 </p>
 
 Generate images from text on your own GPU. No cloud, no Python, no fuss.
+
+**[Documentation](https://utensils.github.io/mold/)** | **[Getting Started](https://utensils.github.io/mold/guide/)** | **[Models](https://utensils.github.io/mold/models/)** | **[API](https://utensils.github.io/mold/api/)**
 
 ```bash
 mold run "a cat riding a motorcycle through neon-lit streets"
@@ -48,6 +50,11 @@ cargo build --release -p mold-ai --features cuda    # Linux (NVIDIA)
 cargo build --release -p mold-ai --features metal   # macOS (Apple Silicon)
 ```
 
+Optional features can be added to the same build, for example
+`--features cuda,preview,expand,discord` or
+`--features metal,preview,expand,discord` if you also want terminal preview,
+local prompt expansion, or the Discord bot commands.
+
 ### Manual download
 
 Pre-built binaries are available on the [releases page](https://github.com/utensils/mold/releases).
@@ -55,7 +62,8 @@ Pre-built binaries are available on the [releases page](https://github.com/utens
 | Platform | File |
 |----------|------|
 | macOS Apple Silicon (Metal) | `mold-aarch64-apple-darwin.tar.gz` |
-| Linux x86_64 (CUDA) | `mold-x86_64-unknown-linux-gnu-cuda.tar.gz` |
+| Linux x86_64 (Ada, RTX 4090 / 40-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
+| Linux x86_64 (Blackwell, RTX 5090 / 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
 </details>
 
@@ -359,6 +367,8 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin |
+| `MOLD_TEXT_TOKENIZER_PATH` | — | Override generic text tokenizer path (Qwen/Z-Image families) |
+| `MOLD_DECODER_PATH` | — | Override decoder weights path (Wuerstchen) |
 | `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
 | `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
@@ -376,18 +386,27 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
 | `flux-schnell:q8` | 4 | 12GB | Fast, general purpose |
+| `flux-schnell:q6` | 4 | 9.8GB | Best quality/size trade-off |
 | `flux-schnell:bf16` | 4 | 23.8GB | Fast, full precision (needs >24GB VRAM) |
 | `flux-schnell:q4` | 4 | 7.5GB | Same but lighter |
 | `flux-dev:q8` | 25 | 12GB | Full quality |
+| `flux-dev:q6` | 25 | 9.9GB | Best quality/size trade-off |
 | `flux-dev:bf16` | 25 | 23.8GB | Full quality, full precision (needs >24GB VRAM) |
 | `flux-dev:q4` | 25 | 7GB | Full quality, less VRAM |
 | `flux-krea:q8` | 25 | 12.7GB | Aesthetic photography |
+| `flux-krea:q6` | 25 | 9.8GB | Aesthetic photography |
+| `flux-krea:q4` | 25 | 7.5GB | Aesthetic photography, lighter |
 | `flux-krea:fp8` | 25 | 11.9GB | Aesthetic photography, FP8 |
+| `jibmix-flux:fp8` | 25 | 11.9GB | Photorealistic fine-tune |
 | `jibmix-flux:q4` | 25 | 6.9GB | Photorealistic fine-tune |
 | `jibmix-flux:q5` | 25 | 8.4GB | Photorealistic fine-tune |
+| `jibmix-flux:q3` | 25 | 5.4GB | Photorealistic, smallest footprint |
 | `ultrareal-v4:q8` | 25 | 12.6GB | Photorealistic (latest) |
+| `ultrareal-v4:q5` | 25 | 8.0GB | Photorealistic |
 | `ultrareal-v4:q4` | 25 | 6.7GB | Photorealistic, lighter |
 | `ultrareal-v3:q8` | 25 | 12.7GB | Photorealistic |
+| `ultrareal-v3:q6` | 25 | 9.8GB | Photorealistic |
+| `ultrareal-v3:q4` | 25 | 7.5GB | Photorealistic, lighter |
 | `ultrareal-v2:bf16` | 25 | 23.8GB | Photorealistic, full precision |
 | `iniverse-mix:fp8` | 25 | 11.9GB | Realistic SFW/NSFW mix |
 
@@ -426,6 +445,7 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
 | `z-image-turbo:q8` | 9 | 6.6GB | Fast 9-step generation |
+| `z-image-turbo:q6` | 9 | 5.3GB | Best quality/size trade-off |
 | `z-image-turbo:q4` | 9 | 3.8GB | Lighter, still good |
 | `z-image-turbo:bf16` | 9 | 12.2GB | Full precision |
 
@@ -435,6 +455,7 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
+| `qwen-image:bf16` | 30 | 44+GB | Full precision, maximum quality |
 | `qwen-image:q8` | 30 | 21.8GB | Qwen-Image-2512, best quality |
 | `qwen-image:q6` | 30 | 16.8GB | Best quality/size trade-off |
 | `qwen-image:q4` | 30 | 12.3GB | Smallest practical footprint |
@@ -450,17 +471,9 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
 | `flux2-klein:q8` | 4 | 4.3GB | Fast 4B model, good quality at low VRAM |
+| `flux2-klein:q6` | 4 | 3.4GB | Better quality/size trade-off |
 | `flux2-klein:q4` | 4 | 2.6GB | Smallest FLUX variant |
 | `flux2-klein:bf16` | 4 | 7.8GB | Full precision 4B |
-
-### Qwen-Image (alpha)
-
-> **Note**: Qwen-Image is still in active alpha development. Results may vary by backend.
-
-| Model | Steps | Size | Notes |
-|-------|-------|------|-------|
-| `qwen-image:q8` | 28 | 21.8GB | Alpha Qwen-Image-2512, actively being improved |
-| `qwen-image:q4` | 28 | 12.3GB | Alpha Qwen-Image, smallest footprint |
 
 > Bare names resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8` in order. So `mold run flux-schnell "a cat"` just works.
 
@@ -535,7 +548,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 ```nix
 services.mold.discord = {
   enable = true;
-  tokenFile = config.age.secrets.discord-token.path; # agenix secret
+  tokenFile = config.age.secrets.discord-token.path; # EnvironmentFile: MOLD_DISCORD_TOKEN=...
   moldHost = "http://localhost:7680";
   cooldownSeconds = 10;
 };
