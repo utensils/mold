@@ -34,7 +34,7 @@ steps than the distilled Klein.
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Apache 2.0
 - **HuggingFace**:
-  [black-forest-labs/FLUX.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-Klein)
+  [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B)
 
 ## Variants
 
@@ -63,7 +63,7 @@ higher quality than the 4B Klein.
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Non-Commercial
 - **HuggingFace**:
-  [black-forest-labs/FLUX.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-Klein)
+  [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B)
   (gated — requires HuggingFace license acceptance)
 
 ## Variants
