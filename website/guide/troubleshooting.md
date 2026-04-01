@@ -36,8 +36,8 @@ Qwen-Image and full BF16 FLUX need much more headroom.
 
 If `mold run` cannot reach the server:
 
-- Check whether the server is up with `mold ps`.
-- Start it with `mold serve`.
+- Run `mold ps` to check server status or detect local mold processes.
+- Start the server with `mold serve`.
 - Verify `MOLD_HOST` points at the right machine and port.
 
 ```bash
