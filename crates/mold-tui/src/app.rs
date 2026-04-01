@@ -116,6 +116,7 @@ pub enum ParamField {
     Steps,
     Guidance,
     Seed,
+    SeedValue,
     Batch,
     Format,
     Mode,
@@ -145,6 +146,7 @@ impl ParamField {
             ParamField::Steps,
             ParamField::Guidance,
             ParamField::Seed,
+            ParamField::SeedValue,
             ParamField::Batch,
             ParamField::Format,
             ParamField::Mode,
@@ -185,6 +187,7 @@ impl ParamField {
             Self::Steps => "Steps",
             Self::Guidance => "Guidance",
             Self::Seed => "Seed",
+            Self::SeedValue => "",
             Self::Batch => "Batch",
             Self::Format => "Format",
             Self::Mode => "Mode",
@@ -362,17 +365,11 @@ impl GenerateParams {
             ParamField::Height => self.height.to_string(),
             ParamField::Steps => self.steps.to_string(),
             ParamField::Guidance => format!("{:.1}", self.guidance),
-            ParamField::Seed => match self.seed_mode {
-                SeedMode::Random => "\u{27e8}random\u{27e9}".to_string(),
-                SeedMode::Fixed => self
-                    .seed
-                    .map(|s| format!("{s} (fixed)"))
-                    .unwrap_or_else(|| "\u{27e8}fixed\u{27e9}".to_string()),
-                SeedMode::Increment => self
-                    .seed
-                    .map(|s| format!("{s} (incr)"))
-                    .unwrap_or_else(|| "\u{27e8}increment\u{27e9}".to_string()),
-            },
+            ParamField::Seed => self.seed_mode.label().to_string(),
+            ParamField::SeedValue => self
+                .seed
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "\u{27e8}auto\u{27e9}".to_string()),
             ParamField::Batch => self.batch.to_string(),
             ParamField::Format => format!("{:?}", self.format).to_uppercase(),
             ParamField::Mode => self.inference_mode.label().to_string(),
@@ -1046,6 +1043,10 @@ impl App {
                     self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
                 }
             }
+            // Randomize the seed value
+            ParamField::SeedValue => {
+                self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+            }
             // Open host input popup
             ParamField::Host => {
                 let current = self.generate.params.host.clone().unwrap_or_default();
@@ -1358,6 +1359,10 @@ mod tests {
         let caps = crate::model_info::capabilities_for_family("sd15");
         let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
         for field in &fields {
+            // SeedValue intentionally has no label (continuation of Seed row)
+            if *field == ParamField::SeedValue {
+                continue;
+            }
             assert!(
                 !field.label().is_empty(),
                 "field {:?} has empty label",
@@ -1458,32 +1463,38 @@ mod tests {
     }
 
     #[test]
-    fn seed_display_random_mode() {
+    fn seed_display_shows_mode() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(params.display_value(&ParamField::Seed), "random");
+        params.seed_mode = SeedMode::Fixed;
+        assert_eq!(params.display_value(&ParamField::Seed), "fixed");
+        params.seed_mode = SeedMode::Increment;
+        assert_eq!(params.display_value(&ParamField::Seed), "increment");
+    }
+
+    #[test]
+    fn seed_value_display_with_number() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.seed = Some(12345);
+        assert_eq!(params.display_value(&ParamField::SeedValue), "12345");
+    }
+
+    #[test]
+    fn seed_value_display_auto_when_none() {
         let config = Config::load_or_default();
         let params = GenerateParams::from_config(&config);
-        let display = params.display_value(&ParamField::Seed);
-        assert!(display.contains("random"));
+        let display = params.display_value(&ParamField::SeedValue);
+        assert!(display.contains("auto"));
     }
 
     #[test]
-    fn seed_display_fixed_mode_with_value() {
+    fn seed_value_shows_long_numbers_untruncated() {
         let config = Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
-        params.seed_mode = SeedMode::Fixed;
-        params.seed = Some(12345);
-        let display = params.display_value(&ParamField::Seed);
-        assert!(display.contains("12345"));
-        assert!(display.contains("fixed"));
-    }
-
-    #[test]
-    fn seed_display_increment_mode() {
-        let config = Config::load_or_default();
-        let mut params = GenerateParams::from_config(&config);
-        params.seed_mode = SeedMode::Increment;
-        params.seed = Some(100);
-        let display = params.display_value(&ParamField::Seed);
-        assert!(display.contains("100"));
-        assert!(display.contains("incr"));
+        params.seed = Some(11275518943372801901);
+        let display = params.display_value(&ParamField::SeedValue);
+        assert_eq!(display, "11275518943372801901");
     }
 }
