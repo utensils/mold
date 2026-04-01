@@ -9,9 +9,12 @@ use candle_core::{DType, Device, Tensor};
 use crate::progress::ProgressReporter;
 
 /// Key for cached LoRA delta tensors.
+/// `patch_index` disambiguates multiple patches on the same fused tensor
+/// (e.g., Q/K/V slices of a fused QKV weight each get a separate delta).
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct LoraCacheKey {
     tensor_name: String,
+    patch_index: usize,
     lora_path_hash: u64,
     scale_bits: u64,
 }
@@ -457,10 +460,12 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
         // Apply LoRA patches if any target this tensor
         if let Some(patches) = self.patches.get(name) {
             let mut t = tensor;
-            for patch in patches {
-                // Build cache key for this specific patch application
+            for (patch_idx, patch) in patches.iter().enumerate() {
+                // Build cache key including patch index to disambiguate fused slices
+                // (e.g., Q/K/V patches on the same qkv.weight tensor).
                 let cache_key = LoraCacheKey {
                     tensor_name: name.to_string(),
+                    patch_index: patch_idx,
                     lora_path_hash: self.lora_path_hash,
                     scale_bits: patch.effective_scale.to_bits(),
                 };
@@ -764,10 +769,11 @@ pub(crate) fn gguf_lora_var_builder(
             device.synchronize()?; // ensure CUDA frees the Q8 allocation
         }
 
-        for patch in layer_patches {
-            // Build cache key for this patch
+        for (patch_idx, patch) in layer_patches.iter().enumerate() {
+            // Build cache key including patch index to disambiguate fused slices.
             let cache_key = LoraCacheKey {
                 tensor_name: candle_key.clone(),
+                patch_index: patch_idx,
                 lora_path_hash,
                 scale_bits: patch.effective_scale.to_bits(),
             };

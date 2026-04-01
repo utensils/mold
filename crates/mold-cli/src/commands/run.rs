@@ -363,26 +363,14 @@ pub async fn run(
                 let first = result.expanded[0].clone();
                 (first, Some(prompt.clone()), Some(result.expanded), None)
             }
-        } else if defer_expand_to_server && batch <= 1 {
-            // --- Single-image: defer expansion to server via GenerateRequest.expand ---
-            // Setting expand=true lets the server expand inline during generation,
-            // saving a round-trip to /api/expand.
-            // Note: if the server is unreachable and generate falls back to local
-            // inference, the expansion won't happen — the raw prompt is used. This is
-            // acceptable; the user can re-run with --local --expand for local expansion.
-            crate::output::status!(
-                "{} Expansion will be handled by server",
-                crate::theme::icon_info()
-            );
-            (prompt, None, None, Some(true))
         } else if defer_expand_to_server {
-            // --- Batch (>1): call /api/expand upfront for all variations ---
-            // maybe_expand_prompt() only produces 1 variation, so batch needs the
-            // explicit /api/expand call to get N distinct expanded prompts.
+            // --- Server-side expansion via /api/expand ---
+            // Always expand upfront so the prompt is ready before generate_remote.
+            // This ensures the local fallback path also gets the expanded prompt.
             #[allow(unused_imports)]
             use colored::Colorize;
 
-            let variations = batch as usize;
+            let variations = batch.max(1) as usize;
             let model_family = super::expand::resolve_family_from_config(&model, &config);
             let client = match host.as_deref() {
                 Some(h) => mold_core::MoldClient::new(h),
