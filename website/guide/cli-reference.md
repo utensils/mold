@@ -153,7 +153,9 @@ encoders, and tokenizers are preserved until no remaining model references them.
 
 ## `mold ps`
 
-Show server status and loaded model.
+Show server status and loaded model. When the server is unreachable, scans for
+running `mold` processes (e.g. `mold run --local`) and displays their PID,
+subcommand, runtime, and memory usage.
 
 ## `mold unload`
 
