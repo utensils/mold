@@ -53,6 +53,9 @@ pub async fn run_tui(host: Option<String>, local: bool) -> Result<()> {
     let mut app = App::new(host, local, picker)?;
     let result = run_event_loop(&mut terminal, &mut app).await;
 
+    // Clean up background server process
+    app.shutdown();
+
     // Restore the terminal
     disable_raw_mode()?;
     execute!(

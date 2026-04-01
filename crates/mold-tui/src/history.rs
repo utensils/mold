@@ -51,6 +51,10 @@ impl PromptHistory {
 
     /// Append an entry and save to disk.
     pub fn push(&mut self, entry: HistoryEntry) {
+        // Skip empty/whitespace-only prompts
+        if entry.prompt.trim().is_empty() {
+            return;
+        }
         // Don't add duplicate of the most recent entry
         if let Some(last) = self.entries.last() {
             if last.prompt == entry.prompt {

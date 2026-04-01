@@ -531,6 +531,8 @@ pub struct App {
     pub history: crate::history::PromptHistory,
     /// Layout areas from the last render, used for mouse hit-testing.
     pub layout: LayoutAreas,
+    /// Background server process spawned by the TUI (killed on quit).
+    pub server_process: Option<std::process::Child>,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -547,23 +549,78 @@ pub struct LayoutAreas {
     pub models_table: ratatui::layout::Rect,
 }
 
+/// Check if a server is responding at the given URL.
+fn check_server_health(url: &str) -> bool {
+    // Use a blocking HTTP request since this runs before the async runtime matters
+    let health_url = format!("{url}/health");
+    std::process::Command::new("curl")
+        .args(["-sf", "--max-time", "2", &health_url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Spawn a background `mold serve` process.
+fn start_background_server(port: u16) -> Option<std::process::Child> {
+    let exe = std::env::current_exe().ok()?;
+    std::process::Command::new(exe)
+        .args(["serve", "--port", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+}
+
+/// Wait for a server to become healthy, polling every 250ms.
+fn wait_for_server_health(url: &str, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        if check_server_health(url) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
 impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
         let config = Config::load_or_default();
 
-        // Determine initial server URL and inference mode based on what's configured
+        // Determine initial server URL and inference mode
         let env_host = std::env::var("MOLD_HOST").ok();
+        let port = config.server_port;
+        let local_url = format!("http://localhost:{port}");
+        let mut server_process: Option<std::process::Child> = None;
+
         let (server_url, initial_mode) = if local {
             (None, InferenceMode::Local)
         } else if let Some(h) = host {
-            // Explicit --host flag: use it, default to auto
             (Some(h), InferenceMode::Auto)
         } else if let Some(h) = env_host {
-            // MOLD_HOST env var set: use it, default to auto
             (Some(h), InferenceMode::Auto)
         } else {
-            // No server configured: default to local, user can enter a host later
-            (None, InferenceMode::Local)
+            // No explicit server — try to detect or auto-start one
+            if check_server_health(&local_url) {
+                // Server already running
+                (Some(local_url.clone()), InferenceMode::Auto)
+            } else {
+                // Try to start a background server
+                match start_background_server(port) {
+                    Some(child) => {
+                        server_process = Some(child);
+                        if wait_for_server_health(&local_url, 8) {
+                            (Some(local_url.clone()), InferenceMode::Auto)
+                        } else {
+                            // Server didn't start in time — fall back to local
+                            (None, InferenceMode::Local)
+                        }
+                    }
+                    None => (None, InferenceMode::Local),
+                }
+            }
         };
 
         let mut params = GenerateParams::from_config(&config);
@@ -673,6 +730,7 @@ impl App {
             resource_info: crate::ui::info::ResourceInfo::default(),
             history,
             layout: LayoutAreas::default(),
+            server_process,
         });
 
         // Spawn background gallery scan
@@ -690,6 +748,15 @@ impl App {
     }
 
     /// Update model-dependent state when the model selection changes.
+    /// Clean up resources on quit (kills background server if we spawned it).
+    pub fn shutdown(&mut self) {
+        if let Some(ref mut child) = self.server_process {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.server_process = None;
+    }
+
     pub fn update_model(&mut self, model_name: &str) {
         let model_name = model_name.to_string();
         self.generate.params.model = model_name.clone();
@@ -870,6 +937,8 @@ impl App {
                                 _ => unreachable!(),
                             };
                             textarea.input(event);
+                            // Reset history navigation when user types
+                            self.history.reset_cursor();
                             return;
                         }
                     }
@@ -1139,11 +1208,38 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
-                self.dispatch_action(Action::Up);
+                // If popup is open, scroll within the popup
+                match &mut self.popup {
+                    Some(Popup::ModelSelector { selected, .. }) => {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    Some(Popup::HistorySearch { selected, .. }) => {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    _ => self.dispatch_action(Action::Up),
+                }
             }
-            MouseEventKind::ScrollDown => {
-                self.dispatch_action(Action::Down);
-            }
+            MouseEventKind::ScrollDown => match &mut self.popup {
+                Some(Popup::ModelSelector {
+                    selected, filtered, ..
+                }) => {
+                    if *selected + 1 < filtered.len() {
+                        *selected += 1;
+                    }
+                }
+                Some(Popup::HistorySearch {
+                    selected, results, ..
+                }) => {
+                    if *selected + 1 < results.len() {
+                        *selected += 1;
+                    }
+                }
+                _ => self.dispatch_action(Action::Down),
+            },
             _ => {}
         }
     }
