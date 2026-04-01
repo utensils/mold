@@ -1,10 +1,46 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::progress::ProgressReporter;
+
+/// Key for cached LoRA delta tensors.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct LoraCacheKey {
+    tensor_name: String,
+    lora_path_hash: u64,
+    scale_bits: u64,
+}
+
+/// CPU-resident cache of pre-computed LoRA delta tensors (B @ A * scale).
+/// Avoids expensive matmul recomputation when the same LoRA is applied across rebuilds.
+pub(crate) struct LoraDeltaCache {
+    deltas: HashMap<LoraCacheKey, Tensor>,
+}
+
+impl LoraDeltaCache {
+    pub fn new() -> Self {
+        Self {
+            deltas: HashMap::new(),
+        }
+    }
+
+    fn get(&self, key: &LoraCacheKey) -> Option<&Tensor> {
+        self.deltas.get(key)
+    }
+
+    fn insert(&mut self, key: LoraCacheKey, delta: Tensor) {
+        self.deltas.insert(key, delta);
+    }
+
+    pub fn clear(&mut self) {
+        self.deltas.clear();
+    }
+}
 
 /// A parsed LoRA adapter: pairs of (A, B) weight matrices keyed by layer name.
 pub(crate) struct LoraAdapter {
@@ -373,6 +409,13 @@ struct LoraBackend {
     /// Pre-computed LoRA patches keyed by canonical tensor name.
     /// Each entry has: LoRA layer ref (A, B, alpha), target type, effective scale.
     patches: HashMap<String, Vec<LoraPatch>>,
+    /// Optional CPU-resident cache of pre-computed deltas (shared across rebuilds).
+    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
+    /// Hash of the LoRA file path (for cache key construction).
+    lora_path_hash: u64,
+    /// Scale bits (for cache key construction).
+    #[allow(dead_code)]
+    scale_bits: u64,
 }
 
 /// A single LoRA patch to apply to a base tensor.
@@ -415,11 +458,39 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
         if let Some(patches) = self.patches.get(name) {
             let mut t = tensor;
             for patch in patches {
-                // Compute delta: B @ A on the same device as the base tensor
-                let a = patch.a.to_dtype(DType::F32)?.to_device(dev)?;
-                let b = patch.b.to_dtype(DType::F32)?.to_device(dev)?;
-                let delta = b.matmul(&a)?;
-                let delta = (&delta * patch.effective_scale)?;
+                // Build cache key for this specific patch application
+                let cache_key = LoraCacheKey {
+                    tensor_name: name.to_string(),
+                    lora_path_hash: self.lora_path_hash,
+                    scale_bits: patch.effective_scale.to_bits(),
+                };
+
+                // Try to retrieve from cache (CPU-resident delta)
+                let cached_delta = self.delta_cache.as_ref().and_then(|c| {
+                    c.lock()
+                        .ok()
+                        .and_then(|guard| guard.get(&cache_key).cloned())
+                });
+
+                let delta = if let Some(cpu_delta) = cached_delta {
+                    // Cache hit: move to target device
+                    cpu_delta.to_device(dev)?
+                } else {
+                    // Cache miss: compute delta on target device
+                    let a = patch.a.to_dtype(DType::F32)?.to_device(dev)?;
+                    let b = patch.b.to_dtype(DType::F32)?.to_device(dev)?;
+                    let computed = b.matmul(&a)?;
+                    let computed = (&computed * patch.effective_scale)?;
+
+                    // Store on CPU for future rebuilds
+                    if let Some(ref cache) = self.delta_cache {
+                        if let Ok(mut guard) = cache.lock() {
+                            let cpu_copy = computed.to_device(&Device::Cpu)?;
+                            guard.insert(cache_key, cpu_copy);
+                        }
+                    }
+                    computed
+                };
 
                 t = match &patch.target {
                     LoraTarget::Direct { .. } => {
@@ -486,6 +557,7 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
 /// during model construction.  Each tensor is loaded from mmap directly to the
 /// target device (GPU), with LoRA deltas applied inline.  Memory profile is
 /// identical to the non-LoRA mmap path — no HashMap, no pre-loading.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lora_var_builder<'a>(
     transformer_path: &Path,
     adapter: &LoraAdapter,
@@ -493,6 +565,8 @@ pub(crate) fn lora_var_builder<'a>(
     dtype: DType,
     device: &Device,
     progress: &ProgressReporter,
+    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
+    lora_path_hash: u64,
 ) -> Result<candle_nn::VarBuilder<'a>> {
     use candle_core::safetensors::MmapedSafetensors;
 
@@ -558,6 +632,9 @@ pub(crate) fn lora_var_builder<'a>(
         st,
         prefix: prefix.to_string(),
         patches,
+        delta_cache,
+        lora_path_hash,
+        scale_bits: scale.to_bits(),
     };
 
     Ok(candle_nn::VarBuilder::from_backend(
@@ -583,6 +660,8 @@ pub(crate) fn gguf_lora_var_builder(
     scale: f64,
     device: &Device,
     progress: &ProgressReporter,
+    delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
+    lora_path_hash: u64,
 ) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
     use std::sync::Arc;
@@ -686,12 +765,37 @@ pub(crate) fn gguf_lora_var_builder(
         }
 
         for patch in layer_patches {
-            // A×B matmul on GPU (tiny LoRA tensors), bring delta to CPU for merge
-            let matmul_dev = if on_gpu { device } else { &Device::Cpu };
-            let a = patch.a.to_dtype(DType::F32)?.to_device(matmul_dev)?;
-            let b = patch.b.to_dtype(DType::F32)?.to_device(matmul_dev)?;
-            let delta = b.matmul(&a)?;
-            let delta = (&delta * patch.effective_scale)?.to_device(&Device::Cpu)?;
+            // Build cache key for this patch
+            let cache_key = LoraCacheKey {
+                tensor_name: candle_key.clone(),
+                lora_path_hash,
+                scale_bits: patch.effective_scale.to_bits(),
+            };
+
+            // Try cache first, then compute
+            let cached = delta_cache.as_ref().and_then(|c| {
+                c.lock()
+                    .ok()
+                    .and_then(|guard| guard.get(&cache_key).cloned())
+            });
+
+            let delta = if let Some(cpu_delta) = cached {
+                cpu_delta
+            } else {
+                let matmul_dev = if on_gpu { device } else { &Device::Cpu };
+                let a = patch.a.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+                let b = patch.b.to_dtype(DType::F32)?.to_device(matmul_dev)?;
+                let computed = b.matmul(&a)?;
+                let computed = (&computed * patch.effective_scale)?.to_device(&Device::Cpu)?;
+
+                // Store in cache for future rebuilds
+                if let Some(ref cache) = delta_cache {
+                    if let Ok(mut guard) = cache.lock() {
+                        guard.insert(cache_key, computed.clone());
+                    }
+                }
+                computed
+            };
 
             t = match &patch.target {
                 LoraTarget::Direct { .. } => (&t + &delta)?,

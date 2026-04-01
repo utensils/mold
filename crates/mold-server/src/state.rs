@@ -6,6 +6,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+use mold_inference::shared_pool::SharedPool;
+
 use crate::model_cache::ModelCache;
 
 #[derive(Debug, Clone, Default)]
@@ -102,6 +104,8 @@ pub struct AppState {
     pub pull_lock: Arc<Mutex<()>>,
     /// Generation request queue.
     pub queue: QueueHandle,
+    /// Shared tokenizer pool for cross-engine caching.
+    pub shared_pool: Arc<std::sync::Mutex<SharedPool>>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -128,6 +132,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
         }
     }
 
@@ -142,6 +147,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
         }
     }
 
@@ -167,6 +173,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
         }
     }
 
@@ -195,6 +202,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
         };
         (state, rx)
     }

@@ -1,18 +1,23 @@
 # Architecture Research: Multi-Model Cache, LoRA Strategy, and Compute Boundaries
 
-> Research for issues #102 and #104 — comparing ComfyUI, Automatic1111, and InvokeAI
-> against mold's current architecture to define a clean implementation path.
+> Research for issues #102, #104, #108, and #109 — comparing ComfyUI, Automatic1111,
+> and InvokeAI against mold's current architecture to define a clean implementation path.
+>
+> **Updated 2026-04-01** with codebase-validated findings from agent team research.
 
 ## Executive Summary
 
-mold currently operates with a single-model slot on the server, LoRA locked to sequential
-(CLI-only) mode, and prompt expansion always running client-side. This document synthesizes
-deep-dive research into three mature reference implementations to chart a path toward:
+mold already has a multi-model LRU cache on the server (up to 3 models), but LoRA is still
+locked to sequential (CLI-only) mode, expansion routing is partially implemented (server-side
+exists but CLI defers when remote), and text encoders are not shared across engines. This
+document synthesizes deep-dive research into three mature reference implementations and
+codebase-validated findings to chart a path toward:
 
-1. **Multi-model cache** with VRAM-pressure eviction
+1. **Enhanced model cache** with shared component awareness and VRAM-pressure eviction
 2. **Per-request LoRA** that works in server/eager mode (including GGUF quantized models)
-3. **Server-side expansion** eliminating wasted client GPU allocation
-4. **Shared component caching** for text encoders and VAEs across model families
+3. **Complete server-side expansion** routing (CLI already defers to server when reachable)
+4. **Shared component caching** for T5/CLIP/VAE/Qwen3 across model families
+5. **Async CUDA stream weight streaming** for block offloading (deprioritized — see findings)
 
 ---
 
@@ -21,19 +26,42 @@ deep-dive research into three mature reference implementations to chart a path t
 ### Server State (mold-server)
 
 ```
-crates/mold-server/src/state.rs
+crates/mold-server/src/state.rs (lines 87-146)
 
 AppState {
-    engine: Arc<Mutex<Option<Box<dyn InferenceEngine>>>>,   // SINGLE engine slot
-    engine_snapshot: Arc<RwLock<EngineSnapshot>>,            // Lightweight read-only view
-    model_load_lock: Arc<Mutex<()>>,                         // Guards concurrent loads
-    queue: QueueHandle,                                      // FIFO generation queue (cap: 16)
+    model_cache: Arc<Mutex<ModelCache>>,                     // LRU multi-model cache (cap: 3)
+    engine_snapshot: Arc<RwLock<EngineSnapshot>>,             // Read-only view of GPU-loaded model
+    model_load_lock: Arc<Mutex<()>>,                          // Serializes concurrent loads
+    pull_lock: Arc<Mutex<()>>,                                // Serializes concurrent pulls
+    active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
 }
 ```
 
-**Model lifecycle**: Full unload-before-load on every model switch. The engine is `.take()`'d
-from the Option slot during `spawn_blocking` to avoid holding the async mutex, with an
-`OptionRestoreGuard` for panic safety.
+**ModelCache** (`model_cache.rs:1-179`): LRU cache of `CachedEngine` structs, max 3 models.
+Each entry tracks `engine: Box<dyn InferenceEngine>`, `residency: ModelResidency` (Gpu or
+Unloaded), `last_used: Instant`, `vram_bytes: u64`. Operations: `insert()`, `get_mut()` (with
+LRU touch), `unload_active()`, `remove()`.
+
+**Key invariant**: At most ONE engine has `residency == Gpu` at a time.
+
+**Model lifecycle** (`model_manager.rs:87-175`): `ensure_model_ready()` checks cache first
+(fast path if cached + on GPU), reloads from cache if unloaded (parks active model first),
+or creates fresh engine if not cached. GPU memory reclaimed via `reclaim_gpu_memory()` only
+when there was a prior active model.
+
+### CUDA Context Reset (device.rs:151-192)
+
+```rust
+pub fn reclaim_gpu_memory() {
+    result::ctx::synchronize();                    // Flush pending GPU ops
+    let cu_device = result::device::get(0)?;       // Single-GPU assumption
+    unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) }  // Frees ALL allocations
+}
+```
+
+Called between model switches. **Critical constraint for shared caching**: this reset
+invalidates ALL GPU tensors, including any cached encoders. Shared GPU-resident components
+would require selective cleanup instead of full context reset.
 
 ### LoRA (mold-inference)
 
@@ -49,18 +77,27 @@ Two paths, both requiring sequential mode:
 loaded — there's no construction phase to hook into. The server runs eager, so LoRA requests
 are rejected with "LoRA adapters require sequential loading mode."
 
+LoRA resolution in CLI (`run.rs:473-484`): priority chain is CLI `--lora` flag → per-model
+config default → global config → None. Path sent as-is in `GenerateRequest`; server assumes
+path exists on its filesystem. Inference application in `flux/pipeline.rs:1235-1280`.
+
 ### Expansion (mold-cli)
 
-```
-CLI (run.rs):
-  1. Expand prompt locally (allocates GPU!)     <-- always client-side
-  2. Build GenerateRequest (expand=None)
-  3. Try server -> POST /api/generate/stream
-  4. If unreachable -> fallback to local
-```
+**Current flow** (`run.rs:286-460`): Three paths based on `defer_expand_to_server = should_expand && !local`:
 
-The server has `maybe_expand_prompt()` and `/api/expand` built in but the CLI never uses them.
-The expand LLM competes for VRAM with the server's loaded model.
+1. **Server-side (remote mode, lines 366-457)**: CLI calls `/api/expand` via HTTP BEFORE
+   `generate_remote()`. Falls back to client-side if server unreachable (lines 421-454).
+2. **Client-side (local mode, lines 300-365)**: `create_expander()` → LocalExpander initializes
+   CUDA device (`expand.rs:119`), allocates GPU/CPU based on VRAM check.
+3. **No expansion**: Prompt used as-is.
+
+**Server side** (`routes.rs:318-435`): Two callsites — `maybe_expand_prompt()` during
+`prepare_generation()` (for `req.expand == Some(true)`), and dedicated `/api/expand` endpoint.
+
+**Key finding**: Expansion routing to server already works. The remaining gap is that the CLI
+expands BEFORE the generate_remote/generate_local decision, so expansion always allocates
+resources even when the server could handle everything. The fix is to defer expansion into
+the generate request (`req.expand = Some(true)`) when targeting a server.
 
 ---
 
@@ -115,8 +152,16 @@ forward-pass residual. This is the single biggest architectural improvement avai
 
 **Key insight**: ComfyUI's async CUDA stream transfers and pinned memory are the most
 advanced VRAM optimization. InvokeAI's per-tensor partial loading is the most granular.
-For mold's block-level offloading, ComfyUI's async stream pattern could overlap block N+1
-transfer with block N computation — a meaningful speedup.
+
+**Codebase-validated assessment (issue #109)**: Async CUDA streams for mold's block offloading
+(`flux/offload.rs:557-575`) would yield only ~5-10% speedup. The bottleneck is block data
+dependencies (block N+1 input = block N output), limiting overlap to prefetching N+1 while
+computing N. Per-block cost: ~5ms H2D transfer + ~10ms compute + ~2ms drop. Overlap saves
+only the transfer time (~5ms) against a ~17ms total. Additionally, candle-core-mold 0.9.3
+hardcodes a single CUDA stream per device (`CudaDevice.stream: Arc<CudaStream>`, line 39
+of `cuda_backend/device.rs`). Adding secondary stream support would require forking candle's
+`to_device()` to accept a stream parameter. **Recommendation: deprioritize until candle adds
+native stream parameter support.**
 
 ### 2.4 Shared Components
 
@@ -126,10 +171,22 @@ transfer with block N computation — a meaningful speedup.
 | **VAE caching** | Independent tracking in `current_loaded_models` | Part of model, separate `sd_vae` module | Submodel keying: `model_key:vae` |
 | **Conditioning cache** | `HierarchicalCache` / `LRUCache` for node outputs | None | `MemoryInvocationCache` keyed by invocation hash |
 
-**Key insight for mold**: T5-XXL (10GB), CLIP-L (250MB), and VAE (160MB) are shared across
-all FLUX models. Caching them independently would make switching between flux-schnell and
-flux-dev near-instant (only the transformer changes). InvokeAI's submodel keying pattern
-maps cleanly to this.
+**Codebase-validated findings (issue #108)**:
+
+- **All 25 FLUX variants** share identical T5-XXL (9.7GB), CLIP-L (246MB), and VAE (335MB)
+  files (`manifest.rs:251-294`). Only the transformer differs per variant.
+- **Flux.2 Klein-4B variants** share Qwen3-1.7B encoder and VAE; Klein-9B shares Qwen3-4B.
+- **Per-engine ownership**: Each engine owns separate encoder instances — no sharing across
+  engines. FluxEngine owns T5+CLIP directly (`flux/pipeline.rs:584-600`), SD3Engine wraps
+  CLIP-L+CLIP-G+T5 in `SD3TripleEncoder`.
+- **Drop-and-reload**: Sequential mode drops T5/CLIP after encoding to free VRAM for
+  transformer (`pipeline.rs:1100-1170`). Eager mode keeps all resident.
+- **CUDA context reset invalidates everything**: `reclaim_gpu_memory()` calls
+  `cuDevicePrimaryCtxReset_v2` which frees ALL GPU allocations. Shared GPU-resident
+  components would need selective cleanup instead of full reset.
+
+InvokeAI's submodel keying pattern (`model_key:text_encoder`) maps cleanly to this. Caching
+T5/CLIP/VAE independently would save ~10GB reload when switching FLUX variants.
 
 ---
 
@@ -159,53 +216,25 @@ maps cleanly to this.
 
 ## 4. Recommended Architecture for Mold
 
-### 4.1 ModelCache
+### 4.1 ModelCache (Enhance Existing)
 
-Replace the single `Option<Box<dyn InferenceEngine>>` with a two-tier cache:
+The server already has `ModelCache` (`model_cache.rs:1-179`) with LRU eviction and
+`Gpu`/`Unloaded` residency states. Enhance it with:
 
-```rust
-pub struct ModelCache {
-    /// All cached engines, keyed by model name
-    engines: HashMap<String, CacheEntry>,
-
-    /// LRU ordering (front = oldest, back = most recent)
-    lru_order: VecDeque<String>,
-
-    /// Currently active (on GPU) engine name
-    active: Option<String>,
-
-    /// Memory budgets
-    max_ram_bytes: usize,   // For parked engines (CPU state)
-    max_vram_bytes: usize,  // For active + partially-loaded engines
-}
-
-pub struct CacheEntry {
-    engine: Box<dyn InferenceEngine>,
-    state: EngineState,
-    last_used: Instant,
-    vram_bytes: usize,
-    ram_bytes: usize,
-    lock_count: u32,
-}
-
-pub enum EngineState {
-    /// Fully loaded on GPU, ready for inference
-    Active,
-    /// Weights in CPU RAM, fast to reload (~1-2s)
-    Parked,
-    /// Unloaded, must reconstruct from disk (~30-60s)
-    Cold,
-}
-```
-
-**Eviction policy**:
-- **VRAM pressure**: When loading a new model, park (move to Parked) the least-recently-used
-  unlocked Active engine. If still insufficient, unload Parked engines smallest-first.
-- **RAM pressure**: Drop oldest Parked entries via LRU when RAM budget exceeded.
+1. **CPU parking tier** — Add `Parked` state alongside existing `Gpu`/`Unloaded`. Parked
+   engines hold weights in CPU RAM for fast reload (~1-2s vs ~30-60s from disk).
+2. **RAM budget enforcement** — Track `ram_bytes` per entry, drop oldest Parked entries
+   when budget exceeded. Use InvokeAI formula: `min(max(50% RAM - 2GB, 4GB), 1x VRAM)`.
+3. **Lock-based eviction protection** — Add `lock_count: u32` to prevent evicting
+   models currently in use by the generation queue.
+4. **Selective GPU cleanup** — Replace `cuDevicePrimaryCtxReset_v2` (which nukes ALL GPU
+   state) with per-engine `unload()` calls when shared components exist. Full context
+   reset only when no shared components are cached.
 
 **Shared components**: Cache T5, CLIP, and VAE independently with submodel keys
 (`"flux-dev:t5"`, `"flux-dev:vae"`). When switching FLUX models, only the transformer
-needs reloading.
+needs reloading. Requires `Arc`-wrapping shared tensors so multiple engines can reference
+them.
 
 ### 4.2 Sidecar LoRA for GGUF (the big win)
 
@@ -318,35 +347,39 @@ pub fn calculate_cache_budget() -> CacheBudget {
 
 ## 5. Phased Implementation Plan
 
-### Phase 1: Server-Side Expansion (fixes #102, low risk)
+### Phase 1: Complete Server-Side Expansion Routing (fixes #102, low risk)
 
-**Goal**: CLI delegates expansion to server when reachable, eliminating wasted GPU context.
+**Goal**: CLI defers expansion into `GenerateRequest` when targeting a server, eliminating
+client-side GPU allocation for expansion.
+
+**Status**: Partially done — CLI already routes to `/api/expand` when remote (`run.rs:366-457`).
+Remaining work: instead of expanding BEFORE the generate call, pass `expand: Some(true)` in
+the request so the server handles it atomically during `prepare_generation()`.
 
 **Files to change**:
-- `crates/mold-cli/src/commands/run.rs` — skip local expansion when not `--local`
+- `crates/mold-cli/src/commands/run.rs` — defer expansion into request when not `--local`
 - `crates/mold-cli/src/commands/generate.rs` — pass `expand: Some(true)` in request
 
-**No server changes needed** — `maybe_expand_prompt()` already works.
+**No server changes needed** — `maybe_expand_prompt()` in `routes.rs:319-362` already works.
 
 **Estimated scope**: ~50 lines changed
 
-### Phase 2: ModelCache Foundation (core of #104)
+### Phase 2: Enhance ModelCache with CPU Parking (core of #104)
 
-**Goal**: Replace single engine slot with multi-model cache.
+**Goal**: Add CPU parking tier to existing `ModelCache` for fast model switching.
 
-**New file**: `crates/mold-server/src/model_cache.rs`
-- `ModelCache` struct with HashMap + VecDeque LRU
-- `CacheEntry` with engine, state, timestamps, memory tracking
-- `get_or_load()`, `park()`, `evict()`, `lock()`, `unlock()` methods
+**Status**: `ModelCache` already exists (`model_cache.rs:1-179`) with LRU eviction and
+`Gpu`/`Unloaded` residency. Missing: CPU parking tier (hold weights in RAM), RAM budget
+enforcement, and lock-based eviction protection.
 
 **Files to change**:
-- `crates/mold-server/src/state.rs` — replace `engine: Option<...>` with `ModelCache`
-- `crates/mold-server/src/model_manager.rs` — use cache instead of direct slot manipulation
-- `crates/mold-server/src/routes.rs` — acquire engine from cache, release after generation
-- `crates/mold-server/src/queue.rs` — lock model during generation, unlock after
-- `crates/mold-inference/src/engine.rs` — add `vram_bytes()` and `to_cpu()` / `to_gpu()` to trait
+- `crates/mold-server/src/model_cache.rs` — add `Parked` residency state, RAM budget, locks
+- `crates/mold-server/src/model_manager.rs` — use `park()` instead of `unload()` when switching
+- `crates/mold-inference/src/engine.rs` — add `to_cpu()` / `to_gpu()` to trait
+- `crates/mold-inference/src/device.rs` — selective GPU cleanup (skip full context reset when
+  shared components exist)
 
-**Estimated scope**: ~400 lines new, ~200 lines changed
+**Estimated scope**: ~200 lines new, ~150 lines changed
 
 ### Phase 3: Sidecar LoRA for GGUF (biggest value, addresses #104)
 
@@ -411,38 +444,50 @@ the transformer.
 
 **Estimated scope**: ~150 lines new, ~50 lines changed
 
-### Phase 7: Async Weight Streaming (stretch goal)
+### Phase 7: Async Weight Streaming (deprioritized — #109)
 
 **Goal**: Overlap CPU->GPU transfers with GPU computation during block-level offloading.
 
-**Requires**: CUDA stream support in candle (may need fork changes).
+**Status**: Deprioritized based on codebase research. Expected speedup is only ~5-10% due to:
+- Block data dependencies (block N+1 input = block N output) limit overlap to prefetch only
+- Per-block breakdown: ~5ms H2D + ~10ms compute + ~2ms drop = ~17ms; overlap saves ~5ms max
+- candle-core-mold 0.9.3 hardcodes single CUDA stream per device (`device.rs:39`)
+- Adding secondary stream support requires forking `to_device()` — maintenance burden
 
-**Approach** (from ComfyUI pattern):
-- 2 CUDA streams, round-robin
-- While computing with block N on default stream, transfer block N+1 on async stream
-- `stream.wait_stream()` before reading transferred weights
+**Better alternatives**: GGUF quantization (already reduces offload overhead dramatically),
+or upgrading to 24GB+ VRAM cards for eager mode (3-5x faster, no offloading needed).
 
-**Estimated scope**: ~300 lines, plus potential candle fork work
+**Revisit when**: candle upstream adds stream parameter to `Tensor::to_device()`.
+
+**If pursued**: ComfyUI pattern — 2 CUDA streams, round-robin, `cuEventRecord`/`cuStreamWaitEvent`
+for synchronization. ~300 lines plus candle fork changes.
 
 ---
 
 ## 6. Priority and Dependencies
 
 ```
-Phase 1 (expansion)     -----> can ship independently
-Phase 2 (cache)         -----> foundation for everything below
+Phase 1 (expansion)     -----> can ship independently (~50 LOC, fixes #102)
+Phase 2 (cache parking) -----> enhances existing cache, foundation for Phases 3-6
 Phase 3 (sidecar GGUF)  -----> depends on Phase 2 (needs cache for engine lifecycle)
 Phase 4 (BF16 eager)    -----> depends on Phase 2
-Phase 5 (shared comps)  -----> depends on Phase 2
+Phase 5 (shared comps)  -----> depends on Phase 2 + selective GPU cleanup
 Phase 6 (LoRA cache)    -----> depends on Phase 3 or 4
-Phase 7 (async streams) -----> independent, but benefits from Phase 2
+Phase 7 (async streams) -----> DEPRIORITIZED (~5-10% gain, requires candle fork)
 ```
 
-**Recommended order**: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
+**Recommended order**: 1 → 2 → 3 → 4 → 5 → 6. Skip 7 until candle adds stream support.
 
-Phase 1 is a quick win that fixes #102 with minimal risk. Phase 2+3 together deliver the
-core value of #104 (multi-model cache + server LoRA for GGUF). Phases 4-7 are progressive
-enhancements.
+Phase 1 is a quick win that completes #102. Phase 2 enhances the existing `ModelCache` with
+CPU parking. Phase 3 is the biggest value — sidecar LoRA enables server-side LoRA for GGUF
+without sequential mode. Phase 5 (shared components) is the most architecturally complex,
+requiring changes to CUDA context management and `Arc`-wrapping of encoder tensors.
+
+**Issues resolved per phase**:
+- Phase 1: #102 (compute boundaries)
+- Phases 2-4: #104 (multi-model cache + per-request LoRA)
+- Phase 5: #108 (shared component caching)
+- Phase 7: #109 (async CUDA streams — deprioritized)
 
 ---
 

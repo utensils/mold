@@ -2,6 +2,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::clip;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 /// CLIP-L text config (hardcoded — this model variant is fixed for FLUX).
@@ -26,19 +27,32 @@ pub fn config() -> clip::text_model::ClipTextConfig {
 /// the tokenizer, and device placement info.
 pub(crate) struct ClipEncoder {
     pub model: Option<clip::text_model::ClipTextTransformer>,
-    pub tokenizer: Tokenizer,
+    pub tokenizer: Arc<Tokenizer>,
     pub device: Device,
     pub on_gpu: bool,
 }
 
 impl ClipEncoder {
     /// Load CLIP encoder weights and tokenizer.
+    #[allow(dead_code)]
     pub fn load(
         encoder_path: &PathBuf,
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
         progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        Self::load_with_tokenizer(encoder_path, tokenizer_path, device, dtype, progress, None)
+    }
+
+    /// Load CLIP encoder weights, reusing a cached tokenizer if provided.
+    pub fn load_with_tokenizer(
+        encoder_path: &PathBuf,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
     ) -> Result<Self> {
         let vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(encoder_path),
@@ -48,8 +62,13 @@ impl ClipEncoder {
             progress,
         )?;
         let model = clip::text_model::ClipTextTransformer::new(vb.pp("text_model"), &config())?;
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
+        let tokenizer = match cached_tokenizer {
+            Some(tok) => tok,
+            None => Arc::new(
+                Tokenizer::from_file(tokenizer_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?,
+            ),
+        };
         let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {
@@ -58,6 +77,11 @@ impl ClipEncoder {
             device: device.clone(),
             on_gpu,
         })
+    }
+
+    /// Get a reference-counted handle to this encoder's tokenizer (for caching in SharedPool).
+    pub fn tokenizer_arc(&self) -> Arc<Tokenizer> {
+        self.tokenizer.clone()
     }
 
     /// Encode a text prompt into CLIP embeddings (truncated to 77 tokens).

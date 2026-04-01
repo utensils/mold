@@ -5,7 +5,7 @@ use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cache::{
@@ -554,6 +554,7 @@ fn flux_lora_var_builder<'a>(
     dtype: DType,
     device: &Device,
     progress: &ProgressReporter,
+    delta_cache: Option<std::sync::Arc<std::sync::Mutex<super::lora::LoraDeltaCache>>>,
 ) -> Result<VarBuilder<'a>> {
     use super::lora;
 
@@ -566,6 +567,13 @@ fn flux_lora_var_builder<'a>(
         lora.scale
     ));
 
+    let lora_path_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        lora.path.hash(&mut hasher);
+        hasher.finish()
+    };
+
     lora::lora_var_builder(
         transformer_path,
         &adapter,
@@ -573,6 +581,8 @@ fn flux_lora_var_builder<'a>(
         dtype,
         device,
         progress,
+        delta_cache,
+        lora_path_hash,
     )
 }
 
@@ -599,6 +609,25 @@ struct LoadedFlux {
     t5_encoder_path: std::path::PathBuf,
 }
 
+/// Fingerprint of a LoRA adapter (path + scale) used to skip redundant transformer rebuilds.
+#[derive(Clone, PartialEq, Eq)]
+struct LoraFingerprint {
+    path_hash: u64,
+    scale_bits: u64,
+}
+
+impl LoraFingerprint {
+    fn from_lora_weight(lora: &mold_core::LoraWeight) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        lora.path.hash(&mut hasher);
+        Self {
+            path_hash: hasher.finish(),
+            scale_bits: lora.scale.to_bits(),
+        }
+    }
+}
+
 /// FLUX inference engine backed by candle.
 pub struct FluxEngine {
     base: EngineBase<LoadedFlux>,
@@ -614,6 +643,12 @@ pub struct FluxEngine {
     cached_transformer_path: Option<PathBuf>,
     /// Force block-level offloading (--offload / MOLD_OFFLOAD=1).
     offload: bool,
+    /// Fingerprint of the currently applied LoRA (None = no LoRA baked in).
+    active_lora: Option<LoraFingerprint>,
+    /// CPU-resident cache of pre-computed LoRA deltas, shared across transformer rebuilds.
+    lora_delta_cache: Arc<Mutex<super::lora::LoraDeltaCache>>,
+    /// Optional shared tokenizer pool for cross-engine caching.
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 impl FluxEngine {
@@ -621,6 +656,7 @@ impl FluxEngine {
     /// `is_schnell_override` lets callers explicitly set the scheduler family.
     /// `t5_variant` controls T5 encoder selection: None/"auto" = VRAM-based auto-select,
     /// "fp16" = force FP16, "q8"/"q5"/etc = specific quantized variant.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_name: String,
         paths: ModelPaths,
@@ -628,6 +664,7 @@ impl FluxEngine {
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
         offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
@@ -637,6 +674,24 @@ impl FluxEngine {
             transformer_is_fp8: None,
             cached_transformer_path: None,
             offload,
+            active_lora: None,
+            lora_delta_cache: Arc::new(Mutex::new(super::lora::LoraDeltaCache::new())),
+            shared_pool,
+        }
+    }
+
+    /// Try to get a cached tokenizer from the shared pool.
+    fn get_cached_tokenizer(&self, path: &std::path::Path) -> Option<Arc<tokenizers::Tokenizer>> {
+        let pool = self.shared_pool.as_ref()?;
+        let pool = pool.lock().unwrap();
+        pool.get_tokenizer(&path.to_string_lossy())
+    }
+
+    /// Store a tokenizer in the shared pool.
+    fn cache_tokenizer(&self, path: &std::path::Path, tokenizer: Arc<tokenizers::Tokenizer>) {
+        if let Some(ref pool) = self.shared_pool {
+            let mut pool = pool.lock().unwrap();
+            pool.insert_tokenizer(path.to_string_lossy().into_owned(), tokenizer);
         }
     }
 
@@ -768,6 +823,7 @@ impl FluxEngine {
     /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
+        self.active_lora = None;
         if self.base.loaded.is_some() {
             return Ok(());
         }
@@ -928,13 +984,16 @@ impl FluxEngine {
             device = %t5_device_label,
             "loading T5 encoder..."
         );
-        let t5 = encoders::t5::T5Encoder::load(
+        let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
+        let t5 = encoders::t5::T5Encoder::load_with_tokenizer(
             &resolved_t5_path,
             &t5_tokenizer_path,
             t5_device,
             t5_dtype,
             &self.base.progress,
+            cached_t5_tok,
         )?;
+        self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
         self.base
             .progress
             .stage_done(&t5_stage_label, t5_stage.elapsed());
@@ -961,13 +1020,16 @@ impl FluxEngine {
             device = clip_device_label,
             "loading CLIP encoder..."
         );
-        let clip = encoders::clip::ClipEncoder::load(
+        let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
+        let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
             &clip_encoder_path,
             &clip_tokenizer_path,
             clip_device,
             clip_dtype,
             &self.base.progress,
+            cached_clip_tok,
         )?;
+        self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
         self.base
             .progress
             .stage_done(&clip_stage_label, clip_stage.elapsed());
@@ -1102,13 +1164,16 @@ impl FluxEngine {
             let t5_stage_label = format!("Loading T5 encoder ({t5_device_label})");
             self.base.progress.stage_start(&t5_stage_label);
             let t5_stage = Instant::now();
-            let mut t5 = encoders::t5::T5Encoder::load(
+            let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
+            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer(
                 &resolved_t5_path,
                 &t5_tokenizer_path,
                 t5_device,
                 t5_dtype,
                 &self.base.progress,
+                cached_t5_tok,
             )?;
+            self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
             self.base
                 .progress
                 .stage_done(&t5_stage_label, t5_stage.elapsed());
@@ -1139,13 +1204,16 @@ impl FluxEngine {
             let clip_stage_label = format!("Loading CLIP encoder ({clip_device_label})");
             self.base.progress.stage_start(&clip_stage_label);
             let clip_stage = Instant::now();
-            let clip = encoders::clip::ClipEncoder::load(
+            let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
+            let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
                 &clip_encoder_path,
                 &clip_tokenizer_path,
                 clip_device,
                 clip_dtype,
                 &self.base.progress,
+                cached_clip_tok,
             )?;
+            self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
             self.base
                 .progress
                 .stage_done(&clip_stage_label, clip_stage.elapsed());
@@ -1260,6 +1328,7 @@ impl FluxEngine {
                     gpu_dtype,
                     &Device::Cpu,
                     &self.base.progress,
+                    Some(self.lora_delta_cache.clone()),
                 )?
             } else {
                 flux_transformer_var_builder(flux_safetensors_var_builder(
@@ -1286,12 +1355,20 @@ impl FluxEngine {
                 adapter.rank,
                 lora.scale
             ));
+            let lora_path_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                lora.path.hash(&mut hasher);
+                hasher.finish()
+            };
             let vb = super::lora::gguf_lora_var_builder(
                 &transformer_path,
                 &adapter,
                 lora.scale,
                 &device,
                 &self.base.progress,
+                Some(self.lora_delta_cache.clone()),
+                lora_path_hash,
             )?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if is_quantized {
@@ -1305,6 +1382,7 @@ impl FluxEngine {
                 gpu_dtype,
                 &device,
                 &self.base.progress,
+                Some(self.lora_delta_cache.clone()),
             )?;
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         } else {
@@ -1608,12 +1686,15 @@ impl InferenceEngine for FluxEngine {
         );
 
         (|| -> Result<GenerateResponse> {
-            // If LoRA is requested and the model is already loaded (no VAE drop
-            // occurred since last generate), force a rebuild to apply LoRA.
-            // This only happens on the first LoRA request after server start.
-            if req.lora.is_some() && loaded.flux_model.is_some() {
-                loaded.flux_model = None;
-                loaded.device.synchronize()?;
+            // Only rebuild the transformer when the LoRA fingerprint changes
+            // (different adapter, different scale, or switching between LoRA/no-LoRA).
+            let requested_lora = req.lora.as_ref().map(LoraFingerprint::from_lora_weight);
+            if requested_lora != self.active_lora {
+                if loaded.flux_model.is_some() {
+                    loaded.flux_model = None;
+                    loaded.device.synchronize()?;
+                }
+                self.active_lora = requested_lora;
             }
 
             if loaded.flux_model.is_none() {
@@ -1641,12 +1722,20 @@ impl InferenceEngine for FluxEngine {
                     // Quantized + LoRA: merge LoRA deltas during construction
                     let lora = req.lora.as_ref().unwrap();
                     let adapter = super::lora::LoraAdapter::load(std::path::Path::new(&lora.path))?;
+                    let lora_path_hash = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        lora.path.hash(&mut hasher);
+                        hasher.finish()
+                    };
                     let vb = super::lora::gguf_lora_var_builder(
                         &transformer_path,
                         &adapter,
                         lora.scale,
                         &loaded.device,
                         progress,
+                        Some(self.lora_delta_cache.clone()),
+                        lora_path_hash,
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else if loaded.is_quantized {
@@ -1664,6 +1753,7 @@ impl InferenceEngine for FluxEngine {
                         loaded.dtype,
                         &loaded.device,
                         progress,
+                        Some(self.lora_delta_cache.clone()),
                     )?;
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 } else {
@@ -1781,6 +1871,10 @@ impl InferenceEngine for FluxEngine {
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);
+        self.active_lora = None;
+        if let Ok(mut cache) = self.lora_delta_cache.lock() {
+            cache.clear();
+        }
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

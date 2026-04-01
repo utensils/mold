@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use mold_core::{Config, ModelPaths, Scheduler};
+use std::sync::{Arc, Mutex};
 
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
@@ -8,6 +9,7 @@ use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
+use crate::shared_pool::SharedPool;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
@@ -35,6 +37,21 @@ pub fn create_engine(
     load_strategy: LoadStrategy,
     offload: bool,
 ) -> Result<Box<dyn InferenceEngine>> {
+    create_engine_with_pool(model_name, paths, config, load_strategy, offload, None)
+}
+
+/// Create an inference engine with an optional shared tokenizer pool.
+///
+/// When `shared_pool` is provided, engines can cache and reuse tokenizers across
+/// model switches (e.g. all FLUX variants share the same T5/CLIP tokenizers).
+pub fn create_engine_with_pool(
+    model_name: String,
+    paths: ModelPaths,
+    config: &Config,
+    load_strategy: LoadStrategy,
+    offload: bool,
+    shared_pool: Option<Arc<Mutex<SharedPool>>>,
+) -> Result<Box<dyn InferenceEngine>> {
     let family = resolve_family(&model_name, config);
     let model_cfg = config.resolved_model_config(&model_name);
 
@@ -51,6 +68,7 @@ pub fn create_engine(
                 t5_variant,
                 load_strategy,
                 offload,
+                shared_pool,
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
