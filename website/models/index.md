@@ -80,16 +80,16 @@ mold pull flux-dev:q4
 
 ## All Families
 
-| Family                              | Native Resolution | Architecture                   |
-| ----------------------------------- | ----------------- | ------------------------------ |
-| [FLUX.1](/models/flux)              | 1024x1024         | Flow-matching transformer      |
-| [SDXL](/models/sdxl)                | 1024x1024         | Dual-CLIP, UNet                |
-| [SD 1.5](/models/sd15)              | 512x512           | CLIP-L, UNet                   |
-| [SD 3.5](/models/sd35)              | 1024x1024         | Triple encoder, MMDiT          |
-| [Z-Image](/models/z-image)          | 1024x1024         | Qwen3 encoder, 3D RoPE         |
-| [Flux.2 Klein](/models/flux2)       | 1024x1024         | Qwen3 encoder, 4B transformer  |
-| [Wuerstchen](/models/wuerstchen)    | 1024x1024         | 3-stage cascade, 42x compress  |
-| [Qwen-Image](/models/qwen-image)    | 1024x1024         | Qwen2.5-VL, flow-matching, CFG |
+| Family                           | Native Resolution | Architecture                   |
+| -------------------------------- | ----------------- | ------------------------------ |
+| [FLUX.1](/models/flux)           | 1024x1024         | Flow-matching transformer      |
+| [SDXL](/models/sdxl)             | 1024x1024         | Dual-CLIP, UNet                |
+| [SD 1.5](/models/sd15)           | 512x512           | CLIP-L, UNet                   |
+| [SD 3.5](/models/sd35)           | 1024x1024         | Triple encoder, MMDiT          |
+| [Z-Image](/models/z-image)       | 1024x1024         | Qwen3 encoder, 3D RoPE         |
+| [Flux.2 Klein](/models/flux2)    | 1024x1024         | Qwen3 encoder, 4B transformer  |
+| [Wuerstchen](/models/wuerstchen) | 1024x1024         | 3-stage cascade, 42x compress  |
+| [Qwen-Image](/models/qwen-image) | 1024x1024         | Qwen2.5-VL, flow-matching, CFG |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.
