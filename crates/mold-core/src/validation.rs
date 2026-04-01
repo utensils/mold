@@ -213,6 +213,24 @@ const FLUX_DIMS: &[(u32, u32)] = &[
 /// Recommended dimensions for Z-Image models (native 1024x1024).
 const ZIMAGE_DIMS: &[(u32, u32)] = &[(1024, 1024), (1024, 768), (768, 1024)];
 
+/// Recommended dimensions for Qwen-Image models (native 1328x1328, ~1.76MP max).
+/// Supports dynamic resolution — any dims divisible by 16 within the megapixel budget work,
+/// but these are the standard aspect-ratio buckets.
+const QWEN_IMAGE_DIMS: &[(u32, u32)] = &[
+    (1328, 1328), // 1:1 (native)
+    (1024, 1024), // 1:1
+    (1152, 896),  // 9:7
+    (896, 1152),  // 7:9
+    (1216, 832),  // 19:13
+    (832, 1216),  // 13:19
+    (1344, 768),  // 7:4
+    (768, 1344),  // 4:7
+    (1664, 928),  // ~16:9
+    (928, 1664),  // ~9:16
+    (768, 768),   // 1:1 (small)
+    (512, 512),   // 1:1 (small, fast)
+];
+
 /// Recommended dimensions for Wuerstchen models (native 1024x1024).
 const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
 
@@ -228,7 +246,7 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "flux" => FLUX_DIMS,
         "flux2" => FLUX_DIMS,
         "z-image" => ZIMAGE_DIMS,
-        "qwen-image" => SDXL_DIMS,
+        "qwen-image" => QWEN_IMAGE_DIMS,
         "wuerstchen" => WUERSTCHEN_DIMS,
         _ => &[],
     }
@@ -917,12 +935,16 @@ mod tests {
     }
 
     #[test]
-    fn dimension_warning_qwen_image_uses_sdxl_buckets() {
-        assert_eq!(
-            recommended_dimensions("qwen-image"),
-            recommended_dimensions("sdxl"),
-            "qwen-image should share SDXL buckets"
+    fn dimension_warning_qwen_image_has_native_resolution() {
+        let dims = recommended_dimensions("qwen-image");
+        assert!(
+            dims.contains(&(1328, 1328)),
+            "must include native 1328x1328"
         );
+        assert!(dims.contains(&(512, 512)), "must include 512x512");
+        assert!(dims.contains(&(1024, 1024)), "must include 1024x1024");
+        assert_eq!(dimension_warning(1328, 1328, "qwen-image"), None);
+        assert_eq!(dimension_warning(512, 512, "qwen-image"), None);
     }
 
     #[test]
