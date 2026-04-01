@@ -31,6 +31,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
+    // Store layout areas for mouse hit-testing
+    app.layout.tab_bar = layout[0];
+
     // ── Tab bar ─────────────────────────────────────────────────
     render_tab_bar(frame, app, layout[0]);
 

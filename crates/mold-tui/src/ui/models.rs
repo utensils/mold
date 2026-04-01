@@ -24,6 +24,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .partition(|(_, m)| m.downloaded);
 
+    // Store area for mouse (use the full content area for click targeting)
+    app.layout.models_table = area;
+
     // ── Installed models ───────────────────────────────────
     render_model_table(
         frame,

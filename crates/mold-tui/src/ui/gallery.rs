@@ -20,6 +20,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(28), Constraint::Min(20)])
         .split(layout[0]);
 
+    // Store areas for mouse
+    app.layout.gallery_list = top_layout[0];
+    app.layout.gallery_preview = top_layout[1];
+
     // ── History list ───────────────────────────────────────
     let list_block = Block::default()
         .borders(Borders::ALL)

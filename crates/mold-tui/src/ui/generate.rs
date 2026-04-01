@@ -67,6 +67,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
+    // Store layout areas for mouse hit-testing
+    app.layout.prompt = prompt_area;
+    if let Some(neg) = neg_area {
+        app.layout.negative_prompt = neg;
+    }
+
     // ── Prompt ─────────────────────────────────────────────
     render_text_area(
         frame,
@@ -103,6 +109,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(6), Constraint::Length(5)])
         .split(middle_layout[0]);
+
+    // Store areas for mouse
+    app.layout.parameters = left_layout[0];
+    app.layout.preview = middle_layout[1];
 
     // Parameters
     param_form::render(

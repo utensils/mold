@@ -529,6 +529,22 @@ pub struct App {
     pub tokio_handle: tokio::runtime::Handle,
     pub resource_info: crate::ui::info::ResourceInfo,
     pub history: crate::history::PromptHistory,
+    /// Layout areas from the last render, used for mouse hit-testing.
+    pub layout: LayoutAreas,
+}
+
+/// Stored layout rectangles for mouse click hit-testing.
+#[derive(Debug, Default, Clone)]
+pub struct LayoutAreas {
+    pub tab_bar: ratatui::layout::Rect,
+    pub prompt: ratatui::layout::Rect,
+    pub negative_prompt: ratatui::layout::Rect,
+    pub parameters: ratatui::layout::Rect,
+    pub preview: ratatui::layout::Rect,
+    pub progress: ratatui::layout::Rect,
+    pub gallery_list: ratatui::layout::Rect,
+    pub gallery_preview: ratatui::layout::Rect,
+    pub models_table: ratatui::layout::Rect,
 }
 
 impl App {
@@ -656,6 +672,7 @@ impl App {
             tokio_handle: tokio::runtime::Handle::current(),
             resource_info: crate::ui::info::ResourceInfo::default(),
             history,
+            layout: LayoutAreas::default(),
         });
 
         // Spawn background gallery scan
@@ -701,6 +718,12 @@ impl App {
 
     /// Handle a raw crossterm event.
     pub fn handle_crossterm_event(&mut self, event: CrosstermEvent) {
+        // Handle mouse events
+        if let CrosstermEvent::Mouse(mouse) = event {
+            self.handle_mouse(mouse);
+            return;
+        }
+
         // If a popup is active, route events there first
         if self.popup.is_some() {
             self.handle_popup_event(event);
@@ -925,6 +948,91 @@ impl App {
                 },
                 None => {}
             }
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let col = mouse.column;
+        let row = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Close popups on click outside (simple approach)
+                if self.popup.is_some() {
+                    self.popup = None;
+                    return;
+                }
+
+                // Tab bar clicks — switch views
+                if self.layout.tab_bar.contains((col, row).into()) {
+                    // Determine which tab was clicked based on x position
+                    let x = col - self.layout.tab_bar.x;
+                    if x < 13 {
+                        self.active_view = View::Generate;
+                    } else if x < 25 {
+                        self.active_view = View::Gallery;
+                    } else {
+                        self.active_view = View::Models;
+                    }
+                    return;
+                }
+
+                // Generate view clicks
+                if self.active_view == View::Generate {
+                    let pos: ratatui::layout::Position = (col, row).into();
+                    if self.layout.prompt.contains(pos) {
+                        self.generate.focus = GenerateFocus::Prompt;
+                    } else if self.layout.negative_prompt.contains(pos)
+                        && self.generate.capabilities.supports_negative_prompt
+                    {
+                        self.generate.focus = GenerateFocus::NegativePrompt;
+                    } else if self.layout.parameters.contains(pos) {
+                        self.generate.focus = GenerateFocus::Parameters;
+                        // Select the parameter row that was clicked
+                        let relative_row =
+                            (row - self.layout.parameters.y).saturating_sub(1) as usize;
+                        if relative_row < self.generate.visible_fields.len() {
+                            self.generate.param_index = relative_row;
+                        }
+                    } else {
+                        // Click on preview or elsewhere — go to navigation
+                        self.generate.focus = GenerateFocus::Navigation;
+                    }
+                }
+
+                // Gallery view clicks
+                if self.active_view == View::Gallery {
+                    let pos: ratatui::layout::Position = (col, row).into();
+                    if self.layout.gallery_list.contains(pos) {
+                        let relative_row =
+                            (row - self.layout.gallery_list.y).saturating_sub(1) as usize;
+                        if relative_row < self.gallery.entries.len() {
+                            self.gallery.selected = relative_row;
+                        }
+                    }
+                }
+
+                // Models view clicks
+                if self.active_view == View::Models {
+                    let pos: ratatui::layout::Position = (col, row).into();
+                    if self.layout.models_table.contains(pos) {
+                        let relative_row =
+                            (row - self.layout.models_table.y).saturating_sub(2) as usize;
+                        if relative_row < self.models.catalog.len() {
+                            self.models.selected = relative_row;
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                self.dispatch_action(Action::Up);
+            }
+            MouseEventKind::ScrollDown => {
+                self.dispatch_action(Action::Down);
+            }
+            _ => {}
         }
     }
 
