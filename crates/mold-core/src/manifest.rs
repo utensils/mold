@@ -1189,7 +1189,7 @@ fn shared_sd15_files() -> Vec<ModelFile> {
             sha256: Some("a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815"),
         },
         ModelFile {
-            hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
+            hf_repo: "stable-diffusion-v1-5/stable-diffusion-v1-5".to_string(),
             hf_filename: "text_encoder/model.safetensors".to_string(),
             component: ModelComponent::ClipEncoder,
             size_bytes: 492_265_874,
@@ -1218,7 +1218,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
             files: {
                 let mut files = shared_sd15_files();
                 files.push(ModelFile {
-                    hf_repo: "runwayml/stable-diffusion-v1-5".to_string(),
+                    hf_repo: "stable-diffusion-v1-5/stable-diffusion-v1-5".to_string(),
                     hf_filename: "unet/diffusion_pytorch_model.safetensors".to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 3_438_167_540,
