@@ -504,8 +504,8 @@ impl JointAttention {
 
         let total_seq_len = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((batch, total_seq_len, ()))?;
-        // contiguous() required: narrow() creates strided views that
-        // QMatMul's CUDA kernel does not support.
+        // contiguous() required: narrow() creates non-contiguous strided views;
+        // candle's matmul expects contiguous input on CUDA.
         let txt_attn = attn.narrow(1, 0, txt_seq_len)?.contiguous()?;
         let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?.contiguous()?;
 
@@ -556,6 +556,7 @@ impl QwenImageTransformerBlock {
         txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
+        let txt_mask_bf16 = txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::BF16)?;
         let temb = temb.silu()?;
         let img_mod = temb.apply(&self.img_mod)?.unsqueeze(1)?;
         let txt_mod = temb.apply(&self.txt_mod)?.unsqueeze(1)?;
@@ -614,8 +615,8 @@ impl QwenImageTransformerBlock {
         )?;
 
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::BF16)?)?;
+        let txt_hidden =
+            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?.broadcast_mul(&txt_mask_bf16)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -632,7 +633,7 @@ impl QwenImageTransformerBlock {
         let img_hidden = (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
         let txt_hidden = (&txt_hidden
             + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-        .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::BF16)?)?;
+        .broadcast_mul(&txt_mask_bf16)?;
 
         Ok((img_hidden, txt_hidden))
     }
