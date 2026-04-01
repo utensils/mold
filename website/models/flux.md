@@ -45,6 +45,20 @@ flow-matching transformer.
 | `ultrareal-v2:bf16` | 25    | 23.8 GB | Full precision          |
 | `iniverse-mix:fp8`  | 25    | 11.9 GB | Realistic SFW/NSFW mix  |
 
+## Recommended Dimensions
+
+| Width | Height | Aspect Ratio |
+| ----- | ------ | ------------ |
+| 1024  | 1024   | 1:1 (native) |
+| 1024  | 768    | 4:3          |
+| 768   | 1024   | 3:4          |
+| 1024  | 576    | 16:9         |
+| 576   | 1024   | 9:16         |
+| 768   | 768    | 1:1          |
+
+Using non-recommended dimensions will trigger a warning. All values must be
+multiples of 16.
+
 ## Examples
 
 **FLUX Schnell Q8** — 4 steps, seed 42:

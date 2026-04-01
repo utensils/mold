@@ -16,6 +16,7 @@ mold run "cyberpunk cityscape" -o cityscape.png
 mold run "a cat" --seed 42
 
 # Custom dimensions (multiples of 16)
+# See each model's recommended dimensions to avoid warnings
 mold run "a banner" --width 1024 --height 512
 
 # Batch generation (multiple images with incrementing seeds)
@@ -31,6 +32,26 @@ Here's what that looks like — FLUX Schnell Q8, seed 42:
 
 Need a quick answer on family capabilities or expected speed? See
 [Feature Support](/guide/feature-matrix) and [Performance](/guide/performance).
+
+## Recommended Dimensions
+
+Each model family has a set of recommended dimensions that produce the best
+results. Using non-recommended dimensions will trigger a warning (generation
+still proceeds). All dimensions must be multiples of 16.
+
+```bash
+# Square (works with all families)
+mold run "a cat" --width 1024 --height 1024
+
+# Landscape (FLUX, Flux.2 Klein)
+mold run flux-schnell "a panorama" --width 1024 --height 576
+
+# Portrait (SDXL, SD 3.5, Qwen-Image)
+mold run sdxl-turbo "a portrait" --width 832 --height 1216
+```
+
+See each [model family page](/models/) for the full list of recommended
+dimensions and aspect ratios.
 
 ## Negative Prompts
 

@@ -193,7 +193,7 @@ fn save_image_to_dir(
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-) -> Result<Option<std::path::PathBuf>, ApiError> {
+) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
     apply_default_metadata_setting(state, request).await;
 
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
@@ -205,12 +205,17 @@ async fn prepare_generation(
 
     let _ = model_manager::check_model_available(state, &request.model).await?;
 
-    let output_dir = {
+    let (output_dir, dim_warning) = {
         let config = state.config.read().await;
-        config.resolved_output_dir().map(|p| p.to_path_buf())
+        let output_dir = config.resolved_output_dir().map(|p| p.to_path_buf());
+        let family = config.resolved_model_config(&request.model).family;
+        let dim_warning = family
+            .as_deref()
+            .and_then(|f| mold_core::dimension_warning(request.width, request.height, f));
+        (output_dir, dim_warning)
     };
 
-    Ok(output_dir)
+    Ok((output_dir, dim_warning))
 }
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
@@ -233,7 +238,7 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let output_dir = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -281,6 +286,16 @@ async fn generate(
                     ApiError::internal(format!("failed to serialize seed header: {e}"))
                 })?,
             );
+            if let Some(warning) = dim_warning {
+                match HeaderValue::from_str(&warning.replace('\n', " ")) {
+                    Ok(val) => {
+                        headers.insert("x-mold-dimension-warning", val);
+                    }
+                    Err(e) => {
+                        tracing::warn!("dimension warning could not be encoded as header: {e}");
+                    }
+                }
+            }
             Ok((headers, img.data))
         }
         Err(err_msg) => Err(ApiError::inference(err_msg)),
@@ -437,7 +452,7 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let output_dir = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -447,6 +462,13 @@ async fn generate_stream(
 
     // Create SSE channel
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+
+    // Send dimension warning before queuing so the client sees it early
+    if let Some(warning) = dim_warning {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
+            message: warning,
+        }));
+    }
 
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let job = GenerationJob {

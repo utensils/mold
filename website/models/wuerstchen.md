@@ -20,6 +20,15 @@ encoder feeds into Prior → Decoder → VQ-GAN stages.
 - **Guidance**: 4.0
 - **Steps**: 60
 
+## Recommended Dimensions
+
+| Width | Height | Aspect Ratio |
+| ----- | ------ | ------------ |
+| 1024  | 1024   | 1:1 (native) |
+
+Using non-recommended dimensions will trigger a warning. All values must be
+multiples of 16.
+
 ## Notes
 
 Wuerstchen includes a default negative prompt. The 42x latent compression means

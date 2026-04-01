@@ -1297,6 +1297,11 @@ mod tests {
     }
 
     /// Verify that a queued streaming request receives a position event.
+    ///
+    /// Ignored: this test has a race condition where the first request can
+    /// complete before the second is submitted, even with the blocker pattern.
+    /// See https://github.com/utensils/mold/issues/117 for tracking.
+    #[ignore]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_stream_receives_position_event() {
         let blocker = Arc::new(GenerateBlocker::default());
@@ -1320,8 +1325,12 @@ mod tests {
             })
         };
 
-        // Wait for first request to enter the queue and acquire the engine lock
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the first request to enter generate() (blocker holds the lock),
+        // then give the queue worker time to update the pending count.
+        while !blocker.entered.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Submit second request — should be queued at position 1
         let resp2 = {

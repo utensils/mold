@@ -23,6 +23,17 @@ encoding. Excellent quality at just 9 steps.
 - **Guidance**: 0.0
 - **Steps**: 9
 
+## Recommended Dimensions
+
+| Width | Height | Aspect Ratio |
+| ----- | ------ | ------------ |
+| 1024  | 1024   | 1:1 (native) |
+| 1024  | 768    | 4:3          |
+| 768   | 1024   | 3:4          |
+
+Using non-recommended dimensions will trigger a warning. All values must be
+multiples of 16.
+
 ## Example
 
 **Z-Image Turbo** — 9 steps, seed 777:

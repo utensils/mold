@@ -170,6 +170,100 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     Ok(())
 }
 
+// ── Dimension recommendations ───────────────────────────────────────────────
+
+/// Recommended (width, height) pairs for SD1.5 models (native 512x512).
+const SD15_DIMS: &[(u32, u32)] = &[(512, 512), (512, 768), (768, 512), (384, 512), (512, 384)];
+
+/// Official SDXL training buckets from Stability AI (native 1024x1024).
+const SDXL_DIMS: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1152, 896),
+    (896, 1152),
+    (1216, 832),
+    (832, 1216),
+    (1344, 768),
+    (768, 1344),
+    (1536, 640),
+    (640, 1536),
+];
+
+/// Recommended dimensions for SD3.5 models (native 1024x1024).
+const SD3_DIMS: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1152, 896),
+    (896, 1152),
+    (1216, 832),
+    (832, 1216),
+    (1344, 768),
+    (768, 1344),
+];
+
+/// Recommended dimensions for FLUX models (native 1024x1024).
+const FLUX_DIMS: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1024, 768),
+    (768, 1024),
+    (1024, 576),
+    (576, 1024),
+    (768, 768),
+];
+
+/// Recommended dimensions for Z-Image models (native 1024x1024).
+const ZIMAGE_DIMS: &[(u32, u32)] = &[(1024, 1024), (1024, 768), (768, 1024)];
+
+/// Recommended dimensions for Wuerstchen models (native 1024x1024).
+const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
+
+/// Return the list of recommended (width, height) pairs for a model family.
+///
+/// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
+/// and conditioning models (e.g. ControlNet).
+pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
+    match family {
+        "sd15" => SD15_DIMS,
+        "sdxl" => SDXL_DIMS,
+        "sd3" => SD3_DIMS,
+        "flux" => FLUX_DIMS,
+        "flux2" => FLUX_DIMS,
+        "z-image" => ZIMAGE_DIMS,
+        "qwen-image" => SDXL_DIMS,
+        "wuerstchen" => WUERSTCHEN_DIMS,
+        _ => &[],
+    }
+}
+
+/// Check if the requested dimensions match any recommended resolution for the model family.
+///
+/// Returns `None` if the dimensions are recommended or the family has no recommendation list.
+/// Returns `Some(warning_message)` with suggested alternatives otherwise.
+pub fn dimension_warning(width: u32, height: u32, family: &str) -> Option<String> {
+    let dims = recommended_dimensions(family);
+    if dims.is_empty() {
+        return None;
+    }
+    if dims.contains(&(width, height)) {
+        return None;
+    }
+    // Build a compact list of suggested alternatives (show up to 4)
+    let suggestions: Vec<String> = dims
+        .iter()
+        .take(4)
+        .map(|(w, h)| format!("{w}x{h}"))
+        .collect();
+    let more = if dims.len() > 4 {
+        format!(", ... ({} total)", dims.len())
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{width}x{height} is not a recommended resolution for {family} models. \
+         Suggested: {}{}",
+        suggestions.join(", "),
+        more,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,5 +854,110 @@ mod tests {
             err.contains("safetensors"),
             "expected safetensors error: {err}"
         );
+    }
+
+    // ── dimension_warning tests ────────────────────────────────────────────
+
+    #[test]
+    fn dimension_warning_matching_returns_none() {
+        assert!(dimension_warning(1024, 1024, "flux").is_none());
+        assert!(dimension_warning(512, 512, "sd15").is_none());
+        assert!(dimension_warning(1024, 1024, "sdxl").is_none());
+        assert!(dimension_warning(1024, 1024, "wuerstchen").is_none());
+    }
+
+    #[test]
+    fn dimension_warning_non_matching_returns_some() {
+        let warning = dimension_warning(256, 256, "flux");
+        assert!(warning.is_some());
+        let msg = warning.unwrap();
+        assert!(msg.contains("256x256"), "should mention requested dims");
+        assert!(msg.contains("flux"), "should mention model family");
+        assert!(msg.contains("Suggested"), "should include suggestions");
+    }
+
+    #[test]
+    fn dimension_warning_unknown_family_returns_none() {
+        assert!(dimension_warning(256, 256, "unknown-model").is_none());
+    }
+
+    #[test]
+    fn dimension_warning_empty_family_returns_none() {
+        assert!(dimension_warning(512, 512, "").is_none());
+    }
+
+    #[test]
+    fn dimension_warning_sd15_at_1024_warns() {
+        let warning = dimension_warning(1024, 1024, "sd15");
+        assert!(warning.is_some(), "SD1.5 at 1024x1024 should warn");
+        assert!(warning.unwrap().contains("512x512"));
+    }
+
+    #[test]
+    fn dimension_warning_sdxl_buckets_accepted() {
+        for (w, h) in recommended_dimensions("sdxl") {
+            assert!(
+                dimension_warning(*w, *h, "sdxl").is_none(),
+                "SDXL bucket {w}x{h} should not warn"
+            );
+        }
+    }
+
+    #[test]
+    fn dimension_warning_qwen_image_uses_sdxl_buckets() {
+        assert_eq!(
+            recommended_dimensions("qwen-image"),
+            recommended_dimensions("sdxl"),
+            "qwen-image should share SDXL buckets"
+        );
+    }
+
+    #[test]
+    fn dimension_warning_flux2_uses_flux_dims() {
+        assert_eq!(
+            recommended_dimensions("flux2"),
+            recommended_dimensions("flux"),
+            "flux2 should share FLUX dimensions"
+        );
+    }
+
+    #[test]
+    fn every_family_native_in_recommendations() {
+        // Each family's native resolution (from ManifestDefaults) should appear
+        // in its recommended list.
+        let families = &[
+            ("sd15", 512, 512),
+            ("sdxl", 1024, 1024),
+            ("sd3", 1024, 1024),
+            ("flux", 1024, 1024),
+            ("flux2", 1024, 1024),
+            ("z-image", 1024, 1024),
+            ("qwen-image", 1024, 1024),
+            ("wuerstchen", 1024, 1024),
+        ];
+        for (family, w, h) in families {
+            let dims = recommended_dimensions(family);
+            assert!(
+                dims.contains(&(*w, *h)),
+                "{family} native {w}x{h} missing from recommended list"
+            );
+        }
+    }
+
+    #[test]
+    fn dimension_warning_message_format() {
+        let msg = dimension_warning(800, 600, "sd15").unwrap();
+        assert!(msg.contains("800x600"));
+        assert!(msg.contains("sd15"));
+        assert!(msg.contains("Suggested:"));
+        // Should list known alternatives
+        assert!(msg.contains("512x512"));
+    }
+
+    #[test]
+    fn dimension_warning_truncates_long_lists() {
+        // SDXL has 9 buckets but warning should show at most 4 + "N total"
+        let msg = dimension_warning(800, 600, "sdxl").unwrap();
+        assert!(msg.contains("total"), "long lists should show total count");
     }
 }
