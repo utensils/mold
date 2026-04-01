@@ -27,9 +27,8 @@ requirements.
 
 # Flux.2 Klein-9B (alpha)
 
-> **Note**: Klein-9B is in alpha. The text encoder architecture (Qwen3 with
-> hidden_size=4096) differs from Klein-4B and is not yet fully supported by the
-> inference engine. Results may not work correctly.
+> **Note**: Klein-9B is in alpha. The Qwen3 encoder (hidden_size=4096) differs
+> from Klein-4B (hidden_size=2560) and is not yet fully supported.
 
 A larger 9B parameter FLUX variant. Distilled for fast 4-step generation with
 higher quality than the 4B Klein.

@@ -1924,9 +1924,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
         // NOTE: Klein-9B uses a larger Qwen3 encoder (hidden_size=4096) than
-        // Klein-4B (hidden_size=2560). The BF16 encoder loader currently only
-        // supports the 2560-wide architecture. Klein-9B is marked alpha until
-        // the encoder is updated to support both architectures.
+        // Klein-4B (hidden_size=2560). Klein-9B is marked alpha until the encoder
+        // supports both architectures.
         ModelManifest {
             name: "flux2-klein-9b:bf16".to_string(),
             family: "flux2".to_string(),
@@ -4151,5 +4150,47 @@ mod tests {
             utility_count, 2,
             "expected exactly 2 utility models, got {utility_count}"
         );
+    }
+
+    #[test]
+    fn only_klein_9b_models_are_alpha() {
+        for manifest in known_manifests() {
+            let desc = &manifest.description;
+            let is_alpha = desc.contains("(alpha)") || desc.contains("[alpha]");
+            if is_alpha {
+                assert!(
+                    manifest.name.contains("klein-9b"),
+                    "non-Klein-9B model '{}' is marked alpha: {desc}",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_klein_9b_models_are_alpha() {
+        for manifest in known_manifests() {
+            if manifest.name.contains("klein-9b") {
+                assert!(
+                    manifest.description.contains("(alpha)"),
+                    "Klein-9B model '{}' should be marked alpha but description is: {}",
+                    manifest.name,
+                    manifest.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_diffusion_model_descriptions_have_stale_alpha_prefix() {
+        // Ensure no model uses the old [alpha] prefix format (should use (alpha) suffix)
+        for manifest in known_manifests() {
+            assert!(
+                !manifest.description.starts_with("[alpha]"),
+                "model '{}' uses stale [alpha] prefix format: {}",
+                manifest.name,
+                manifest.description
+            );
+        }
     }
 }

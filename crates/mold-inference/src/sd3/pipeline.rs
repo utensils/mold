@@ -26,7 +26,8 @@ use super::vae::{build_sd3_vae_autoencoder, sd3_vae_vb_rename};
 
 /// Loaded SD3 model components, ready for inference.
 struct LoadedSD3 {
-    transformer: SD3Transformer,
+    /// None after being dropped for VAE decode VRAM; reloaded on next generate.
+    transformer: Option<SD3Transformer>,
     triple_encoder: encoders::sd3_clip::SD3TripleEncoder,
     vae_vb_path: std::path::PathBuf,
     device: Device,
@@ -334,7 +335,7 @@ impl SD3Engine {
             .stage_done(&encoder_label, encoder_stage.elapsed());
 
         self.base.loaded = Some(LoadedSD3 {
-            transformer,
+            transformer: Some(transformer),
             triple_encoder,
             vae_vb_path: self.base.paths.vae.clone(),
             device,
@@ -625,6 +626,8 @@ impl InferenceEngine for SD3Engine {
         // Eager mode: use pre-loaded components
         let progress = &self.base.progress;
         let prompt_cache = &self.prompt_cache;
+        let mmdit_config = self.mmdit_config();
+        let transformer_path = self.base.paths.transformer.clone();
 
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
@@ -649,6 +652,31 @@ impl InferenceEngine for SD3Engine {
         );
 
         (|| -> Result<GenerateResponse> {
+            // Reload transformer if it was dropped after a previous VAE decode
+            if loaded.transformer.is_none() {
+                progress.stage_start("Reloading SD3 transformer");
+                let reload_start = Instant::now();
+                let transformer = if is_quantized {
+                    let vb = quantized_var_builder::VarBuilder::from_gguf(
+                        &transformer_path,
+                        &loaded_device,
+                    )?;
+                    SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
+                } else {
+                    let vb = crate::weight_loader::load_safetensors_with_progress(
+                        std::slice::from_ref(&transformer_path),
+                        loaded_dtype,
+                        &loaded_device,
+                        "SD3 transformer",
+                        progress,
+                    )?;
+                    let vb = vb.pp("model.diffusion_model");
+                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
+                };
+                loaded.transformer = Some(transformer);
+                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
+            }
+
             if !loaded.triple_encoder.is_loaded() {
                 progress.stage_start("Reloading SD3 triple encoder");
                 let reload_start = Instant::now();
@@ -689,8 +717,12 @@ impl InferenceEngine for SD3Engine {
             progress.stage_start(&denoise_label);
             let denoise_start = Instant::now();
 
+            let transformer = loaded
+                .transformer
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("SD3 transformer not loaded"))?;
             let x = sampling::euler_sample(
-                &loaded.transformer,
+                transformer,
                 &y,
                 &context,
                 req.steps as usize,
@@ -707,6 +739,11 @@ impl InferenceEngine for SD3Engine {
             progress.stage_done(&denoise_label, denoise_start.elapsed());
             drop(context);
             drop(y);
+
+            // Drop transformer before VAE decode to free VRAM.
+            loaded.transformer = None;
+            loaded.device.synchronize()?;
+            tracing::info!("SD3 transformer dropped to free VRAM for VAE decode");
 
             progress.stage_start("VAE decode");
             let vae_decode_start = Instant::now();

@@ -40,7 +40,8 @@ use crate::progress::{ProgressCallback, ProgressReporter};
 
 /// Loaded Flux.2 model components, ready for inference.
 struct LoadedFlux2 {
-    transformer: Flux2TransformerWrapper,
+    /// None after being dropped for VAE decode VRAM; reloaded on next generate.
+    transformer: Option<Flux2TransformerWrapper>,
     text_encoder: encoders::qwen3::Qwen3Encoder,
     vae: Flux2AutoEncoder,
     /// GPU device for transformer + VAE
@@ -175,6 +176,35 @@ impl Flux2Engine {
                 "Loading Flux.2 transformer (GPU, BF16)",
             ))
         }
+    }
+
+    /// Reload transformer using `&mut self` — called before the main `loaded` borrow
+    /// to avoid borrow conflicts.
+    fn reload_transformer_if_needed(&mut self) -> Result<()> {
+        let needs_reload = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|l| l.transformer.is_none())
+            .unwrap_or(false);
+
+        if needs_reload {
+            let cfg = self.resolve_config();
+            self.base
+                .progress
+                .stage_start("Reloading Flux.2 transformer");
+            let reload_start = Instant::now();
+            let (transformer, _label) = self.load_transformer(
+                &cfg,
+                self.base.loaded.as_ref().unwrap().dtype,
+                &self.base.loaded.as_ref().unwrap().device.clone(),
+            )?;
+            self.base.loaded.as_mut().unwrap().transformer = Some(transformer);
+            self.base
+                .progress
+                .stage_done("Reloading Flux.2 transformer", reload_start.elapsed());
+        }
+        Ok(())
     }
 
     /// Get text encoder file paths (shards or single file).
@@ -353,7 +383,7 @@ impl Flux2Engine {
         tracing::info!(device = %device_label, "Qwen3 encoder loaded");
 
         self.base.loaded = Some(LoadedFlux2 {
-            transformer,
+            transformer: Some(transformer),
             text_encoder,
             vae,
             device,
@@ -607,6 +637,10 @@ impl InferenceEngine for Flux2Engine {
         }
 
         // Eager mode: use pre-loaded components
+        // Reload transformer first (before taking the main `loaded` borrow)
+        // if it was dropped after a previous VAE decode.
+        self.reload_transformer_if_needed()?;
+
         let progress = &self.base.progress;
 
         let loaded = self
@@ -692,7 +726,11 @@ impl InferenceEngine for Flux2Engine {
         tracing::info!(steps = timesteps.len() - 1, "running denoising loop...");
 
         // 5. Denoise
-        let img = loaded.transformer.denoise(
+        let transformer = loaded
+            .transformer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?;
+        let img = transformer.denoise(
             &state.img,
             &state.img_ids,
             &state.txt,
@@ -708,9 +746,17 @@ impl InferenceEngine for Flux2Engine {
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
 
-        // Free denoising intermediates
+        // Free denoising intermediates and transformer before VAE decode.
+        // The transformer consumes most of VRAM — VAE decode needs that
+        // memory for conv2d intermediates. Transformer is reloaded next generate.
         drop(state);
         drop(txt_emb);
+        loaded.transformer = None;
+        // Force CUDA to complete pending operations and release freed memory.
+        // Without this, cuMemFree is asynchronous and the freed VRAM may not
+        // be available when VAE decode allocates its conv2d intermediates.
+        loaded.device.synchronize()?;
+        tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 7. Decode with VAE
         progress.stage_start("VAE decode");

@@ -30,7 +30,8 @@ struct ControlNetContext {
 
 /// Loaded SD1.5 model components, ready for inference.
 struct LoadedSD15 {
-    unet: stable_diffusion::unet_2d::UNet2DConditionModel,
+    /// None after being dropped for VAE decode VRAM; reloaded on next generate.
+    unet: Option<stable_diffusion::unet_2d::UNet2DConditionModel>,
     vae: stable_diffusion::vae::AutoEncoderKL,
     clip: stable_diffusion::clip::ClipTextTransformer,
     tokenizer: tokenizers::Tokenizer,
@@ -104,6 +105,34 @@ impl SD15Engine {
         stable_diffusion::StableDiffusionConfig::v1_5(None, None, None)
     }
 
+    /// Reload UNet if it was dropped after VAE decode.
+    fn reload_unet_if_needed(&mut self) -> Result<()> {
+        let needs_reload = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|l| l.unet.is_none())
+            .unwrap_or(false);
+
+        if needs_reload {
+            let sd_config = self.sd_config();
+            let loaded = self.base.loaded.as_ref().unwrap();
+            let device = loaded.device.clone();
+            let dtype = loaded.dtype;
+            let _ = loaded;
+
+            self.base.progress.stage_start("Reloading UNet (GPU)");
+            let reload_start = Instant::now();
+            let unet =
+                sd_config.build_unet(&self.base.paths.transformer, &device, 4, false, dtype)?;
+            self.base.loaded.as_mut().unwrap().unet = Some(unet);
+            self.base
+                .progress
+                .stage_done("Reloading UNet (GPU)", reload_start.elapsed());
+        }
+        Ok(())
+    }
+
     /// Load all SD1.5 model components (Eager mode).
     ///
     /// On error, `self.base.loaded` remains `None` — all components are assembled into
@@ -172,7 +201,7 @@ impl SD15Engine {
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
 
         self.base.loaded = Some(LoadedSD15 {
-            unet,
+            unet: Some(unet),
             vae,
             clip,
             tokenizer,
@@ -792,7 +821,9 @@ impl InferenceEngine for SD15Engine {
             return self.generate_sequential(req);
         }
 
-        // Eager mode: use pre-loaded components
+        // Eager mode: reload UNet if dropped after previous VAE decode
+        self.reload_unet_if_needed()?;
+
         let loaded = self
             .base
             .loaded
@@ -887,8 +918,12 @@ impl InferenceEngine for SD15Engine {
         let controlnet_ctx = self.load_controlnet(req, &loaded.device, loaded.dtype)?;
 
         // 4. Denoising loop
+        let unet = loaded
+            .unet
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("UNet not loaded"))?;
         self.denoise_loop(
-            &loaded.unet,
+            unet,
             &text_embeddings,
             sched,
             &mut latents,
@@ -898,6 +933,19 @@ impl InferenceEngine for SD15Engine {
             inpaint_ctx.as_ref(),
             controlnet_ctx.as_ref(),
         )?;
+
+        // Drop UNet before VAE decode to free VRAM for conv2d intermediates.
+        drop(controlnet_ctx);
+        drop(inpaint_ctx);
+        // End the immutable borrow of `loaded` so we can take a mutable one.
+        let _ = loaded;
+        let loaded = self.base.loaded.as_mut().unwrap();
+        loaded.unet = None;
+        loaded.device.synchronize()?;
+        tracing::info!("UNet dropped to free VRAM for VAE decode");
+        // Re-borrow as immutable for VAE decode + output encoding.
+        let _ = loaded;
+        let loaded = self.base.loaded.as_ref().unwrap();
 
         // 5. VAE decode
         self.base.progress.stage_start("VAE decode");
