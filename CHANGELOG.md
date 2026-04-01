@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-01
+
+### Fixed
+
+- **OOM prevention in eager/server mode**: drop transformer/UNet before VAE decode in all 8 pipelines — prevents out-of-memory on GPUs where transformer + VAE decode intermediates exceed VRAM ([#128](https://github.com/utensils/mold/pull/128))
+- **Batch cache optimization**: skip text encoder load on prompt cache hit in all 8 sequential/CLI pipelines, saving 2-10s per batch image depending on model family ([#128](https://github.com/utensils/mold/pull/128))
+- **Wuerstchen cache key**: include negative prompt and CFG flags in cache key to prevent silent cache collisions ([#128](https://github.com/utensils/mold/pull/128))
+- **Unified memory fixes for low-RAM Apple Silicon**: drop text encoders after encoding on Metal (unified memory), use available memory (free + inactive) for variant selection on macOS, and show "Metal out of memory" instead of misleading CUDA error ([#126](https://github.com/utensils/mold/pull/126))
+- **Skip encoder reload on cache hit**: Flux2 and Z-Image eager paths no longer reload encoder from disk before checking prompt cache ([#126](https://github.com/utensils/mold/pull/126))
+- **Stale alpha labels**: removed incorrect alpha labels from Klein-4B model descriptions; Klein-9B correctly retains alpha ([#128](https://github.com/utensils/mold/pull/128))
+
+### Changed
+
+- Candle dependencies switched from git refs to crates.io 0.9.3 — unblocks `cargo publish` for all mold crates
+
 ## [0.3.0] - 2026-04-01
 
 ### Added
@@ -128,6 +143,7 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server) | Axum HTTP inference server |
 
+[0.3.1]: https://github.com/utensils/mold/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/utensils/mold/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/utensils/mold/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/utensils/mold/releases/tag/v0.1.0

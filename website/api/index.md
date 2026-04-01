@@ -133,7 +133,7 @@ Example response:
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.1",
   "git_sha": "da039e1",
   "build_date": "2026-03-25",
   "models_loaded": ["flux-schnell:q8"],
