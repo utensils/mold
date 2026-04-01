@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'website/**'
-      - '.github/workflows/pages.yml'
+      - "website/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -32,6 +32,10 @@ jobs:
       - name: Install dependencies
         working-directory: website
         run: bun install
+
+      - name: Verify docs
+        working-directory: website
+        run: bun run verify
 
       - name: Build docs
         working-directory: website

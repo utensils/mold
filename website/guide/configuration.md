@@ -109,6 +109,8 @@ Environment variables take precedence over config file values.
 | `MOLD_T5_TOKENIZER_PATH`    | —       | Override T5 tokenizer path                            |
 | `MOLD_CLIP_TOKENIZER_PATH`  | —       | Override CLIP-L tokenizer path                        |
 | `MOLD_CLIP2_TOKENIZER_PATH` | —       | Override CLIP-G tokenizer path for SDXL               |
+| `MOLD_TEXT_TOKENIZER_PATH`  | —       | Override generic text tokenizer path for Qwen/Z-Image |
+| `MOLD_DECODER_PATH`         | —       | Override Wuerstchen decoder weights path              |
 
 These are mainly useful for custom local model layouts, manual debugging, or
 testing alternative weight files without editing `config.toml`.

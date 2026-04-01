@@ -35,16 +35,21 @@ nix profile install github:utensils/mold
 ::: code-group
 
 ```bash [Linux (CUDA)]
-cargo build --release -p mold-cli --features cuda
+cargo build --release -p mold-ai --features cuda
 ```
 
 ```bash [macOS (Metal)]
-cargo build --release -p mold-cli --features metal
+cargo build --release -p mold-ai --features metal
 ```
 
 :::
 
 Requires Rust 1.85+ and CUDA toolkit (Linux) or Xcode (macOS).
+
+Optional features can be added to the same build, for example
+`--features cuda,preview,expand,discord` or
+`--features metal,preview,expand,discord` if you also want terminal preview,
+local prompt expansion, or the Discord bot commands.
 
 ## Docker
 

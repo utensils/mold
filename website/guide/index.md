@@ -56,4 +56,10 @@ mold run "a sunset over mountains"
 - [Installation](/guide/installation) — all the ways to install mold
 - [Configuration](/guide/configuration) — environment variables, config file
 - [Generating Images](/guide/generating) — full usage guide
+- [Feature Support](/guide/feature-matrix) — which model families support which
+  features
+- [Remote Workflows](/guide/remote-workflows) — laptop-to-GPU-server setups
+- [Performance](/guide/performance) — speed and VRAM tuning
+- [Custom Models & LoRA](/guide/custom-models) — manual config and adapter
+  workflows
 - [Models](/models/) — which model to pick for your use case

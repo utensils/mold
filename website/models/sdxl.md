@@ -4,8 +4,10 @@ Fast and flexible. Dual-CLIP text encoding (CLIP-L + CLIP-G) with UNet denoising
 and classifier-free guidance.
 
 - **Developer**: [Stability AI](https://stability.ai/)
-- **License**: [CreativeML Open RAIL++-M](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md)
-- **HuggingFace**: [stabilityai/stable-diffusion-xl-base-1.0](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0)
+- **License**:
+  [CreativeML Open RAIL++-M](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md)
+- **HuggingFace**:
+  [stabilityai/stable-diffusion-xl-base-1.0](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0)
 
 ## Variants
 

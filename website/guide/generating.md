@@ -29,6 +29,9 @@ Here's what that looks like — FLUX Schnell Q8, seed 42:
 
 ![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
+Need a quick answer on family capabilities or expected speed? See
+[Feature Support](/guide/feature-matrix) and [Performance](/guide/performance).
+
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,
