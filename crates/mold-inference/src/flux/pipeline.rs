@@ -64,8 +64,8 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
         }
     } else if is_cuda && transformer_is_fp8 {
         // FP8 safetensors must go through F16 on CUDA (candle has a kernel naming
-        // bug that prevents direct CUDA FP8→BF16 casts). Loading uses
-        // CpuStagedSafetensors which does FP8→F16 on CPU then transfers to GPU.
+        // bug that prevents direct CUDA FP8→BF16 casts). The lazy mmap VarBuilder
+        // handles dtype conversion during model construction.
         DType::F16
     } else if is_cuda {
         DType::BF16
