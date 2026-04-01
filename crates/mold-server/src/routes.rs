@@ -287,8 +287,13 @@ async fn generate(
                 })?,
             );
             if let Some(warning) = dim_warning {
-                if let Ok(val) = HeaderValue::from_str(&warning.replace('\n', " ")) {
-                    headers.insert("x-mold-dimension-warning", val);
+                match HeaderValue::from_str(&warning.replace('\n', " ")) {
+                    Ok(val) => {
+                        headers.insert("x-mold-dimension-warning", val);
+                    }
+                    Err(e) => {
+                        tracing::warn!("dimension warning could not be encoded as header: {e}");
+                    }
                 }
             }
             Ok((headers, img.data))

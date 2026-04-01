@@ -152,8 +152,9 @@ pub async fn run(
         lora: lora.clone(),
     };
 
-    // Warn if user-provided dimensions don't match model recommendations
-    if width.is_some() || height.is_some() {
+    // Warn if user-provided dimensions don't match model recommendations.
+    // Only warn locally — in remote mode the server sends the warning via SSE/header.
+    if local && (width.is_some() || height.is_some()) {
         if let Some(ref family) = model_cfg.family {
             if let Some(warning) =
                 mold_core::dimension_warning(effective_width, effective_height, family)
