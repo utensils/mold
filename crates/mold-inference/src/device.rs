@@ -130,8 +130,9 @@ pub(crate) fn free_system_memory_bytes() -> Option<u64> {
 
 /// Total available system memory on macOS (free + inactive pages).
 ///
-/// Inactive pages CAN be reclaimed by the OS, but doing so involves I/O for dirty pages.
-/// Use this for memory budget checks (can this model run at all?) not for real-time decisions.
+/// Inactive pages are trivially reclaimable by the OS (no I/O for anonymous pages).
+/// Used for both memory budget checks and variant selection on unified-memory systems,
+/// where free-only is too conservative (often ~1-2GB on a busy 16GB Mac).
 #[cfg(target_os = "macos")]
 pub(crate) fn available_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free + s.inactive)
@@ -555,9 +556,12 @@ mod tests {
             vram >= free,
             "free_vram_bytes ({vram}) should be >= free_system_memory ({free})"
         );
-        assert_eq!(
-            vram, available,
-            "free_vram_bytes should equal available_system_memory on macOS"
+        // Allow small delta between separate syscalls (TOCTOU: inactive pages may
+        // change between the two macos_vm_stats() calls on a busy system)
+        let max_drift = 16 * 4096; // 16 pages
+        assert!(
+            vram.abs_diff(available) < max_drift,
+            "free_vram_bytes ({vram}) should approximately equal available_system_memory ({available})"
         );
     }
 
