@@ -288,6 +288,12 @@ mod tests {
     }
 
     #[test]
+    fn discord_not_in_known_subcommands() {
+        // "discord" was removed to avoid matching unrelated Discord processes.
+        assert!(!KNOWN_SUBCOMMANDS.contains(&"discord"));
+    }
+
+    #[test]
     fn known_subcommands_detected() {
         for &cmd_name in KNOWN_SUBCOMMANDS {
             let cmd = vec!["mold".into(), cmd_name.into()];
