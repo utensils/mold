@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, restore_cached_tensor_pair,
-    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor_pair, restore_cached_tensor_pair, CachedTensorPair,
+    LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -757,7 +757,10 @@ impl WuerstchenEngine {
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
-        let cache_key = prompt_text_key(&req.prompt);
+        let use_prior_cfg = prior_guidance > 1.0;
+        let use_decoder_cfg = decoder_guidance > 1.0;
+        let cache_key =
+            Self::prompt_cache_key(&req.prompt, negative_prompt, use_prior_cfg, use_decoder_cfg);
         let (prior_text_embeddings, decoder_text_embeddings) =
             if let Some((prior_emb, decoder_emb)) =
                 restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, dtype)?
