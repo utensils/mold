@@ -55,7 +55,9 @@ steps than the distilled Klein.
 
 # Flux.2 Klein-9B (alpha)
 
-> **Note**: Klein-9B is in alpha. The text encoder architecture (Qwen3 with hidden_size=4096) differs from Klein-4B and is not yet fully supported by the inference engine. Results may not work correctly.
+> **Note**: Klein-9B is in alpha. The text encoder architecture (Qwen3 with
+> hidden_size=4096) differs from Klein-4B and is not yet fully supported by the
+> inference engine. Results may not work correctly.
 
 A larger 9B parameter FLUX variant. Distilled for fast 4-step generation with
 higher quality than the 4B Klein.
@@ -68,12 +70,12 @@ higher quality than the 4B Klein.
 
 ## Variants
 
-| Model                  | Steps | Size    | Notes                        |
-| ---------------------- | ----- | ------- | ---------------------------- |
-| `flux2-klein-9b:q8`   | 4     | 10 GB   | Good quality                 |
-| `flux2-klein-9b:q6`   | 4     | 7.9 GB  | Better quality               |
-| `flux2-klein-9b:q4`   | 4     | 5.9 GB  | Smallest 9B                  |
-| `flux2-klein-9b:bf16` | 4     | 18 GB   | Full precision, gated, 2 shards |
+| Model                 | Steps | Size   | Notes                           |
+| --------------------- | ----- | ------ | ------------------------------- |
+| `flux2-klein-9b:q8`   | 4     | 10 GB  | Good quality                    |
+| `flux2-klein-9b:q6`   | 4     | 7.9 GB | Better quality                  |
+| `flux2-klein-9b:q4`   | 4     | 5.9 GB | Smallest 9B                     |
+| `flux2-klein-9b:bf16` | 4     | 18 GB  | Full precision, gated, 2 shards |
 
 ## Defaults
 
