@@ -75,6 +75,17 @@ impl Flux2Engine {
         }
     }
 
+    /// Select the appropriate transformer config based on the model name.
+    /// Klein-9B uses a larger architecture than Klein-4B / Klein-base-4B.
+    fn resolve_config(&self) -> Flux2Config {
+        let name = self.base.model_name.to_lowercase();
+        if name.contains("9b") {
+            Flux2Config::klein_9b()
+        } else {
+            Flux2Config::klein()
+        }
+    }
+
     /// Validate that all required paths exist.
     fn validate_paths(&self) -> Result<std::path::PathBuf> {
         let text_tokenizer_path = self
@@ -261,7 +272,7 @@ impl Flux2Engine {
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
 
         // --- Load transformer on GPU first ---
-        let flux2_cfg = Flux2Config::klein();
+        let flux2_cfg = self.resolve_config();
         let xformer_stage = Instant::now();
         let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
         self.base
@@ -464,7 +475,7 @@ impl Flux2Engine {
             self.base.progress.info(&status);
         }
 
-        let flux2_cfg = Flux2Config::klein();
+        let flux2_cfg = self.resolve_config();
         let xformer_stage = Instant::now();
         let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
         self.base
