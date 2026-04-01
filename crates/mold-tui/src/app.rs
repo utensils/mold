@@ -492,6 +492,14 @@ pub enum Popup {
     HostInput {
         input: String,
     },
+    SeedInput {
+        input: String,
+    },
+    HistorySearch {
+        filter: String,
+        selected: usize,
+        results: Vec<String>,
+    },
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
@@ -519,6 +527,8 @@ pub struct App {
     pub bg_tx: mpsc::UnboundedSender<BackgroundEvent>,
     pub bg_rx: mpsc::UnboundedReceiver<BackgroundEvent>,
     pub tokio_handle: tokio::runtime::Handle,
+    pub resource_info: crate::ui::info::ResourceInfo,
+    pub history: crate::history::PromptHistory,
 }
 
 impl App {
@@ -548,8 +558,32 @@ impl App {
         }
 
         let family = family_for_model(&params.model, &config);
-        let capabilities = capabilities_for_family(&family);
-        let visible_fields = ParamField::visible_fields(&capabilities, initial_mode);
+        let mut capabilities = capabilities_for_family(&family);
+        let mut visible_fields = ParamField::visible_fields(&capabilities, initial_mode);
+
+        let catalog = mold_core::build_model_catalog(&config, None, false);
+
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+
+        // Load session from previous TUI run
+        let session = crate::session::TuiSession::load();
+
+        // Restore model from session if it was set
+        if !session.last_model.is_empty()
+            && config.manifest_model_is_downloaded(&session.last_model)
+        {
+            params.model = session.last_model.clone();
+            let mc = config.resolved_model_config(&params.model);
+            params.steps = session.last_steps.unwrap_or(mc.effective_steps(&config));
+            params.guidance = session.last_guidance.unwrap_or(mc.effective_guidance());
+            params.width = session.last_width.unwrap_or(mc.effective_width(&config));
+            params.height = session.last_height.unwrap_or(mc.effective_height(&config));
+            // Re-derive capabilities for the restored model
+            let fam = family_for_model(&params.model, &config);
+            let caps = capabilities_for_family(&fam);
+            visible_fields = ParamField::visible_fields(&caps, initial_mode);
+            capabilities = caps;
+        }
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
             .and_then(|m| {
@@ -558,17 +592,26 @@ impl App {
             })
             .unwrap_or_default();
 
-        let catalog = mold_core::build_model_catalog(&config, None, false);
-
-        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
-
+        // Set up prompt textarea — restore from session if available
         let mut prompt = TextArea::default();
         prompt.set_cursor_line_style(ratatui::style::Style::default());
         prompt.set_placeholder_text("Enter your prompt...");
+        if session.has_prompt() {
+            prompt = TextArea::new(session.last_prompt.lines().map(String::from).collect());
+            prompt.set_cursor_line_style(ratatui::style::Style::default());
+        }
 
         let mut negative_prompt = TextArea::default();
         negative_prompt.set_cursor_line_style(ratatui::style::Style::default());
         negative_prompt.set_placeholder_text("Negative prompt (what to avoid)...");
+        if !session.last_negative.is_empty() {
+            negative_prompt =
+                TextArea::new(session.last_negative.lines().map(String::from).collect());
+            negative_prompt.set_cursor_line_style(ratatui::style::Style::default());
+        }
+
+        // Load prompt history
+        let history = crate::history::PromptHistory::load();
 
         Ok(Self {
             active_view: View::Generate,
@@ -611,6 +654,8 @@ impl App {
             bg_tx,
             bg_rx,
             tokio_handle: tokio::runtime::Handle::current(),
+            resource_info: crate::ui::info::ResourceInfo::default(),
+            history,
         })
     }
 
@@ -668,6 +713,8 @@ impl App {
                         | (KeyCode::Char('r'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('s'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('k'), KeyModifiers::CONTROL)
+                        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+                        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
                         | (KeyCode::Enter, KeyModifiers::NONE)
                         | (KeyCode::Esc, KeyModifiers::NONE) => {
                             // Fall through to action mapping
@@ -776,11 +823,90 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::SeedInput { input }) => match key.code {
+                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Enter => {
+                        let text = input.trim().to_string();
+                        self.popup = None;
+                        if text.is_empty() {
+                            // Clear seed → back to auto
+                            self.generate.params.seed = None;
+                        } else if let Ok(val) = text.parse::<u64>() {
+                            self.generate.params.seed = Some(val);
+                            // Switch to fixed mode when user enters a specific seed
+                            if self.generate.params.seed_mode == SeedMode::Random {
+                                self.generate.params.seed_mode = SeedMode::Fixed;
+                            }
+                        }
+                        // else: invalid input, just close
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => input.push(c),
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    _ => {}
+                },
+                Some(Popup::HistorySearch {
+                    filter,
+                    selected,
+                    results,
+                }) => match key.code {
+                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Enter => {
+                        if let Some(prompt) = results.get(*selected).cloned() {
+                            self.popup = None;
+                            self.generate.prompt =
+                                TextArea::new(prompt.lines().map(String::from).collect());
+                            self.generate
+                                .prompt
+                                .set_cursor_line_style(ratatui::style::Style::default());
+                            self.generate.focus = GenerateFocus::Prompt;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k')
+                        if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Up =>
+                    {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j')
+                        if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Down =>
+                    {
+                        if *selected + 1 < results.len() {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        filter.push(c);
+                        *results = self
+                            .history
+                            .search(filter)
+                            .into_iter()
+                            .map(|e| e.prompt.clone())
+                            .collect();
+                        if *selected >= results.len() {
+                            *selected = results.len().saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        *results = self
+                            .history
+                            .search(filter)
+                            .into_iter()
+                            .map(|e| e.prompt.clone())
+                            .collect();
+                        if *selected >= results.len() {
+                            *selected = results.len().saturating_sub(1);
+                        }
+                    }
+                    _ => {}
+                },
                 Some(Popup::Confirm { on_confirm, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
                         let _action = on_confirm.clone();
                         self.popup = None;
-                        // TODO: handle confirm action
                     }
                     _ => self.popup = None,
                 },
@@ -923,6 +1049,47 @@ impl App {
             Action::Cancel => {
                 self.generate.error_message = None;
             }
+            Action::HistoryPrev => {
+                if self.active_view == View::Generate
+                    && self.generate.focus == GenerateFocus::Prompt
+                {
+                    let current = self.generate.prompt.lines().join("\n");
+                    if let Some(prompt) = self.history.prev(&current) {
+                        self.generate.prompt =
+                            TextArea::new(prompt.lines().map(String::from).collect());
+                        self.generate
+                            .prompt
+                            .set_cursor_line_style(ratatui::style::Style::default());
+                    }
+                }
+            }
+            Action::HistoryNext => {
+                if self.active_view == View::Generate
+                    && self.generate.focus == GenerateFocus::Prompt
+                {
+                    let current = self.generate.prompt.lines().join("\n");
+                    if let Some(prompt) = self.history.next(&current) {
+                        self.generate.prompt =
+                            TextArea::new(prompt.lines().map(String::from).collect());
+                        self.generate
+                            .prompt
+                            .set_cursor_line_style(ratatui::style::Style::default());
+                    }
+                }
+            }
+            Action::SearchHistory => {
+                let all: Vec<String> = self
+                    .history
+                    .search("")
+                    .into_iter()
+                    .map(|e| e.prompt.clone())
+                    .collect();
+                self.popup = Some(Popup::HistorySearch {
+                    filter: String::new(),
+                    selected: 0,
+                    results: all,
+                });
+            }
             Action::Unfocus => {
                 if self.active_view == View::Generate {
                     self.generate.focus = GenerateFocus::Navigation;
@@ -1045,7 +1212,13 @@ impl App {
             }
             // Randomize the seed value
             ParamField::SeedValue => {
-                self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                let current = self
+                    .generate
+                    .params
+                    .seed
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                self.popup = Some(Popup::SeedInput { input: current });
             }
             // Open host input popup
             ParamField::Host => {
@@ -1126,6 +1299,45 @@ impl App {
                             response.seed_used
                         ),
                         style: ProgressStyle::Done,
+                    });
+
+                    // Save session state for next launch
+                    let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
+                    let neg_text = self
+                        .generate
+                        .negative_prompt
+                        .lines()
+                        .join("\n")
+                        .trim()
+                        .to_string();
+                    let session = crate::session::TuiSession {
+                        last_prompt: prompt_text.clone(),
+                        last_negative: neg_text.clone(),
+                        last_model: self.generate.params.model.clone(),
+                        last_width: Some(self.generate.params.width),
+                        last_height: Some(self.generate.params.height),
+                        last_steps: Some(self.generate.params.steps),
+                        last_guidance: Some(self.generate.params.guidance),
+                        last_seed_mode: Some(self.generate.params.seed_mode.label().to_string()),
+                    };
+                    session.save();
+                    // Also update last-model for CLI compatibility
+                    Config::write_last_model(&self.generate.params.model);
+
+                    // Push to prompt history
+                    let neg = if neg_text.is_empty() {
+                        None
+                    } else {
+                        Some(neg_text)
+                    };
+                    self.history.push(crate::history::HistoryEntry {
+                        prompt: prompt_text,
+                        negative: neg,
+                        model: self.generate.params.model.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
                     });
                 }
                 BackgroundEvent::Error(msg) => {

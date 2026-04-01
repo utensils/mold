@@ -2755,6 +2755,7 @@ dependencies = [
  "ratatui-image",
  "serde",
  "serde_json",
+ "sysinfo",
  "tokio",
  "tui-textarea",
  "unicode-width 0.2.0",

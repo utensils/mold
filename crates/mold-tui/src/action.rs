@@ -45,6 +45,8 @@ pub enum Action {
     HistoryPrev,
     /// Navigate prompt history forward.
     HistoryNext,
+    /// Open fuzzy search over prompt history.
+    SearchHistory,
     /// Gallery: re-generate with same parameters.
     Regenerate,
     /// Gallery: load parameters into Generate view for editing.

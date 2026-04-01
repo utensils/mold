@@ -5,7 +5,9 @@ mod action;
 mod app;
 mod backend;
 mod event;
+mod history;
 mod model_info;
+mod session;
 mod ui;
 
 use std::io;
@@ -66,6 +68,10 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let mut last_resource_refresh = std::time::Instant::now();
+    // Initial resource info refresh
+    app.resource_info.refresh();
+
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -77,6 +83,12 @@ async fn run_event_loop(
 
         // Process any background task results
         app.process_background_events();
+
+        // Refresh resource info every 2 seconds
+        if last_resource_refresh.elapsed() >= std::time::Duration::from_secs(2) {
+            app.resource_info.refresh();
+            last_resource_refresh = std::time::Instant::now();
+        }
 
         if app.should_quit {
             return Ok(());

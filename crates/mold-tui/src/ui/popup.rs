@@ -9,6 +9,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::Help) => render_help(frame, app),
         Some(Popup::ModelSelector { .. }) => render_model_selector(frame, app),
         Some(Popup::HostInput { .. }) => render_host_input(frame, app),
+        Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
+        Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         None => {}
     }
@@ -239,6 +241,139 @@ fn render_host_input(frame: &mut Frame, app: &mut App) {
             height: 1,
         };
         frame.render_widget(Paragraph::new(actions), actions_area);
+    }
+}
+
+fn render_seed_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 45, 15);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::SeedInput { input }) = &app.popup {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(" Seed Value ")
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 3 {
+            return;
+        }
+
+        let hint = Paragraph::new("Enter seed (digits only, empty for auto)").style(theme.dim());
+        frame.render_widget(hint, Rect { height: 1, ..inner });
+
+        let display = format!("{input}\u{2588}");
+        let input_line = Paragraph::new(display).style(Style::default().fg(theme.text));
+        frame.render_widget(
+            input_line,
+            Rect {
+                y: inner.y + 2,
+                height: 1,
+                ..inner
+            },
+        );
+
+        let actions = Line::from(vec![
+            Span::styled("Enter", theme.status_key()),
+            Span::styled(" Confirm  ", Style::default().fg(theme.text)),
+            Span::styled("Esc", theme.status_key()),
+            Span::styled(" Cancel", Style::default().fg(theme.text)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(actions),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(1),
+                height: 1,
+                ..inner
+            },
+        );
+    }
+}
+
+fn render_history_search(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 60, 55);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::HistorySearch {
+        filter,
+        selected,
+        results,
+    }) = &app.popup
+    {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(" Prompt History ")
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 3 {
+            return;
+        }
+
+        // Filter input
+        let filter_display = if filter.is_empty() {
+            "Type to search...".to_string()
+        } else {
+            filter.clone()
+        };
+        let filter_style = if filter.is_empty() {
+            theme.dim()
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let filter_line = Paragraph::new(format!("/ {filter_display}")).style(filter_style);
+        frame.render_widget(filter_line, Rect { height: 1, ..inner });
+
+        // Results list
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+
+        let items: Vec<ListItem> = results
+            .iter()
+            .enumerate()
+            .map(|(i, prompt)| {
+                let style = if i == *selected {
+                    theme.list_selected()
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let marker = if i == *selected { "\u{25b8} " } else { "  " };
+                // Truncate long prompts
+                let display = if prompt.len() > list_area.width as usize - 4 {
+                    format!("{marker}{}...", &prompt[..list_area.width as usize - 7])
+                } else {
+                    format!("{marker}{prompt}")
+                };
+                ListItem::new(display).style(style)
+            })
+            .collect();
+
+        if items.is_empty() {
+            let empty = Paragraph::new("No matching prompts")
+                .style(theme.dim())
+                .alignment(Alignment::Center);
+            frame.render_widget(empty, list_area);
+        } else {
+            let list = List::new(items);
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(list, list_area, &mut state);
+        }
     }
 }
 

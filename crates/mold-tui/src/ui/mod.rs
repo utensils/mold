@@ -1,5 +1,6 @@
 pub mod gallery;
 pub mod generate;
+pub mod info;
 pub mod models;
 pub mod param_form;
 pub mod popup;

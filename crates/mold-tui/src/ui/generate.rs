@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_image::StatefulImage;
 
 use crate::app::{App, GenerateFocus};
-use crate::ui::{param_form, progress, theme::Theme};
+use crate::ui::{info, param_form, progress, theme::Theme};
 
 /// Render the Generate view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -89,23 +89,32 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    // ── Middle row: Parameters + Preview ───────────────────
+    // ── Middle row: Parameters/Info (left) + Preview (right) ──
     let middle_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(38), // Parameters panel
+            Constraint::Length(38), // Left column (params + info)
             Constraint::Min(20),    // Preview panel
         ])
         .split(middle_area);
+
+    // Left column: Parameters (top) + Info (bottom, 5 lines)
+    let left_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(5)])
+        .split(middle_layout[0]);
 
     // Parameters
     param_form::render(
         frame,
         theme,
         &app.generate,
-        middle_layout[0],
+        left_layout[0],
         app.generate.focus == GenerateFocus::Parameters,
     );
+
+    // Info panel
+    info::render(frame, app, left_layout[1]);
 
     // Preview
     render_preview(frame, app, middle_layout[1]);

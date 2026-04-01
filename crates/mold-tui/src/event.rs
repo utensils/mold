@@ -57,6 +57,8 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => return Action::SaveImage,
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => return Action::CompareModels,
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => return Action::Generate,
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Action::HistoryPrev,
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Action::HistoryNext,
         _ => {}
     }
 
@@ -83,6 +85,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Right | KeyCode::Char('l') => Action::ViewNext,
             KeyCode::Left | KeyCode::Char('h') => Action::ViewPrev,
+            KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
             _ => Action::None,
