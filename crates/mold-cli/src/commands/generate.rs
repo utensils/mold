@@ -241,6 +241,9 @@ pub async fn run(
             batch,
             base_seed,
             batch_prompts.as_deref(),
+            &output,
+            output_format,
+            preview,
         )
         .await?
     } else {
@@ -297,6 +300,11 @@ pub async fn run(
 
             for mut img in response.images {
                 img.index = i;
+                // Save and preview each image immediately during batch generation
+                // (single-image mode is handled in the post-loop section)
+                if batch > 1 {
+                    save_and_preview_image(&img, &output, model, batch, output_format, preview)?;
+                }
                 all_images.push(img);
             }
         }
@@ -310,6 +318,7 @@ pub async fn run(
     };
 
     // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
+    // For batch > 1, images were already saved inside the batch loop above.
     if piped && output.is_none() {
         // Pipe mode: write raw image bytes to stdout
         let mut stdout = std::io::stdout().lock();
@@ -317,46 +326,13 @@ pub async fn run(
             stdout.write_all(&img.data)?;
         }
         stdout.flush()?;
-    } else {
-        // File mode: save to disk
+    } else if batch == 1 {
+        // Single image: save and preview now
         for img in &response.images {
-            let filename = match &output {
-                Some(path) if path == "-" => {
-                    // Explicit stdout via --output -
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&img.data)?;
-                    stdout.flush()?;
-                    continue;
-                }
-                Some(path) if batch == 1 => path.clone(),
-                Some(path) => {
-                    let stem = std::path::Path::new(path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("output");
-                    let ext = output_format.to_string();
-                    format!("{stem}-{}.{ext}", img.index)
-                }
-                None => {
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let ext = output_format.to_string();
-                    default_filename(model, timestamp, &ext, batch, img.index)
-                }
-            };
-
-            if std::path::Path::new(&filename).exists() {
-                status!("{} Overwriting: {}", theme::icon_alert(), filename);
-            }
-            std::fs::write(&filename, &img.data)?;
-            status!("{} Saved: {}", theme::icon_done(), filename.bold());
-            if preview {
-                preview_image(&img.data);
-            }
+            save_and_preview_image(img, &output, model, batch, output_format, preview)?;
         }
     }
+    // batch > 1: already saved+previewed inside the batch loop
 
     let secs = response.generation_time_ms as f64 / 1000.0;
     if batch > 1 {
@@ -738,6 +714,9 @@ async fn generate_local_batch(
     batch: u32,
     base_seed: u64,
     batch_prompts: Option<&[String]>,
+    output: &Option<String>,
+    output_format: OutputFormat,
+    preview: bool,
 ) -> Result<GenerateResponse> {
     let (base_req, mut engine) = prepare_local_engine(
         req,
@@ -813,6 +792,11 @@ async fn generate_local_batch(
 
         for mut img in response.images {
             img.index = i;
+            // Save and preview each image immediately during batch generation
+            // (single-image mode is handled by the caller's post-loop section)
+            if batch > 1 {
+                save_and_preview_image(&img, output, &req.model, batch, output_format, preview)?;
+            }
             all_images.push(img);
         }
     }
@@ -861,11 +845,68 @@ async fn generate_local_batch(
     _batch: u32,
     _base_seed: u64,
     _batch_prompts: Option<&[String]>,
+    _output: &Option<String>,
+    _output_format: OutputFormat,
+    _preview: bool,
 ) -> Result<GenerateResponse> {
     anyhow::bail!(
         "No mold server running and this binary was built without GPU support.\n\
          Either start a server with `mold serve` or rebuild with --features cuda"
     )
+}
+
+/// Save a single image to disk and optionally preview it inline.
+///
+/// Resolves the output filename from the `--output` flag, batch index,
+/// model name, and output format. Used both inside batch loops (for
+/// immediate save+preview) and for single-image output.
+fn save_and_preview_image(
+    img: &ImageData,
+    output: &Option<String>,
+    model: &str,
+    batch: u32,
+    output_format: OutputFormat,
+    preview: bool,
+) -> anyhow::Result<()> {
+    let filename = match output {
+        Some(path) if path == "-" => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&img.data)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        Some(path) if batch == 1 => path.clone(),
+        Some(path) => {
+            let p = std::path::Path::new(path);
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+            let ext = output_format.to_string();
+            let leaf = format!("{stem}-{}.{ext}", img.index);
+            p.parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.join(&leaf))
+                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+                .to_string_lossy()
+                .into_owned()
+        }
+        None => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let ext = output_format.to_string();
+            default_filename(model, timestamp, &ext, batch, img.index)
+        }
+    };
+
+    if std::path::Path::new(&filename).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), filename);
+    }
+    std::fs::write(&filename, &img.data)?;
+    status!("{} Saved: {}", theme::icon_done(), filename.bold());
+    if preview {
+        preview_image(&img.data);
+    }
+    Ok(())
 }
 
 /// Display an image inline in the terminal using viuer.
