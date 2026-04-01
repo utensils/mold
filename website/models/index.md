@@ -27,7 +27,7 @@ and VRAM requirements.
 | `z-image-turbo:q8` | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                    |
 | `sdxl-turbo:fp16`  | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
 | `sd15:fp16`        | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
-| `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 30 steps     | Strong                       |
+| `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
 
 If you are close to your card limit, start with a smaller quantization or use
 `--offload`. Full BF16 FLUX can run on 24 GB cards, but offloading may kick in

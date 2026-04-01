@@ -1,7 +1,4 @@
-# Qwen-Image (Alpha)
-
-::: warning Alpha Status Qwen-Image is partially working and still in active
-alpha development. Results may vary. :::
+# Qwen-Image
 
 Qwen2.5-VL text encoder with a 3D causal VAE (2D temporal-slice) and
 flow-matching with classifier-free guidance.
@@ -15,16 +12,16 @@ flow-matching with classifier-free guidance.
 
 | Model             | Steps | Size    | Notes                           |
 | ----------------- | ----- | ------- | ------------------------------- |
-| `qwen-image:bf16` | 30    | 44+ GB  | Full precision, maximum quality |
-| `qwen-image:q8`   | 30    | 21.8 GB | Best quality                    |
-| `qwen-image:q6`   | 30    | 16.8 GB | Best quality/size trade-off     |
-| `qwen-image:q4`   | 30    | 12.3 GB | Smallest practical footprint    |
+| `qwen-image:bf16` | 50    | 44+ GB  | Full precision, maximum quality |
+| `qwen-image:q8`   | 50    | 21.8 GB | Best quality                    |
+| `qwen-image:q6`   | 50    | 16.8 GB | Best quality/size trade-off     |
+| `qwen-image:q4`   | 50    | 12.3 GB | Smallest practical footprint    |
 
 ## Defaults
 
-- **Resolution**: 1024x1024
+- **Resolution**: 1328x1328
 - **Guidance**: 3.0
-- **Steps**: 30
+- **Steps**: 50
 
 ## Recommended Dimensions
 
