@@ -51,9 +51,9 @@ cargo build --release -p mold-ai --features metal   # macOS (Apple Silicon)
 ```
 
 Optional features can be added to the same build, for example
-`--features cuda,preview,expand,discord` or
-`--features metal,preview,expand,discord` if you also want terminal preview,
-local prompt expansion, or the Discord bot commands.
+`--features cuda,preview,expand,discord,tui` or
+`--features metal,preview,expand,discord,tui` if you also want terminal preview,
+local prompt expansion, the Discord bot, or the interactive TUI.
 
 ### Manual download
 
@@ -138,6 +138,30 @@ In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 ```toml
 embed_metadata = false
 ```
+
+### Terminal UI
+
+Launch a full interactive TUI for generating images, browsing models, and previewing results — all without leaving the terminal.
+
+```bash
+mold tui
+```
+
+<p align="center">
+  <img src="website/public/gallery/tui-generate.png" alt="mold TUI — Generate view with image preview" width="720" />
+  <br/>
+  <em>The TUI Generate view with Kitty graphics protocol image preview in Ghostty</em>
+</p>
+
+Features:
+- **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3 or arrow keys)
+- **Live image preview** — Kitty, Sixel, iTerm2, or halfblock auto-detected
+- **Model selector** — fuzzy-filtered popup (Ctrl+M or Enter on Model field)
+- **Auto-pull** — generates with any model, auto-downloads if not installed
+- **Real-time progress** — stage completion, denoising gauge, download bars
+- **Server fallback** — tries remote server first, falls back to local GPU
+
+See the full [TUI documentation](https://utensils.github.io/mold/guide/tui) for keybindings and configuration.
 
 ### Image-to-image
 

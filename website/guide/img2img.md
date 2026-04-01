@@ -38,8 +38,11 @@ black pixels are preserved.
 mold run "a golden retriever" --image park.png --mask mask.png
 ```
 
-::: tip Mask format The mask must be the same dimensions as the source image.
-Use any image editor to paint white on areas you want regenerated. :::
+<!-- prettier-ignore-start -->
+::: tip Mask format
+The mask must be the same dimensions as the source image. Use any image editor to paint white on areas you want regenerated.
+:::
+<!-- prettier-ignore-end -->
 
 ## ControlNet (SD1.5)
 

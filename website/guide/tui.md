@@ -20,9 +20,11 @@ The TUI launches in the **Generate** view with your cursor in the prompt field.
 Type a prompt, press **Enter**, and watch the progress panel as your image
 generates. The result appears in the Preview panel.
 
-::: tip The `tui` feature must be compiled in. Pre-built releases and the Nix
-package include it by default. If building from source, add `--features tui` to
-your build command. :::
+<!-- prettier-ignore-start -->
+::: tip
+The `tui` feature must be compiled in. Pre-built releases and the Nix package include it by default. If building from source, add `--features tui` to your build command.
+:::
+<!-- prettier-ignore-end -->
 
 ## Views
 
