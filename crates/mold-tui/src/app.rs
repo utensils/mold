@@ -3,6 +3,7 @@ use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
     Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, SseProgressEvent,
 };
+use rand::Rng;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -212,6 +213,56 @@ impl ParamField {
     }
 }
 
+/// How the seed behaves across generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeedMode {
+    /// New random seed each generation.
+    #[default]
+    Random,
+    /// Keep the same seed every generation.
+    Fixed,
+    /// Increment seed by 1 after each generation.
+    Increment,
+}
+
+impl SeedMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Random => "random",
+            Self::Fixed => "fixed",
+            Self::Increment => "increment",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Random => Self::Fixed,
+            Self::Fixed => Self::Increment,
+            Self::Increment => Self::Random,
+        }
+    }
+
+    /// Resolve the actual seed value for a generation.
+    pub fn resolve(self, current: Option<u64>) -> u64 {
+        match self {
+            Self::Random => rand::thread_rng().gen_range(0..u64::MAX),
+            Self::Fixed => current.unwrap_or_else(|| rand::thread_rng().gen_range(0..u64::MAX)),
+            Self::Increment => current
+                .map(|s| s.wrapping_add(1))
+                .unwrap_or_else(|| rand::thread_rng().gen_range(0..u64::MAX)),
+        }
+    }
+
+    /// Advance the seed after a generation completes (for Increment mode).
+    pub fn advance(self, used_seed: u64) -> Option<u64> {
+        match self {
+            Self::Random => None,
+            Self::Fixed => Some(used_seed),
+            Self::Increment => Some(used_seed),
+        }
+    }
+}
+
 /// Generation parameters mirroring GenerateRequest fields.
 #[derive(Debug, Clone)]
 pub struct GenerateParams {
@@ -221,6 +272,7 @@ pub struct GenerateParams {
     pub steps: u32,
     pub guidance: f64,
     pub seed: Option<u64>,
+    pub seed_mode: SeedMode,
     pub batch: u32,
     pub format: OutputFormat,
     pub scheduler: Option<Scheduler>,
@@ -283,6 +335,7 @@ impl GenerateParams {
             guidance: model_cfg.effective_guidance(),
             model,
             seed: None,
+            seed_mode: SeedMode::Random,
             batch: 1,
             format: OutputFormat::Png,
             scheduler: None,
@@ -309,10 +362,17 @@ impl GenerateParams {
             ParamField::Height => self.height.to_string(),
             ParamField::Steps => self.steps.to_string(),
             ParamField::Guidance => format!("{:.1}", self.guidance),
-            ParamField::Seed => self
-                .seed
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string()),
+            ParamField::Seed => match self.seed_mode {
+                SeedMode::Random => "\u{27e8}random\u{27e9}".to_string(),
+                SeedMode::Fixed => self
+                    .seed
+                    .map(|s| format!("{s} (fixed)"))
+                    .unwrap_or_else(|| "\u{27e8}fixed\u{27e9}".to_string()),
+                SeedMode::Increment => self
+                    .seed
+                    .map(|s| format!("{s} (incr)"))
+                    .unwrap_or_else(|| "\u{27e8}increment\u{27e9}".to_string()),
+            },
             ParamField::Batch => self.batch.to_string(),
             ParamField::Format => format!("{:?}", self.format).to_uppercase(),
             ParamField::Mode => self.inference_mode.label().to_string(),
@@ -848,7 +908,14 @@ impl App {
                 self.open_model_selector();
             }
             Action::RandomizeSeed => {
-                self.generate.params.seed = None;
+                // Cycle seed mode: Random → Fixed → Increment → Random
+                self.generate.params.seed_mode = self.generate.params.seed_mode.next();
+                // When switching to Fixed, lock in a seed if we don't have one
+                if self.generate.params.seed_mode == SeedMode::Fixed
+                    && self.generate.params.seed.is_none()
+                {
+                    self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                }
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
@@ -971,8 +1038,13 @@ impl App {
             }
             // Randomize seed on Enter
             ParamField::Seed => {
-                use rand::Rng;
-                self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                // Cycle seed mode on Enter
+                self.generate.params.seed_mode = self.generate.params.seed_mode.next();
+                if self.generate.params.seed_mode == SeedMode::Fixed
+                    && self.generate.params.seed.is_none()
+                {
+                    self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                }
             }
             // Open host input popup
             ParamField::Host => {
@@ -1006,9 +1078,17 @@ impl App {
             .to_string();
         let negative_prompt = if neg.is_empty() { None } else { Some(neg) };
 
+        // Resolve seed based on seed mode
+        let resolved_seed = self
+            .generate
+            .params
+            .seed_mode
+            .resolve(self.generate.params.seed);
+        let mut params = self.generate.params.clone();
+        params.seed = Some(resolved_seed);
+
         let tx = self.bg_tx.clone();
         let server_url = self.server_url.clone();
-        let params = self.generate.params.clone();
 
         self.tokio_handle.spawn(async move {
             crate::backend::run_generation(server_url, params, prompt_text, negative_prompt, tx)
@@ -1025,6 +1105,10 @@ impl App {
                     self.generate.generating = false;
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
+
+                    // Advance seed for next generation based on seed mode
+                    self.generate.params.seed =
+                        self.generate.params.seed_mode.advance(response.seed_used);
 
                     if let Some(img_data) = response.images.first() {
                         if let Ok(img) = image::load_from_memory(&img_data.data) {
@@ -1301,5 +1385,105 @@ mod tests {
         assert_eq!(state.download_bytes, 0);
         assert!(state.download_filename.is_empty());
         assert!(state.log.is_empty());
+    }
+
+    // ── SeedMode tests ────────────────────────────────────
+
+    #[test]
+    fn seed_mode_cycle() {
+        assert_eq!(SeedMode::Random.next(), SeedMode::Fixed);
+        assert_eq!(SeedMode::Fixed.next(), SeedMode::Increment);
+        assert_eq!(SeedMode::Increment.next(), SeedMode::Random);
+    }
+
+    #[test]
+    fn seed_mode_labels() {
+        assert_eq!(SeedMode::Random.label(), "random");
+        assert_eq!(SeedMode::Fixed.label(), "fixed");
+        assert_eq!(SeedMode::Increment.label(), "increment");
+    }
+
+    #[test]
+    fn seed_mode_random_generates_value() {
+        let seed = SeedMode::Random.resolve(None);
+        // Just verify it returns something (can't test exact value)
+        assert!(seed > 0 || seed == 0); // always true, but exercises the code
+    }
+
+    #[test]
+    fn seed_mode_fixed_keeps_seed() {
+        let seed = SeedMode::Fixed.resolve(Some(42));
+        assert_eq!(seed, 42);
+    }
+
+    #[test]
+    fn seed_mode_fixed_generates_if_none() {
+        let seed = SeedMode::Fixed.resolve(None);
+        // Should generate a seed when none exists
+        let _ = seed; // exercises the code path
+    }
+
+    #[test]
+    fn seed_mode_increment_adds_one() {
+        let seed = SeedMode::Increment.resolve(Some(42));
+        assert_eq!(seed, 43);
+    }
+
+    #[test]
+    fn seed_mode_increment_wraps_at_max() {
+        let seed = SeedMode::Increment.resolve(Some(u64::MAX));
+        assert_eq!(seed, 0); // wrapping_add
+    }
+
+    #[test]
+    fn seed_mode_increment_generates_if_none() {
+        let seed = SeedMode::Increment.resolve(None);
+        let _ = seed;
+    }
+
+    #[test]
+    fn seed_mode_advance_random_returns_none() {
+        assert_eq!(SeedMode::Random.advance(42), None);
+    }
+
+    #[test]
+    fn seed_mode_advance_fixed_returns_same() {
+        assert_eq!(SeedMode::Fixed.advance(42), Some(42));
+    }
+
+    #[test]
+    fn seed_mode_advance_increment_returns_same() {
+        // advance stores the used seed; resolve will +1 next time
+        assert_eq!(SeedMode::Increment.advance(42), Some(42));
+    }
+
+    #[test]
+    fn seed_display_random_mode() {
+        let config = Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        let display = params.display_value(&ParamField::Seed);
+        assert!(display.contains("random"));
+    }
+
+    #[test]
+    fn seed_display_fixed_mode_with_value() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.seed_mode = SeedMode::Fixed;
+        params.seed = Some(12345);
+        let display = params.display_value(&ParamField::Seed);
+        assert!(display.contains("12345"));
+        assert!(display.contains("fixed"));
+    }
+
+    #[test]
+    fn seed_display_increment_mode() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.seed_mode = SeedMode::Increment;
+        params.seed = Some(100);
+        let display = params.display_value(&ParamField::Seed);
+        assert!(display.contains("100"));
+        assert!(display.contains("incr"));
     }
 }

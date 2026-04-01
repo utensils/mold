@@ -116,7 +116,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("Enter", "Generate"),
                     ("^E", "Expand"),
                     ("^M", "Model"),
-                    ("^R", "Seed"),
+                    ("^R", "Seed Mode"),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                 ]
