@@ -134,6 +134,8 @@ pub enum ParamField {
     ControlImage,
     ControlModel,
     ControlScale,
+    // Actions
+    ResetDefaults,
 }
 
 impl ParamField {
@@ -176,6 +178,8 @@ impl ParamField {
             fields.push(ParamField::ControlModel);
             fields.push(ParamField::ControlScale);
         }
+        // Reset action
+        fields.push(ParamField::ResetDefaults);
         fields
     }
 
@@ -202,6 +206,7 @@ impl ParamField {
             Self::ControlImage => "Control",
             Self::ControlModel => "CNet Mdl",
             Self::ControlScale => "Scale",
+            Self::ResetDefaults => "\u{21ba} Reset",
         }
     }
 
@@ -211,6 +216,7 @@ impl ParamField {
             Self::Scheduler => Some("Advanced"),
             Self::SourceImage => Some("img2img"),
             Self::ControlImage => Some("ControlNet"),
+            Self::ResetDefaults => Some(""),
             _ => None,
         }
     }
@@ -428,6 +434,7 @@ impl GenerateParams {
                 .unwrap_or("\u{27e8}none\u{27e9}")
                 .to_string(),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
+            ParamField::ResetDefaults => "restore model defaults".to_string(),
         }
     }
 }
@@ -641,16 +648,13 @@ impl App {
         // Load session from previous TUI run
         let session = crate::session::TuiSession::load();
 
-        // Restore model from session if it was set
+        // Restore all settings from session
         if !session.last_model.is_empty()
             && config.manifest_model_is_downloaded(&session.last_model)
         {
             params.model = session.last_model.clone();
-            let mc = config.resolved_model_config(&params.model);
-            params.steps = session.last_steps.unwrap_or(mc.effective_steps(&config));
-            params.guidance = session.last_guidance.unwrap_or(mc.effective_guidance());
-            params.width = session.last_width.unwrap_or(mc.effective_width(&config));
-            params.height = session.last_height.unwrap_or(mc.effective_height(&config));
+            // Apply all saved params (width, height, steps, guidance, batch, etc.)
+            session.apply_to_params(&mut params);
             // Re-derive capabilities for the restored model
             let fam = family_for_model(&params.model, &config);
             let caps = capabilities_for_family(&fam);
@@ -1614,6 +1618,30 @@ impl App {
                 let current = self.generate.params.host.clone().unwrap_or_default();
                 self.popup = Some(Popup::HostInput { input: current });
             }
+            // Reset all params to model defaults (keep model and prompt)
+            ParamField::ResetDefaults => {
+                let model = self.generate.params.model.clone();
+                let mc = self.config.resolved_model_config(&model);
+                self.generate.params.width = mc.effective_width(&self.config);
+                self.generate.params.height = mc.effective_height(&self.config);
+                self.generate.params.steps = mc.effective_steps(&self.config);
+                self.generate.params.guidance = mc.effective_guidance();
+                self.generate.params.seed = None;
+                self.generate.params.seed_mode = SeedMode::Random;
+                self.generate.params.batch = 1;
+                self.generate.params.format = OutputFormat::Png;
+                self.generate.params.scheduler = None;
+                self.generate.params.lora_path = None;
+                self.generate.params.lora_scale = 1.0;
+                self.generate.params.expand = false;
+                self.generate.params.offload = false;
+                self.generate.params.strength = 0.75;
+                self.generate.params.source_image_path = None;
+                self.generate.params.mask_image_path = None;
+                self.generate.params.control_image_path = None;
+                self.generate.params.control_model = None;
+                self.generate.params.control_scale = 1.0;
+            }
             // For numeric fields, Enter does nothing special (use +/-)
             _ => {}
         }
@@ -1739,16 +1767,11 @@ impl App {
                         .join("\n")
                         .trim()
                         .to_string();
-                    let session = crate::session::TuiSession {
-                        last_prompt: prompt_text.clone(),
-                        last_negative: neg_text.clone(),
-                        last_model: self.generate.params.model.clone(),
-                        last_width: Some(self.generate.params.width),
-                        last_height: Some(self.generate.params.height),
-                        last_steps: Some(self.generate.params.steps),
-                        last_guidance: Some(self.generate.params.guidance),
-                        last_seed_mode: Some(self.generate.params.seed_mode.label().to_string()),
-                    };
+                    let session = crate::session::TuiSession::from_params(
+                        &prompt_text,
+                        &neg_text,
+                        &self.generate.params,
+                    );
                     session.save();
                     // Also update last-model for CLI compatibility
                     Config::write_last_model(&self.generate.params.model);
