@@ -36,7 +36,6 @@ pub struct Flux2Config {
 
 impl Flux2Config {
     /// Configuration for Flux.2 Klein-4B (Apache 2.0, distilled).
-    /// Also used by Klein-base-4B (same architecture, undistilled).
     pub fn klein() -> Self {
         Self {
             in_channels: 128,

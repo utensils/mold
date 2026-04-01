@@ -353,7 +353,7 @@ Key environment variables (highest precedence, override config file):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default model storage |
-| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
 | `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
@@ -472,15 +472,6 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `flux2-klein:q6` | 4 | 3.4GB | Better quality/size trade-off |
 | `flux2-klein:q4` | 4 | 2.6GB | Smallest FLUX variant |
 | `flux2-klein:bf16` | 4 | 7.8GB | Full precision 4B |
-
-### Flux.2 Klein-base-4B (undistilled, Apache 2.0)
-
-| Model | Steps | Size | Good for |
-|-------|-------|------|----------|
-| `flux2-klein-base:q8` | 50 | 4.3GB | Undistilled 4B, best for fine-tuning/LoRA |
-| `flux2-klein-base:q6` | 50 | 3.4GB | Better quality/size trade-off |
-| `flux2-klein-base:q4` | 50 | 2.6GB | Smallest undistilled |
-| `flux2-klein-base:bf16` | 50 | 7.75GB | Full precision 4B |
 
 ### Flux.2 Klein-9B (alpha, non-commercial, distilled)
 

@@ -783,12 +783,12 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                 .keys()
                 .min()
                 .cloned()
-                .unwrap_or_else(|| "flux-schnell".to_string());
+                .unwrap_or_else(|| "flux2-klein".to_string());
             if config.models.is_empty() {
                 eprintln!(
                     "{} default model reset to {}",
                     theme::prefix_note(),
-                    "flux-schnell".bold()
+                    "flux2-klein".bold()
                 );
             } else {
                 eprintln!(

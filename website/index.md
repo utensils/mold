@@ -101,6 +101,14 @@ All images generated locally with mold — click any to see the model and prompt
 <div class="gallery-grid">
 <figure>
 
+![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
+
+**flux2-klein:bf16** — 4 steps _"a majestic owl perched on a mossy branch in a
+moonlit forest"_
+
+</figure>
+<figure>
+
 ![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
 **flux-schnell:q8** — 4 steps, seed 42 _"A majestic snow leopard perched on a

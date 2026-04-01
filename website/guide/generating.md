@@ -3,7 +3,7 @@
 ## Basic Usage
 
 ```bash
-# Default model (flux-schnell:q8 — fast 4-step)
+# Default model (flux2-klein:q8 — fast 4-step, Apache 2.0, fully ungated)
 mold run "a red apple on a wooden table"
 
 # Explicit model selection
@@ -44,7 +44,7 @@ still proceeds). All dimensions must be multiples of 16.
 mold run "a cat" --width 1024 --height 1024
 
 # Landscape (FLUX, Flux.2 Klein)
-mold run flux-schnell "a panorama" --width 1024 --height 576
+mold run flux2-klein "a panorama" --width 1024 --height 576
 
 # Portrait (SDXL, SD 3.5, Qwen-Image)
 mold run sdxl-turbo "a portrait" --width 832 --height 1216
@@ -132,7 +132,7 @@ image bytes go to stdout and status goes to stderr.
 mold run "neon cityscape" | viu -
 
 # Pipe prompt from stdin
-echo "a cat riding a motorcycle" | mold run flux-schnell
+echo "a cat riding a motorcycle" | mold run flux2-klein
 
 # Full pipeline
 echo "cyberpunk samurai" | mold run flux-dev:q4 | viu -

@@ -120,7 +120,7 @@ mod tests {
 
     fn empty_config() -> Config {
         Config {
-            default_model: "flux-schnell".to_string(),
+            default_model: "flux2-klein".to_string(),
             models_dir: "/nonexistent".to_string(),
             server_port: 7680,
             default_width: 768,
@@ -188,7 +188,7 @@ mod tests {
     fn resolve_source_custom_model_entry() {
         let mut config = empty_config();
         config.models.insert(
-            "flux-schnell".to_string(),
+            "flux2-klein".to_string(),
             mold_core::config::ModelConfig::default(),
         );
         let resolution = config.resolve_default_model();

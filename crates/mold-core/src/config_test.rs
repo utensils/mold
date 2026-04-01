@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn config_default_values() {
         let cfg = Config::default();
-        assert_eq!(cfg.default_model, "flux-schnell");
+        assert_eq!(cfg.default_model, "flux2-klein");
         assert_eq!(cfg.server_port, 7680);
         assert_eq!(cfg.default_width, 768);
         assert_eq!(cfg.default_height, 768);
@@ -347,10 +347,10 @@ is_schnell = false
     fn model_paths_resolve_manifest_from_models_dir_without_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("resolve-manifest");
-        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        populate_manifest_files(&models_dir, "flux2-klein:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let paths = ModelPaths::resolve("flux-schnell:q8", &Config::default()).unwrap();
+        let paths = ModelPaths::resolve("flux2-klein:q8", &Config::default()).unwrap();
 
         assert!(paths.transformer.starts_with(&models_dir));
         assert!(paths.vae.starts_with(&models_dir));
@@ -367,13 +367,13 @@ is_schnell = false
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
         let mut models = HashMap::new();
-        models.insert("flux-schnell:q8".to_string(), full_model_config("/cfg"));
+        models.insert("flux2-klein:q8".to_string(), full_model_config("/cfg"));
         let cfg = Config {
             models,
             ..Config::default()
         };
 
-        assert!(ModelPaths::resolve("flux-schnell:q8", &cfg).is_none());
+        assert!(ModelPaths::resolve("flux2-klein:q8", &cfg).is_none());
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -383,11 +383,11 @@ is_schnell = false
     fn model_config_prefers_discovered_manifest_paths_from_models_dir() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("model-config-discovery");
-        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        populate_manifest_files(&models_dir, "flux2-klein:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
         let cfg = Config::default();
-        let model_cfg = cfg.model_config("flux-schnell:q8");
+        let model_cfg = cfg.model_config("flux2-klein:q8");
 
         assert!(model_cfg
             .transformer
@@ -676,7 +676,7 @@ is_schnell = false
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         let cfg = isolated_config();
-        assert_eq!(cfg.resolved_default_model(), "flux-schnell");
+        assert_eq!(cfg.resolved_default_model(), "flux2-klein");
     }
 
     #[test]
@@ -695,7 +695,7 @@ is_schnell = false
         let result = isolated_config().resolved_default_model();
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         // Empty env should fall through to config value
-        assert_eq!(result, "flux-schnell");
+        assert_eq!(result, "flux2-klein");
     }
 
     #[test]
@@ -703,7 +703,7 @@ is_schnell = false
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         let models_dir = test_models_dir("default-model-config-only");
-        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        populate_manifest_files(&models_dir, "flux2-klein:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
         let mold_home = std::env::temp_dir().join(format!(

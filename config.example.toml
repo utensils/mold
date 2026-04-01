@@ -9,7 +9,7 @@
 #      into this candle build. Use a GGUF-quantized version instead.
 #   ❌ Scaled FP8 (fp8_scaled) — ComfyUI-only custom format, not supported.
 
-default_model = "flux-schnell"
+default_model = "flux2-klein"
 server_port   = 7680
 default_width  = 768
 default_height = 768

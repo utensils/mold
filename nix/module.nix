@@ -102,7 +102,7 @@ in
     defaultModel = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Default model for generation. Null uses built-in default (flux-schnell) with smart fallback to the only downloaded model.";
+      description = "Default model for generation. Null uses built-in default (flux2-klein) with smart fallback to the only downloaded model.";
     };
 
     openFirewall = lib.mkOption {
