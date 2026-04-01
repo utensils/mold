@@ -328,8 +328,8 @@
               {
                 category = "build";
                 name = "build-release";
-                help = "cargo build --release";
-                command = "cargo build --release \"$@\"";
+                help = "cargo build --release -p mold-ai --features ${devFeatures}";
+                command = "cargo build --release -p mold-ai --features ${devFeatures} \"$@\"";
               }
               {
                 category = "build";
