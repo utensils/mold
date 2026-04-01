@@ -2277,10 +2277,10 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
-        steps: 30,
+        steps: 50,
         guidance: 3.0,
-        width: 1024,
-        height: 1024,
+        width: 1328,
+        height: 1328,
         is_schnell: false,
         scheduler: None,
         negative_prompt: None,

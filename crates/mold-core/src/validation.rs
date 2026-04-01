@@ -1,7 +1,8 @@
 use crate::GenerateRequest;
 
-/// Maximum total pixels allowed (~1.1 megapixels, VAE VRAM constraint).
-pub const MAX_PIXELS: u64 = 1_100_000;
+/// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
+/// (1328x1328), other models at ≤1MP. Headroom for non-square aspect ratios.
+pub const MAX_PIXELS: u64 = 1_800_000;
 
 /// Clamp dimensions to fit within the megapixel limit, preserving aspect ratio.
 /// Both dimensions are rounded down to multiples of 16.
@@ -313,6 +314,18 @@ mod tests {
     }
 
     #[test]
+    fn clamp_noop_qwen_image_native_resolution() {
+        // Qwen-Image trains at 1328x1328 (~1.76MP), must fit within MAX_PIXELS
+        assert_eq!(super::clamp_to_megapixel_limit(1328, 1328), (1328, 1328));
+    }
+
+    #[test]
+    fn clamp_noop_qwen_image_landscape() {
+        // Qwen-Image 16:9 training resolution (1664x928 = ~1.54MP)
+        assert_eq!(super::clamp_to_megapixel_limit(1664, 928), (1664, 928));
+    }
+
+    #[test]
     fn clamp_downscales_oversized() {
         let (w, h) = super::clamp_to_megapixel_limit(1888, 1168);
         assert!(w % 16 == 0 && h % 16 == 0, "must be multiples of 16");
@@ -391,8 +404,8 @@ mod tests {
     #[test]
     fn oversized_image_rejected() {
         let mut req = valid_req();
-        req.width = 1280;
-        req.height = 1280; // 1.64MP > 1.1MP limit
+        req.width = 1408;
+        req.height = 1408; // ~1.98MP > 1.8MP limit
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("megapixels"));

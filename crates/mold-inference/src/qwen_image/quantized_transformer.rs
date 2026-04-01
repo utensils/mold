@@ -611,7 +611,11 @@ impl QwenImageTransformerBlock {
 
         if debug_block0 {
             let a = img_attn.abs()?.mean_all()?.to_scalar::<f32>()?;
-            let ga = img_gate_msa.broadcast_mul(&img_attn)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let ga = img_gate_msa
+                .broadcast_mul(&img_attn)?
+                .abs()?
+                .mean_all()?
+                .to_scalar::<f32>()?;
             eprintln!("[Q-BLOCK] img_attn: {a:.4} gated_attn: {ga:.4}");
         }
 
@@ -639,15 +643,18 @@ impl QwenImageTransformerBlock {
         if debug_block0 {
             let mlp_in = img_mlp_in.abs()?.mean_all()?.to_scalar::<f32>()?;
             let ff = img_ff.abs()?.mean_all()?.to_scalar::<f32>()?;
-            let gff = img_gate_mlp.broadcast_mul(&img_ff)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let gff = img_gate_mlp
+                .broadcast_mul(&img_ff)?
+                .abs()?
+                .mean_all()?
+                .to_scalar::<f32>()?;
             eprintln!("[Q-BLOCK] img_mlp_in: {mlp_in:.4} img_ff: {ff:.4} gated_ff: {gff:.4}");
         }
 
-        let img_hidden =
-            (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
-        let txt_hidden =
-            (&txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-                .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::F32)?)?;
+        let img_hidden = (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
+        let txt_hidden = (&txt_hidden
+            + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+        .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::F32)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -792,7 +799,8 @@ impl QuantizedQwenImageTransformer2DModel {
             let img_abs = img.abs()?.mean_all()?.to_scalar::<f32>()?;
             eprintln!(
                 "[Q-DEBUG] after img_in: shape={:?} dtype={:?} mean_abs={img_abs:.6}",
-                img.shape(), img.dtype()
+                img.shape(),
+                img.dtype()
             );
         }
 
