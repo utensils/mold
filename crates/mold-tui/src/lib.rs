@@ -5,6 +5,7 @@ mod action;
 mod app;
 mod backend;
 mod event;
+mod gallery_scan;
 mod history;
 mod model_info;
 mod session;

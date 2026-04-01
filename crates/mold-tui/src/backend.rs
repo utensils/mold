@@ -89,7 +89,7 @@ pub async fn run_generation(
 }
 
 /// Pull a model with progress reporting to the TUI.
-async fn auto_pull_model(
+pub async fn auto_pull_model(
     model_name: &str,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> Result<mold_core::Config, String> {

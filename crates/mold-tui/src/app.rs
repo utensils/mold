@@ -613,7 +613,7 @@ impl App {
         // Load prompt history
         let history = crate::history::PromptHistory::load();
 
-        Ok(Self {
+        let app = Ok(Self {
             active_view: View::Generate,
             generate: GenerateState {
                 prompt,
@@ -656,7 +656,20 @@ impl App {
             tokio_handle: tokio::runtime::Handle::current(),
             resource_info: crate::ui::info::ResourceInfo::default(),
             history,
-        })
+        });
+
+        // Spawn background gallery scan
+        if let Ok(ref app) = app {
+            let tx = app.bg_tx.clone();
+            app.tokio_handle.spawn(async move {
+                let entries = tokio::task::spawn_blocking(crate::gallery_scan::scan_images)
+                    .await
+                    .unwrap_or_default();
+                let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
+            });
+        }
+
+        app
     }
 
     /// Update model-dependent state when the model selection changes.
@@ -715,7 +728,6 @@ impl App {
                         | (KeyCode::Char('k'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('p'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('n'), KeyModifiers::CONTROL)
-                        | (KeyCode::Enter, KeyModifiers::NONE)
                         | (KeyCode::Esc, KeyModifiers::NONE) => {
                             // Fall through to action mapping
                         }
@@ -1016,15 +1028,55 @@ impl App {
                     self.start_generation();
                 }
             }
-            Action::Confirm => {
-                if self.active_view == View::Generate {
+            Action::Confirm => match self.active_view {
+                View::Generate => {
                     if self.generate.focus == GenerateFocus::Parameters {
-                        // Enter on a param field: activate it
                         self.activate_current_param();
                     } else if !self.generate.generating {
-                        // Enter in prompt/negative: generate
                         self.start_generation();
                     }
+                }
+                View::Models => {
+                    // Select model as default and switch to Generate
+                    if let Some(model) = self.models.catalog.get(self.models.selected) {
+                        let name = model.name.clone();
+                        self.update_model(&name);
+                        self.active_view = View::Generate;
+                        self.generate.focus = GenerateFocus::Prompt;
+                    }
+                }
+                _ => {}
+            },
+            Action::PullModel => {
+                if self.active_view == View::Models {
+                    if let Some(model) = self.models.catalog.get(self.models.selected) {
+                        let model_name = model.name.clone();
+                        let tx = self.bg_tx.clone();
+                        self.tokio_handle.spawn(async move {
+                            let _ = crate::backend::auto_pull_model(&model_name, &tx).await;
+                        });
+                    }
+                }
+            }
+            Action::UnloadModel => {
+                if let Some(ref url) = self.server_url {
+                    let url = url.clone();
+                    let tx = self.bg_tx.clone();
+                    self.tokio_handle.spawn(async move {
+                        let client = mold_core::MoldClient::new(&url);
+                        match client.unload_model().await {
+                            Ok(_) => {
+                                let _ =
+                                    tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                                        message: "Model unloaded".to_string(),
+                                    }));
+                            }
+                            Err(e) => {
+                                let _ =
+                                    tx.send(BackgroundEvent::Error(format!("Unload failed: {e}")));
+                            }
+                        }
+                    });
                 }
             }
             Action::OpenModelSelector => {
@@ -1330,15 +1382,38 @@ impl App {
                     } else {
                         Some(neg_text)
                     };
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
                     self.history.push(crate::history::HistoryEntry {
-                        prompt: prompt_text,
+                        prompt: prompt_text.clone(),
                         negative: neg,
                         model: self.generate.params.model.clone(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0),
+                        timestamp: ts,
                     });
+
+                    // Add to gallery (most recent first)
+                    if let Some(img_data) = response.images.first() {
+                        self.gallery.entries.insert(
+                            0,
+                            GalleryEntry {
+                                path: std::path::PathBuf::new(), // in-memory, not saved yet
+                                prompt_preview: if prompt_text.len() > 60 {
+                                    format!("{}...", &prompt_text[..57])
+                                } else {
+                                    prompt_text
+                                },
+                                model: self.generate.params.model.clone(),
+                                generation_time_ms: Some(response.generation_time_ms),
+                                seed: Some(response.seed_used),
+                                width: img_data.width,
+                                height: img_data.height,
+                                timestamp: ts,
+                            },
+                        );
+                    }
                 }
                 BackgroundEvent::Error(msg) => {
                     self.generate.generating = false;

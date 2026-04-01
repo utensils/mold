@@ -114,10 +114,10 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ]
             } else {
                 vec![
-                    ("Enter", "Generate"),
-                    ("^E", "Expand"),
+                    ("^G", "Generate"),
                     ("^M", "Model"),
                     ("^R", "Seed Mode"),
+                    ("^P/^N", "History"),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                 ]
@@ -137,7 +137,6 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("1/2/3", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
-            ("r", "Remove"),
             ("u", "Unload"),
             ("Esc", "Back"),
             ("?", "Help"),
