@@ -1,6 +1,7 @@
 mod commands;
 mod control;
 mod output;
+mod procinfo;
 mod theme;
 mod ui;
 
@@ -411,9 +412,7 @@ async fn main() {
             eprintln!("  at {}:{}:{}", loc.file(), loc.line(), loc.column());
         }
         eprintln!();
-        eprintln!(
-            "  This is a bug. Please report it at:"
-        );
+        eprintln!("  This is a bug. Please report it at:");
         eprintln!("  https://github.com/utensils/mold/issues");
         eprintln!();
         eprintln!("  Include the full output above and your 'mold version'.");
