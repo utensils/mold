@@ -56,15 +56,23 @@ for (const link of sidebarLinks) {
   }
 }
 
-const rustEnvVars = new Set(
-  execSync(
-    "rg -o 'MOLD_[A-Z0-9_]+' crates --glob '!**/*test*' -g'*.rs' | sed 's/.*://' | sort -u",
-    { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
+let rustEnvVars
+try {
+  rustEnvVars = new Set(
+    execSync(
+      "rg -o 'MOLD_[A-Z0-9_]+' crates --glob '!**/*test*' -g'*.rs' | sed 's/.*://' | sort -u",
+      { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
+    )
+      .trim()
+      .split('\n')
+      .filter(Boolean)
   )
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-)
+} catch {
+  console.warn(
+    'warning: ripgrep (rg) not found — skipping env-var coverage check'
+  )
+  rustEnvVars = new Set()
+}
 
 const ignoredEnvVars = new Set([
   'MOLD_BUILD_DATE',
