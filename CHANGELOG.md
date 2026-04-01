@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-01
+
+### Added
+
+- **Flux.2 Klein-9B model (alpha)**: 9B parameter distilled model with larger Qwen3 encoder (hidden_size=4096), 4-step generation ([#123](https://github.com/utensils/mold/pull/123))
+- **SD 3.5 model family**: Triple encoder (CLIP-L + CLIP-G + T5-XXL), quantized MMDiT with NaN-safe inference, SLG support ([#111](https://github.com/utensils/mold/pull/111))
+- **Qwen-Image model family**: Qwen2.5-VL text encoder, 3D causal VAE, flow-matching with classifier-free guidance ([#111](https://github.com/utensils/mold/pull/111))
+- **LLM-powered prompt expansion**: local Qwen3-1.7B GGUF expansion with `--expand` flag, user-configurable templates, per-family tuning ([#86](https://github.com/utensils/mold/pull/86), [#88](https://github.com/utensils/mold/pull/88))
+- **CUDA block-level offloading**: streams transformer blocks CPU↔GPU to reduce VRAM from ~24GB to ~2-4GB via `--offload` flag ([#84](https://github.com/utensils/mold/pull/84))
+- **LoRA adapter support**: custom VarBuilder backend for FLUX BF16 and GGUF quantized models with `--lora` and `--lora-scale` flags ([#94](https://github.com/utensils/mold/pull/94), [#97](https://github.com/utensils/mold/pull/97))
+- **Negative prompt support**: `--negative-prompt` and `--no-negative` flags for CFG-based model families ([#90](https://github.com/utensils/mold/pull/90))
+- **Dimension validation**: warns when dimensions don't match model recommendations ([#116](https://github.com/utensils/mold/pull/116))
+- **Discord bot integration**: `/generate`, `/expand`, `/models`, `/status` slash commands, standalone or embedded in server ([#72](https://github.com/utensils/mold/pull/72), [#75](https://github.com/utensils/mold/pull/75))
+- **Docker/RunPod deployment**: multi-stage Dockerfile, RunPod entrypoint, network volume support ([#110](https://github.com/utensils/mold/pull/110))
+- **VitePress documentation site**: full docs at utensils.github.io/mold with model guides, API reference, deployment docs ([#114](https://github.com/utensils/mold/pull/114))
+- **Multi-CUDA architecture support**: Ada (sm_89) + Blackwell (sm_120) build targets ([#91](https://github.com/utensils/mold/pull/91))
+- **Terminal image preview**: `--preview` flag to display images inline ([#55](https://github.com/utensils/mold/pull/55))
+- **`mold default` command**: get/set default model ([#64](https://github.com/utensils/mold/pull/64))
+- **`mold info` command**: installation overview and per-model details with optional SHA-256 verify ([#53](https://github.com/utensils/mold/pull/53))
+- **Multi-model server cache**: server LoRA support and server-side prompt expansion ([#107](https://github.com/utensils/mold/pull/107))
+- **SHA-256 download verification**: fails on integrity mismatch, `--skip-verify` to override ([#56](https://github.com/utensils/mold/pull/56))
+- **One-line install script**: `curl | sh` installer with GPU auto-detection
+
+### Changed
+
+- **Default model changed to `flux2-klein:q8`**: fully ungated (no HuggingFace auth), Apache 2.0 licensed, fast 4-step generation ([#125](https://github.com/utensils/mold/pull/125))
+- Lazy mmap weight loading replaces eager per-tensor loading for better performance ([#122](https://github.com/utensils/mold/pull/122))
+- `mold run` auto-resizes source images to model-native resolution for img2img ([#51](https://github.com/utensils/mold/pull/51))
+- Server queues concurrent requests instead of dropping them ([#68](https://github.com/utensils/mold/pull/68))
+- Git SHA and build date embedded in version output ([#67](https://github.com/utensils/mold/pull/67))
+- CLI validates file-based arguments before expansion/inference ([#101](https://github.com/utensils/mold/pull/101))
+
+### Fixed
+
+- Model weight loading and Qwen-Image quantized inference performance ([#124](https://github.com/utensils/mold/pull/124))
+- Batch generation saves and previews images immediately ([#120](https://github.com/utensils/mold/pull/120))
+- Expand segfault, crash reporting, and ps process detection ([#118](https://github.com/utensils/mold/pull/118))
+- LoRA VRAM leak in GGUF re-quantization ([#100](https://github.com/utensils/mold/pull/100))
+- Weight loader CPU fallback for dtype conversion ([#98](https://github.com/utensils/mold/pull/98))
+- Server unloads current model before loading a different one ([#106](https://github.com/utensils/mold/pull/106))
+- Server fully releases GPU memory on unload ([#62](https://github.com/utensils/mold/pull/62))
+- FLUX auto-patch for city96-format GGUFs missing embedding layers ([#61](https://github.com/utensils/mold/pull/61))
+- `mold rm` comprehensive cleanup for shared files, hf-cache, and stale markers ([#93](https://github.com/utensils/mold/pull/93))
+- Qwen-Image denoising quality and performance ([#111](https://github.com/utensils/mold/pull/111))
+- SD1.5 repo updated to canonical location ([#113](https://github.com/utensils/mold/pull/113))
+- Wuerstchen v2 sampling alignment and default negative prompt ([#99](https://github.com/utensils/mold/pull/99))
+
+### Removed
+
+- **Flux.2 Klein-base-4B model**: all variants removed — denoising fails to converge, producing incoherent output ([#125](https://github.com/utensils/mold/pull/125))
+
 ## [0.2.0] - 2026-03-24
 
 ### Added
@@ -77,5 +128,6 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server) | Axum HTTP inference server |
 
+[0.3.0]: https://github.com/utensils/mold/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/utensils/mold/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/utensils/mold/releases/tag/v0.1.0

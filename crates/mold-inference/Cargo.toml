@@ -19,7 +19,7 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 expand = []
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.2.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.3.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle", rev = "96a6156a" }
 candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle", rev = "96a6156a" }
