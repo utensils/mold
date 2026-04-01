@@ -287,7 +287,7 @@ fn build_request(
         seed: params.seed,
         batch_size: params.batch,
         output_format: params.format,
-        embed_metadata: Some(true),
+        embed_metadata: Some(mold_core::Config::load_or_default().effective_embed_metadata(None)),
         scheduler: params.scheduler,
         source_image,
         strength: params.strength,

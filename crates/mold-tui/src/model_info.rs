@@ -56,7 +56,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: true,
-            supports_controlnet: true,
+            supports_controlnet: false, // ControlNet only supported on SD1.5
             supports_lora: true,
             default_scheduler: None,
         },
