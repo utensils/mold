@@ -5,6 +5,7 @@ members = [
     "crates/mold-server",
     "crates/mold-cli",
     "crates/mold-discord",
+    "crates/mold-tui",
 ]
 resolver = "2"
 

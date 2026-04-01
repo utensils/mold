@@ -368,6 +368,21 @@ Examples:
     #[cfg(feature = "discord")]
     Discord,
 
+    /// Launch the interactive terminal UI
+    ///
+    /// Full-featured TUI for image generation with live preview,
+    /// model management, and gallery browsing.
+    #[cfg(feature = "tui")]
+    Tui {
+        /// Server URL override
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+
+        /// Force local inference (no server connection)
+        #[arg(long)]
+        local: bool,
+    },
+
     /// Generate shell completions (sources dynamic model-name completion)
     #[command(after_long_help = "\
 Setup instructions:
@@ -681,6 +696,10 @@ async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "discord")]
         Commands::Discord => {
             commands::discord::run().await?;
+        }
+        #[cfg(feature = "tui")]
+        Commands::Tui { host, local } => {
+            mold_tui::run_tui(host, local).await?;
         }
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
