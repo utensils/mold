@@ -36,6 +36,7 @@ pub struct Flux2Config {
 
 impl Flux2Config {
     /// Configuration for Flux.2 Klein-4B (Apache 2.0, distilled).
+    /// Also used by Klein-base-4B (same architecture, undistilled).
     pub fn klein() -> Self {
         Self {
             in_channels: 128,
@@ -46,6 +47,24 @@ impl Flux2Config {
             num_heads: 24,
             depth: 5,
             depth_single_blocks: 20,
+            axes_dim: vec![32, 32, 32, 32],
+            theta: 2000,
+            guidance_embed: false,
+        }
+    }
+
+    /// Configuration for Flux.2 Klein-9B (Non-Commercial, distilled).
+    /// Larger Qwen3 encoder (hidden_size=4096, joint_attention_dim=12288).
+    pub fn klein_9b() -> Self {
+        Self {
+            in_channels: 128,
+            vec_in_dim: 0,
+            context_in_dim: 12288, // 4096 * 3 (Qwen3 hidden_size stacked 3x)
+            hidden_size: 4096,
+            mlp_ratio: 3.0,
+            num_heads: 32,
+            depth: 8,
+            depth_single_blocks: 24,
             axes_dim: vec![32, 32, 32, 32],
             theta: 2000,
             guidance_embed: false,

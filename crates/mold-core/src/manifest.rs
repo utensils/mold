@@ -1922,6 +1922,293 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
             },
         },
+        // ── Flux.2 Klein-base-4B (undistilled, Apache 2.0) ─────────────────
+        // Same architecture as Klein-4B but NOT step-distilled — needs more
+        // steps and guidance. Better for fine-tuning and LoRA.
+        ModelManifest {
+            name: "flux2-klein-base:bf16".to_string(),
+            family: "flux2".to_string(),
+            description:
+                "Flux.2 Klein-base-4B BF16 — Apache 2.0, undistilled, ideal for fine-tuning"
+                    .to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-base-4B".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_751_109_744,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 50,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-base:q8".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-base-4B Q8 GGUF — undistilled, best quantized quality"
+                .to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-base-4b-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 4_300_644_928,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 50,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-base:q6".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-base-4B Q6 GGUF — undistilled, good quality/size trade-off"
+                .to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-base-4b-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 3_409_273_408,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 50,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-base:q4".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-base-4B Q4 GGUF — undistilled, smallest footprint"
+                .to_string(),
+            files: {
+                let mut files = shared_flux2_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-base-4b-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 2_604_311_104,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 50,
+                guidance: 4.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
+        ModelManifest {
+            name: "flux2-klein-9b:bf16".to_string(),
+            family: "flux2".to_string(),
+            description:
+                "Flux.2 Klein-9B BF16 — 9B param distilled, sub-second generation on RTX 4090"
+                    .to_string(),
+            files: {
+                let mut files = shared_flux2_9b_files();
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_801_069_272,
+                    gated: true,
+                    sha256: None,
+                });
+                files.push(ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 8_356_121_608,
+                    gated: true,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-9b:q8".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-9B Q8 GGUF — best quantized quality".to_string(),
+            files: {
+                let mut files = shared_flux2_9b_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-9B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-9b-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_978_304_800,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-9b:q6".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-9B Q6 GGUF — good quality/size trade-off".to_string(),
+            files: {
+                let mut files = shared_flux2_9b_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-9B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-9b-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_865_424_160,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+        ModelManifest {
+            name: "flux2-klein-9b:q4".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-9B Q4 GGUF — smallest footprint".to_string(),
+            files: {
+                let mut files = shared_flux2_9b_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/FLUX.2-klein-9B-GGUF".to_string(),
+                    hf_filename: "flux-2-klein-9b-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_909_829_920,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1024,
+                height: 1024,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+            },
+        },
+    ]
+}
+
+/// Shared Flux.2 Klein-9B component files (Qwen3 text encoder 4 shards, VAE, tokenizer).
+///
+/// Klein-9B uses a larger Qwen3 encoder (hidden_size=4096, 4 shards) than Klein-4B
+/// (hidden_size=2560, 2 shards). The VAE and tokenizer format are the same.
+/// The text encoder and tokenizer come from the gated klein-9B repo.
+fn shared_flux2_9b_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_902_257_696,
+            gated: true,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_915_960_368,
+            gated: true,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_983_068_496,
+            gated: true,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 1_580_230_264,
+            gated: true,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 168_120_878,
+            gated: true,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+            hf_filename: "tokenizer/tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 11_422_654,
+            gated: true,
+            sha256: None,
+        },
     ]
 }
 
@@ -3029,8 +3316,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 4 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 57
-        assert_eq!(known_manifests().len(), 57);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 12 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 65
+        assert_eq!(known_manifests().len(), 65);
     }
 
     #[test]
@@ -3187,10 +3474,11 @@ mod tests {
                     );
                 }
                 "flux2" => {
-                    // Flux.2 uses Transformer + Qwen3 TextEncoder + TextTokenizer
+                    // Flux.2 uses Transformer (or TransformerShard for sharded BF16) + Qwen3 TextEncoder + TextTokenizer
                     assert!(
-                        components.contains(&ModelComponent::Transformer),
-                        "{} (flux2) missing Transformer",
+                        components.contains(&ModelComponent::Transformer)
+                            || components.contains(&ModelComponent::TransformerShard),
+                        "{} (flux2) missing Transformer or TransformerShard",
                         manifest.name
                     );
                     assert!(
