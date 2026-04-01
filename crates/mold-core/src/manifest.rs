@@ -4193,4 +4193,116 @@ mod tests {
             );
         }
     }
+
+    // ── Pipeline structural tests ────────────────────────────────────────
+    // These tests read pipeline source files to verify consistent VRAM
+    // management patterns across all model families.
+
+    /// Pipelines that use eager mode must wrap their transformer/UNet in Option
+    /// so it can be dropped before VAE decode to free VRAM.
+    #[test]
+    fn all_pipelines_wrap_transformer_in_option() {
+        let pipeline_fields = [
+            (
+                "flux",
+                "crates/mold-inference/src/flux/pipeline.rs",
+                "Option<FluxTransformer>",
+            ),
+            (
+                "flux2",
+                "crates/mold-inference/src/flux2/pipeline.rs",
+                "Option<Flux2TransformerWrapper>",
+            ),
+            (
+                "sd15",
+                "crates/mold-inference/src/sd15/pipeline.rs",
+                "Option<stable_diffusion::unet_2d::UNet2DConditionModel>",
+            ),
+            (
+                "sdxl",
+                "crates/mold-inference/src/sdxl/pipeline.rs",
+                "Option<stable_diffusion::unet_2d::UNet2DConditionModel>",
+            ),
+            (
+                "sd3",
+                "crates/mold-inference/src/sd3/pipeline.rs",
+                "Option<SD3Transformer>",
+            ),
+            (
+                "zimage",
+                "crates/mold-inference/src/zimage/pipeline.rs",
+                "Option<ZImageTransformer>",
+            ),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+                "Option<QwenImageTransformer>",
+            ),
+            (
+                "wuerstchen (prior)",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "Option<WPrior>",
+            ),
+            (
+                "wuerstchen (decoder)",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "Option<WDiffNeXt>",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path, expected_type) in pipeline_fields {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+            assert!(
+                source.contains(expected_type),
+                "{family} pipeline ({path}) must wrap transformer/UNet in {expected_type} \
+                 for VRAM management — field should be Option-wrapped so it can be dropped \
+                 before VAE decode"
+            );
+        }
+    }
+
+    /// All pipelines must call device.synchronize() before VAE/VQ-GAN decode
+    /// in their eager generate path to ensure CUDA releases freed memory.
+    #[test]
+    fn all_pipelines_synchronize_before_decode() {
+        let pipelines = [
+            ("flux", "crates/mold-inference/src/flux/pipeline.rs"),
+            ("flux2", "crates/mold-inference/src/flux2/pipeline.rs"),
+            ("sd15", "crates/mold-inference/src/sd15/pipeline.rs"),
+            ("sdxl", "crates/mold-inference/src/sdxl/pipeline.rs"),
+            ("sd3", "crates/mold-inference/src/sd3/pipeline.rs"),
+            ("zimage", "crates/mold-inference/src/zimage/pipeline.rs"),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+            ),
+            (
+                "wuerstchen",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path) in pipelines {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+            assert!(
+                source.contains("synchronize()"),
+                "{family} pipeline ({path}) must call device.synchronize() before decode \
+                 to ensure CUDA releases freed transformer/UNet VRAM"
+            );
+        }
+    }
 }
