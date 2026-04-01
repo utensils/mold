@@ -37,7 +37,14 @@ pub struct MoldProcess {
 pub fn find_mold_processes() -> Vec<MoldProcess> {
     let current_pid = std::process::id();
     let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
+            .with_exe(sysinfo::UpdateKind::OnlyIfNotSet)
+            .with_memory(),
+    );
 
     let mut results = Vec::new();
 
