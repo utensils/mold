@@ -1,5 +1,6 @@
 //! Detect running mold processes via OS-level process inspection.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use sysinfo::System;
 
@@ -11,7 +12,6 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "pull",
     "list",
     "ls", // alias for list
-    "ps",
     "info",
     "rm",
     "remove", // alias for rm
@@ -23,7 +23,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "discord",
 ];
 
-/// A detected mold process.
+/// A detected mold process (deduplicated — threads are counted, not listed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoldProcess {
     pub pid: u32,
@@ -31,13 +31,16 @@ pub struct MoldProcess {
     pub args: Vec<String>,
     pub run_time_secs: u64,
     pub memory_bytes: u64,
+    pub thread_count: usize,
 }
 
 /// Scan the system for running mold processes (excluding the current PID).
+///
+/// Threads share their parent's cmdline on Linux, so we deduplicate by
+/// command line — each unique cmdline becomes one entry with a thread count.
 pub fn find_mold_processes() -> Vec<MoldProcess> {
     let current_pid = std::process::id();
     let mut sys = System::new();
-    // Second param `false` = don't include threads (only main processes).
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         false,
@@ -47,7 +50,10 @@ pub fn find_mold_processes() -> Vec<MoldProcess> {
             .with_memory(),
     );
 
-    let mut results = Vec::new();
+    // Collect raw matches, keyed by cmdline for dedup.
+    #[allow(clippy::type_complexity)]
+    let mut groups: HashMap<Vec<String>, (u32, String, Vec<String>, u64, u64, usize)> =
+        HashMap::new();
 
     for (pid, process) in sys.processes() {
         let pid_u32 = pid.as_u32();
@@ -65,29 +71,50 @@ pub fn find_mold_processes() -> Vec<MoldProcess> {
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
 
-        // Skip threads and zombie entries — they have no command line.
         if cmd.is_empty() {
             continue;
         }
 
-        // Extract subcommand and remaining args (skip the binary path).
         let (subcommand, args) = parse_mold_cmd(&cmd);
 
-        // Only include processes with a recognized mold subcommand.
-        // This filters out the GNU `mold` linker and other false positives.
-        // Also skip "ps" — that's us (or another mold ps invocation).
+        // Filter: recognized subcommand, not "ps" (that's us).
         if !KNOWN_SUBCOMMANDS.contains(&subcommand.as_str()) || subcommand == "ps" {
             continue;
         }
 
-        results.push(MoldProcess {
-            pid: pid_u32,
-            subcommand,
-            args,
-            run_time_secs: process.run_time(),
-            memory_bytes: process.memory(),
-        });
+        let run_time = process.run_time();
+        let memory = process.memory();
+
+        groups
+            .entry(cmd)
+            .and_modify(|(lowest_pid, _, _, max_time, max_mem, count)| {
+                if pid_u32 < *lowest_pid {
+                    *lowest_pid = pid_u32;
+                }
+                if run_time > *max_time {
+                    *max_time = run_time;
+                }
+                if memory > *max_mem {
+                    *max_mem = memory;
+                }
+                *count += 1;
+            })
+            .or_insert((pid_u32, subcommand, args, run_time, memory, 1));
     }
+
+    let mut results: Vec<MoldProcess> = groups
+        .into_values()
+        .map(
+            |(pid, subcommand, args, run_time, memory, count)| MoldProcess {
+                pid,
+                subcommand,
+                args,
+                run_time_secs: run_time,
+                memory_bytes: memory,
+                thread_count: count,
+            },
+        )
+        .collect();
 
     results.sort_by_key(|p| p.pid);
     results
@@ -231,7 +258,6 @@ mod tests {
 
     #[test]
     fn find_mold_processes_excludes_self() {
-        // This test verifies the function runs without panic and excludes our own PID.
         let procs = find_mold_processes();
         let self_pid = std::process::id();
         assert!(
@@ -242,7 +268,6 @@ mod tests {
 
     #[test]
     fn gnu_mold_linker_filtered_out() {
-        // GNU mold linker has no recognized subcommand — should be filtered.
         let cmd = vec![
             "/usr/bin/mold".into(),
             "-run".into(),
@@ -250,7 +275,6 @@ mod tests {
             "main.c".into(),
         ];
         let (sub, _) = parse_mold_cmd(&cmd);
-        // `-run` starts with '-', `gcc` is parsed as subcommand
         assert!(!KNOWN_SUBCOMMANDS.contains(&sub.as_str()));
     }
 

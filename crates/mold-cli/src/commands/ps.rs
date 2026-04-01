@@ -85,14 +85,20 @@ pub async fn run() -> Result<()> {
                             format!(" {joined}")
                         }
                     };
+                    let threads = if p.thread_count > 1 {
+                        format!(", {} threads", p.thread_count)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  {} {} {}{} {} ({})",
+                        "  {} {} {}{} {} ({}{})",
                         theme::icon_bullet(),
                         format!("[{}]", p.pid).dimmed(),
                         p.subcommand.green(),
                         args_display.dimmed(),
                         procinfo::format_duration(p.run_time_secs).dimmed(),
                         procinfo::format_memory_mb(p.memory_bytes).dimmed(),
+                        threads.dimmed(),
                     );
                 }
                 println!();
