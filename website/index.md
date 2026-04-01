@@ -5,8 +5,8 @@ hero:
   name: mold
   text: AI Image Generation on Your GPU
   tagline:
-    'FLUX, SD3.5, SDXL, SD 1.5, Z-Image, Flux.2 Klein & more — no cloud, no
-    Python, no fuss.'
+    'CUDA on Linux. Metal on macOS. FLUX, SD3.5, SDXL, SD 1.5, Z-Image, Flux.2
+    Klein & more — no cloud, no Python, no fuss.'
   image:
     src: /logo-transparent.png
     alt: mold logo
@@ -36,10 +36,10 @@ features:
       Wuerstchen v2. Quantized variants fit any GPU.
   - icon:
       src: /icons/rust.svg
-    title: Pure Rust — Linux & macOS
+    title: Linux NVIDIA + macOS Metal
     details:
-      Single binary built on candle. CUDA on Linux (NVIDIA), Metal on macOS
-      (Apple Silicon). No Python, no libtorch, no ONNX.
+      Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
+      Silicon on macOS via Metal. No Python, no libtorch, no ONNX.
   - icon:
       src: /icons/server.svg
     title: Client-Server
