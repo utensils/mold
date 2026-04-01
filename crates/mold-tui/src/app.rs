@@ -740,20 +740,61 @@ impl App {
                 if let CrosstermEvent::Key(key) = &event {
                     // Let certain keys bypass the textarea
                     match (key.code, key.modifiers) {
+                        // TUI-global shortcuts that bypass the textarea
                         (KeyCode::Tab, KeyModifiers::NONE)
                         | (KeyCode::BackTab, KeyModifiers::SHIFT)
-                        | (KeyCode::Char('c'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('e'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('g'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('m'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('r'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('s'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('k'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
-                        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
-                        | (KeyCode::Enter, KeyModifiers::NONE)
-                        | (KeyCode::Esc, KeyModifiers::NONE) => {
+                        | (KeyCode::Char('c'), KeyModifiers::CONTROL) // quit
+                        | (KeyCode::Char('g'), KeyModifiers::CONTROL) // generate
+                        | (KeyCode::Char('m'), KeyModifiers::CONTROL) // model selector
+                        | (KeyCode::Char('r'), KeyModifiers::CONTROL) // seed mode
+                        | (KeyCode::Enter, KeyModifiers::NONE)        // generate
+                        | (KeyCode::Esc, KeyModifiers::NONE) => {     // nav mode
                             // Fall through to action mapping
+                        }
+                        // Ctrl+P/N: history when on first/last line,
+                        // otherwise let textarea handle cursor movement
+                        (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                            let textarea = match self.generate.focus {
+                                GenerateFocus::Prompt => &self.generate.prompt,
+                                GenerateFocus::NegativePrompt => &self.generate.negative_prompt,
+                                _ => unreachable!(),
+                            };
+                            // At top line → history prev; otherwise cursor up
+                            if textarea.cursor().0 == 0 {
+                                // Fall through for history
+                            } else {
+                                let ta = match self.generate.focus {
+                                    GenerateFocus::Prompt => &mut self.generate.prompt,
+                                    GenerateFocus::NegativePrompt => {
+                                        &mut self.generate.negative_prompt
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                ta.input(event);
+                                return;
+                            }
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                            let textarea = match self.generate.focus {
+                                GenerateFocus::Prompt => &self.generate.prompt,
+                                GenerateFocus::NegativePrompt => &self.generate.negative_prompt,
+                                _ => unreachable!(),
+                            };
+                            let last_line = textarea.lines().len().saturating_sub(1);
+                            // At bottom line → history next; otherwise cursor down
+                            if textarea.cursor().0 >= last_line {
+                                // Fall through for history
+                            } else {
+                                let ta = match self.generate.focus {
+                                    GenerateFocus::Prompt => &mut self.generate.prompt,
+                                    GenerateFocus::NegativePrompt => {
+                                        &mut self.generate.negative_prompt
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                ta.input(event);
+                                return;
+                            }
                         }
                         (KeyCode::Char('1'), KeyModifiers::ALT)
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
