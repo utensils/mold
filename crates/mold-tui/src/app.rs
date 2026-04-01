@@ -1589,13 +1589,15 @@ impl App {
             }
             // Randomize seed on Enter
             ParamField::Seed => {
-                // Cycle seed mode on Enter
-                self.generate.params.seed_mode = self.generate.params.seed_mode.next();
-                if self.generate.params.seed_mode == SeedMode::Fixed
-                    && self.generate.params.seed.is_none()
-                {
-                    self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
-                }
+                // Enter on Seed mode row opens the value input popup
+                // (use +/- or Ctrl+R to cycle the mode)
+                let current = self
+                    .generate
+                    .params
+                    .seed
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                self.popup = Some(Popup::SeedInput { input: current });
             }
             // Randomize the seed value
             ParamField::SeedValue => {
