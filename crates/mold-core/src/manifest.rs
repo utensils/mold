@@ -2035,11 +2035,15 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
+        // NOTE: Klein-9B uses a larger Qwen3 encoder (hidden_size=4096) than
+        // Klein-4B (hidden_size=2560). The BF16 encoder loader currently only
+        // supports the 2560-wide architecture. Klein-9B is marked alpha until
+        // the encoder is updated to support both architectures.
         ModelManifest {
             name: "flux2-klein-9b:bf16".to_string(),
             family: "flux2".to_string(),
             description:
-                "Flux.2 Klein-9B BF16 — 9B param distilled, sub-second generation on RTX 4090"
+                "Flux.2 Klein-9B BF16 (alpha) — 9B param distilled, sub-second generation on RTX 4090"
                     .to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
@@ -2076,7 +2080,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q8".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q8 GGUF — best quantized quality".to_string(),
+            description: "Flux.2 Klein-9B Q8 GGUF (alpha) — best quantized quality".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {
@@ -2102,7 +2106,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q6".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q6 GGUF — good quality/size trade-off".to_string(),
+            description: "Flux.2 Klein-9B Q6 GGUF (alpha) — good quality/size trade-off".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {
@@ -2128,7 +2132,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q4".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q4 GGUF — smallest footprint".to_string(),
+            description: "Flux.2 Klein-9B Q4 GGUF (alpha) — smallest footprint".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {

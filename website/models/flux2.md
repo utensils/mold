@@ -53,7 +53,9 @@ steps than the distilled Klein.
 
 ---
 
-# Flux.2 Klein-9B
+# Flux.2 Klein-9B (alpha)
+
+> **Note**: Klein-9B is in alpha. The text encoder architecture (Qwen3 with hidden_size=4096) differs from Klein-4B and is not yet fully supported by the inference engine. Results may not work correctly.
 
 A larger 9B parameter FLUX variant. Distilled for fast 4-step generation with
 higher quality than the 4B Klein.

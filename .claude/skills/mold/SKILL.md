@@ -134,7 +134,7 @@ Pick the right model for the task:
 | `flux-dev:q4` | Slow (25 steps) | Excellent | Final quality, detailed |
 | `flux2-klein:q8` | Fast (4 steps) | Good | Low VRAM, lightweight FLUX |
 | `flux2-klein-base:q8` | Slow (50 steps) | Good | Undistilled 4B, fine-tuning/LoRA |
-| `flux2-klein-9b:q8` | Fast (4 steps) | Excellent | Higher quality 9B, non-commercial |
+| `flux2-klein-9b:q8` | Fast (4 steps) | Excellent | Higher quality 9B, non-commercial (alpha) |
 | `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
 | `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |

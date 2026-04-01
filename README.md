@@ -484,7 +484,9 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `flux2-klein-base:q4` | 50 | 2.6GB | Smallest undistilled |
 | `flux2-klein-base:bf16` | 50 | 7.75GB | Full precision 4B |
 
-### Flux.2 Klein-9B (non-commercial, distilled)
+### Flux.2 Klein-9B (alpha, non-commercial, distilled)
+
+> **Note**: Klein-9B is in alpha. The larger Qwen3 encoder is not yet fully supported. Results may vary.
 
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
