@@ -1044,12 +1044,12 @@ impl App {
                             self.generate.params.seed = None;
                         } else if let Ok(val) = text.parse::<u64>() {
                             self.generate.params.seed = Some(val);
-                            // Switch to fixed mode when user enters a specific seed
                             if self.generate.params.seed_mode == SeedMode::Random {
                                 self.generate.params.seed_mode = SeedMode::Fixed;
                             }
                         }
-                        // else: invalid input, just close
+                        // Move focus to prompt so Enter key repeat doesn't re-open
+                        self.generate.focus = GenerateFocus::Prompt;
                     }
                     KeyCode::Char(c) if c.is_ascii_digit() => input.push(c),
                     KeyCode::Backspace => {

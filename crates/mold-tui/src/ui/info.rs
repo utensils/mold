@@ -40,10 +40,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(mem.as_str(), theme.dim())));
     }
 
-    // Process RAM
-    if ri.process_ram_mb > 0 {
+    // Process memory
+    if ri.process_memory_mb > 0 {
         lines.push(Line::from(Span::styled(
-            format!("Mold: {} MB RAM", ri.process_ram_mb),
+            format!("Mold: {:.1} GB", ri.process_memory_mb as f64 / 1024.0),
             theme.dim(),
         )));
     }
@@ -66,8 +66,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 pub struct ResourceInfo {
     /// Human-readable memory status (e.g., "VRAM: 16.2 GB free" or "Memory: 24.0 GB available")
     pub memory_line: Option<String>,
-    /// Total RAM used by all mold processes in MB.
-    pub process_ram_mb: u64,
+    /// Total memory used by all mold processes in MB (including mmap'd model weights).
+    pub process_memory_mb: u64,
 }
 
 impl ResourceInfo {
@@ -76,17 +76,85 @@ impl ResourceInfo {
         // System memory / VRAM
         self.memory_line = mold_inference::device::memory_status_string();
 
-        // Total RAM across all mold processes (TUI + server + any workers)
-        use sysinfo::{ProcessesToUpdate, System};
-        let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::All, true);
-        let mut total_bytes: u64 = 0;
-        for proc in sys.processes().values() {
-            let name = proc.name().to_string_lossy();
-            if name == "mold" || name.starts_with("mold") {
-                total_bytes += proc.memory();
-            }
-        }
-        self.process_ram_mb = total_bytes / (1024 * 1024);
+        // Total memory across all mold processes
+        self.process_memory_mb = total_mold_memory_mb();
     }
+}
+
+/// Get total memory used by all mold processes in MB.
+/// On macOS, uses phys_footprint (includes mmap'd file pages) instead of RSS.
+fn total_mold_memory_mb() -> u64 {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    let mut pids: Vec<u32> = Vec::new();
+    for (pid, proc) in sys.processes() {
+        let name = proc.name().to_string_lossy();
+        if name == "mold" {
+            pids.push(pid.as_u32());
+        }
+    }
+
+    if pids.is_empty() {
+        return 0;
+    }
+
+    let mut total_bytes: u64 = 0;
+    for pid in &pids {
+        total_bytes += process_footprint(*pid);
+    }
+    total_bytes / (1024 * 1024)
+}
+
+/// Get the physical footprint of a process (includes mmap'd file pages).
+/// Uses proc_pid_rusage with rusage_info_v0 to get ri_phys_footprint.
+#[cfg(target_os = "macos")]
+fn process_footprint(pid: u32) -> u64 {
+    use std::mem::MaybeUninit;
+
+    // rusage_info_v0 layout from <sys/resource.h>:
+    // uint8_t[16] ri_uuid, then 6x uint64_t, then ri_phys_footprint
+    #[repr(C)]
+    #[allow(non_camel_case_types)]
+    struct rusage_info_v0 {
+        ri_uuid: [u8; 16],
+        ri_user_time: u64,
+        ri_system_time: u64,
+        ri_pkg_idle_wkups: u64,
+        ri_interrupt_wkups: u64,
+        ri_pageins: u64,
+        ri_wired_size: u64,
+        ri_resident_size: u64,
+        ri_phys_footprint: u64,
+        ri_proc_start_abstime: u64,
+        ri_proc_exit_abstime: u64,
+    }
+
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut rusage_info_v0) -> i32;
+    }
+
+    const RUSAGE_INFO_V0: i32 = 0;
+
+    unsafe {
+        let mut info = MaybeUninit::<rusage_info_v0>::zeroed();
+        let ret = proc_pid_rusage(pid as i32, RUSAGE_INFO_V0, info.as_mut_ptr());
+        if ret == 0 {
+            info.assume_init().ri_phys_footprint
+        } else {
+            0
+        }
+    }
+}
+
+/// Fallback for non-macOS: use RSS from sysinfo.
+#[cfg(not(target_os = "macos"))]
+fn process_footprint(pid: u32) -> u64 {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid))
+        .map(|p| p.memory())
+        .unwrap_or(0)
 }
