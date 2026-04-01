@@ -138,7 +138,7 @@ Pick the right model for the task:
 | `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
 | `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
-| `qwen-image:q4` | Slow (30 steps) | Good | Alpha — results may vary |
+| `qwen-image:q4` | Slow (50 steps) | Good | Qwen-Image-2512, CFG |
 
 Default model if none specified: `flux-schnell:q8`
 
@@ -156,7 +156,7 @@ Default model if none specified: `flux-schnell:q8`
 | `flux2-klein` | 4 | 0.0 | 1024x1024 |
 | `flux2-klein-base` | 50 | 4.0 | 1024x1024 |
 | `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
-| `qwen-image` | 30 | 7.0 | 1024x1024 |
+| `qwen-image` | 50 | 3.0 | 1328x1328 |
 
 ### Available Models
 
@@ -180,7 +180,7 @@ Default model if none specified: `flux-schnell:q8`
 
 **Wuerstchen**: `wuerstchen-v2:fp16`
 
-**Qwen-Image (alpha)**: `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `qwen-image:bf16`
+**Qwen-Image**: `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q4`, `qwen-image:bf16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 

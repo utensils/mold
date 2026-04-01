@@ -621,8 +621,8 @@ mod tests {
     #[tokio::test]
     async fn generate_oversized_returns_422() {
         let app = app_with(MockEngine::ready());
-        // 1280x1280 = 1.64MP > 1.1MP limit
-        let body = generate_body("a cat", 1280, 1280);
+        // 1408x1408 = ~1.98MP > 1.8MP limit
+        let body = generate_body("a cat", 1408, 1408);
         let resp = app
             .oneshot(
                 Request::post("/api/generate")
