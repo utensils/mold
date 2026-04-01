@@ -1304,20 +1304,19 @@ mod tests {
 
     /// Verify that a queued streaming request receives a position event.
     ///
-    /// Ignored: this test has a race condition where the first request can
-    /// complete before the second is submitted, even with the blocker pattern.
-    /// See https://github.com/utensils/mold/issues/117 for tracking.
-    #[ignore]
+    /// Strategy: submit both requests BEFORE starting the queue worker.
+    /// Without a worker, no job holds model_cache long-term, so both HTTP
+    /// handlers complete submit() immediately with sequential positions
+    /// (0 then 1). Starting the worker afterward lets both jobs process
+    /// and close their SSE streams.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_stream_receives_position_event() {
-        let blocker = Arc::new(GenerateBlocker::default());
-        let (state, rx) =
-            AppState::with_engine_and_queue(MockEngine::blocking_generate(blocker.clone()));
+        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let queue = state.queue.clone();
         let worker_state = state.clone();
-        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
 
-        // Submit first request (will block in generate)
+        // Submit first request (worker not started — handler completes fast)
         let _resp1 = {
             let app = app.clone();
             tokio::spawn(async move {
@@ -1331,12 +1330,11 @@ mod tests {
             })
         };
 
-        // Wait for the first request to enter generate() (blocker holds the lock),
-        // then give the queue worker time to update the pending count.
-        while !blocker.entered.load(std::sync::atomic::Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        // Wait for the first request to be queued before submitting the second,
+        // guaranteeing the second request sees pending_count == 1 (position 1).
+        while queue.pending() < 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Submit second request — should be queued at position 1
         let resp2 = {
@@ -1358,9 +1356,12 @@ mod tests {
             })
         };
 
-        // Release blocker so both requests complete
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        blocker.release();
+        // Wait for both requests to be queued, then start the worker so
+        // both jobs are processed and their SSE streams close.
+        while queue.pending() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
 
         let text2 = resp2.await.unwrap();
         assert!(
