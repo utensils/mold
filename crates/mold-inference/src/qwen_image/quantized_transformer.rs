@@ -1,12 +1,13 @@
-//! GGUF Qwen-Image transformer with block-level CPU<->GPU offloading.
+//! Quantized (GGUF) Qwen-Image transformer using quantized matmul kernels.
 //!
-//! The GGUF weights are dequantized to BF16 on CPU at load time. Stem and
-//! output layers stay resident on the GPU, while transformer blocks remain on
-//! CPU and are streamed to the GPU one at a time during forward.
+//! Uses `quantized_nn::Linear` (backed by `QMatMul`) to keep GGUF weights
+//! quantized on the GPU. CUDA quantized matmul kernels handle the math —
+//! no dequantization to BF16 needed. Intermediate computations use F32.
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{Linear, RmsNorm};
+use candle_nn::RmsNorm;
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
+use candle_transformers::quantized_nn::Linear;
 use candle_transformers::quantized_var_builder::VarBuilder;
 
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
@@ -14,38 +15,32 @@ use super::transformer::{QwenImageConfig, MAX_PERIOD};
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 pub(crate) const ROPE_CACHE_LEN: usize = 4096;
 
-fn dequant_tensor(vb: &VarBuilder, name: &str, dtype: DType, target: &Device) -> Result<Tensor> {
-    vb.get_no_shape(name)?
-        .dequantize(vb.device())?
-        .to_dtype(dtype)?
-        .to_device(target)
-}
-
-fn dequant_linear(vb: &VarBuilder, name: &str, dtype: DType, target: &Device) -> Result<Linear> {
-    let weight = dequant_tensor(vb, &format!("{name}.weight"), dtype, target)?;
-    let bias = match vb.get_no_shape(&format!("{name}.bias")) {
-        Ok(bias) => Some(
-            bias.dequantize(vb.device())?
-                .to_dtype(dtype)?
-                .to_device(target)?,
-        ),
+/// Load a quantized linear layer from GGUF, keeping weights in quantized form.
+/// Bias (if present) is dequantized to F32 (biases are tiny 1D vectors).
+fn qlinear(vb: &VarBuilder, name: &str) -> Result<Linear> {
+    let vb = vb.pp(name);
+    let weight = vb.get_no_shape("weight")?;
+    if std::env::var("MOLD_QWEN_DEBUG").is_ok() {
+        eprintln!(
+            "[Q-DEBUG] qlinear {name}: dtype={:?} shape={:?}",
+            weight.dtype(),
+            weight.shape()
+        );
+    }
+    let bias = match vb.get_no_shape("bias") {
+        Ok(b) => Some(b.dequantize(vb.device())?),
         Err(_) => None,
     };
-    Ok(Linear::new(weight, bias))
+    Linear::from_arc(weight, bias)
 }
 
-fn linear_to_device(linear: &Linear, target: &Device) -> Result<Linear> {
-    let weight = linear.weight().to_device(target)?;
-    let bias = linear
-        .bias()
-        .map(|bias| bias.to_device(target))
-        .transpose()?;
-    Ok(Linear::new(weight, bias))
-}
-
-fn rms_norm_to_device(norm: &RmsNorm, eps: f64, target: &Device) -> Result<RmsNorm> {
-    let inner = norm.clone().into_inner();
-    Ok(RmsNorm::new(inner.weight().to_device(target)?, eps))
+/// Dequantize a small 1D weight vector for RmsNorm (norm weights are tiny).
+fn dequant_rms_norm(vb: &VarBuilder, name: &str, eps: f64) -> Result<RmsNorm> {
+    let weight = vb
+        .pp(name)
+        .get_no_shape("weight")?
+        .dequantize(vb.device())?;
+    Ok(RmsNorm::new(weight, eps))
 }
 
 #[derive(Debug, Clone)]
@@ -289,12 +284,11 @@ struct TimestepProjEmbeddings {
 }
 
 impl TimestepProjEmbeddings {
-    fn new(inner_dim: usize, vb: VarBuilder, dtype: DType, target: &Device) -> Result<Self> {
+    fn new(vb: VarBuilder) -> Result<Self> {
         let vb = vb.pp("time_text_embed").pp("timestep_embedder");
-        let _ = inner_dim;
         Ok(Self {
-            linear1: dequant_linear(&vb, "linear_1", dtype, target)?,
-            linear2: dequant_linear(&vb, "linear_2", dtype, target)?,
+            linear1: qlinear(&vb, "linear_1")?,
+            linear2: qlinear(&vb, "linear_2")?,
         })
     }
 
@@ -306,8 +300,7 @@ impl TimestepProjEmbeddings {
             .unsqueeze(1)?
             .to_dtype(DType::F32)?
             .broadcast_mul(&freqs.unsqueeze(0)?)?;
-        let embedding = Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?
-            .to_dtype(self.linear1.weight().dtype())?;
+        let embedding = Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?;
         embedding.apply(&self.linear1)?.silu()?.apply(&self.linear2)
     }
 }
@@ -317,15 +310,9 @@ struct ApproximateGelu {
 }
 
 impl ApproximateGelu {
-    fn new(vb: VarBuilder, dtype: DType, target: &Device) -> Result<Self> {
+    fn new(vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            proj: dequant_linear(&vb, "proj", dtype, target)?,
-        })
-    }
-
-    fn to_device(&self, target: &Device) -> Result<Self> {
-        Ok(Self {
-            proj: linear_to_device(&self.proj, target)?,
+            proj: qlinear(&vb, "proj")?,
         })
     }
 }
@@ -343,17 +330,10 @@ struct FeedForward {
 }
 
 impl FeedForward {
-    fn new(vb: VarBuilder, dtype: DType, target: &Device) -> Result<Self> {
+    fn new(vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            act: ApproximateGelu::new(vb.pp("net").pp("0"), dtype, target)?,
-            out: dequant_linear(&vb.pp("net"), "2", dtype, target)?,
-        })
-    }
-
-    fn to_device(&self, target: &Device) -> Result<Self> {
-        Ok(Self {
-            act: self.act.to_device(target)?,
-            out: linear_to_device(&self.out, target)?,
+            act: ApproximateGelu::new(vb.pp("net").pp("0"))?,
+            out: qlinear(&vb.pp("net"), "2")?,
         })
     }
 }
@@ -367,38 +347,13 @@ impl Module for FeedForward {
 struct QkNorm {
     norm_q: RmsNorm,
     norm_k: RmsNorm,
-    eps: f64,
 }
 
 impl QkNorm {
-    fn new(
-        head_dim: usize,
-        eps: f64,
-        vb: VarBuilder,
-        q_name: &str,
-        k_name: &str,
-        dtype: DType,
-        target: &Device,
-    ) -> Result<Self> {
-        let _ = head_dim;
+    fn new(eps: f64, vb: &VarBuilder, q_name: &str, k_name: &str) -> Result<Self> {
         Ok(Self {
-            norm_q: RmsNorm::new(
-                dequant_tensor(&vb.pp(q_name), "weight", dtype, target)?,
-                eps,
-            ),
-            norm_k: RmsNorm::new(
-                dequant_tensor(&vb.pp(k_name), "weight", dtype, target)?,
-                eps,
-            ),
-            eps,
-        })
-    }
-
-    fn to_device(&self, target: &Device) -> Result<Self> {
-        Ok(Self {
-            norm_q: rms_norm_to_device(&self.norm_q, self.eps, target)?,
-            norm_k: rms_norm_to_device(&self.norm_k, self.eps, target)?,
-            eps: self.eps,
+            norm_q: dequant_rms_norm(vb, q_name, eps)?,
+            norm_k: dequant_rms_norm(vb, k_name, eps)?,
         })
     }
 
@@ -423,57 +378,20 @@ struct JointAttention {
 }
 
 impl JointAttention {
-    fn new(cfg: &QwenImageConfig, vb: VarBuilder, dtype: DType, target: &Device) -> Result<Self> {
-        let dim = cfg.inner_dim;
-        let qkv_dim = cfg.num_attention_heads * cfg.attention_head_dim;
-        let _ = qkv_dim;
-        let _ = dim;
+    fn new(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            to_q: dequant_linear(&vb, "to_q", dtype, target)?,
-            to_k: dequant_linear(&vb, "to_k", dtype, target)?,
-            to_v: dequant_linear(&vb, "to_v", dtype, target)?,
-            to_out: dequant_linear(&vb.pp("to_out"), "0", dtype, target)?,
-            add_q_proj: dequant_linear(&vb, "add_q_proj", dtype, target)?,
-            add_k_proj: dequant_linear(&vb, "add_k_proj", dtype, target)?,
-            add_v_proj: dequant_linear(&vb, "add_v_proj", dtype, target)?,
-            add_out_proj: dequant_linear(&vb, "to_add_out", dtype, target)?,
-            qk_norm: QkNorm::new(
-                cfg.attention_head_dim,
-                1e-6,
-                vb.clone(),
-                "norm_q",
-                "norm_k",
-                dtype,
-                target,
-            )?,
-            added_qk_norm: QkNorm::new(
-                cfg.attention_head_dim,
-                1e-6,
-                vb.clone(),
-                "norm_added_q",
-                "norm_added_k",
-                dtype,
-                target,
-            )?,
+            to_q: qlinear(&vb, "to_q")?,
+            to_k: qlinear(&vb, "to_k")?,
+            to_v: qlinear(&vb, "to_v")?,
+            to_out: qlinear(&vb.pp("to_out"), "0")?,
+            add_q_proj: qlinear(&vb, "add_q_proj")?,
+            add_k_proj: qlinear(&vb, "add_k_proj")?,
+            add_v_proj: qlinear(&vb, "add_v_proj")?,
+            add_out_proj: qlinear(&vb, "to_add_out")?,
+            qk_norm: QkNorm::new(1e-6, &vb, "norm_q", "norm_k")?,
+            added_qk_norm: QkNorm::new(1e-6, &vb, "norm_added_q", "norm_added_k")?,
             n_heads: cfg.num_attention_heads,
             head_dim: cfg.attention_head_dim,
-        })
-    }
-
-    fn to_device(&self, target: &Device) -> Result<Self> {
-        Ok(Self {
-            to_q: linear_to_device(&self.to_q, target)?,
-            to_k: linear_to_device(&self.to_k, target)?,
-            to_v: linear_to_device(&self.to_v, target)?,
-            to_out: linear_to_device(&self.to_out, target)?,
-            add_q_proj: linear_to_device(&self.add_q_proj, target)?,
-            add_k_proj: linear_to_device(&self.add_k_proj, target)?,
-            add_v_proj: linear_to_device(&self.add_v_proj, target)?,
-            add_out_proj: linear_to_device(&self.add_out_proj, target)?,
-            qk_norm: self.qk_norm.to_device(target)?,
-            added_qk_norm: self.added_qk_norm.to_device(target)?,
-            n_heads: self.n_heads,
-            head_dim: self.head_dim,
         })
     }
 
@@ -563,8 +481,10 @@ impl JointAttention {
 
         let total_seq_len = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((batch, total_seq_len, ()))?;
-        let txt_attn = attn.narrow(1, 0, txt_seq_len)?;
-        let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
+        // contiguous() required: narrow() creates strided views that
+        // QMatMul's CUDA kernel does not support.
+        let txt_attn = attn.narrow(1, 0, txt_seq_len)?.contiguous()?;
+        let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?.contiguous()?;
 
         Ok((
             img_attn.apply(&self.to_out)?,
@@ -586,32 +506,17 @@ struct QwenImageTransformerBlock {
 }
 
 impl QwenImageTransformerBlock {
-    fn new(cfg: &QwenImageConfig, vb: VarBuilder, dtype: DType, target: &Device) -> Result<Self> {
-        let _ = cfg.inner_dim;
+    fn new(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             img_norm1: LayerNormNoParams::new(1e-6),
             img_norm2: LayerNormNoParams::new(1e-6),
             txt_norm1: LayerNormNoParams::new(1e-6),
             txt_norm2: LayerNormNoParams::new(1e-6),
-            attn: JointAttention::new(cfg, vb.pp("attn"), dtype, target)?,
-            img_mlp: FeedForward::new(vb.pp("img_mlp"), dtype, target)?,
-            txt_mlp: FeedForward::new(vb.pp("txt_mlp"), dtype, target)?,
-            img_mod: dequant_linear(&vb.pp("img_mod"), "1", dtype, target)?,
-            txt_mod: dequant_linear(&vb.pp("txt_mod"), "1", dtype, target)?,
-        })
-    }
-
-    fn to_device(&self, target: &Device) -> Result<Self> {
-        Ok(Self {
-            img_norm1: self.img_norm1.clone(),
-            img_norm2: self.img_norm2.clone(),
-            txt_norm1: self.txt_norm1.clone(),
-            txt_norm2: self.txt_norm2.clone(),
-            attn: self.attn.to_device(target)?,
-            img_mlp: self.img_mlp.to_device(target)?,
-            txt_mlp: self.txt_mlp.to_device(target)?,
-            img_mod: linear_to_device(&self.img_mod, target)?,
-            txt_mod: linear_to_device(&self.txt_mod, target)?,
+            attn: JointAttention::new(cfg, vb.pp("attn"))?,
+            img_mlp: FeedForward::new(vb.pp("img_mlp"))?,
+            txt_mlp: FeedForward::new(vb.pp("txt_mlp"))?,
+            img_mod: qlinear(&vb.pp("img_mod"), "1")?,
+            txt_mod: qlinear(&vb.pp("txt_mod"), "1")?,
         })
     }
 
@@ -664,11 +569,30 @@ impl QwenImageTransformerBlock {
             &txt_chunks[5],
         );
 
+        let debug_block0 = std::env::var("MOLD_QWEN_DEBUG").is_ok() && img_seq_len > 0;
+
+        if debug_block0 {
+            let s_abs = img_scale_msa.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let sh_abs = img_shift_msa.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let g_abs = img_gate_msa.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let gmlp = img_gate_mlp.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let smlp = img_scale_mlp.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!(
+                "[Q-BLOCK] scale_msa={s_abs:.4} shift_msa={sh_abs:.4} gate_msa={g_abs:.4} scale_mlp={smlp:.4} gate_mlp={gmlp:.4}"
+            );
+        }
+
         let img_attn_in = self
             .img_norm1
             .forward(img_hidden)?
             .broadcast_mul(&(img_scale_msa + 1.0)?)?
             .broadcast_add(img_shift_msa)?;
+
+        if debug_block0 {
+            let a = img_attn_in.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-BLOCK] img_attn_in: {a:.4}");
+        }
+
         let txt_attn_in = self
             .txt_norm1
             .forward(txt_hidden)?
@@ -685,8 +609,20 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
+        if debug_block0 {
+            let a = img_attn.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let ga = img_gate_msa.broadcast_mul(&img_attn)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-BLOCK] img_attn: {a:.4} gated_attn: {ga:.4}");
+        }
+
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
+            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::F32)?)?;
+
+        if debug_block0 {
+            let a = img_hidden.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-BLOCK] after_attn_residual: {a:.4}");
+        }
 
         let img_mlp_in = self
             .img_norm2
@@ -698,10 +634,20 @@ impl QwenImageTransformerBlock {
             .forward(&txt_hidden)?
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
+        let img_ff = self.img_mlp.forward(&img_mlp_in)?;
+
+        if debug_block0 {
+            let mlp_in = img_mlp_in.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let ff = img_ff.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let gff = img_gate_mlp.broadcast_mul(&img_ff)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-BLOCK] img_mlp_in: {mlp_in:.4} img_ff: {ff:.4} gated_ff: {gff:.4}");
+        }
+
         let img_hidden =
-            (&img_hidden + img_gate_mlp.broadcast_mul(&self.img_mlp.forward(&img_mlp_in)?)?)?;
+            (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
         let txt_hidden =
-            (&txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?;
+            (&txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
+                .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::F32)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -714,19 +660,11 @@ struct OutputLayer {
 }
 
 impl OutputLayer {
-    fn new(
-        inner_dim: usize,
-        out_channels: usize,
-        patch_size: usize,
-        vb: VarBuilder,
-        dtype: DType,
-        target: &Device,
-    ) -> Result<Self> {
-        let _ = (inner_dim, out_channels, patch_size);
+    fn new(vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             norm_final: LayerNormNoParams::new(1e-6),
-            adaln_linear: dequant_linear(&vb.pp("norm_out"), "linear", dtype, target)?,
-            linear: dequant_linear(&vb, "proj_out", dtype, target)?,
+            adaln_linear: qlinear(&vb.pp("norm_out"), "linear")?,
+            linear: qlinear(&vb, "proj_out")?,
         })
     }
 
@@ -753,47 +691,31 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
     rope_embedder: QwenRopeEmbedder,
     output_layer: OutputLayer,
     cfg: QwenImageConfig,
-    gpu_device: Device,
-    dtype: DType,
 }
 
 impl QuantizedQwenImageTransformer2DModel {
-    pub fn new(
-        cfg: &QwenImageConfig,
-        vb: VarBuilder,
-        cpu_device: &Device,
-        gpu_device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        let time_embed = TimestepProjEmbeddings::new(cfg.inner_dim, vb.clone(), dtype, gpu_device)?;
-        let img_in = dequant_linear(&vb, "img_in", dtype, gpu_device)?;
-        let txt_in = dequant_linear(&vb, "txt_in", dtype, gpu_device)?;
-        let txt_norm = RmsNorm::new(
-            dequant_tensor(&vb.pp("txt_norm"), "weight", dtype, gpu_device)?,
-            cfg.norm_eps,
-        );
+    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder, device: &Device) -> Result<Self> {
+        let time_embed = TimestepProjEmbeddings::new(vb.clone())?;
+        let img_in = qlinear(&vb, "img_in")?;
+        let txt_in = qlinear(&vb, "txt_in")?;
+        let txt_norm = dequant_rms_norm(&vb, "txt_norm", cfg.norm_eps)?;
 
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         let vb_blocks = vb.pp("transformer_blocks");
         for i in 0..cfg.num_layers {
-            blocks.push(QwenImageTransformerBlock::new(
-                cfg,
-                vb_blocks.pp(i),
-                dtype,
-                cpu_device,
-            )?);
+            blocks.push(QwenImageTransformerBlock::new(cfg, vb_blocks.pp(i))?);
         }
 
-        let rope_embedder =
-            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, dtype)?;
-        let output_layer = OutputLayer::new(
-            cfg.inner_dim,
-            cfg.out_channels,
-            cfg.patch_size,
-            vb,
-            dtype,
-            gpu_device,
+        // RoPE tables stay on CPU — they're small and moved to GPU per forward call.
+        let rope_embedder = QwenRopeEmbedder::new(
+            10000.0,
+            cfg.axes_dims_rope.clone(),
+            &Device::Cpu,
+            DType::F32,
         )?;
+        let output_layer = OutputLayer::new(vb)?;
+
+        let _ = device; // device is used implicitly via VarBuilder
 
         Ok(Self {
             time_embed,
@@ -804,8 +726,6 @@ impl QuantizedQwenImageTransformer2DModel {
             rope_embedder,
             output_layer,
             cfg: cfg.clone(),
-            gpu_device: gpu_device.clone(),
-            dtype,
         })
     }
 
@@ -818,21 +738,18 @@ impl QuantizedQwenImageTransformer2DModel {
     ) -> Result<Tensor> {
         let out_dtype = x.dtype();
         let device = x.device();
-        let x = if x.dtype() == self.dtype {
-            x.clone()
-        } else {
-            x.to_dtype(self.dtype)?
-        };
-        let t = if t.dtype() == self.dtype {
-            t.clone()
-        } else {
-            t.to_dtype(self.dtype)?
-        };
-        let encoder_hidden_states = if encoder_hidden_states.dtype() == self.dtype {
-            encoder_hidden_states.clone()
-        } else {
-            encoder_hidden_states.to_dtype(self.dtype)?
-        };
+
+        // Use dequantize+matmul instead of Q8_1 quantized kernel. The Q8_1 path
+        // introduces compounding error across 60 blocks, causing activation explosion
+        // (~450K magnitude by block 59) and NaN by step 2. Dequantize+matmul on GPU
+        // gives correct results with minimal overhead since dequantization is fast on GPU.
+        #[cfg(feature = "cuda")]
+        candle_core::quantized::cuda::set_force_dmmv(true);
+
+        // Cast inputs to F32 for dequantized layers
+        let x = x.to_dtype(DType::F32)?;
+        let t = t.to_dtype(DType::F32)?;
+        let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
         let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
 
         let (batch, channels, height, width) = x.dims4()?;
@@ -858,9 +775,35 @@ impl QuantizedQwenImageTransformer2DModel {
             ))?
             .contiguous()?;
 
+        // Debug: check input BEFORE img_in
+        if std::env::var("MOLD_QWEN_DEBUG").is_ok() {
+            let xp_abs = x_packed.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let xp_max = x_packed.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "[Q-DEBUG] x_packed: shape={:?} dtype={:?} mean_abs={xp_abs:.6} max_abs={xp_max:.6}",
+                x_packed.shape(), x_packed.dtype()
+            );
+        }
+
         let mut img = x_packed.apply(&self.img_in)?;
+
+        // Debug: check output AFTER img_in
+        if std::env::var("MOLD_QWEN_DEBUG").is_ok() {
+            let img_abs = img.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!(
+                "[Q-DEBUG] after img_in: shape={:?} dtype={:?} mean_abs={img_abs:.6}",
+                img.shape(), img.dtype()
+            );
+        }
+
         let txt_normed = self.txt_norm.forward(&encoder_hidden_states)?;
         let mut txt = txt_normed.apply(&self.txt_in)?;
+
+        if std::env::var("MOLD_QWEN_DEBUG").is_ok() {
+            let txt_abs = txt.abs()?.mean_all()?.to_scalar::<f32>()?;
+            let temb_abs = temb.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-DEBUG] txt_mean_abs={txt_abs:.6} temb_mean_abs={temb_abs:.6}");
+        }
 
         let h_tokens = height / patch_size;
         let w_tokens = width / patch_size;
@@ -869,9 +812,8 @@ impl QuantizedQwenImageTransformer2DModel {
             self.rope_embedder
                 .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
 
-        for block in &self.blocks {
-            let gpu_block = block.to_device(&self.gpu_device)?;
-            (img, txt) = gpu_block.forward(
+        for (i, block) in self.blocks.iter().enumerate() {
+            (img, txt) = block.forward(
                 &img,
                 &txt,
                 &encoder_attention_mask,
@@ -881,11 +823,20 @@ impl QuantizedQwenImageTransformer2DModel {
                 &txt_cos,
                 &txt_sin,
             )?;
-            self.gpu_device.synchronize()?;
-            drop(gpu_block);
+            if std::env::var("MOLD_QWEN_DEBUG").is_ok() && (i == 0 || i == 29 || i == 59) {
+                let img_abs = img.abs()?.mean_all()?.to_scalar::<f32>()?;
+                let txt_abs = txt.abs()?.mean_all()?.to_scalar::<f32>()?;
+                eprintln!(
+                    "[Q-DEBUG] block {i}: img_mean_abs={img_abs:.6} txt_mean_abs={txt_abs:.6}"
+                );
+            }
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;
+        if std::env::var("MOLD_QWEN_DEBUG").is_ok() {
+            let out_abs = img_out.abs()?.mean_all()?.to_scalar::<f32>()?;
+            eprintln!("[Q-DEBUG] output: mean_abs={out_abs:.6}");
+        }
         let out_channels = self.cfg.out_channels;
         let x_out = img_out
             .reshape((
@@ -899,6 +850,10 @@ impl QuantizedQwenImageTransformer2DModel {
             .permute((0, 3, 1, 4, 2, 5))?
             .reshape((batch, out_channels, height, width))?
             .contiguous()?;
+        // Restore default quantized matmul behavior for other models
+        #[cfg(feature = "cuda")]
+        candle_core::quantized::cuda::set_force_dmmv(false);
+
         x_out.to_dtype(out_dtype)
     }
 }
