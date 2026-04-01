@@ -12,8 +12,8 @@ use std::time::Instant;
 use super::quantized_transformer::QuantizedZImageTransformer2DModel;
 use super::transformer::ZImageTransformer;
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, prompt_text_key, CachedTensor, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
+    LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
@@ -719,42 +719,53 @@ impl InferenceEngine for ZImageEngine {
             "starting Z-Image generation"
         );
 
-        // 1. Reload text encoder if weights were dropped after previous generation
-        if loaded.text_encoder.model.is_none() {
-            let te_label = if loaded.text_encoder.is_quantized {
-                "Reloading Qwen3 encoder (GGUF)"
-            } else {
-                "Reloading Qwen3 encoder (BF16)"
-            };
-            progress.stage_start(te_label);
-            let reload_start = Instant::now();
-            loaded.text_encoder.reload(progress)?;
-            progress.stage_done(te_label, reload_start.elapsed());
-        }
+        // 1. Encode prompt with Qwen3 (check cache first to avoid unnecessary reload)
+        let cache_key = prompt_text_key(&req.prompt);
+        let (cap_feats, cap_mask) = if let Some(cap_feats) =
+            restore_cached_tensor(&self.prompt_cache, &cache_key, &loaded.device, loaded.dtype)?
+        {
+            progress.cache_hit("prompt conditioning");
+            let token_count = cap_feats.dim(1)?;
+            let cap_mask = Tensor::ones((1, token_count), DType::U8, &loaded.device)?;
+            (cap_feats, cap_mask)
+        } else {
+            // Cache miss — reload encoder if it was dropped after a previous generation
+            if loaded.text_encoder.model.is_none() {
+                let te_label = if loaded.text_encoder.is_quantized {
+                    "Reloading Qwen3 encoder (GGUF)"
+                } else {
+                    "Reloading Qwen3 encoder (BF16)"
+                };
+                progress.stage_start(te_label);
+                let reload_start = Instant::now();
+                loaded.text_encoder.reload(progress)?;
+                progress.stage_done(te_label, reload_start.elapsed());
+            }
 
-        // 2. Encode prompt with Qwen3
-        let (cap_feats, cap_mask) = Self::encode_prompt_cached(
-            progress,
-            &self.prompt_cache,
-            &mut loaded.text_encoder,
-            &req.prompt,
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
+            let (cap_feats, cap_mask) = Self::encode_prompt_cached(
+                progress,
+                &self.prompt_cache,
+                &mut loaded.text_encoder,
+                &req.prompt,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
 
-        // Drop text encoder to free memory for denoising + VAE decode.
-        // It will be reloaded on the next generate() call.
-        // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded weights
-        // since they share the same physical RAM as GPU allocations.
-        // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
-        if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-            loaded.text_encoder.drop_weights();
-            tracing::info!(
-                on_gpu = loaded.text_encoder.on_gpu,
-                "Qwen3 text encoder dropped to free memory for denoising"
-            );
-        }
+            // Drop text encoder to free memory for denoising + VAE decode.
+            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
+            // weights since they share the same physical RAM as GPU allocations.
+            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
+                loaded.text_encoder.drop_weights();
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen3 text encoder dropped to free memory for denoising"
+                );
+            }
+
+            (cap_feats, cap_mask)
+        };
 
         // 3. Calculate latent dimensions: 2 * (image_size / 16)
         let vae_align = 16;
