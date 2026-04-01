@@ -111,7 +111,8 @@ export default defineConfig({
 
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'Copyright <a href="https://jamesbrink.online/">James Brink</a>',
+      copyright:
+        'Copyright <a href="https://jamesbrink.online/">James Brink</a>',
     },
 
     editLink: {
