@@ -66,7 +66,7 @@ pub fn build_generate_request(
 }
 
 /// Resolve the default model name from the cached model list.
-/// Prefers: loaded model > smallest downloaded model > "flux-schnell:q8" fallback.
+/// Prefers: loaded model > smallest downloaded model > "flux2-klein:q8" fallback.
 fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
     // Prefer the currently loaded model
     if let Some(loaded) = models.iter().find(|m| m.info.is_loaded) {
@@ -91,7 +91,7 @@ fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
         return downloaded.info.name.clone();
     }
     // Last resort
-    "flux-schnell:q8".to_string()
+    "flux2-klein:q8".to_string()
 }
 
 /// Generate an AI image from a text prompt.
@@ -197,7 +197,7 @@ mod tests {
         };
         let req = build_generate_request(
             "a cat",
-            "flux-schnell:q8",
+            "flux2-klein:q8",
             None,
             None,
             None,
@@ -207,7 +207,7 @@ mod tests {
             Some(&defaults),
         );
         assert_eq!(req.prompt, "a cat");
-        assert_eq!(req.model, "flux-schnell:q8");
+        assert_eq!(req.model, "flux2-klein:q8");
         assert_eq!(req.width, 1024);
         assert_eq!(req.height, 1024);
         assert_eq!(req.steps, 4);
@@ -330,7 +330,7 @@ mod tests {
             },
             mold_core::ModelInfoExtended {
                 info: mold_core::ModelInfo {
-                    name: "flux-schnell:q8".to_string(),
+                    name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
                     size_gb: 4.5,
                     is_loaded: true,
@@ -349,7 +349,7 @@ mod tests {
                 remaining_download_bytes: None,
             },
         ];
-        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+        assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn resolve_default_empty_list() {
-        assert_eq!(resolve_default_model(&[]), "flux-schnell:q8");
+        assert_eq!(resolve_default_model(&[]), "flux2-klein:q8");
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
             },
             mold_core::ModelInfoExtended {
                 info: mold_core::ModelInfo {
-                    name: "flux-schnell:q8".to_string(),
+                    name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
                     size_gb: 4.5,
                     is_loaded: false,
@@ -427,7 +427,7 @@ mod tests {
             },
         ];
         // Should pick q8 (4.5GB) over bf16 (22.1GB)
-        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+        assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 
     #[test]
@@ -455,7 +455,7 @@ mod tests {
             },
             mold_core::ModelInfoExtended {
                 info: mold_core::ModelInfo {
-                    name: "flux-schnell:q8".to_string(),
+                    name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
                     size_gb: 4.5,
                     is_loaded: false,
@@ -474,8 +474,8 @@ mod tests {
                 remaining_download_bytes: None,
             },
         ];
-        // Should pick flux-schnell:q8, not the utility model
-        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+        // Should pick flux2-klein:q8, not the utility model
+        assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 
     #[test]
@@ -501,7 +501,7 @@ mod tests {
             remaining_download_bytes: None,
         }];
         // Only utility model downloaded — should fall back to default
-        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+        assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 
     #[test]
@@ -529,7 +529,7 @@ mod tests {
             },
             mold_core::ModelInfoExtended {
                 info: mold_core::ModelInfo {
-                    name: "flux-schnell:q8".to_string(),
+                    name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
                     size_gb: 4.5,
                     is_loaded: false,
@@ -548,7 +548,7 @@ mod tests {
                 remaining_download_bytes: None,
             },
         ];
-        // Should pick flux-schnell:q8, not the smaller controlnet
-        assert_eq!(resolve_default_model(&models), "flux-schnell:q8");
+        // Should pick flux2-klein:q8, not the smaller controlnet
+        assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 }

@@ -25,34 +25,6 @@ requirements.
 
 ---
 
-# Flux.2 Klein-base-4B
-
-Undistilled 4B parameter FLUX variant. Same architecture as Klein but without
-distillation — better suited for fine-tuning and LoRA training. Requires more
-steps than the distilled Klein.
-
-- **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
-- **License**: Apache 2.0
-- **HuggingFace**:
-  [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B)
-
-## Variants
-
-| Model                   | Steps | Size    | Notes             |
-| ----------------------- | ----- | ------- | ----------------- |
-| `flux2-klein-base:q8`   | 50    | 4.3 GB  | Good quality      |
-| `flux2-klein-base:q6`   | 50    | 3.4 GB  | Better quality    |
-| `flux2-klein-base:q4`   | 50    | 2.6 GB  | Smallest          |
-| `flux2-klein-base:bf16` | 50    | 7.75 GB | Full precision 4B |
-
-## Defaults
-
-- **Resolution**: 1024x1024
-- **Guidance**: 4.0
-- **Steps**: 50
-
----
-
 # Flux.2 Klein-9B (alpha)
 
 > **Note**: Klein-9B is in alpha. The text encoder architecture (Qwen3 with
@@ -109,6 +81,14 @@ mold run flux2-klein:q8 "A minimalist zen garden with raked sand patterns, a sin
 ```
 
 ![Zen garden — Flux.2 Klein](/gallery/flux2-klein-zen.png)
+
+**Flux.2 Klein BF16** — 4 steps:
+
+```bash
+mold run flux2-klein:bf16 "a majestic owl perched on a mossy branch in a moonlit forest"
+```
+
+![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
 
 ## Architecture
 

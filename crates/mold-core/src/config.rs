@@ -335,7 +335,7 @@ pub struct Config {
 }
 
 fn default_model() -> String {
-    "flux-schnell".to_string()
+    "flux2-klein".to_string()
 }
 
 fn default_models_dir() -> String {

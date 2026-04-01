@@ -6,7 +6,7 @@ default, or override with `MOLD_HOME`).
 ## Config File
 
 ```toml{8-11,14-17}
-default_model = "flux-schnell:q8"
+default_model = "flux2-klein:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
 default_width = 1024
@@ -51,7 +51,7 @@ Environment variables take precedence over config file values.
 | Variable             | Default                 | Description                         |
 | -------------------- | ----------------------- | ----------------------------------- |
 | `MOLD_HOME`          | `~/.mold`               | Base directory for config and cache |
-| `MOLD_DEFAULT_MODEL` | `flux-schnell`          | Default model name                  |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein`           | Default model name                  |
 | `MOLD_HOST`          | `http://localhost:7680` | Remote server URL                   |
 | `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`     | Model storage directory             |
 | `MOLD_PORT`          | `7680`                  | Server port                         |

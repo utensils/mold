@@ -76,7 +76,7 @@ impl Flux2Engine {
     }
 
     /// Select the appropriate transformer config based on the model name.
-    /// Klein-9B uses a larger architecture than Klein-4B / Klein-base-4B.
+    /// Klein-9B uses a larger architecture than Klein-4B.
     fn resolve_config(&self) -> Flux2Config {
         let name = self.base.model_name.to_lowercase();
         if name.contains("9b") {

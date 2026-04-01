@@ -524,7 +524,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
-            default_model: "flux-schnell".to_string(),
+            default_model: "flux2-klein".to_string(),
             // Point models_dir to a non-existent path so the smart default
             // fallback doesn't detect locally downloaded models.
             models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
@@ -566,7 +566,7 @@ mod tests {
             &config,
         )
         .unwrap();
-        assert_eq!(model, "flux-schnell:q8");
+        assert_eq!(model, "flux2-klein:q8");
         assert_eq!(prompt.unwrap(), "a sunset over mountains");
     }
 
@@ -574,7 +574,7 @@ mod tests {
     fn single_prompt_word() {
         let config = test_config();
         let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config).unwrap();
-        assert_eq!(model, "flux-schnell:q8");
+        assert_eq!(model, "flux2-klein:q8");
         assert_eq!(prompt.unwrap(), "sunset");
     }
 
@@ -582,7 +582,7 @@ mod tests {
     fn no_args_returns_none_prompt() {
         let config = test_config();
         let (model, prompt) = resolve_run_args(None, &[], &config).unwrap();
-        assert_eq!(model, "flux-schnell:q8");
+        assert_eq!(model, "flux2-klein:q8");
         assert!(prompt.is_none());
     }
 

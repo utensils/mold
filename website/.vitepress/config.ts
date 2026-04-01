@@ -71,12 +71,12 @@ export default defineConfig({
           text: 'Models',
           items: [
             { text: 'Overview', link: '/models/' },
+            { text: 'FLUX.2', link: '/models/flux2' },
             { text: 'FLUX.1', link: '/models/flux' },
             { text: 'SDXL', link: '/models/sdxl' },
             { text: 'SD 1.5', link: '/models/sd15' },
             { text: 'SD 3.5', link: '/models/sd35' },
             { text: 'Z-Image', link: '/models/z-image' },
-            { text: 'Flux.2 Klein', link: '/models/flux2' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
           ],
@@ -111,7 +111,8 @@ export default defineConfig({
 
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'Copyright <a href="https://jamesbrink.online/">James Brink</a>',
+      copyright:
+        'Copyright <a href="https://jamesbrink.online/">James Brink</a>',
     },
 
     editLink: {

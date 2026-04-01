@@ -7,7 +7,7 @@ and VRAM requirements.
 
 | Need              | Recommended                     | Why                            |
 | ----------------- | ------------------------------- | ------------------------------ |
-| Fast iterations   | `flux-schnell:q8`               | 4 steps, ~10s on RTX 4090      |
+| Fast iterations   | `flux2-klein:q8`                | 4 steps, ungated, Apache 2.0   |
 | Best quality      | `flux-dev:q4`                   | 25 steps, excellent detail     |
 | Low VRAM (<8 GB)  | `flux2-klein:q4`                | 2.6 GB, 4 steps                |
 | Classic ecosystem | `sd15:fp16` or `dreamshaper-v8` | Huge model library, ControlNet |
@@ -35,6 +35,8 @@ automatically and slow generation down.
 
 <div class="gallery-grid">
 
+![Flux.2 Klein — 4 steps](/gallery/flux2-klein-owl.png)
+
 ![FLUX Schnell — 4 steps](/gallery/flux-schnell-leopard.png)
 
 ![FLUX Dev Q4 — 25 steps](/gallery/flux-dev-teahouse.png)
@@ -52,7 +54,7 @@ automatically and slow generation down.
 ## Model Management
 
 ```bash
-mold pull flux-schnell:q8   # Download a model
+mold pull flux2-klein:q8     # Download a model
 mold list                    # See what you have
 mold info                    # Installation overview
 mold info flux-dev:q4        # Model details + disk usage
@@ -65,7 +67,7 @@ mold default flux-dev:q4     # Set default model
 Bare names auto-resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8`:
 
 ```bash
-mold run flux-schnell "a cat"  # resolves to flux-schnell:q8
+mold run flux2-klein "a cat"   # resolves to flux2-klein:q8
 mold run sdxl-base "a cat"     # resolves to sdxl-base:fp16
 ```
 
@@ -82,12 +84,12 @@ mold pull flux-dev:q4
 
 | Family                           | Native Resolution | Architecture                   |
 | -------------------------------- | ----------------- | ------------------------------ |
+| [FLUX.2](/models/flux2)          | 1024x1024         | Qwen3 encoder, 4B transformer  |
 | [FLUX.1](/models/flux)           | 1024x1024         | Flow-matching transformer      |
 | [SDXL](/models/sdxl)             | 1024x1024         | Dual-CLIP, UNet                |
 | [SD 1.5](/models/sd15)           | 512x512           | CLIP-L, UNet                   |
 | [SD 3.5](/models/sd35)           | 1024x1024         | Triple encoder, MMDiT          |
 | [Z-Image](/models/z-image)       | 1024x1024         | Qwen3 encoder, 3D RoPE         |
-| [Flux.2 Klein](/models/flux2)    | 1024x1024         | Qwen3 encoder, 4B transformer  |
 | [Wuerstchen](/models/wuerstchen) | 1024x1024         | 3-stage cascade, 42x compress  |
 | [Qwen-Image](/models/qwen-image) | 1024x1024         | Qwen2.5-VL, flow-matching, CFG |
 

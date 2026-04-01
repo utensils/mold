@@ -186,7 +186,7 @@ Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 ```
 mold run [MODEL] [PROMPT...] [OPTIONS]
     First positional arg is MODEL if it matches a known model name; otherwise it's prompt.
-    Prompt can also be piped via stdin: echo "a cat" | mold run flux-schnell
+    Prompt can also be piped via stdin: echo "a cat" | mold run flux2-klein
 
     -m, --model <MODEL>         Explicit model override
     -o, --output <PATH>         Output file [default: ./mold-{model}-{timestamp}.png]
@@ -239,14 +239,14 @@ mold version                    Show version
 mold completions <SHELL>        Generate shell completions
 ```
 
-**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux-schnell | viu -` just works. `--output -` forces stdout even in interactive terminals. `--image -` reads source image from stdin for img2img: `cat photo.png | mold run "oil painting" --image - | viu -`.
+**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux2-klein | viu -` just works. `--output -` forces stdout even in interactive terminals. `--image -` reads source image from stdin for img2img: `cat photo.png | mold run "oil painting" --image - | viu -`.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MOLD_HOME` | `~/.mold` | Override base mold directory (config, cache, default models) |
-| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model when none specified (smart fallback to only downloaded model) |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model when none specified (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
 | `MOLD_PORT` | `7680` | Server port |
@@ -288,7 +288,7 @@ Env vars take precedence over config file values. `mold pull` auto-writes config
 Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists)
 
 ```toml
-default_model = "flux-schnell:q8"
+default_model = "flux2-klein:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
 default_width = 1024
@@ -298,16 +298,16 @@ default_height = 1024
 # output_dir = "/srv/mold/gallery"
 # default_negative_prompt = "low quality, worst quality, blurry, watermark"
 
-[models."flux-schnell:q8"]
-transformer = "/path/to/flux1-schnell-Q8_0.gguf"
-vae = "/path/to/ae.safetensors"
-t5_encoder = "/path/to/t5xxl_fp16.safetensors"
-clip_encoder = "/path/to/clip_l.safetensors"
-t5_tokenizer = "/path/to/t5.tokenizer.json"
-clip_tokenizer = "/path/to/clip.tokenizer.json"
+[models."flux2-klein:q8"]
+transformer = "/path/to/flux-2-klein-4b-Q8_0.gguf"
+vae = "/path/to/vae/diffusion_pytorch_model.safetensors"
+t5_encoder = "/path/to/text_encoder/model-00001-of-00002.safetensors"
+clip_encoder = ""
+t5_tokenizer = "/path/to/tokenizer/tokenizer.json"
+clip_tokenizer = ""
 default_steps = 4
 default_guidance = 0.0
-is_schnell = true
+is_schnell = false
 # lora = "/path/to/adapter.safetensors"
 # lora_scale = 0.8
 

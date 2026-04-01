@@ -62,7 +62,7 @@ system user, and manages the data directory at `/var/lib/mold`.
     # modelsDir = "/var/lib/mold/models"; # defaults to homeDir/models
 
     # Models
-    defaultModel = "flux-schnell:q8";
+    defaultModel = "flux2-klein:q8";
 
     # Image persistence — save copies of all server-generated images
     # outputDir = "/srv/mold/gallery";

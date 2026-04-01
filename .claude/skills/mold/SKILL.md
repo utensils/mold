@@ -33,7 +33,7 @@ Parse `$ARGUMENTS` to determine the action:
 ### Basic Usage
 
 ```bash
-# Default model (flux-schnell:q8 — fast 4-step)
+# Default model (flux2-klein:q8 — fast 4-step, Apache 2.0, fully ungated)
 mold run "a red apple on a wooden table"
 
 # Explicit model selection
@@ -133,14 +133,13 @@ Pick the right model for the task:
 | `flux-schnell:q8` | Fast (4 steps) | Good | Quick iterations, drafts |
 | `flux-dev:q4` | Slow (25 steps) | Excellent | Final quality, detailed |
 | `flux2-klein:q8` | Fast (4 steps) | Good | Low VRAM, lightweight FLUX |
-| `flux2-klein-base:q8` | Slow (50 steps) | Good | Undistilled 4B, fine-tuning/LoRA |
 | `flux2-klein-9b:q8` | Fast (4 steps) | Excellent | Higher quality 9B, non-commercial (alpha) |
 | `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
 | `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
 | `qwen-image:q4` | Slow (50 steps) | Good | Qwen-Image-2512, CFG |
 
-Default model if none specified: `flux-schnell:q8`
+Default model if none specified: `flux2-klein:q8`
 
 ### Model Defaults
 
@@ -154,7 +153,6 @@ Default model if none specified: `flux-schnell:q8`
 | `sd3.5-large` | 28 | 4.0 | 1024x1024 |
 | `z-image-turbo` | 9 | 0.0 | 1024x1024 |
 | `flux2-klein` | 4 | 0.0 | 1024x1024 |
-| `flux2-klein-base` | 50 | 4.0 | 1024x1024 |
 | `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
 | `qwen-image` | 50 | 3.0 | 1328x1328 |
 
@@ -173,8 +171,6 @@ Default model if none specified: `flux-schnell:q8`
 **Z-Image**: `z-image-turbo:bf16`, `z-image-turbo:q8`, `z-image-turbo:q6`, `z-image-turbo:q4`
 
 **Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
-
-**Flux.2 Klein-base-4B**: `flux2-klein-base:bf16`, `flux2-klein-base:q8`, `flux2-klein-base:q6`, `flux2-klein-base:q4`
 
 **Flux.2 Klein-9B**: `flux2-klein-9b:bf16`, `flux2-klein-9b:q8`, `flux2-klein-9b:q6`, `flux2-klein-9b:q4`
 
@@ -235,7 +231,7 @@ mold is pipe-friendly. When stdout is not a TTY, image bytes go to stdout and st
 ```bash
 mold run "a cat" | viu -                           # Preview in terminal
 mold run "a cat" | convert - output.webp           # Convert format
-echo "a dog in space" | mold run flux-schnell      # Prompt from stdin
+echo "a dog in space" | mold run flux2-klein        # Prompt from stdin
 cat photo.png | mold run "style" --image - | viu - # Full pipeline
 ```
 
@@ -275,7 +271,7 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default models |
-| `MOLD_DEFAULT_MODEL` | `flux-schnell` | Default model (smart fallback to only downloaded model) |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
 | `MOLD_OUTPUT_DIR` | unset | Save server-generated images to this directory |
@@ -304,11 +300,11 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 2. **Local fallback**: if server unreachable, auto-falls back to local GPU
 3. **Local forced** (`--local`): skip server, run on local GPU directly
 
-Models auto-pull if not downloaded: `mold run flux-schnell "a cat"` will download the model first if needed.
+Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download the model first if needed.
 
 ## Practical Tips
 
-- Use `flux-schnell:q8` for fast iterations (4 steps, ~10s on RTX 4090)
+- Use `flux2-klein:q8` for fast iterations (4 steps, ~10s on RTX 4090)
 - Use `flux-dev:q4` for final quality images (25 steps)
 - Use `--seed` for reproducibility — same seed + same prompt = same image
 - Quantized models (q4/q6/q8) use less VRAM than fp16/bf16

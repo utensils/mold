@@ -1922,118 +1922,6 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
             },
         },
-        // ── Flux.2 Klein-base-4B (undistilled, Apache 2.0) ─────────────────
-        // Same architecture as Klein-4B but NOT step-distilled — needs more
-        // steps and guidance. Better for fine-tuning and LoRA.
-        ModelManifest {
-            name: "flux2-klein-base:bf16".to_string(),
-            family: "flux2".to_string(),
-            description:
-                "Flux.2 Klein-base-4B BF16 — Apache 2.0, undistilled, ideal for fine-tuning"
-                    .to_string(),
-            files: {
-                let mut files = shared_flux2_files();
-                files.push(ModelFile {
-                    hf_repo: "black-forest-labs/FLUX.2-klein-base-4B".to_string(),
-                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 7_751_109_744,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: ManifestDefaults {
-                steps: 50,
-                guidance: 4.0,
-                width: 1024,
-                height: 1024,
-                is_schnell: false,
-                scheduler: None,
-                negative_prompt: None,
-            },
-        },
-        ModelManifest {
-            name: "flux2-klein-base:q8".to_string(),
-            family: "flux2".to_string(),
-            description: "Flux.2 Klein-base-4B Q8 GGUF — undistilled, best quantized quality"
-                .to_string(),
-            files: {
-                let mut files = shared_flux2_files();
-                files.push(ModelFile {
-                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
-                    hf_filename: "flux-2-klein-base-4b-Q8_0.gguf".to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 4_300_644_928,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: ManifestDefaults {
-                steps: 50,
-                guidance: 4.0,
-                width: 1024,
-                height: 1024,
-                is_schnell: false,
-                scheduler: None,
-                negative_prompt: None,
-            },
-        },
-        ModelManifest {
-            name: "flux2-klein-base:q6".to_string(),
-            family: "flux2".to_string(),
-            description: "Flux.2 Klein-base-4B Q6 GGUF — undistilled, good quality/size trade-off"
-                .to_string(),
-            files: {
-                let mut files = shared_flux2_files();
-                files.push(ModelFile {
-                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
-                    hf_filename: "flux-2-klein-base-4b-Q6_K.gguf".to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 3_409_273_408,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: ManifestDefaults {
-                steps: 50,
-                guidance: 4.0,
-                width: 1024,
-                height: 1024,
-                is_schnell: false,
-                scheduler: None,
-                negative_prompt: None,
-            },
-        },
-        ModelManifest {
-            name: "flux2-klein-base:q4".to_string(),
-            family: "flux2".to_string(),
-            description: "Flux.2 Klein-base-4B Q4 GGUF — undistilled, smallest footprint"
-                .to_string(),
-            files: {
-                let mut files = shared_flux2_files();
-                files.push(ModelFile {
-                    hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
-                    hf_filename: "flux-2-klein-base-4b-Q4_K_M.gguf".to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 2_604_311_104,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: ManifestDefaults {
-                steps: 50,
-                guidance: 4.0,
-                width: 1024,
-                height: 1024,
-                is_schnell: false,
-                scheduler: None,
-                negative_prompt: None,
-            },
-        },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
         // NOTE: Klein-9B uses a larger Qwen3 encoder (hidden_size=4096) than
         // Klein-4B (hidden_size=2560). The BF16 encoder loader currently only
@@ -3293,28 +3181,6 @@ mod tests {
     }
 
     #[test]
-    fn flux2_klein_base_defaults() {
-        let manifest = find_manifest("flux2-klein-base:bf16").unwrap();
-        assert_eq!(manifest.family, "flux2");
-        assert_eq!(manifest.defaults.steps, 50);
-        assert!((manifest.defaults.guidance - 4.0).abs() < 0.01);
-        assert_eq!(manifest.defaults.width, 1024);
-    }
-
-    #[test]
-    fn flux2_klein_base_gguf_exists() {
-        assert!(find_manifest("flux2-klein-base:q8").is_some());
-        assert!(find_manifest("flux2-klein-base:q6").is_some());
-        assert!(find_manifest("flux2-klein-base:q4").is_some());
-    }
-
-    #[test]
-    fn flux2_klein_base_resolves_to_q8() {
-        let name = resolve_model_name("flux2-klein-base");
-        assert_eq!(name, "flux2-klein-base:q8");
-    }
-
-    #[test]
     fn flux2_klein_9b_defaults() {
         let manifest = find_manifest("flux2-klein-9b:bf16").unwrap();
         assert_eq!(manifest.family, "flux2");
@@ -3393,8 +3259,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 12 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 65
-        assert_eq!(known_manifests().len(), 65);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand = 61
+        assert_eq!(known_manifests().len(), 61);
     }
 
     #[test]
