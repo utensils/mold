@@ -1,9 +1,12 @@
-use mold_core::{GenerateRequest, GenerateResponse, LoraWeight, MoldClient, SseProgressEvent};
+use mold_core::{
+    classify_generate_error, GenerateRequest, GenerateResponse, GenerateServerAction, LoraWeight,
+    MoldClient, SseProgressEvent,
+};
 use tokio::sync::mpsc;
 
 use crate::app::{BackgroundEvent, GenerateParams};
 
-/// Run a generation request (remote or local) and send progress/results to the channel.
+/// Run a generation request — tries remote first, falls back to local on connection error.
 pub async fn run_generation(
     server_url: Option<String>,
     params: GenerateParams,
@@ -13,51 +16,73 @@ pub async fn run_generation(
 ) {
     if params.local_mode {
         run_local_generation(params, prompt, negative_prompt, tx).await;
-    } else if let Some(url) = server_url {
+        return;
+    }
+
+    if let Some(url) = server_url {
         let client = MoldClient::new(&url);
-        run_remote_generation(client, params, prompt, negative_prompt, tx).await;
-    } else {
-        // No server configured and not in local mode
-        let _ = tx.send(BackgroundEvent::Error(
-            "No server configured. Set MOLD_HOST or use local mode.".to_string(),
-        ));
+        let req = build_request(&params, &prompt, &negative_prompt);
+
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
+
+        let tx_progress = tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let _ = tx_progress.send(BackgroundEvent::Progress(event));
+            }
+        });
+
+        match client.generate_stream(&req, progress_tx).await {
+            Ok(Some(response)) => {
+                let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+                return;
+            }
+            Ok(None) => {
+                // Server doesn't support SSE — try blocking API
+                match client.generate(req).await {
+                    Ok(response) => {
+                        let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+                        return;
+                    }
+                    Err(e) => {
+                        match classify_generate_error(&e) {
+                            GenerateServerAction::FallbackLocal => {
+                                let _ =
+                                    tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                                        message: "Server unreachable, using local inference"
+                                            .to_string(),
+                                    }));
+                                // Fall through to local
+                            }
+                            _ => {
+                                let _ = tx.send(BackgroundEvent::Error(format!(
+                                    "Generation failed: {e}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                match classify_generate_error(&e) {
+                    GenerateServerAction::FallbackLocal => {
+                        let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                            message: "Server unreachable, using local inference".to_string(),
+                        }));
+                        // Fall through to local
+                    }
+                    _ => {
+                        let _ = tx.send(BackgroundEvent::Error(format!("Generation failed: {e}")));
+                        return;
+                    }
+                }
+            }
+        }
     }
-}
 
-async fn run_remote_generation(
-    client: MoldClient,
-    params: GenerateParams,
-    prompt: String,
-    negative_prompt: Option<String>,
-    tx: mpsc::UnboundedSender<BackgroundEvent>,
-) {
-    let req = build_request(params, prompt, negative_prompt);
-
-    // Create a channel for SSE progress events
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
-
-    // Forward progress events to the main TUI channel
-    let tx_progress = tx.clone();
-    tokio::spawn(async move {
-        while let Some(event) = progress_rx.recv().await {
-            let _ = tx_progress.send(BackgroundEvent::Progress(event));
-        }
-    });
-
-    // Run the streaming generation
-    match client.generate_stream(&req, progress_tx).await {
-        Ok(Some(response)) => {
-            let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
-        }
-        Ok(None) => {
-            let _ = tx.send(BackgroundEvent::Error(
-                "Generation completed but no response received".to_string(),
-            ));
-        }
-        Err(e) => {
-            let _ = tx.send(BackgroundEvent::Error(format!("Generation failed: {e}")));
-        }
-    }
+    // Fall through: no server URL or server unreachable — try local
+    run_local_generation(params, prompt, negative_prompt, tx).await;
 }
 
 async fn run_local_generation(
@@ -76,14 +101,15 @@ async fn run_local_generation(
         Some(paths) => paths,
         None => {
             let _ = tx.send(BackgroundEvent::Error(format!(
-                "Cannot resolve model paths for '{model_name}'. Run: mold pull {model_name}"
+                "Model '{}' not downloaded. Run: mold pull {}",
+                model_name, model_name
             )));
             return;
         }
     };
 
     let offload = params.offload;
-    let req = build_request(params, prompt, negative_prompt);
+    let req = build_request(&params, &prompt, &negative_prompt);
 
     let tx_clone = tx.clone();
 
@@ -96,7 +122,6 @@ async fn run_local_generation(
             offload,
         )?;
 
-        // Install progress callback
         let tx_progress = tx_clone.clone();
         engine.set_on_progress(Box::new(move |event: ProgressEvent| {
             let sse_event: SseProgressEvent = event.into();
@@ -123,16 +148,15 @@ async fn run_local_generation(
 }
 
 fn build_request(
-    params: GenerateParams,
-    prompt: String,
-    negative_prompt: Option<String>,
+    params: &GenerateParams,
+    prompt: &str,
+    negative_prompt: &Option<String>,
 ) -> GenerateRequest {
-    let lora = params.lora_path.map(|path| LoraWeight {
-        path,
+    let lora = params.lora_path.as_ref().map(|path| LoraWeight {
+        path: path.clone(),
         scale: params.lora_scale,
     });
 
-    // Read source image bytes if path provided
     let source_image = params
         .source_image_path
         .as_ref()
@@ -149,9 +173,9 @@ fn build_request(
         .and_then(|p| std::fs::read(p).ok());
 
     GenerateRequest {
-        prompt,
-        negative_prompt,
-        model: params.model,
+        prompt: prompt.to_string(),
+        negative_prompt: negative_prompt.clone(),
+        model: params.model.clone(),
         width: params.width,
         height: params.height,
         steps: params.steps,
@@ -165,7 +189,7 @@ fn build_request(
         strength: params.strength,
         mask_image,
         control_image,
-        control_model: params.control_model,
+        control_model: params.control_model.clone(),
         control_scale: params.control_scale,
         expand: if params.expand { Some(true) } else { None },
         original_prompt: None,

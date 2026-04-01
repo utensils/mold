@@ -545,11 +545,13 @@ impl App {
                         | (KeyCode::BackTab, KeyModifiers::SHIFT)
                         | (KeyCode::Char('c'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('e'), KeyModifiers::CONTROL)
+                        | (KeyCode::Char('g'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('m'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('r'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('s'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('k'), KeyModifiers::CONTROL)
-                        | (KeyCode::Enter, KeyModifiers::NONE) => {
+                        | (KeyCode::Enter, KeyModifiers::NONE)
+                        | (KeyCode::Esc, KeyModifiers::NONE) => {
                             // Fall through to action mapping
                         }
                         (KeyCode::Char('1'), KeyModifiers::ALT)
@@ -715,19 +717,24 @@ impl App {
             },
             Action::Increment => self.increment_param(1),
             Action::Decrement => self.increment_param(-1),
-            Action::Generate | Action::Confirm => {
+            Action::Generate => {
                 if self.active_view == View::Generate && !self.generate.generating {
                     self.start_generation();
                 }
             }
+            Action::Confirm => {
+                if self.active_view == View::Generate {
+                    if self.generate.focus == GenerateFocus::Parameters {
+                        // Enter on a param field: activate it
+                        self.activate_current_param();
+                    } else if !self.generate.generating {
+                        // Enter in prompt/negative: generate
+                        self.start_generation();
+                    }
+                }
+            }
             Action::OpenModelSelector => {
-                let all_models: Vec<String> =
-                    self.models.catalog.iter().map(|m| m.name.clone()).collect();
-                self.popup = Some(Popup::ModelSelector {
-                    filter: String::new(),
-                    selected: 0,
-                    filtered: all_models,
-                });
+                self.open_model_selector();
             }
             Action::RandomizeSeed => {
                 self.generate.params.seed = None;
@@ -791,6 +798,54 @@ impl App {
             ParamField::Offload => {
                 p.offload = !p.offload;
             }
+            _ => {}
+        }
+    }
+
+    fn open_model_selector(&mut self) {
+        let all_models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        self.popup = Some(Popup::ModelSelector {
+            filter: String::new(),
+            selected: 0,
+            filtered: all_models,
+        });
+    }
+
+    /// Handle Enter on the currently focused parameter field.
+    fn activate_current_param(&mut self) {
+        let field = match self.generate.visible_fields.get(self.generate.param_index) {
+            Some(f) => *f,
+            None => return,
+        };
+        match field {
+            // Open model selector popup
+            ParamField::Model => self.open_model_selector(),
+            // Toggle boolean fields
+            ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
+            ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
+            ParamField::Mode => self.generate.params.local_mode = !self.generate.params.local_mode,
+            // Cycle format
+            ParamField::Format => {
+                self.generate.params.format = match self.generate.params.format {
+                    OutputFormat::Png => OutputFormat::Jpeg,
+                    OutputFormat::Jpeg => OutputFormat::Png,
+                };
+            }
+            // Cycle scheduler
+            ParamField::Scheduler => {
+                self.generate.params.scheduler = match self.generate.params.scheduler {
+                    None => Some(Scheduler::Ddim),
+                    Some(Scheduler::Ddim) => Some(Scheduler::EulerAncestral),
+                    Some(Scheduler::EulerAncestral) => Some(Scheduler::UniPc),
+                    Some(Scheduler::UniPc) => None,
+                };
+            }
+            // Randomize seed on Enter
+            ParamField::Seed => {
+                use rand::Rng;
+                self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+            }
+            // For numeric fields, Enter does nothing special (use +/-)
             _ => {}
         }
     }

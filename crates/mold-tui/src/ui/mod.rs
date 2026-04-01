@@ -93,16 +93,25 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         View::Generate => {
             if app.generate.generating {
                 vec![("", "Generating...")]
+            } else if app.generate.focus == crate::app::GenerateFocus::Parameters {
+                vec![
+                    ("Enter", "Edit"),
+                    ("+/-", "Adjust"),
+                    ("^G", "Generate"),
+                    ("^M", "Model"),
+                    ("Tab", "Focus"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
             } else {
                 vec![
                     ("Enter", "Generate"),
                     ("^E", "Expand"),
-                    ("^S", "Save"),
                     ("^M", "Model"),
                     ("^R", "Seed"),
                     ("Tab", "Focus"),
                     ("?", "Help"),
-                    ("q", "Quit"),
                 ]
             }
         }

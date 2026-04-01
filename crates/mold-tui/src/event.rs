@@ -16,7 +16,12 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     // Global shortcuts (available in all views)
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Quit,
-        (KeyCode::Char('?'), KeyModifiers::NONE) => return Action::ShowHelp,
+        (KeyCode::Char('?'), KeyModifiers::NONE)
+            if app.active_view != View::Generate
+                || app.generate.focus == crate::app::GenerateFocus::Parameters =>
+        {
+            return Action::ShowHelp
+        }
         _ => {}
     }
 
@@ -41,13 +46,14 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
 fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     use crate::app::GenerateFocus;
 
-    // Ctrl shortcuts
+    // Ctrl shortcuts (work from any focus)
     match (key.code, key.modifiers) {
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => return Action::ExpandPrompt,
         (KeyCode::Char('m'), KeyModifiers::CONTROL) => return Action::OpenModelSelector,
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => return Action::RandomizeSeed,
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => return Action::SaveImage,
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => return Action::CompareModels,
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => return Action::Generate,
         _ => {}
     }
 
@@ -58,14 +64,31 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         _ => {}
     }
 
-    // Enter to generate (from any focus)
-    if key.code == KeyCode::Enter && !app.generate.generating {
-        return Action::Generate;
+    // Escape: clear errors, or if nothing to clear, deselect/go to prompt
+    if key.code == KeyCode::Esc {
+        if app.generate.error_message.is_some() {
+            return Action::Cancel;
+        }
+        // If in params, go back to prompt
+        if app.generate.focus != GenerateFocus::Prompt {
+            return Action::FocusPrev;
+        }
+        return Action::None;
     }
 
-    // Escape to clear errors
-    if key.code == KeyCode::Esc {
-        return Action::Cancel;
+    // Enter behavior depends on focus
+    if key.code == KeyCode::Enter {
+        return match app.generate.focus {
+            GenerateFocus::Prompt | GenerateFocus::NegativePrompt => {
+                // In text fields: Ctrl+Enter or just Enter generates
+                // (multiline input uses Shift+Enter in textarea)
+                Action::Generate
+            }
+            GenerateFocus::Parameters => {
+                // In params: Enter activates the field (model selector, toggle, etc.)
+                Action::Confirm
+            }
+        };
     }
 
     // Parameter-specific keys
