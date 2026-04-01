@@ -1,21 +1,21 @@
-//! Utility for loading safetensors model weights with byte-level progress reporting.
+//! Utility for loading safetensors model weights via lazy memory-mapped I/O.
 //!
-//! Replaces the opaque `VarBuilder::from_mmaped_safetensors()` with a per-tensor
-//! loading loop that emits `WeightLoad` progress events. The returned `VarBuilder`
-//! is backed by an in-memory `HashMap` (via `VarBuilder::from_tensors`).
+//! Wraps candle's `VarBuilder::from_mmaped_safetensors()` with progress events.
+//! Only the safetensors header is parsed upfront — tensor data loads on demand
+//! via OS page faults during model construction.
 
 use anyhow::Result;
-use candle_core::{safetensors::MmapedSafetensors, DType, Device, Tensor};
+use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::progress::ProgressReporter;
 
-/// Load safetensors files with per-tensor progress reporting.
+/// Load safetensors files via lazy mmap with progress events.
 ///
 /// `component` is the human-readable label (e.g. "FLUX transformer", "VAE").
-/// Progress events track bytes loaded vs total file size on disk.
+/// Emits start/complete `WeightLoad` events; actual tensor I/O is deferred
+/// to model construction via OS page faults.
 pub fn load_safetensors_with_progress<'a>(
     paths: &[impl AsRef<Path>],
     dtype: DType,
@@ -25,58 +25,18 @@ pub fn load_safetensors_with_progress<'a>(
 ) -> Result<VarBuilder<'a>> {
     let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
 
-    // Total bytes = sum of file sizes on disk (accurate, includes header/alignment)
     let bytes_total: u64 = path_refs
         .iter()
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    // Open mmap (cheap — sets up page table entries, no I/O yet)
-    let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
-
-    // Enumerate all tensors and compute per-tensor byte sizes from on-disk dtype
-    // (not target dtype — bytes_total is derived from file size on disk).
-    let tensor_list: Vec<(String, usize)> = st
-        .tensors()
-        .into_iter()
-        .map(|(name, view)| {
-            let elements: usize = view.shape().iter().product();
-            let byte_size = elements * (view.dtype().bitsize() / 8);
-            (name, byte_size)
-        })
-        .collect();
-
-    let mut bytes_loaded: u64 = 0;
-    let mut last_reported: u64 = 0;
-    // Throttle: emit at most ~100 events (every 1% or 50MB, whichever is larger)
-    let report_interval = (bytes_total / 100).max(50_000_000);
-
     progress.weight_load(component, 0, bytes_total);
 
-    let mut tensor_map: HashMap<String, Tensor> = HashMap::with_capacity(tensor_list.len());
-    for (name, byte_size) in &tensor_list {
-        let needs_conversion = st.get(name).is_ok_and(|v| v.dtype() != dtype.into());
-        let tensor = if needs_conversion {
-            // On-disk dtype differs from target: load to CPU, convert, transfer.
-            // We avoid calling to_dtype() on a GPU tensor because the CUDA
-            // type-conversion kernel can conflict with GGUF quantized kernel
-            // contexts loaded on the same device.
-            st.load(name, &candle_core::Device::Cpu)?
-                .to_dtype(dtype)?
-                .to_device(device)?
-        } else {
-            // On-disk dtype matches target — load directly to device.
-            st.load(name, device)?
-        };
-        tensor_map.insert(name.clone(), tensor);
+    // Lazy mmap — only parses safetensors header, no tensor I/O.
+    // Tensors load on-demand via OS page faults during model construction.
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&path_refs, dtype, device)? };
 
-        bytes_loaded += *byte_size as u64;
-        if bytes_loaded - last_reported >= report_interval || bytes_loaded >= bytes_total {
-            // Clamp to file-size total to avoid overshoot from dtype size differences
-            progress.weight_load(component, bytes_loaded.min(bytes_total), bytes_total);
-            last_reported = bytes_loaded;
-        }
-    }
+    progress.weight_load(component, bytes_total, bytes_total);
 
-    Ok(VarBuilder::from_tensors(tensor_map, dtype, device))
+    Ok(vb)
 }
