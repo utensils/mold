@@ -78,7 +78,7 @@ pub async fn run() -> Result<()> {
                         String::new()
                     } else {
                         let joined = p.args.join(" ");
-                        if joined.len() > 60 {
+                        if joined.chars().count() > 60 {
                             let truncated: String = joined.chars().take(57).collect();
                             format!(" {truncated}...")
                         } else {

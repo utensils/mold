@@ -160,7 +160,11 @@ pub fn format_duration(secs: u64) -> String {
 
 /// Format bytes to a human-readable MB string.
 pub fn format_memory_mb(bytes: u64) -> String {
-    format!("{} MB", bytes / (1024 * 1024))
+    let mb = bytes / (1024 * 1024);
+    if mb == 0 && bytes > 0 {
+        return "< 1 MB".to_string();
+    }
+    format!("{mb} MB")
 }
 
 #[cfg(test)]
@@ -233,6 +237,12 @@ mod tests {
     #[test]
     fn format_memory_mb_basic() {
         assert_eq!(format_memory_mb(512 * 1024 * 1024), "512 MB");
+    }
+
+    #[test]
+    fn format_memory_mb_sub_mb() {
+        assert_eq!(format_memory_mb(500_000), "< 1 MB");
+        assert_eq!(format_memory_mb(0), "0 MB");
     }
 
     #[test]
