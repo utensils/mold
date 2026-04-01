@@ -728,6 +728,7 @@ impl App {
                         | (KeyCode::Char('k'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('p'), KeyModifiers::CONTROL)
                         | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+                        | (KeyCode::Enter, KeyModifiers::NONE)
                         | (KeyCode::Esc, KeyModifiers::NONE) => {
                             // Fall through to action mapping
                         }

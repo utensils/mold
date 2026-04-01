@@ -96,7 +96,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     // (In Prompt/NegativePrompt, Enter is handled by tui-textarea for newlines)
     if key.code == KeyCode::Enter {
         return match app.generate.focus {
-            GenerateFocus::Prompt | GenerateFocus::NegativePrompt => Action::None,
+            GenerateFocus::Prompt | GenerateFocus::NegativePrompt => Action::Generate,
             GenerateFocus::Parameters => Action::Confirm,
             GenerateFocus::Navigation => Action::FocusNext,
         };
