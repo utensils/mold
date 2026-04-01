@@ -1,3 +1,6 @@
+// Phase 1 skeleton — many types are defined for future phases.
+#![allow(dead_code)]
+
 mod action;
 mod app;
 mod backend;
@@ -12,7 +15,7 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
 

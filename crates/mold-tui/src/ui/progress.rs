@@ -65,7 +65,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                     Span::styled(stage, Style::default().fg(theme.text)),
                 ]);
                 let p = Paragraph::new(line);
-                let row = Rect { height: 1, ..bar_area };
+                let row = Rect {
+                    height: 1,
+                    ..bar_area
+                };
                 frame.render_widget(p, row);
                 bar_area.y += 1;
                 bar_area.height = bar_area.height.saturating_sub(1);
@@ -89,7 +92,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                 .label(label)
                 .gauge_style(theme.progress_filled())
                 .style(theme.progress_empty());
-            let row = Rect { height: 1, ..bar_area };
+            let row = Rect {
+                height: 1,
+                ..bar_area
+            };
             frame.render_widget(gauge, row);
             bar_area.y += 1;
             bar_area.height = bar_area.height.saturating_sub(1);
@@ -111,7 +117,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                 .label(label)
                 .gauge_style(theme.progress_filled())
                 .style(theme.progress_empty());
-            let row = Rect { height: 1, ..bar_area };
+            let row = Rect {
+                height: 1,
+                ..bar_area
+            };
             frame.render_widget(gauge, row);
         }
     }
@@ -130,10 +139,10 @@ fn render_log(frame: &mut Frame, theme: &Theme, log: &[ProgressLogEntry], area: 
         .iter()
         .map(|entry| {
             let (icon, style) = match entry.style {
-                PStyle::Done => ("\u{2713}", theme.success()),      // checkmark
-                PStyle::Info => ("\u{2022}", theme.dim()),          // bullet
+                PStyle::Done => ("\u{2713}", theme.success()), // checkmark
+                PStyle::Info => ("\u{2022}", theme.dim()),     // bullet
                 PStyle::Warning => ("!", theme.warning()),
-                PStyle::Error => ("\u{2717}", theme.error()),       // x mark
+                PStyle::Error => ("\u{2717}", theme.error()), // x mark
             };
             Line::from(vec![
                 Span::styled(format!("{icon} "), style),
@@ -164,6 +173,9 @@ fn spinner_frame() -> char {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let frames = ['\u{2801}', '\u{2802}', '\u{2804}', '\u{2840}', '\u{2820}', '\u{2810}', '\u{2808}', '\u{2800}'];
+    let frames = [
+        '\u{2801}', '\u{2802}', '\u{2804}', '\u{2840}', '\u{2820}', '\u{2810}', '\u{2808}',
+        '\u{2800}',
+    ];
     frames[(ms / 100 % frames.len() as u128) as usize]
 }

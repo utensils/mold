@@ -1,5 +1,5 @@
-pub mod generate;
 pub mod gallery;
+pub mod generate;
 pub mod models;
 pub mod param_form;
 pub mod popup;
@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Tab bar
+            Constraint::Length(3), // Tab bar
             Constraint::Min(10),   // Content area
             Constraint::Length(1), // Status bar
         ])
@@ -138,7 +138,6 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(*desc, theme.status_bar()));
     }
 
-    let bar = Paragraph::new(Line::from(spans))
-        .style(theme.status_bar());
+    let bar = Paragraph::new(Line::from(spans)).style(theme.status_bar());
     frame.render_widget(bar, area);
 }

@@ -145,8 +145,7 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
         } else {
             Style::default().fg(theme.text)
         };
-        let filter_line = Paragraph::new(format!("Filter: {filter_display}"))
-            .style(filter_style);
+        let filter_line = Paragraph::new(format!("Filter: {filter_display}")).style(filter_style);
         let filter_area = Rect {
             x: inner.x,
             y: inner.y,

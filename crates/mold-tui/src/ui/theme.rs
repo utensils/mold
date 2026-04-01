@@ -50,22 +50,22 @@ impl Theme {
     /// Dark theme — Catppuccin Mocha inspired.
     pub fn dark() -> Self {
         Self {
-            bg: Color::Rgb(30, 30, 46),           // #1e1e2e
-            surface: Color::Rgb(49, 50, 68),       // #313244
-            border: Color::Rgb(69, 71, 90),        // #45475a
-            border_focus: Color::Rgb(137, 180, 250), // #89b4fa (blue)
-            text: Color::Rgb(205, 214, 244),       // #cdd6f4
-            text_dim: Color::Rgb(127, 132, 156),   // #7f849c
-            accent: Color::Rgb(137, 180, 250),     // #89b4fa (blue)
-            success: Color::Rgb(166, 227, 161),    // #a6e3a1 (green)
-            warning: Color::Rgb(249, 226, 175),    // #f9e2af (yellow)
-            error: Color::Rgb(243, 139, 168),      // #f38ba8 (red)
-            highlight: Color::Rgb(69, 71, 90),     // #45475a
+            bg: Color::Rgb(30, 30, 46),               // #1e1e2e
+            surface: Color::Rgb(49, 50, 68),          // #313244
+            border: Color::Rgb(69, 71, 90),           // #45475a
+            border_focus: Color::Rgb(137, 180, 250),  // #89b4fa (blue)
+            text: Color::Rgb(205, 214, 244),          // #cdd6f4
+            text_dim: Color::Rgb(127, 132, 156),      // #7f849c
+            accent: Color::Rgb(137, 180, 250),        // #89b4fa (blue)
+            success: Color::Rgb(166, 227, 161),       // #a6e3a1 (green)
+            warning: Color::Rgb(249, 226, 175),       // #f9e2af (yellow)
+            error: Color::Rgb(243, 139, 168),         // #f38ba8 (red)
+            highlight: Color::Rgb(69, 71, 90),        // #45475a
             progress_fill: Color::Rgb(137, 180, 250), // #89b4fa
             progress_empty: Color::Rgb(49, 50, 68),   // #313244
-            tab_bg: Color::Rgb(24, 24, 37),        // #181825
-            tab_active: Color::Rgb(137, 180, 250), // #89b4fa
-            tab_inactive: Color::Rgb(127, 132, 156), // #7f849c
+            tab_bg: Color::Rgb(24, 24, 37),           // #181825
+            tab_active: Color::Rgb(137, 180, 250),    // #89b4fa
+            tab_inactive: Color::Rgb(127, 132, 156),  // #7f849c
         }
     }
 

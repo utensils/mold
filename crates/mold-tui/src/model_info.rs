@@ -101,8 +101,6 @@ pub fn family_for_model(model_name: &str, config: &Config) -> String {
     model_cfg
         .family
         .clone()
-        .or_else(|| {
-            mold_core::manifest::find_manifest(model_name).map(|m| m.family.clone())
-        })
+        .or_else(|| mold_core::manifest::find_manifest(model_name).map(|m| m.family.clone()))
         .unwrap_or_else(|| "flux".to_string())
 }

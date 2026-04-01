@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use crate::app::{GenerateState, ParamField};
 use crate::ui::theme::Theme;
@@ -67,9 +69,13 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
 
         // Add indicator for dropdown/toggle fields
         let suffix = match field {
-            ParamField::Model => " \u{25bc}",  // down triangle
+            ParamField::Model => " \u{25bc}", // down triangle
             ParamField::Format | ParamField::Mode | ParamField::Expand | ParamField::Offload => {
-                if is_selected { " \u{25c0}\u{25b6}" } else { "" }  // left/right arrows
+                if is_selected {
+                    " \u{25c0}\u{25b6}"
+                } else {
+                    ""
+                } // left/right arrows
             }
             ParamField::Width
             | ParamField::Height
@@ -78,7 +84,11 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
             | ParamField::Batch
             | ParamField::Strength
             | ParamField::ControlScale => {
-                if is_selected { " \u{25c0}\u{25b6}" } else { "" }
+                if is_selected {
+                    " \u{25c0}\u{25b6}"
+                } else {
+                    ""
+                }
             }
             _ => "",
         };
@@ -86,7 +96,14 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
         lines.push(Line::from(vec![
             Span::styled(label, label_style),
             Span::styled(value, value_style),
-            Span::styled(suffix, if is_selected { theme.param_selected() } else { theme.dim() }),
+            Span::styled(
+                suffix,
+                if is_selected {
+                    theme.param_selected()
+                } else {
+                    theme.dim()
+                },
+            ),
         ]));
     }
 
@@ -106,8 +123,9 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
 
     // Scrollbar if content overflows
     if lines.len() > inner.height as usize {
-        let mut scrollbar_state = ScrollbarState::new(lines.len().saturating_sub(inner.height as usize))
-            .position(scroll_offset);
+        let mut scrollbar_state =
+            ScrollbarState::new(lines.len().saturating_sub(inner.height as usize))
+                .position(scroll_offset);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(theme.border));
         frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);

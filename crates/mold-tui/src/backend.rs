@@ -1,6 +1,4 @@
-use mold_core::{
-    GenerateRequest, GenerateResponse, LoraWeight, MoldClient, SseProgressEvent,
-};
+use mold_core::{GenerateRequest, GenerateResponse, LoraWeight, MoldClient, SseProgressEvent};
 use tokio::sync::mpsc;
 
 use crate::app::{BackgroundEvent, GenerateParams};
@@ -69,8 +67,8 @@ async fn run_local_generation(
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
     use mold_core::{Config, ModelPaths};
-    use mold_inference::{LoadStrategy, create_engine};
     use mold_inference::progress::ProgressEvent;
+    use mold_inference::{create_engine, LoadStrategy};
 
     let config = Config::load_or_default();
     let model_name = params.model.clone();

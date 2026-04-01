@@ -21,7 +21,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let prompt_height = 4;
     let neg_height = if show_negative { 3 } else { 0 };
     let progress_height = 5;
-    let error_height = if app.generate.error_message.is_some() { 1 } else { 0 };
+    let error_height = if app.generate.error_message.is_some() {
+        1
+    } else {
+        0
+    };
 
     let constraints = if show_negative {
         vec![
@@ -46,9 +50,21 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let (prompt_area, neg_area, middle_area, progress_area, error_area) = if show_negative {
-        (layout[0], Some(layout[1]), layout[2], layout[3], layout.get(4).copied())
+        (
+            layout[0],
+            Some(layout[1]),
+            layout[2],
+            layout[3],
+            layout.get(4).copied(),
+        )
     } else {
-        (layout[0], None, layout[1], layout[2], layout.get(3).copied())
+        (
+            layout[0],
+            None,
+            layout[1],
+            layout[2],
+            layout.get(3).copied(),
+        )
     };
 
     // ── Prompt ─────────────────────────────────────────────
@@ -78,7 +94,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(38), // Parameters panel
-            Constraint::Min(20),   // Preview panel
+            Constraint::Min(20),    // Preview panel
         ])
         .split(middle_area);
 
@@ -100,8 +116,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // ── Error message ──────────────────────────────────────
     if let Some(error_area) = error_area {
         if let Some(err) = &app.generate.error_message {
-            let error_line = Paragraph::new(format!(" \u{2717} {err}"))
-                .style(app.theme.error());
+            let error_line = Paragraph::new(format!(" \u{2717} {err}")).style(app.theme.error());
             frame.render_widget(error_line, error_area);
         }
     }
@@ -137,9 +152,7 @@ fn render_text_area<'a>(
 
     textarea.set_style(Style::default().fg(theme.text).bg(theme.bg));
     textarea.set_cursor_style(if focused {
-        Style::default()
-            .fg(theme.bg)
-            .bg(theme.accent)
+        Style::default().fg(theme.bg).bg(theme.accent)
     } else {
         Style::default()
     });
@@ -175,11 +188,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             (app.generate.last_seed, app.generate.last_generation_time_ms)
         {
             if inner.height > 2 {
-                let info = format!(
-                    "seed: {} | {:.1}s",
-                    seed,
-                    time_ms as f64 / 1000.0
-                );
+                let info = format!("seed: {} | {:.1}s", seed, time_ms as f64 / 1000.0);
                 let info_area = Rect {
                     x: inner.x,
                     y: inner.y + inner.height - 1,

@@ -73,9 +73,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => return Action::Up,
             KeyCode::Down | KeyCode::Char('j') => return Action::Down,
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => {
-                return Action::Increment
-            }
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => return Action::Increment,
             KeyCode::Char('-') | KeyCode::Left => return Action::Decrement,
             _ => {}
         }

@@ -81,10 +81,11 @@ crates/
 ├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
 ├── mold-server/              # Axum HTTP inference server (library, consumed by mold-cli)
 ├── mold-cli/                 # Main binary — CLI (clap), single `mold` binary with feature flags
-└── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
+├── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
+└── mold-tui/                 # Interactive terminal UI (feature-gated, consumed by mold-cli via `tui` feature)
 ```
 
-**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`).
+**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`).
 
 ### mold-core
 

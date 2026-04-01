@@ -56,10 +56,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(theme.bg));
 
     if let Some(model) = app.models.catalog.get(app.models.selected) {
-        let line1 = format!(
-            "{} \u{2014} {}",
-            model.name, model.defaults.description
-        );
+        let line1 = format!("{} \u{2014} {}", model.name, model.defaults.description);
         let line2 = format!(
             "Family: {} \u{00b7} Size: {:.1}G \u{00b7} HF: {}",
             model.family, model.size_gb, model.hf_repo,
@@ -71,10 +68,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(details_block);
         frame.render_widget(details, layout[2]);
     } else {
-        frame.render_widget(
-            Paragraph::new("").block(details_block),
-            layout[2],
-        );
+        frame.render_widget(Paragraph::new("").block(details_block), layout[2]);
     }
 }
 
@@ -94,14 +88,43 @@ fn render_model_table(
     };
 
     let header = Row::new(vec![
-        Cell::from("NAME").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("FAMILY").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("SIZE").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("STEPS").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("GUIDE").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("DIM").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-        Cell::from("STATUS").style(Style::default().fg(theme.text_dim).add_modifier(Modifier::BOLD)),
-    ]).height(1);
+        Cell::from("NAME").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("FAMILY").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("SIZE").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("STEPS").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("GUIDE").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("DIM").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("STATUS").style(
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+    .height(1);
 
     let rows: Vec<Row> = models
         .iter()
@@ -114,10 +137,7 @@ fn render_model_table(
                 ""
             };
             let marker = if m.is_loaded { "\u{2605} " } else { "  " };
-            let dim = format!(
-                "{}\u{00b2}",
-                m.defaults.default_width,
-            );
+            let dim = format!("{}\u{00b2}", m.defaults.default_width,);
             Row::new(vec![
                 Cell::from(format!("{marker}{}", m.name)),
                 Cell::from(m.family.to_uppercase()),

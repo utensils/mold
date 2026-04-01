@@ -1,8 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
-    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler,
-    SseProgressEvent,
+    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, SseProgressEvent,
 };
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -11,7 +10,7 @@ use tui_textarea::TextArea;
 
 use crate::action::{Action, View};
 use crate::event::map_event;
-use crate::model_info::{ModelCapabilities, capabilities_for_family, family_for_model};
+use crate::model_info::{capabilities_for_family, family_for_model, ModelCapabilities};
 use crate::ui::theme::Theme;
 
 /// Events sent from background tasks to the main TUI loop.
@@ -427,12 +426,8 @@ impl App {
             None
         } else {
             Some(host.unwrap_or_else(|| {
-                std::env::var("MOLD_HOST").unwrap_or_else(|_| {
-                    format!(
-                        "http://localhost:{}",
-                        config.server_port
-                    )
-                })
+                std::env::var("MOLD_HOST")
+                    .unwrap_or_else(|_| format!("http://localhost:{}", config.server_port))
             }))
         };
 
@@ -517,17 +512,15 @@ impl App {
 
         let family = family_for_model(&model_name, &self.config);
         self.generate.capabilities = capabilities_for_family(&family);
-        self.generate.visible_fields =
-            ParamField::visible_fields(&self.generate.capabilities);
+        self.generate.visible_fields = ParamField::visible_fields(&self.generate.capabilities);
         self.generate.param_index = 0;
 
-        self.generate.model_description =
-            mold_core::manifest::find_manifest(&model_name)
-                .and_then(|m| {
-                    let mc = self.config.resolved_model_config(&model_name);
-                    mc.description.or(Some(m.name.clone()))
-                })
-                .unwrap_or_default();
+        self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
+            .and_then(|m| {
+                let mc = self.config.resolved_model_config(&model_name);
+                mc.description.or(Some(m.name.clone()))
+            })
+            .unwrap_or_default();
     }
 
     /// Handle a raw crossterm event.
@@ -568,9 +561,7 @@ impl App {
                             // Let the textarea consume the event
                             let textarea = match self.generate.focus {
                                 GenerateFocus::Prompt => &mut self.generate.prompt,
-                                GenerateFocus::NegativePrompt => {
-                                    &mut self.generate.negative_prompt
-                                }
+                                GenerateFocus::NegativePrompt => &mut self.generate.negative_prompt,
                                 _ => unreachable!(),
                             };
                             textarea.input(event);
@@ -670,16 +661,18 @@ impl App {
             Action::SwitchView(view) => self.active_view = view,
             Action::FocusNext => {
                 if self.active_view == View::Generate {
-                    self.generate.focus = self.generate.focus.next(
-                        self.generate.capabilities.supports_negative_prompt,
-                    );
+                    self.generate.focus = self
+                        .generate
+                        .focus
+                        .next(self.generate.capabilities.supports_negative_prompt);
                 }
             }
             Action::FocusPrev => {
                 if self.active_view == View::Generate {
-                    self.generate.focus = self.generate.focus.prev(
-                        self.generate.capabilities.supports_negative_prompt,
-                    );
+                    self.generate.focus = self
+                        .generate
+                        .focus
+                        .prev(self.generate.capabilities.supports_negative_prompt);
                 }
             }
             Action::Up => match self.active_view {
@@ -753,9 +746,7 @@ impl App {
     }
 
     fn increment_param(&mut self, delta: i32) {
-        if self.active_view != View::Generate
-            || self.generate.focus != GenerateFocus::Parameters
-        {
+        if self.active_view != View::Generate || self.generate.focus != GenerateFocus::Parameters {
             return;
         }
         let field = match self.generate.visible_fields.get(self.generate.param_index) {
@@ -831,7 +822,8 @@ impl App {
         let params = self.generate.params.clone();
 
         self.tokio_handle.spawn(async move {
-            crate::backend::run_generation(server_url, params, prompt_text, negative_prompt, tx).await;
+            crate::backend::run_generation(server_url, params, prompt_text, negative_prompt, tx)
+                .await;
         });
     }
 
@@ -843,15 +835,11 @@ impl App {
                 BackgroundEvent::GenerationComplete(response) => {
                     self.generate.generating = false;
                     self.generate.last_seed = Some(response.seed_used);
-                    self.generate.last_generation_time_ms =
-                        Some(response.generation_time_ms);
+                    self.generate.last_generation_time_ms = Some(response.generation_time_ms);
 
                     if let Some(img_data) = response.images.first() {
-                        if let Ok(img) =
-                            image::load_from_memory(&img_data.data)
-                        {
-                            let protocol =
-                                self.picker.new_resize_protocol(img.clone());
+                        if let Ok(img) = image::load_from_memory(&img_data.data) {
+                            let protocol = self.picker.new_resize_protocol(img.clone());
                             self.generate.preview_image = Some(img);
                             self.generate.image_state = Some(protocol);
                         }
@@ -880,8 +868,7 @@ impl App {
                         style: ProgressStyle::Done,
                     });
                     // Refresh the catalog
-                    self.models.catalog =
-                        mold_core::build_model_catalog(&self.config, None, false);
+                    self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
                 }
             }
         }
@@ -898,10 +885,7 @@ impl App {
             SseProgressEvent::StageDone { name, elapsed_ms } => {
                 self.generate.progress.current_stage = None;
                 self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!(
-                        "{name} [{:.1}s]",
-                        elapsed_ms as f64 / 1000.0
-                    ),
+                    message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
                     style: ProgressStyle::Done,
                 });
             }

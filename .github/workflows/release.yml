@@ -23,7 +23,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build (Metal)
-        run: cargo build --release -p mold-ai --features metal,preview,discord,expand
+        run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui
 
       - name: Ad-hoc code sign
         run: codesign -s - target/release/mold
@@ -59,7 +59,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
@@ -92,7 +92,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
@@ -304,6 +304,14 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p mold-ai-server
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish mold-ai-tui
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-tui
 
       - name: Wait for crates.io index
         run: sleep 30

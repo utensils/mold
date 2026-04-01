@@ -117,7 +117,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             entry.model,
             entry.width,
             entry.height,
-            entry.seed.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+            entry
+                .seed
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".into()),
         );
         let line2 = format!("\"{}\"\n", entry.prompt_preview);
         let line3 = format!("File: {}", entry.path.display());
@@ -130,8 +133,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .block(details_block);
         frame.render_widget(details, layout[1]);
     } else {
-        let empty = Paragraph::new("")
-            .block(details_block);
+        let empty = Paragraph::new("").block(details_block);
         frame.render_widget(empty, layout[1]);
     }
 }
