@@ -33,13 +33,14 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
         return;
     }
 
-    // Decide what to show in the available space
+    // Count active progress bars
     let has_denoise = progress.denoise_total > 0 && progress.denoise_step < progress.denoise_total;
     let has_weight = progress.weight_total > 0 && progress.weight_loaded < progress.weight_total;
+    let has_download = progress.download_total > 0;
     let has_spinner = progress.current_stage.is_some();
 
-    // Layout: log lines, then active bars
-    let bar_lines = has_denoise as u16 + has_weight as u16 + has_spinner as u16;
+    let bar_lines =
+        has_denoise as u16 + has_weight as u16 + has_download as u16 + has_spinner as u16;
     let log_height = inner.height.saturating_sub(bar_lines);
 
     let layout = Layout::default()
@@ -73,6 +74,31 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
                 bar_area.y += 1;
                 bar_area.height = bar_area.height.saturating_sub(1);
             }
+        }
+
+        if has_download && bar_area.height > 0 {
+            let pct = if progress.download_total > 0 {
+                (progress.download_bytes as f64 / progress.download_total as f64).min(1.0)
+            } else {
+                0.0
+            };
+            let label = format!(
+                "{} [{}/{}]",
+                progress.download_filename,
+                format_bytes(progress.download_bytes),
+                format_bytes(progress.download_total),
+            );
+            let gauge = Gauge::default()
+                .ratio(pct)
+                .label(label)
+                .gauge_style(Style::default().fg(theme.warning).bg(theme.progress_empty));
+            let row = Rect {
+                height: 1,
+                ..bar_area
+            };
+            frame.render_widget(gauge, row);
+            bar_area.y += 1;
+            bar_area.height = bar_area.height.saturating_sub(1);
         }
 
         if has_weight && bar_area.height > 0 {
@@ -131,7 +157,6 @@ fn render_log(frame: &mut Frame, theme: &Theme, log: &[ProgressLogEntry], area: 
         return;
     }
 
-    // Show the most recent entries that fit
     let visible = log.len().min(area.height as usize);
     let start = log.len().saturating_sub(visible);
 
@@ -168,7 +193,6 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn spinner_frame() -> char {
-    // Simple rotating spinner based on time
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

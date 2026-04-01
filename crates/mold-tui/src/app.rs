@@ -53,6 +53,9 @@ pub struct ProgressState {
     pub weight_loaded: u64,
     pub weight_total: u64,
     pub weight_component: String,
+    pub download_filename: String,
+    pub download_bytes: u64,
+    pub download_total: u64,
 }
 
 impl ProgressState {
@@ -65,6 +68,9 @@ impl ProgressState {
         self.weight_loaded = 0;
         self.weight_total = 0;
         self.weight_component.clear();
+        self.download_filename.clear();
+        self.download_bytes = 0;
+        self.download_total = 0;
     }
 }
 
@@ -974,11 +980,42 @@ impl App {
                 self.generate.progress.weight_total = bytes_total;
                 self.generate.progress.weight_component = component;
             }
+            SseProgressEvent::DownloadProgress {
+                filename,
+                bytes_downloaded,
+                bytes_total,
+                ..
+            } => {
+                self.generate.progress.download_filename = filename;
+                self.generate.progress.download_bytes = bytes_downloaded;
+                self.generate.progress.download_total = bytes_total;
+            }
+            SseProgressEvent::DownloadDone {
+                filename,
+                file_index,
+                total_files,
+            } => {
+                self.generate.progress.download_bytes = 0;
+                self.generate.progress.download_total = 0;
+                self.generate.progress.download_filename.clear();
+                self.generate.progress.log.push(ProgressLogEntry {
+                    message: format!("[{}/{}] {filename}", file_index + 1, total_files),
+                    style: ProgressStyle::Done,
+                });
+            }
+            SseProgressEvent::PullComplete { model } => {
+                self.generate.progress.log.push(ProgressLogEntry {
+                    message: format!("Pull complete: {model}"),
+                    style: ProgressStyle::Done,
+                });
+                // Refresh config and catalog after pull
+                self.config = Config::load_or_default();
+                self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+            }
             SseProgressEvent::Queued { position } => {
                 self.generate.progress.current_stage =
                     Some(format!("Queued (position {position})"));
             }
-            _ => {}
         }
     }
 }
