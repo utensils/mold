@@ -475,8 +475,6 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 
 ### Flux.2 Klein-9B (alpha, non-commercial, distilled)
 
-> **Note**: Klein-9B is in alpha. The larger Qwen3 encoder is not yet fully supported. Results may vary.
-
 | Model | Steps | Size | Good for |
 |-------|-------|------|----------|
 | `flux2-klein-9b:q8` | 4 | 10GB | Fast 9B, higher quality than 4B |

@@ -1924,9 +1924,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
         // NOTE: Klein-9B uses a larger Qwen3 encoder (hidden_size=4096) than
-        // Klein-4B (hidden_size=2560). The BF16 encoder loader currently only
-        // supports the 2560-wide architecture. Klein-9B is marked alpha until
-        // the encoder is updated to support both architectures.
+        // Klein-4B (hidden_size=2560). Klein-9B is marked alpha until the encoder
+        // supports both architectures.
         ModelManifest {
             name: "flux2-klein-9b:bf16".to_string(),
             family: "flux2".to_string(),
@@ -4151,5 +4150,253 @@ mod tests {
             utility_count, 2,
             "expected exactly 2 utility models, got {utility_count}"
         );
+    }
+
+    #[test]
+    fn only_klein_9b_models_are_alpha() {
+        for manifest in known_manifests() {
+            let desc = &manifest.description;
+            let is_alpha = desc.contains("(alpha)") || desc.contains("[alpha]");
+            if is_alpha {
+                assert!(
+                    manifest.name.contains("klein-9b"),
+                    "non-Klein-9B model '{}' is marked alpha: {desc}",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_klein_9b_models_are_alpha() {
+        for manifest in known_manifests() {
+            if manifest.name.contains("klein-9b") {
+                assert!(
+                    manifest.description.contains("(alpha)"),
+                    "Klein-9B model '{}' should be marked alpha but description is: {}",
+                    manifest.name,
+                    manifest.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_diffusion_model_descriptions_have_stale_alpha_prefix() {
+        // Ensure no model uses the old [alpha] prefix format (should use (alpha) suffix)
+        for manifest in known_manifests() {
+            assert!(
+                !manifest.description.starts_with("[alpha]"),
+                "model '{}' uses stale [alpha] prefix format: {}",
+                manifest.name,
+                manifest.description
+            );
+        }
+    }
+
+    // ── Pipeline structural tests ────────────────────────────────────────
+    // These tests read pipeline source files to verify consistent VRAM
+    // management patterns across all model families.
+
+    /// Pipelines that use eager mode must wrap their transformer/UNet in Option
+    /// so it can be dropped before VAE decode to free VRAM.
+    #[test]
+    fn all_pipelines_wrap_transformer_in_option() {
+        let pipeline_fields = [
+            (
+                "flux",
+                "crates/mold-inference/src/flux/pipeline.rs",
+                "Option<FluxTransformer>",
+            ),
+            (
+                "flux2",
+                "crates/mold-inference/src/flux2/pipeline.rs",
+                "Option<Flux2TransformerWrapper>",
+            ),
+            (
+                "sd15",
+                "crates/mold-inference/src/sd15/pipeline.rs",
+                "Option<stable_diffusion::unet_2d::UNet2DConditionModel>",
+            ),
+            (
+                "sdxl",
+                "crates/mold-inference/src/sdxl/pipeline.rs",
+                "Option<stable_diffusion::unet_2d::UNet2DConditionModel>",
+            ),
+            (
+                "sd3",
+                "crates/mold-inference/src/sd3/pipeline.rs",
+                "Option<SD3Transformer>",
+            ),
+            (
+                "zimage",
+                "crates/mold-inference/src/zimage/pipeline.rs",
+                "Option<ZImageTransformer>",
+            ),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+                "Option<QwenImageTransformer>",
+            ),
+            (
+                "wuerstchen (prior)",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "Option<WPrior>",
+            ),
+            (
+                "wuerstchen (decoder)",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "Option<WDiffNeXt>",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path, expected_type) in pipeline_fields {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+            assert!(
+                source.contains(expected_type),
+                "{family} pipeline ({path}) must wrap transformer/UNet in {expected_type} \
+                 for VRAM management — field should be Option-wrapped so it can be dropped \
+                 before VAE decode"
+            );
+        }
+    }
+
+    /// All pipelines must call device.synchronize() before VAE/VQ-GAN decode
+    /// in their eager generate path to ensure CUDA releases freed memory.
+    #[test]
+    fn all_pipelines_synchronize_before_decode() {
+        let pipelines = [
+            ("flux", "crates/mold-inference/src/flux/pipeline.rs"),
+            ("flux2", "crates/mold-inference/src/flux2/pipeline.rs"),
+            ("sd15", "crates/mold-inference/src/sd15/pipeline.rs"),
+            ("sdxl", "crates/mold-inference/src/sdxl/pipeline.rs"),
+            ("sd3", "crates/mold-inference/src/sd3/pipeline.rs"),
+            ("zimage", "crates/mold-inference/src/zimage/pipeline.rs"),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+            ),
+            (
+                "wuerstchen",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path) in pipelines {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+            assert!(
+                source.contains("synchronize()"),
+                "{family} pipeline ({path}) must call device.synchronize() before decode \
+                 to ensure CUDA releases freed transformer/UNet VRAM"
+            );
+        }
+    }
+
+    /// All pipelines with sequential mode must check the prompt cache BEFORE
+    /// loading the text encoder, to avoid wasting seconds reloading the encoder
+    /// on batch iterations when the prompt is identical.
+    #[test]
+    fn sequential_pipelines_check_cache_before_encoder_load() {
+        // Each entry: (family, path, cache_check_pattern, encoder_load_pattern)
+        // The cache check must appear BEFORE the encoder load in generate_sequential().
+        let pipelines = [
+            (
+                "flux2",
+                "crates/mold-inference/src/flux2/pipeline.rs",
+                "restore_cached_tensor(",
+                "Qwen3Encoder::load_",
+            ),
+            (
+                "flux",
+                "crates/mold-inference/src/flux/pipeline.rs",
+                "restore_prompt_cache(",
+                "T5Encoder::load",
+            ),
+            (
+                "sd15",
+                "crates/mold-inference/src/sd15/pipeline.rs",
+                "restore_cached_tensor(",
+                "build_clip_transformer(",
+            ),
+            (
+                "sdxl",
+                "crates/mold-inference/src/sdxl/pipeline.rs",
+                "restore_cached_tensor(",
+                "build_clip_transformer(",
+            ),
+            (
+                "sd3",
+                "crates/mold-inference/src/sd3/pipeline.rs",
+                "restore_cached_tensor_pair(",
+                "SD3TripleEncoder::load(",
+            ),
+            (
+                "zimage",
+                "crates/mold-inference/src/zimage/pipeline.rs",
+                "restore_cached_tensor(",
+                "Qwen3Encoder::load_",
+            ),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+                "get_cloned(&prompt_key)",
+                "load_text_encoder(",
+            ),
+            (
+                "wuerstchen",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "restore_cached_tensor_pair(",
+                "build_clip_transformer(",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path, cache_pattern, load_pattern) in pipelines {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+
+            // Find generate_sequential function body
+            let seq_start = source.find("fn generate_sequential(").unwrap_or_else(|| {
+                panic!("{family} pipeline ({path}) missing generate_sequential()")
+            });
+            let seq_body = &source[seq_start..];
+
+            let cache_pos = seq_body.find(cache_pattern).unwrap_or_else(|| {
+                panic!(
+                    "{family} pipeline ({path}) generate_sequential() missing cache check '{cache_pattern}'"
+                )
+            });
+            let load_pos = seq_body.find(load_pattern).unwrap_or_else(|| {
+                panic!(
+                    "{family} pipeline ({path}) generate_sequential() missing encoder load '{load_pattern}'"
+                )
+            });
+
+            assert!(
+                cache_pos < load_pos,
+                "{family} pipeline ({path}): prompt cache check ('{cache_pattern}' at offset {cache_pos}) \
+                 must appear BEFORE encoder load ('{load_pattern}' at offset {load_pos}) \
+                 in generate_sequential() — encoder should not be loaded when cache hits"
+            );
+        }
     }
 }

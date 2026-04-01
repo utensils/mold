@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, CachedTensorPair, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor_pair, restore_cached_tensor_pair, CachedTensorPair,
+    LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -44,8 +44,10 @@ const LATENT_DIM_SCALE_DECODER: f64 = 10.67;
 
 /// Loaded Wuerstchen model components, ready for inference.
 struct LoadedWuerstchen {
-    prior: WPrior,
-    decoder: WDiffNeXt,
+    /// None after being dropped for VQ-GAN decode VRAM; reloaded on next generate.
+    prior: Option<WPrior>,
+    /// None after being dropped for VQ-GAN decode VRAM; reloaded on next generate.
+    decoder: Option<WDiffNeXt>,
     vqgan: PaellaVQ,
     prior_clip: stable_diffusion::clip::ClipTextTransformer,
     decoder_clip: stable_diffusion::clip::ClipTextTransformer,
@@ -359,6 +361,77 @@ impl WuerstchenEngine {
         ))
     }
 
+    /// Reload Prior and Decoder if they were dropped after VQ-GAN decode.
+    fn reload_models_if_needed(&mut self) -> Result<()> {
+        let needs_reload = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|l| l.prior.is_none() || l.decoder.is_none())
+            .unwrap_or(false);
+
+        if needs_reload {
+            let (decoder_path, _, _, _, _) = self.validate_paths()?;
+            let loaded = self.base.loaded.as_ref().unwrap();
+            let device = loaded.device.clone();
+            let dtype = loaded.dtype;
+            let _ = loaded;
+
+            self.base.progress.stage_start("Reloading Prior (Stage C)");
+            let reload_start = Instant::now();
+            let prior_vb = crate::weight_loader::load_safetensors_with_progress(
+                &[&self.base.paths.transformer],
+                dtype,
+                &device,
+                "Wuerstchen Prior",
+                &self.base.progress,
+            )?;
+            let prior = WPrior::new(
+                PRIOR_C_IN,
+                PRIOR_C,
+                PRIOR_C_COND,
+                PRIOR_C_R,
+                PRIOR_DEPTH,
+                PRIOR_NHEAD,
+                false,
+                prior_vb,
+            )?;
+            self.base
+                .progress
+                .stage_done("Reloading Prior (Stage C)", reload_start.elapsed());
+
+            self.base
+                .progress
+                .stage_start("Reloading Decoder (Stage B)");
+            let reload_start = Instant::now();
+            let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
+                &[&decoder_path],
+                dtype,
+                &device,
+                "Wuerstchen Decoder",
+                &self.base.progress,
+            )?;
+            let decoder = WDiffNeXt::new(
+                DECODER_C_IN,
+                DECODER_C_OUT,
+                DECODER_C_R,
+                DECODER_C_COND,
+                DECODER_CLIP_EMBD,
+                DECODER_PATCH_SIZE,
+                false,
+                decoder_vb,
+            )?;
+            self.base
+                .progress
+                .stage_done("Reloading Decoder (Stage B)", reload_start.elapsed());
+
+            let loaded = self.base.loaded.as_mut().unwrap();
+            loaded.prior = Some(prior);
+            loaded.decoder = Some(decoder);
+        }
+        Ok(())
+    }
+
     /// Load all Wuerstchen model components (Eager mode).
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
@@ -484,8 +557,8 @@ impl WuerstchenEngine {
             .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
         self.base.loaded = Some(LoadedWuerstchen {
-            prior,
-            decoder,
+            prior: Some(prior),
+            decoder: Some(decoder),
             vqgan,
             prior_clip,
             decoder_clip,
@@ -683,73 +756,82 @@ impl WuerstchenEngine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Prior CLIP-G encode (1280-dim) ---
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
+        // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
+        let use_prior_cfg = prior_guidance > 1.0;
+        let use_decoder_cfg = decoder_guidance > 1.0;
+        let cache_key =
+            Self::prompt_cache_key(&req.prompt, negative_prompt, use_prior_cfg, use_decoder_cfg);
+        let (prior_text_embeddings, decoder_text_embeddings) =
+            if let Some((prior_emb, decoder_emb)) =
+                restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, dtype)?
+            {
+                self.base.progress.cache_hit("prompt conditioning");
+                (prior_emb, decoder_emb)
+            } else {
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
 
-        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
+                let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
 
-        self.base
-            .progress
-            .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
-        let clip_start = Instant::now();
-        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let prior_clip = stable_diffusion::build_clip_transformer(
-            &prior_clip_config,
-            &prior_clip_path,
-            &device,
-            DType::F32,
-        )?;
-        self.base.progress.stage_done(
-            "Loading Prior CLIP-G encoder (1280-dim)",
-            clip_start.elapsed(),
-        );
+                self.base
+                    .progress
+                    .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
+                let clip_start = Instant::now();
+                let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+                let prior_clip = stable_diffusion::build_clip_transformer(
+                    &prior_clip_config,
+                    &prior_clip_path,
+                    &device,
+                    DType::F32,
+                )?;
+                self.base.progress.stage_done(
+                    "Loading Prior CLIP-G encoder (1280-dim)",
+                    clip_start.elapsed(),
+                );
 
-        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+                let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
-        self.base
-            .progress
-            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
-        let dec_clip_start = Instant::now();
-        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let decoder_clip = stable_diffusion::build_clip_transformer(
-            &dec_clip_config,
-            &dec_clip_path,
-            &device,
-            DType::F32,
-        )?;
-        self.base.progress.stage_done(
-            "Loading Decoder CLIP encoder (1024-dim)",
-            dec_clip_start.elapsed(),
-        );
+                self.base
+                    .progress
+                    .stage_start("Loading Decoder CLIP encoder (1024-dim)");
+                let dec_clip_start = Instant::now();
+                let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+                let decoder_clip = stable_diffusion::build_clip_transformer(
+                    &dec_clip_config,
+                    &dec_clip_path,
+                    &device,
+                    DType::F32,
+                )?;
+                self.base.progress.stage_done(
+                    "Loading Decoder CLIP encoder (1024-dim)",
+                    dec_clip_start.elapsed(),
+                );
 
-        let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
-            &prior_clip,
-            &prior_tokenizer,
-            &decoder_clip,
-            &decoder_tokenizer,
-            &req.prompt,
-            negative_prompt,
-            &device,
-            dtype,
-            prior_guidance,
-            decoder_guidance,
-        )?;
+                let (prior_emb, decoder_emb) = self.encode_prompt_pair_cached(
+                    &prior_clip,
+                    &prior_tokenizer,
+                    &decoder_clip,
+                    &decoder_tokenizer,
+                    &req.prompt,
+                    negative_prompt,
+                    &device,
+                    dtype,
+                    prior_guidance,
+                    decoder_guidance,
+                )?;
+
+                drop(prior_clip);
+                drop(prior_tokenizer);
+                self.base.progress.info("Freed Prior CLIP-G encoder");
+
+                (prior_emb, decoder_emb)
+            };
         Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
-
-        drop(prior_clip);
-        drop(prior_tokenizer);
-        self.base.progress.info("Freed Prior CLIP-G encoder");
-        tracing::info!("Prior CLIP-G encoder dropped (sequential mode)");
-
-        drop(decoder_clip);
-        drop(decoder_tokenizer);
-        self.base.progress.info("Freed Decoder CLIP encoder");
-        tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
+        tracing::info!("CLIP encoders processed (sequential mode)");
 
         // --- Phase 2: Prior (Stage C) ---
         let prior_size = std::fs::metadata(&self.base.paths.transformer)
@@ -948,6 +1030,9 @@ impl InferenceEngine for WuerstchenEngine {
             return self.generate_sequential(req);
         }
 
+        // Reload Prior/Decoder if dropped after previous VQ-GAN decode
+        self.reload_models_if_needed()?;
+
         let loaded = self
             .base
             .loaded
@@ -1002,8 +1087,12 @@ impl InferenceEngine for WuerstchenEngine {
         )?;
         Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
+        let prior = loaded
+            .prior
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Prior not loaded"))?;
         self.denoise_prior(
-            &loaded.prior,
+            prior,
             &prior_text_embeddings,
             &mut prior_latents,
             seed,
@@ -1026,8 +1115,12 @@ impl InferenceEngine for WuerstchenEngine {
             Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
         Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
+        let decoder = loaded
+            .decoder
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Decoder not loaded"))?;
         self.denoise_decoder(
-            &loaded.decoder,
+            decoder,
             &prior_latents,
             &decoder_text_embeddings,
             &mut decoder_latents,
@@ -1037,6 +1130,16 @@ impl InferenceEngine for WuerstchenEngine {
             &loaded.device,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
+
+        // Drop Prior and Decoder before VQ-GAN decode to free VRAM.
+        let _ = loaded;
+        let loaded = self.base.loaded.as_mut().unwrap();
+        loaded.prior = None;
+        loaded.decoder = None;
+        loaded.device.synchronize()?;
+        tracing::info!("Prior + Decoder dropped to free VRAM for VQ-GAN decode");
+        let _ = loaded;
+        let loaded = self.base.loaded.as_ref().unwrap();
 
         // 5. Stage A (VQ-GAN): decode to pixel space
         self.base.progress.stage_start("VQ-GAN decode");

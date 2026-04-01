@@ -40,7 +40,8 @@ use crate::progress::{ProgressCallback, ProgressReporter};
 
 /// Loaded Flux.2 model components, ready for inference.
 struct LoadedFlux2 {
-    transformer: Flux2TransformerWrapper,
+    /// None after being dropped for VAE decode VRAM; reloaded on next generate.
+    transformer: Option<Flux2TransformerWrapper>,
     text_encoder: encoders::qwen3::Qwen3Encoder,
     vae: Flux2AutoEncoder,
     /// GPU device for transformer + VAE
@@ -175,6 +176,35 @@ impl Flux2Engine {
                 "Loading Flux.2 transformer (GPU, BF16)",
             ))
         }
+    }
+
+    /// Reload transformer using `&mut self` — called before the main `loaded` borrow
+    /// to avoid borrow conflicts.
+    fn reload_transformer_if_needed(&mut self) -> Result<()> {
+        let needs_reload = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|l| l.transformer.is_none())
+            .unwrap_or(false);
+
+        if needs_reload {
+            let cfg = self.resolve_config();
+            self.base
+                .progress
+                .stage_start("Reloading Flux.2 transformer");
+            let reload_start = Instant::now();
+            let (transformer, _label) = self.load_transformer(
+                &cfg,
+                self.base.loaded.as_ref().unwrap().dtype,
+                &self.base.loaded.as_ref().unwrap().device.clone(),
+            )?;
+            self.base.loaded.as_mut().unwrap().transformer = Some(transformer);
+            self.base
+                .progress
+                .stage_done("Reloading Flux.2 transformer", reload_start.elapsed());
+        }
+        Ok(())
     }
 
     /// Get text encoder file paths (shards or single file).
@@ -353,7 +383,7 @@ impl Flux2Engine {
         tracing::info!(device = %device_label, "Qwen3 encoder loaded");
 
         self.base.loaded = Some(LoadedFlux2 {
-            transformer,
+            transformer: Some(transformer),
             text_encoder,
             vae,
             device,
@@ -393,75 +423,87 @@ impl Flux2Engine {
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
         // --- Phase 1: Qwen3 text encoding ---
-        let free = free_vram_bytes().unwrap_or(0);
-        self.base.progress.stage_start("Selecting Qwen3 encoder");
-        let resolve_start = Instant::now();
-        let (encoder_paths, is_gguf, on_gpu, device_label) = {
-            let bf16_paths = self.text_encoder_paths();
-            let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
-            crate::encoders::variant_resolution::resolve_qwen3_variant(
-                &self.base.progress,
-                self.qwen3_variant.as_deref(),
-                &device,
-                free,
-                &bf16_paths,
-                have_bf16,
-                true,
-            )?
-        };
-        self.base
-            .progress
-            .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
-
-        let enc_device = if on_gpu { &device } else { &Device::Cpu };
-        let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
-
-        // Pre-flight memory check
-        let enc_size: u64 = encoder_paths
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-            .sum();
-        preflight_memory_check("Qwen3 encoder", enc_size)?;
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
-        self.base.progress.stage_start(&enc_stage_label);
-        let enc_stage = Instant::now();
-
-        let mut text_encoder = if is_gguf {
-            encoders::qwen3::Qwen3Encoder::load_gguf(
-                &encoder_paths[0],
-                &text_tokenizer_path,
-                enc_device,
-            )?
+        // Check prompt cache first — skip encoder load entirely on cache hit.
+        // This saves ~1-5s per batch image (encoder load + VRAM allocation).
+        let cache_key = prompt_text_key(&req.prompt);
+        let txt_emb = if let Some(tensor) =
+            restore_cached_tensor(&self.prompt_cache, &cache_key, &device, gpu_dtype)?
+        {
+            self.base.progress.cache_hit("prompt conditioning");
+            tensor
         } else {
-            encoders::qwen3::Qwen3Encoder::load_bf16(
-                &encoder_paths,
-                &text_tokenizer_path,
-                enc_device,
-                enc_dtype,
+            let free = free_vram_bytes().unwrap_or(0);
+            self.base.progress.stage_start("Selecting Qwen3 encoder");
+            let resolve_start = Instant::now();
+            let (encoder_paths, is_gguf, on_gpu, device_label) = {
+                let bf16_paths = self.text_encoder_paths();
+                let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
+                crate::encoders::variant_resolution::resolve_qwen3_variant(
+                    &self.base.progress,
+                    self.qwen3_variant.as_deref(),
+                    &device,
+                    free,
+                    &bf16_paths,
+                    have_bf16,
+                    true,
+                )?
+            };
+            self.base
+                .progress
+                .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
+
+            let enc_device = if on_gpu { &device } else { &Device::Cpu };
+            let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
+
+            // Pre-flight memory check
+            let enc_size: u64 = encoder_paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                .sum();
+            preflight_memory_check("Qwen3 encoder", enc_size)?;
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
+
+            let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
+            self.base.progress.stage_start(&enc_stage_label);
+            let enc_stage = Instant::now();
+
+            let mut text_encoder = if is_gguf {
+                encoders::qwen3::Qwen3Encoder::load_gguf(
+                    &encoder_paths[0],
+                    &text_tokenizer_path,
+                    enc_device,
+                )?
+            } else {
+                encoders::qwen3::Qwen3Encoder::load_bf16(
+                    &encoder_paths,
+                    &text_tokenizer_path,
+                    enc_device,
+                    enc_dtype,
+                    &self.base.progress,
+                )?
+            };
+            self.base
+                .progress
+                .stage_done(&enc_stage_label, enc_stage.elapsed());
+
+            let txt_emb = Self::encode_prompt_cached(
                 &self.base.progress,
-            )?
+                &self.prompt_cache,
+                &mut text_encoder,
+                &req.prompt,
+                &device,
+                gpu_dtype,
+            )?;
+
+            // Drop text encoder to free memory
+            drop(text_encoder);
+            self.base.progress.info("Freed Qwen3 encoder");
+            tracing::info!("Qwen3 encoder dropped (sequential mode)");
+
+            txt_emb
         };
-        self.base
-            .progress
-            .stage_done(&enc_stage_label, enc_stage.elapsed());
-
-        let txt_emb = Self::encode_prompt_cached(
-            &self.base.progress,
-            &self.prompt_cache,
-            &mut text_encoder,
-            &req.prompt,
-            &device,
-            gpu_dtype,
-        )?;
-
-        // Drop text encoder to free memory
-        drop(text_encoder);
-        self.base.progress.info("Freed Qwen3 encoder");
-        tracing::info!("Qwen3 encoder dropped (sequential mode)");
 
         // --- Phase 2: Load transformer + VAE, denoise ---
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
@@ -607,6 +649,10 @@ impl InferenceEngine for Flux2Engine {
         }
 
         // Eager mode: use pre-loaded components
+        // Reload transformer first (before taking the main `loaded` borrow)
+        // if it was dropped after a previous VAE decode.
+        self.reload_transformer_if_needed()?;
+
         let progress = &self.base.progress;
 
         let loaded = self
@@ -692,7 +738,11 @@ impl InferenceEngine for Flux2Engine {
         tracing::info!(steps = timesteps.len() - 1, "running denoising loop...");
 
         // 5. Denoise
-        let img = loaded.transformer.denoise(
+        let transformer = loaded
+            .transformer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?;
+        let img = transformer.denoise(
             &state.img,
             &state.img_ids,
             &state.txt,
@@ -708,9 +758,17 @@ impl InferenceEngine for Flux2Engine {
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
 
-        // Free denoising intermediates
+        // Free denoising intermediates and transformer before VAE decode.
+        // The transformer consumes most of VRAM — VAE decode needs that
+        // memory for conv2d intermediates. Transformer is reloaded next generate.
         drop(state);
         drop(txt_emb);
+        loaded.transformer = None;
+        // Force CUDA to complete pending operations and release freed memory.
+        // Without this, cuMemFree is asynchronous and the freed VRAM may not
+        // be available when VAE decode allocates its conv2d intermediates.
+        loaded.device.synchronize()?;
+        tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 7. Decode with VAE
         progress.stage_start("VAE decode");
