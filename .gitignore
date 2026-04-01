@@ -5,8 +5,6 @@
 # Claude Code
 .claude/worktrees/
 .direnv/
-!docs/**/*.png
-!website/public/**/*.png
 
 # Website
 website/node_modules/
@@ -16,8 +14,10 @@ website/.vitepress/dist/
 .env
 *.jpeg
 *.jpg
-# Nix / direnv
 *.png
+# Allow committed images in docs and website
+!docs/**/*.png
+!website/public/**/*.png
 result
 *.swo
 *.swp
