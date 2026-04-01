@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, CachedTensorPair, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, restore_cached_tensor_pair,
+    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -756,73 +756,79 @@ impl WuerstchenEngine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Prior CLIP-G encode (1280-dim) ---
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
+        // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
+        let cache_key = prompt_text_key(&req.prompt);
+        let (prior_text_embeddings, decoder_text_embeddings) =
+            if let Some((prior_emb, decoder_emb)) =
+                restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, dtype)?
+            {
+                self.base.progress.cache_hit("prompt conditioning");
+                (prior_emb, decoder_emb)
+            } else {
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
 
-        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
+                let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
 
-        self.base
-            .progress
-            .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
-        let clip_start = Instant::now();
-        let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
-        let prior_clip = stable_diffusion::build_clip_transformer(
-            &prior_clip_config,
-            &prior_clip_path,
-            &device,
-            DType::F32,
-        )?;
-        self.base.progress.stage_done(
-            "Loading Prior CLIP-G encoder (1280-dim)",
-            clip_start.elapsed(),
-        );
+                self.base
+                    .progress
+                    .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
+                let clip_start = Instant::now();
+                let prior_clip_config = stable_diffusion::clip::Config::wuerstchen_prior();
+                let prior_clip = stable_diffusion::build_clip_transformer(
+                    &prior_clip_config,
+                    &prior_clip_path,
+                    &device,
+                    DType::F32,
+                )?;
+                self.base.progress.stage_done(
+                    "Loading Prior CLIP-G encoder (1280-dim)",
+                    clip_start.elapsed(),
+                );
 
-        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+                let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
 
-        self.base
-            .progress
-            .stage_start("Loading Decoder CLIP encoder (1024-dim)");
-        let dec_clip_start = Instant::now();
-        let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
-        let decoder_clip = stable_diffusion::build_clip_transformer(
-            &dec_clip_config,
-            &dec_clip_path,
-            &device,
-            DType::F32,
-        )?;
-        self.base.progress.stage_done(
-            "Loading Decoder CLIP encoder (1024-dim)",
-            dec_clip_start.elapsed(),
-        );
+                self.base
+                    .progress
+                    .stage_start("Loading Decoder CLIP encoder (1024-dim)");
+                let dec_clip_start = Instant::now();
+                let dec_clip_config = stable_diffusion::clip::Config::wuerstchen();
+                let decoder_clip = stable_diffusion::build_clip_transformer(
+                    &dec_clip_config,
+                    &dec_clip_path,
+                    &device,
+                    DType::F32,
+                )?;
+                self.base.progress.stage_done(
+                    "Loading Decoder CLIP encoder (1024-dim)",
+                    dec_clip_start.elapsed(),
+                );
 
-        let (prior_text_embeddings, decoder_text_embeddings) = self.encode_prompt_pair_cached(
-            &prior_clip,
-            &prior_tokenizer,
-            &decoder_clip,
-            &decoder_tokenizer,
-            &req.prompt,
-            negative_prompt,
-            &device,
-            dtype,
-            prior_guidance,
-            decoder_guidance,
-        )?;
+                let (prior_emb, decoder_emb) = self.encode_prompt_pair_cached(
+                    &prior_clip,
+                    &prior_tokenizer,
+                    &decoder_clip,
+                    &decoder_tokenizer,
+                    &req.prompt,
+                    negative_prompt,
+                    &device,
+                    dtype,
+                    prior_guidance,
+                    decoder_guidance,
+                )?;
+
+                drop(prior_clip);
+                drop(prior_tokenizer);
+                self.base.progress.info("Freed Prior CLIP-G encoder");
+
+                (prior_emb, decoder_emb)
+            };
         Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
-
-        drop(prior_clip);
-        drop(prior_tokenizer);
-        self.base.progress.info("Freed Prior CLIP-G encoder");
-        tracing::info!("Prior CLIP-G encoder dropped (sequential mode)");
-
-        drop(decoder_clip);
-        drop(decoder_tokenizer);
-        self.base.progress.info("Freed Decoder CLIP encoder");
-        tracing::info!("Decoder CLIP encoder dropped (sequential mode)");
+        tracing::info!("CLIP encoders processed (sequential mode)");
 
         // --- Phase 2: Prior (Stage C) ---
         let prior_size = std::fs::metadata(&self.base.paths.transformer)

@@ -4305,4 +4305,98 @@ mod tests {
             );
         }
     }
+
+    /// All pipelines with sequential mode must check the prompt cache BEFORE
+    /// loading the text encoder, to avoid wasting seconds reloading the encoder
+    /// on batch iterations when the prompt is identical.
+    #[test]
+    fn sequential_pipelines_check_cache_before_encoder_load() {
+        // Each entry: (family, path, cache_check_pattern, encoder_load_pattern)
+        // The cache check must appear BEFORE the encoder load in generate_sequential().
+        let pipelines = [
+            (
+                "flux2",
+                "crates/mold-inference/src/flux2/pipeline.rs",
+                "restore_cached_tensor(",
+                "Qwen3Encoder::load_",
+            ),
+            (
+                "flux",
+                "crates/mold-inference/src/flux/pipeline.rs",
+                "restore_prompt_cache(",
+                "T5Encoder::load",
+            ),
+            (
+                "sd15",
+                "crates/mold-inference/src/sd15/pipeline.rs",
+                "restore_cached_tensor(",
+                "build_clip_transformer(",
+            ),
+            (
+                "sdxl",
+                "crates/mold-inference/src/sdxl/pipeline.rs",
+                "restore_cached_tensor(",
+                "build_clip_transformer(",
+            ),
+            (
+                "sd3",
+                "crates/mold-inference/src/sd3/pipeline.rs",
+                "restore_cached_tensor_pair(",
+                "SD3TripleEncoder::load(",
+            ),
+            (
+                "zimage",
+                "crates/mold-inference/src/zimage/pipeline.rs",
+                "restore_cached_tensor(",
+                "Qwen3Encoder::load_",
+            ),
+            (
+                "qwen_image",
+                "crates/mold-inference/src/qwen_image/pipeline.rs",
+                "get_cloned(&prompt_key)",
+                "load_text_encoder(",
+            ),
+            (
+                "wuerstchen",
+                "crates/mold-inference/src/wuerstchen/pipeline.rs",
+                "restore_cached_tensor_pair(",
+                "build_clip_transformer(",
+            ),
+        ];
+
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-core")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+
+        for (family, path, cache_pattern, load_pattern) in pipelines {
+            let full_path = format!("{workspace}/{path}");
+            let source = std::fs::read_to_string(&full_path)
+                .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+
+            // Find generate_sequential function body
+            let seq_start = source.find("fn generate_sequential(").unwrap_or_else(|| {
+                panic!("{family} pipeline ({path}) missing generate_sequential()")
+            });
+            let seq_body = &source[seq_start..];
+
+            let cache_pos = seq_body.find(cache_pattern).unwrap_or_else(|| {
+                panic!(
+                    "{family} pipeline ({path}) generate_sequential() missing cache check '{cache_pattern}'"
+                )
+            });
+            let load_pos = seq_body.find(load_pattern).unwrap_or_else(|| {
+                panic!(
+                    "{family} pipeline ({path}) generate_sequential() missing encoder load '{load_pattern}'"
+                )
+            });
+
+            assert!(
+                cache_pos < load_pos,
+                "{family} pipeline ({path}): prompt cache check ('{cache_pattern}' at offset {cache_pos}) \
+                 must appear BEFORE encoder load ('{load_pattern}' at offset {load_pos}) \
+                 in generate_sequential() — encoder should not be loaded when cache hits"
+            );
+        }
+    }
 }

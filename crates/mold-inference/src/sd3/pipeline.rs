@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, CachedTensorPair, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, restore_cached_tensor_pair,
+    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
@@ -404,67 +404,76 @@ impl SD3Engine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Encode prompt with triple encoder ---
-        let free = free_vram_bytes().unwrap_or(0);
-        self.base.progress.stage_start("Selecting T5 encoder");
-        let t5_resolve_start = Instant::now();
-        let t5_preference = self.t5_variant.as_deref();
-        let (resolved_t5_path, t5_on_gpu, t5_device_label) =
-            crate::encoders::variant_resolution::resolve_t5_variant(
-                &self.base.progress,
-                t5_preference,
-                &device,
-                free,
-                &t5_encoder_path,
-            )?;
-        self.base
-            .progress
-            .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
-
-        let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
-        let encoder_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
-
-        let t5_size = std::fs::metadata(&resolved_t5_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        preflight_memory_check("SD3 triple encoder", t5_size)?;
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
-        self.base.progress.stage_start(&encoder_label);
-        let encoder_stage = Instant::now();
-        let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
-            &clip_l_path,
-            &clip_l_tokenizer,
-            &clip_g_path,
-            &clip_g_tokenizer,
-            &resolved_t5_path,
-            &t5_tokenizer_path,
-            encoder_device,
-            encoder_dtype,
-            &self.base.progress,
-        )?;
-        self.base
-            .progress
-            .stage_done(&encoder_label, encoder_stage.elapsed());
-
+        // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let (context, y) = Self::encode_conditioning(
-            &self.base.progress,
-            &self.prompt_cache,
-            &mut triple_encoder,
-            &req.prompt,
-            neg,
-            &device,
-            gpu_dtype,
-            is_quantized,
-        )?;
+        let cache_key = prompt_text_key(&req.prompt);
+        let (context, y) = if let Some((context, y)) =
+            restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, gpu_dtype)?
+        {
+            self.base.progress.cache_hit("prompt conditioning");
+            (context, y)
+        } else {
+            let free = free_vram_bytes().unwrap_or(0);
+            self.base.progress.stage_start("Selecting T5 encoder");
+            let t5_resolve_start = Instant::now();
+            let t5_preference = self.t5_variant.as_deref();
+            let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+                crate::encoders::variant_resolution::resolve_t5_variant(
+                    &self.base.progress,
+                    t5_preference,
+                    &device,
+                    free,
+                    &t5_encoder_path,
+                )?;
+            self.base
+                .progress
+                .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-        // Drop encoders to free memory
-        drop(triple_encoder);
-        self.base.progress.info("Freed SD3 triple encoder");
+            let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
+            let encoder_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
+
+            let t5_size = std::fs::metadata(&resolved_t5_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            preflight_memory_check("SD3 triple encoder", t5_size)?;
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
+
+            let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
+            self.base.progress.stage_start(&encoder_label);
+            let encoder_stage = Instant::now();
+            let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
+                &clip_l_path,
+                &clip_l_tokenizer,
+                &clip_g_path,
+                &clip_g_tokenizer,
+                &resolved_t5_path,
+                &t5_tokenizer_path,
+                encoder_device,
+                encoder_dtype,
+                &self.base.progress,
+            )?;
+            self.base
+                .progress
+                .stage_done(&encoder_label, encoder_stage.elapsed());
+
+            let (context, y) = Self::encode_conditioning(
+                &self.base.progress,
+                &self.prompt_cache,
+                &mut triple_encoder,
+                &req.prompt,
+                neg,
+                &device,
+                gpu_dtype,
+                is_quantized,
+            )?;
+
+            drop(triple_encoder);
+            self.base.progress.info("Freed SD3 triple encoder");
+
+            (context, y)
+        };
 
         // --- Phase 2: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();

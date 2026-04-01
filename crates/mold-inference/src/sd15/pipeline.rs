@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey, LruCache,
-    PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
+    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
@@ -604,45 +604,51 @@ impl SD15Engine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Load CLIP-L encoder, encode, then drop ---
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        // Load tokenizer (kept in memory — tiny)
-        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-
-        // Load CLIP-L
-        self.base.progress.stage_start("Loading CLIP-L encoder");
-        let clip_start = Instant::now();
-        let clip = stable_diffusion::build_clip_transformer(
-            &sd_config.clip,
-            &clip_encoder,
-            &device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
-
-        // Encode prompt
+        // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let text_embeddings = self.encode_prompt(
-            &clip,
-            &tokenizer,
-            &req.prompt,
-            neg,
-            max_len,
-            &device,
-            dtype,
-            guidance,
-        )?;
+        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let text_embeddings = if let Some(tensor) =
+            restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
+        {
+            self.base.progress.cache_hit("prompt conditioning");
+            tensor
+        } else {
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
 
-        // Drop CLIP encoder to free memory
-        drop(clip);
-        self.base.progress.info("Freed CLIP-L encoder");
-        tracing::info!("CLIP encoder dropped (sequential mode)");
+            let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
+                .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
+
+            self.base.progress.stage_start("Loading CLIP-L encoder");
+            let clip_start = Instant::now();
+            let clip = stable_diffusion::build_clip_transformer(
+                &sd_config.clip,
+                &clip_encoder,
+                &device,
+                DType::F32,
+            )?;
+            self.base
+                .progress
+                .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
+
+            let text_embeddings = self.encode_prompt(
+                &clip,
+                &tokenizer,
+                &req.prompt,
+                neg,
+                max_len,
+                &device,
+                dtype,
+                guidance,
+            )?;
+
+            drop(clip);
+            self.base.progress.info("Freed CLIP-L encoder");
+            tracing::info!("CLIP encoder dropped (sequential mode)");
+
+            text_embeddings
+        };
 
         // --- Phase 2: Load UNet and denoise ---
         let unet_size = std::fs::metadata(&self.base.paths.transformer)

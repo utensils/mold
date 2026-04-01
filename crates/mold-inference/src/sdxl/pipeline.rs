@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey, LruCache,
-    PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
+    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -567,69 +567,72 @@ impl SDXLEngine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Load both CLIP encoders, encode, then drop ---
-        // SDXL CLIP encoders are small (~1.7GB total) so we load both for encoding,
-        // then drop them together before loading the UNet.
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        // Load tokenizers (kept in memory — tiny)
-        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
-
-        // Load CLIP-L
-        self.base.progress.stage_start("Loading CLIP-L encoder");
-        let clip_l_start = Instant::now();
-        let clip_l = stable_diffusion::build_clip_transformer(
-            &sd_config.clip,
-            &clip_encoder,
-            &device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
-
-        // Load CLIP-G
-        self.base.progress.stage_start("Loading CLIP-G encoder");
-        let clip_g_start = Instant::now();
-        let clip2_config = sd_config
-            .clip2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
-        let clip_g = stable_diffusion::build_clip_transformer(
-            clip2_config,
-            &clip_encoder_2,
-            &device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
-
-        // Encode prompt
+        // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let text_embeddings = self.encode_prompt(
-            &clip_l,
-            &clip_g,
-            &tokenizer_l,
-            &tokenizer_g,
-            &req.prompt,
-            neg,
-            max_len,
-            &device,
-            dtype,
-            guidance,
-        )?;
+        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let text_embeddings = if let Some(tensor) =
+            restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
+        {
+            self.base.progress.cache_hit("prompt conditioning");
+            tensor
+        } else {
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
 
-        // Drop CLIP encoders to free memory
-        drop(clip_l);
-        drop(clip_g);
-        self.base.progress.info("Freed CLIP-L and CLIP-G encoders");
-        tracing::info!("CLIP encoders dropped (sequential mode)");
+            let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
+                .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
+            let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
+                .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+
+            self.base.progress.stage_start("Loading CLIP-L encoder");
+            let clip_l_start = Instant::now();
+            let clip_l = stable_diffusion::build_clip_transformer(
+                &sd_config.clip,
+                &clip_encoder,
+                &device,
+                DType::F32,
+            )?;
+            self.base
+                .progress
+                .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+
+            self.base.progress.stage_start("Loading CLIP-G encoder");
+            let clip_g_start = Instant::now();
+            let clip2_config = sd_config
+                .clip2
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
+            let clip_g = stable_diffusion::build_clip_transformer(
+                clip2_config,
+                &clip_encoder_2,
+                &device,
+                DType::F32,
+            )?;
+            self.base
+                .progress
+                .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+
+            let text_embeddings = self.encode_prompt(
+                &clip_l,
+                &clip_g,
+                &tokenizer_l,
+                &tokenizer_g,
+                &req.prompt,
+                neg,
+                max_len,
+                &device,
+                dtype,
+                guidance,
+            )?;
+
+            drop(clip_l);
+            drop(clip_g);
+            self.base.progress.info("Freed CLIP-L and CLIP-G encoders");
+            tracing::info!("CLIP encoders dropped (sequential mode)");
+
+            text_embeddings
+        };
 
         // --- Phase 2: Load UNet and denoise ---
         let unet_size = std::fs::metadata(&self.base.paths.transformer)

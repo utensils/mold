@@ -449,69 +449,101 @@ impl QwenImageEngine {
             .progress
             .info("Using sequential loading (load-use-drop) to minimize peak memory");
 
-        // --- Phase 1: Text encoding ---
-        let free = free_vram_bytes().unwrap_or(0);
-        let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
-        let te_device = if te_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
-        let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
-
-        let te_label = format!(
-            "Loading Qwen2.5 text encoder ({} shards, {})",
-            self.base.paths.text_encoder_files.len(),
-            te_device_label,
-        );
-        let te_size: u64 = self
-            .base
-            .paths
-            .text_encoder_files
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        preflight_memory_check("Qwen2.5 text encoder", te_size)?;
-
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        self.base.progress.stage_start(&te_label);
-        let te_start = Instant::now();
-        let mut text_encoder =
-            self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
-        self.base.progress.stage_done(&te_label, te_start.elapsed());
-
-        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
-            &self.base.progress,
-            &self.prompt_cache,
-            &mut text_encoder,
-            &req.prompt,
-            &device,
-            dtype,
-        )?;
-
-        // Encode unconditional (empty) prompt for classifier-free guidance
+        // --- Phase 1: Text encoding (check cache first to skip encoder load) ---
         let use_cfg = req.guidance > 1.0;
-        let (uncond_hs, uncond_mask) = if use_cfg {
+        let prompt_key = prompt_text_key(&req.prompt);
+        let uncond_key = prompt_text_key("");
+        let prompt_cached = self
+            .prompt_cache
+            .lock()
+            .expect("cache poisoned")
+            .get_cloned(&prompt_key);
+        let uncond_cached = if use_cfg {
+            self.prompt_cache
+                .lock()
+                .expect("cache poisoned")
+                .get_cloned(&uncond_key)
+        } else {
+            None
+        };
+        let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
+
+        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if both_cached
+        {
+            self.base.progress.cache_hit("prompt conditioning");
+            let cached = prompt_cached.unwrap();
+            let (hs, mask) = cached.restore(&device, dtype)?;
+            let (u_hs, u_mask) = if use_cfg {
+                let ucached = uncond_cached.unwrap();
+                let (u_hs, u_mask) = ucached.restore(&device, dtype)?;
+                (Some(u_hs), Some(u_mask))
+            } else {
+                (None, None)
+            };
+            (hs, mask, u_hs, u_mask)
+        } else {
+            let free = free_vram_bytes().unwrap_or(0);
+            let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
+            let te_device = if te_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
+
+            let te_label = format!(
+                "Loading Qwen2.5 text encoder ({} shards, {})",
+                self.base.paths.text_encoder_files.len(),
+                te_device_label,
+            );
+            let te_size: u64 = self
+                .base
+                .paths
+                .text_encoder_files
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum();
+            preflight_memory_check("Qwen2.5 text encoder", te_size)?;
+
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
+
+            self.base.progress.stage_start(&te_label);
+            let te_start = Instant::now();
+            let mut text_encoder =
+                self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
+            self.base.progress.stage_done(&te_label, te_start.elapsed());
+
             let (hs, mask) = Self::encode_prompt_cached(
                 &self.base.progress,
                 &self.prompt_cache,
                 &mut text_encoder,
-                "",
+                &req.prompt,
                 &device,
                 dtype,
             )?;
-            (Some(hs), Some(mask))
-        } else {
-            (None, None)
-        };
 
-        // Drop text encoder to free memory
-        drop(text_encoder);
-        self.base.progress.info("Freed Qwen2.5 text encoder");
+            let (u_hs, u_mask) = if use_cfg {
+                let (hs, mask) = Self::encode_prompt_cached(
+                    &self.base.progress,
+                    &self.prompt_cache,
+                    &mut text_encoder,
+                    "",
+                    &device,
+                    dtype,
+                )?;
+                (Some(hs), Some(mask))
+            } else {
+                (None, None)
+            };
+
+            drop(text_encoder);
+            self.base.progress.info("Freed Qwen2.5 text encoder");
+
+            (hs, mask, u_hs, u_mask)
+        };
 
         // --- Phase 2: Load transformer and denoise ---
         let xformer_paths = self.transformer_paths();
