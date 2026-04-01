@@ -1320,8 +1320,8 @@ mod tests {
             })
         };
 
-        // Wait for first request to enter the queue
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for first request to enter the queue and acquire the engine lock
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Submit second request — should be queued at position 1
         let resp2 = {
