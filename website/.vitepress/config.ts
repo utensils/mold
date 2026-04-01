@@ -54,6 +54,7 @@ export default defineConfig({
           text: 'Usage',
           items: [
             { text: 'Generating Images', link: '/guide/generating' },
+            { text: 'Terminal UI', link: '/guide/tui' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
             { text: 'Prompt Expansion', link: '/guide/expansion' },
             { text: 'Feature Support', link: '/guide/feature-matrix' },

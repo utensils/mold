@@ -26,7 +26,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--format <FMT>`          | `png` or `jpeg`                                  |
 | `--local`                 | Skip server, run locally                         |
 | `--eager`                 | Keep all components loaded (more VRAM)           |
-| `--offload`               | CPU↔GPU block streaming (less VRAM)              |
+| `--offload`               | CPU↔GPU block streaming (less VRAM)             |
 | `--lora <PATH>`           | LoRA adapter safetensors                         |
 | `--lora-scale <FLOAT>`    | LoRA strength (0.0–2.0)                          |
 | `-i, --image <PATH>`      | Source image for img2img (`-` for stdin)         |
