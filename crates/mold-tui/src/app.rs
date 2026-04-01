@@ -990,11 +990,12 @@ impl App {
                         self.generate.focus = GenerateFocus::NegativePrompt;
                     } else if self.layout.parameters.contains(pos) {
                         self.generate.focus = GenerateFocus::Parameters;
-                        // Select the parameter row that was clicked
+                        // Select and activate the parameter row that was clicked
                         let relative_row =
                             (row - self.layout.parameters.y).saturating_sub(1) as usize;
                         if relative_row < self.generate.visible_fields.len() {
                             self.generate.param_index = relative_row;
+                            self.activate_current_param();
                         }
                     } else {
                         // Click on preview or elsewhere — go to navigation
@@ -1010,6 +1011,7 @@ impl App {
                             (row - self.layout.gallery_list.y).saturating_sub(1) as usize;
                         if relative_row < self.gallery.entries.len() {
                             self.gallery.selected = relative_row;
+                            // TODO: load preview image for selected entry
                         }
                     }
                 }
@@ -1021,7 +1023,15 @@ impl App {
                         let relative_row =
                             (row - self.layout.models_table.y).saturating_sub(2) as usize;
                         if relative_row < self.models.catalog.len() {
+                            let was_selected = self.models.selected == relative_row;
                             self.models.selected = relative_row;
+                            // Double-click: select model and switch to Generate
+                            if was_selected {
+                                let name = self.models.catalog[relative_row].name.clone();
+                                self.update_model(&name);
+                                self.active_view = View::Generate;
+                                self.generate.focus = GenerateFocus::Prompt;
+                            }
                         }
                     }
                 }
