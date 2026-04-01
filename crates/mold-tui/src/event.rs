@@ -18,7 +18,10 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Quit,
         (KeyCode::Char('?'), KeyModifiers::NONE)
             if app.active_view != View::Generate
-                || app.generate.focus == crate::app::GenerateFocus::Parameters =>
+                || matches!(
+                    app.generate.focus,
+                    crate::app::GenerateFocus::Parameters | crate::app::GenerateFocus::Navigation
+                ) =>
         {
             return Action::ShowHelp
         }
@@ -64,30 +67,32 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         _ => {}
     }
 
-    // Escape: clear errors, or if nothing to clear, deselect/go to prompt
+    // Escape behavior: unfocus to navigation mode, or clear errors
     if key.code == KeyCode::Esc {
         if app.generate.error_message.is_some() {
             return Action::Cancel;
         }
-        // If in params, go back to prompt
-        if app.generate.focus != GenerateFocus::Prompt {
-            return Action::FocusPrev;
-        }
-        return Action::None;
+        return Action::Unfocus;
+    }
+
+    // Navigation mode: number keys switch views, Enter/Tab focuses prompt
+    if app.generate.focus == GenerateFocus::Navigation {
+        return match key.code {
+            KeyCode::Char('1') => Action::SwitchView(View::Generate),
+            KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+            KeyCode::Char('3') => Action::SwitchView(View::Models),
+            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Enter | KeyCode::Char('i') => Action::FocusNext, // Enter/i to focus prompt
+            _ => Action::None,
+        };
     }
 
     // Enter behavior depends on focus
     if key.code == KeyCode::Enter {
         return match app.generate.focus {
-            GenerateFocus::Prompt | GenerateFocus::NegativePrompt => {
-                // In text fields: Ctrl+Enter or just Enter generates
-                // (multiline input uses Shift+Enter in textarea)
-                Action::Generate
-            }
-            GenerateFocus::Parameters => {
-                // In params: Enter activates the field (model selector, toggle, etc.)
-                Action::Confirm
-            }
+            GenerateFocus::Prompt | GenerateFocus::NegativePrompt => Action::Generate,
+            GenerateFocus::Parameters => Action::Confirm,
+            GenerateFocus::Navigation => Action::FocusNext,
         };
     }
 
@@ -98,18 +103,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Down | KeyCode::Char('j') => return Action::Down,
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => return Action::Increment,
             KeyCode::Char('-') | KeyCode::Left => return Action::Decrement,
-            _ => {}
-        }
-    }
-
-    // 'q' to quit only when not in a text field
-    if key.code == KeyCode::Char('q') && app.generate.focus == GenerateFocus::Parameters {
-        return Action::Quit;
-    }
-
-    // Number keys for view switching (only when not in text input)
-    if app.generate.focus == GenerateFocus::Parameters {
-        match key.code {
+            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('1') => return Action::SwitchView(View::Generate),
             KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
@@ -132,7 +126,7 @@ fn map_gallery_key(key: &KeyEvent) -> Action {
         KeyCode::Char('l') | KeyCode::Right => Action::PanRight,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
         KeyCode::Char('-') => Action::ZoomOut,
-        KeyCode::Esc => Action::ResetView,
+        KeyCode::Esc => Action::SwitchView(View::Generate),
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
@@ -151,7 +145,7 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('u') => Action::UnloadModel,
         KeyCode::Char('/') => Action::FilterModels,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Esc => Action::Cancel,
+        KeyCode::Esc => Action::SwitchView(View::Generate),
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
         KeyCode::Char('3') => Action::SwitchView(View::Models),

@@ -93,6 +93,14 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         View::Generate => {
             if app.generate.generating {
                 vec![("", "Generating...")]
+            } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
+                vec![
+                    ("1/2/3", "Views"),
+                    ("Enter", "Edit"),
+                    ("Tab", "Focus"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
             } else if app.generate.focus == crate::app::GenerateFocus::Parameters {
                 vec![
                     ("Enter", "Edit"),
@@ -100,9 +108,8 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("^G", "Generate"),
                     ("^M", "Model"),
                     ("Tab", "Focus"),
-                    ("Esc", "Back"),
+                    ("Esc", "Nav"),
                     ("?", "Help"),
-                    ("q", "Quit"),
                 ]
             } else {
                 vec![
@@ -111,25 +118,27 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("^M", "Model"),
                     ("^R", "Seed"),
                     ("Tab", "Focus"),
-                    ("?", "Help"),
+                    ("Esc", "Nav"),
                 ]
             }
         }
         View::Gallery => vec![
+            ("1/2/3", "Views"),
             ("Enter", "Re-gen"),
             ("e", "Edit"),
             ("d", "Delete"),
             ("o", "Open"),
-            ("hjkl", "Pan"),
+            ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
         ],
         View::Models => vec![
+            ("1/2/3", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("r", "Remove"),
             ("u", "Unload"),
-            ("/", "Filter"),
+            ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
         ],

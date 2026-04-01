@@ -21,6 +21,8 @@ pub enum Action {
     Confirm,
     /// Cancel / close popup (Escape).
     Cancel,
+    /// Unfocus current panel — go to navigation mode.
+    Unfocus,
     /// Start image generation.
     Generate,
     /// Open the model selector popup.

@@ -77,6 +77,8 @@ impl ProgressState {
 /// Which panel is focused in the Generate view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerateFocus {
+    /// No panel focused — number keys switch views, Enter focuses prompt.
+    Navigation,
     Prompt,
     NegativePrompt,
     Parameters,
@@ -85,6 +87,7 @@ pub enum GenerateFocus {
 impl GenerateFocus {
     pub fn next(self, has_negative: bool) -> Self {
         match self {
+            Self::Navigation => Self::Prompt,
             Self::Prompt if has_negative => Self::NegativePrompt,
             Self::Prompt => Self::Parameters,
             Self::NegativePrompt => Self::Parameters,
@@ -94,6 +97,7 @@ impl GenerateFocus {
 
     pub fn prev(self, has_negative: bool) -> Self {
         match self {
+            Self::Navigation => Self::Parameters,
             Self::Prompt => Self::Parameters,
             Self::NegativePrompt => Self::Prompt,
             Self::Parameters if has_negative => Self::NegativePrompt,
@@ -753,6 +757,11 @@ impl App {
             }
             Action::Cancel => {
                 self.generate.error_message = None;
+            }
+            Action::Unfocus => {
+                if self.active_view == View::Generate {
+                    self.generate.focus = GenerateFocus::Navigation;
+                }
             }
             _ => {}
         }
