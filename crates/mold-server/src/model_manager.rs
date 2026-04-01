@@ -111,7 +111,8 @@ pub(crate) async fn ensure_model_ready(
                 return Ok(());
             }
 
-            // Cached but unloaded — need to reload.
+            // Cached but not on GPU (Unloaded or Parked) — need to reload.
+            // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
                 tracing::info!(
@@ -267,12 +268,13 @@ async fn create_and_load_engine(
 
     let config = state.config.read().await;
     let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-    let mut new_engine = mold_inference::create_engine(
+    let mut new_engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
         &config,
         mold_inference::LoadStrategy::Eager,
         offload,
+        Some(state.shared_pool.clone()),
     )
     .map_err(|e| ApiError::internal(format!("failed to create engine for '{model_name}': {e}")))?;
     drop(config);

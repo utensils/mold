@@ -142,6 +142,9 @@ pub trait InferenceEngine: Send + Sync {
 - **Quantized encoder auto-fallback** — When FP16/BF16 encoder doesn't fit in VRAM, auto-selects largest quantized GGUF variant that fits. Custom `GgufT5Encoder` and `GgufQwen3Encoder` in `encoders/` handle GGUF-specific tensor naming. Override with `--t5-variant` / `--qwen3-variant` flags.
 - **Block-level offloading** — `flux/offload.rs`: streams transformer blocks between CPU and GPU one at a time, reducing VRAM from ~24GB to ~2-4GB (3-5x slower). Auto-enabled when VRAM is insufficient; force with `--offload` / `MOLD_OFFLOAD=1`.
 - **LoRA adapter support** — `flux/lora.rs`: custom `SimpleBackend` (`LoraBackend`) that wraps mmap'd base weights and applies LoRA deltas inline during model construction. Parses diffusers-format LoRA safetensors (A/B weight pairs + alpha), maps keys to candle's fused tensor layout (QKV, linear1), and merges via `W' = W + scale * (B @ A)`. Compatible with block-level offloading — LoRA patches are baked into blocks on CPU, then streamed to GPU during inference.
+- **LoRA fingerprint caching** — `FluxEngine` tracks an `active_lora: Option<LoraFingerprint>` (path hash + scale) to skip redundant transformer rebuilds when the same LoRA is used across requests. Cleared on `unload()`/`load()`.
+- **LoRA delta caching** — `LoraDeltaCache` in `flux/lora.rs` caches pre-computed `B @ A * scale` delta tensors on CPU (~80-120MB for FLUX). Cache keys include `patch_index` to disambiguate fused QKV slices. Survives across transformer rebuilds within the same engine lifetime.
+- **Shared tokenizer pool** — `shared_pool.rs`: cross-engine `SharedPool` caches T5 and CLIP tokenizers (keyed by file path) via `Arc<Tokenizer>`. All FLUX variants share the same tokenizer files, so model switches skip ~100-150ms of re-initialization. Passed through `create_engine_with_pool()` in `factory.rs`.
 
 **Z-Image GGUF specifics** — The quantized Z-Image transformer (`zimage/quantized_transformer.rs`) lives in this crate (not candle) because candle has no quantized Z-Image model. Key GGUF tensor name differences from BF16: fused `attention.qkv` vs separate Q/K/V, `x_embedder` vs `all_x_embedder.2-1`, etc.
 
@@ -167,7 +170,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/openapi.json` | OpenAPI spec |
 | `GET` | `/api/docs` | Interactive API docs (Scalar) |
 
-State managed via `AppState` with `tokio::sync::Mutex` around the engine.
+State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching.
 
 ### mold-cli
 
@@ -383,4 +386,4 @@ magick /tmp/mold-cropped.png /tmp/mold-mask.png \
 9. **Pipe-friendly output** — `IsTerminal` detection routes image bytes to stdout, status to stderr. SIGPIPE reset to default. `status!` macro handles routing.
 10. **Unified `run` command** — First positional arg disambiguated at runtime: known model name vs prompt text.
 11. **CPU-based noise generation** — Initial denoising noise is generated on CPU with a deterministic Rust RNG (`StdRng`/ChaCha20), then moved to GPU. This ensures same seed produces identical images across CUDA, Metal, and CPU backends. See `seeded_randn()` in `engine.rs`.
-12. **LoRA via custom VarBuilder backend** — candle has no built-in LoRA support. For BF16 models, a custom `SimpleBackend` (`LoraBackend`) wraps mmap'd safetensors and intercepts `vb.get()` calls during model construction — each tensor loads from mmap → device, and LoRA deltas (`B @ A`) are applied inline. For GGUF models, `gguf_lora_var_builder()` selectively dequantizes LoRA-affected tensors to F32 on CPU, merges deltas, and re-quantizes back to the original GGML dtype. Non-LoRA tensors stay quantized. Works with block-level offloading by targeting CPU device.
+12. **LoRA via custom VarBuilder backend** — candle has no built-in LoRA support. For BF16 models, a custom `SimpleBackend` (`LoraBackend`) wraps mmap'd safetensors and intercepts `vb.get()` calls during model construction — each tensor loads from mmap → device, and LoRA deltas (`B @ A`) are applied inline. For GGUF models, `gguf_lora_var_builder()` selectively dequantizes LoRA-affected tensors to F32 on CPU, merges deltas, and re-quantizes back to the original GGML dtype. Non-LoRA tensors stay quantized. Works with block-level offloading by targeting CPU device. `LoraDeltaCache` caches computed deltas on CPU across rebuilds; `LoraFingerprint` tracks the active LoRA to skip redundant drops.

@@ -11,6 +11,9 @@ pub enum ModelResidency {
     /// Engine exists but weights are unloaded. Can reload without recreating
     /// the engine (retains paths, config, caches).
     Unloaded,
+    /// Engine was actively unloaded from GPU but retains tokenizers, caches,
+    /// and config in memory for faster reload compared to `Unloaded`.
+    Parked,
 }
 
 /// A model entry in the cache.
@@ -29,7 +32,7 @@ pub struct CachedEngine {
 /// - At most one engine has `residency == Gpu` at a time (single-GPU inference).
 /// - `lru_order` tracks all entries from least-recently-used (front) to
 ///   most-recently-used (back).
-/// - `max_cached` limits total entries (both Gpu and Unloaded).
+/// - `max_cached` limits total entries (Gpu, Unloaded, and Parked).
 pub struct ModelCache {
     entries: HashMap<String, CachedEngine>,
     /// Ordered from least-recently-used (index 0) to most-recently-used (last).
@@ -101,12 +104,13 @@ impl ModelCache {
     }
 
     /// Unload all models from GPU. Returns names of models that were unloaded.
+    /// Unloaded models are parked (retain tokenizers/caches for faster reload).
     pub fn unload_all(&mut self) -> Vec<String> {
         let mut unloaded = Vec::new();
         for entry in self.entries.values_mut() {
             if entry.residency == ModelResidency::Gpu {
                 entry.engine.unload();
-                entry.residency = ModelResidency::Unloaded;
+                entry.residency = ModelResidency::Parked;
                 entry.vram_bytes = 0;
                 unloaded.push(entry.model_name.clone());
             }
@@ -115,6 +119,7 @@ impl ModelCache {
     }
 
     /// Unload the current GPU-resident model (if any) to make room for a new one.
+    /// The engine is parked (retains tokenizers/caches) for faster reload.
     /// Returns the name of the unloaded model.
     pub fn unload_active(&mut self) -> Option<String> {
         let active_name = self
@@ -126,7 +131,7 @@ impl ModelCache {
         if let Some(ref name) = active_name {
             if let Some(entry) = self.entries.get_mut(name) {
                 entry.engine.unload();
-                entry.residency = ModelResidency::Unloaded;
+                entry.residency = ModelResidency::Parked;
                 entry.vram_bytes = 0;
             }
         }
@@ -265,7 +270,7 @@ mod tests {
         // Still in cache, just unloaded
         assert!(cache.contains("model-a"));
         let entry = cache.get_mut("model-a").unwrap();
-        assert_eq!(entry.residency, ModelResidency::Unloaded);
+        assert_eq!(entry.residency, ModelResidency::Parked);
     }
 
     #[test]

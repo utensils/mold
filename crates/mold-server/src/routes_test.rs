@@ -1145,6 +1145,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(
+                mold_inference::shared_pool::SharedPool::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1186,6 +1189,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(
+                mold_inference::shared_pool::SharedPool::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1429,6 +1435,9 @@ mod tests {
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(
+                mold_inference::shared_pool::SharedPool::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));

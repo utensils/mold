@@ -60,14 +60,21 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
             }
 
             let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-            let engine = mold_inference::create_engine(
+            // Create shared pool before engine so the first engine can populate it.
+            let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(
+                mold_inference::shared_pool::SharedPool::new(),
+            ));
+            let engine = mold_inference::create_engine_with_pool(
                 model_name,
                 paths,
                 &config,
                 mold_inference::LoadStrategy::Eager,
                 offload,
+                Some(shared_pool.clone()),
             )?;
-            state::AppState::new(engine, config, queue_handle)
+            let mut state = state::AppState::new(engine, config, queue_handle);
+            state.shared_pool = shared_pool;
+            state
         }
         None => {
             info!("no default model configured — models will be pulled on first request");

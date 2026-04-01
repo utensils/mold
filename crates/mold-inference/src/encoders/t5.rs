@@ -2,6 +2,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::t5;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 use super::t5_gguf::GgufT5Encoder;
@@ -57,7 +58,7 @@ impl T5Model {
 /// and GGUF quantized T5 models.
 pub(crate) struct T5Encoder {
     pub model: Option<T5Model>,
-    pub tokenizer: Tokenizer,
+    pub tokenizer: Arc<Tokenizer>,
     pub device: Device,
     pub on_gpu: bool,
     /// Whether this encoder uses a quantized GGUF model.
@@ -73,6 +74,18 @@ impl T5Encoder {
         device: &Device,
         dtype: DType,
         progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        Self::load_with_tokenizer(encoder_path, tokenizer_path, device, dtype, progress, None)
+    }
+
+    /// Load T5 encoder weights, reusing a cached tokenizer if provided.
+    pub fn load_with_tokenizer(
+        encoder_path: &PathBuf,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
     ) -> Result<Self> {
         let is_quantized = encoder_path
             .extension()
@@ -93,8 +106,13 @@ impl T5Encoder {
             T5Model::FP16(t5::T5EncoderModel::load(vb, &config())?)
         };
 
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?;
+        let tokenizer = match cached_tokenizer {
+            Some(tok) => tok,
+            None => Arc::new(
+                Tokenizer::from_file(tokenizer_path)
+                    .map_err(|e| anyhow::anyhow!("failed to load T5 tokenizer: {e}"))?,
+            ),
+        };
         let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {
@@ -104,6 +122,11 @@ impl T5Encoder {
             on_gpu,
             is_quantized,
         })
+    }
+
+    /// Get a reference-counted handle to this encoder's tokenizer (for caching in SharedPool).
+    pub fn tokenizer_arc(&self) -> Arc<Tokenizer> {
+        self.tokenizer.clone()
     }
 
     /// Encode a text prompt into T5 embeddings, padded to 256 tokens.
