@@ -161,10 +161,17 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
 }
 
-.support-pill img {
+.support-pill img,
+.support-pill svg {
   width: 1.05rem;
   height: 1.05rem;
   flex: 0 0 auto;
+}
+
+.support-pill svg {
+  display: block;
+  color: currentColor;
+  fill: currentColor;
 }
 
 @media (max-width: 640px) {

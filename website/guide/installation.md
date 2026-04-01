@@ -64,10 +64,10 @@ See [Docker & RunPod](/deployment/docker) for full deployment instructions.
 
 Available on the [releases page](https://github.com/utensils/mold/releases):
 
-| Platform                              | File                                              |
-| ------------------------------------- | ------------------------------------------------- |
-| macOS Apple Silicon                   | `mold-aarch64-apple-darwin.tar.gz`                |
-| Linux x86_64 (Ada, RTX 4090 / 40-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
+| Platform                                       | File                                              |
+| ---------------------------------------------- | ------------------------------------------------- |
+| macOS Apple Silicon                            | `mold-aarch64-apple-darwin.tar.gz`                |
+| Linux x86_64 (Ada, RTX 4090 / 40-series)       | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
 | Linux x86_64 (Blackwell, RTX 5090 / 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
 ## Shell Completions
