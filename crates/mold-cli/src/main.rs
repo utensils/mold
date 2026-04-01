@@ -36,7 +36,9 @@ Quick start:
   mold pull flux-schnell:q8        Download a model
   mold run \"a cat on a skateboard\"  Generate an image
 
-Run 'mold <command> --help' for more information on a command."
+Run 'mold <command> --help' for more information on a command.
+
+Report bugs: https://github.com/utensils/mold/issues"
 )]
 #[command(version, propagate_version = true)]
 struct Cli {
@@ -392,6 +394,31 @@ Setup instructions:
 
 #[tokio::main]
 async fn main() {
+    // Install a panic hook that prints a friendly crash report with a link
+    // to file an issue.  This only fires on Rust panics — segfaults from
+    // FFI/CUDA are OS signals and bypass this hook entirely.
+    std::panic::set_hook(Box::new(|info| {
+        // Clear any in-progress line (progress bars, spinners)
+        eprint!("\r\x1b[2K");
+        eprintln!("\n{} mold crashed unexpectedly", theme::prefix_error());
+        eprintln!();
+        if let Some(msg) = info.payload().downcast_ref::<&str>() {
+            eprintln!("  {msg}");
+        } else if let Some(msg) = info.payload().downcast_ref::<String>() {
+            eprintln!("  {msg}");
+        }
+        if let Some(loc) = info.location() {
+            eprintln!("  at {}:{}:{}", loc.file(), loc.line(), loc.column());
+        }
+        eprintln!();
+        eprintln!(
+            "  This is a bug. Please report it at:"
+        );
+        eprintln!("  https://github.com/utensils/mold/issues");
+        eprintln!();
+        eprintln!("  Include the full output above and your 'mold version'.");
+    }));
+
     // Reset SIGPIPE to default (terminate) so piping doesn't panic.
     // Rust ignores SIGPIPE by default, causing "broken pipe" panics when
     // stdout is a pipe and the reader closes (e.g. `mold run ... | head`).

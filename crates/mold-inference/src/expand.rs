@@ -248,20 +248,16 @@ impl LocalExpander {
             .decode(&generated_tokens, true)
             .map_err(|e| anyhow::anyhow!("failed to decode generated tokens: {e}"))?;
 
-        // Clear KV cache and drop model + device before reclaiming GPU memory.
-        // The device must be dropped BEFORE cuDevicePrimaryCtxReset — otherwise
-        // the candle Device still holds a CudaDevice reference to the context
-        // we're about to destroy, causing a use-after-free segfault when the
-        // next pipeline creates a new Device on the same GPU.
-        let was_cuda = device.is_cuda();
+        // Clear KV cache and drop model + device to free VRAM.
+        // NOTE: We intentionally do NOT call reclaim_gpu_memory() here.
+        // That function resets the CUDA primary context, but cudarc caches
+        // CudaDevice per ordinal — the next Device::new_cuda(0) would get
+        // the stale cached handle and segfault.  Dropping the model and
+        // device frees all tensor allocations; the context stays valid for
+        // the diffusion engine that runs next.
         model.clear_kv_cache();
         drop(model);
         drop(device);
-
-        // Reclaim GPU memory if we used it
-        if was_cuda {
-            crate::device::reclaim_gpu_memory();
-        }
 
         Ok(output)
     }
