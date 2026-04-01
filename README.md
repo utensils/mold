@@ -475,6 +475,24 @@ See [CLAUDE.md](CLAUDE.md) for the full list.
 | `flux2-klein:q4` | 4 | 2.6GB | Smallest FLUX variant |
 | `flux2-klein:bf16` | 4 | 7.8GB | Full precision 4B |
 
+### Flux.2 Klein-base-4B (undistilled, Apache 2.0)
+
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `flux2-klein-base:q8` | 50 | 4.3GB | Undistilled 4B, best for fine-tuning/LoRA |
+| `flux2-klein-base:q6` | 50 | 3.4GB | Better quality/size trade-off |
+| `flux2-klein-base:q4` | 50 | 2.6GB | Smallest undistilled |
+| `flux2-klein-base:bf16` | 50 | 7.75GB | Full precision 4B |
+
+### Flux.2 Klein-9B (non-commercial, distilled)
+
+| Model | Steps | Size | Good for |
+|-------|-------|------|----------|
+| `flux2-klein-9b:q8` | 4 | 10GB | Fast 9B, higher quality than 4B |
+| `flux2-klein-9b:q6` | 4 | 7.9GB | Better quality/size trade-off |
+| `flux2-klein-9b:q4` | 4 | 5.9GB | Smallest 9B variant |
+| `flux2-klein-9b:bf16` | 4 | 18GB | Full precision 9B, gated (2 shards, ~29GB VRAM) |
+
 > Bare names resolve by trying `:q8` → `:fp16` → `:bf16` → `:fp8` in order. So `mold run flux-schnell "a cat"` just works.
 
 ## Server API

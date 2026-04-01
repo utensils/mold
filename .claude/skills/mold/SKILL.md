@@ -133,6 +133,8 @@ Pick the right model for the task:
 | `flux-schnell:q8` | Fast (4 steps) | Good | Quick iterations, drafts |
 | `flux-dev:q4` | Slow (25 steps) | Excellent | Final quality, detailed |
 | `flux2-klein:q8` | Fast (4 steps) | Good | Low VRAM, lightweight FLUX |
+| `flux2-klein-base:q8` | Slow (50 steps) | Good | Undistilled 4B, fine-tuning/LoRA |
+| `flux2-klein-9b:q8` | Fast (4 steps) | Excellent | Higher quality 9B, non-commercial |
 | `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
 | `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
@@ -152,6 +154,8 @@ Default model if none specified: `flux-schnell:q8`
 | `sd3.5-large` | 28 | 4.0 | 1024x1024 |
 | `z-image-turbo` | 9 | 0.0 | 1024x1024 |
 | `flux2-klein` | 4 | 0.0 | 1024x1024 |
+| `flux2-klein-base` | 50 | 4.0 | 1024x1024 |
+| `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
 | `qwen-image` | 30 | 7.0 | 1024x1024 |
 
 ### Available Models
@@ -169,6 +173,10 @@ Default model if none specified: `flux-schnell:q8`
 **Z-Image**: `z-image-turbo:bf16`, `z-image-turbo:q8`, `z-image-turbo:q6`, `z-image-turbo:q4`
 
 **Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
+
+**Flux.2 Klein-base-4B**: `flux2-klein-base:bf16`, `flux2-klein-base:q8`, `flux2-klein-base:q6`, `flux2-klein-base:q4`
+
+**Flux.2 Klein-9B**: `flux2-klein-9b:bf16`, `flux2-klein-9b:q8`, `flux2-klein-9b:q6`, `flux2-klein-9b:q4`
 
 **Wuerstchen**: `wuerstchen-v2:fp16`
 
