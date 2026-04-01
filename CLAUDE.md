@@ -299,15 +299,15 @@ default_height = 1024
 # default_negative_prompt = "low quality, worst quality, blurry, watermark"
 
 [models."flux2-klein:q8"]
-transformer = "/path/to/flux1-schnell-Q8_0.gguf"
-vae = "/path/to/ae.safetensors"
-t5_encoder = "/path/to/t5xxl_fp16.safetensors"
-clip_encoder = "/path/to/clip_l.safetensors"
-t5_tokenizer = "/path/to/t5.tokenizer.json"
-clip_tokenizer = "/path/to/clip.tokenizer.json"
+transformer = "/path/to/flux-2-klein-4b-Q8_0.gguf"
+vae = "/path/to/vae/diffusion_pytorch_model.safetensors"
+t5_encoder = "/path/to/text_encoder/model-00001-of-00002.safetensors"
+clip_encoder = ""
+t5_tokenizer = "/path/to/tokenizer/tokenizer.json"
+clip_tokenizer = ""
 default_steps = 4
 default_guidance = 0.0
-is_schnell = true
+is_schnell = false
 # lora = "/path/to/adapter.safetensors"
 # lora_scale = 0.8
 

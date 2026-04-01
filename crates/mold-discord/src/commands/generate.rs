@@ -474,7 +474,7 @@ mod tests {
                 remaining_download_bytes: None,
             },
         ];
-        // Should pick flux-schnell:q8, not the utility model
+        // Should pick flux2-klein:q8, not the utility model
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 
@@ -548,7 +548,7 @@ mod tests {
                 remaining_download_bytes: None,
             },
         ];
-        // Should pick flux-schnell:q8, not the smaller controlnet
+        // Should pick flux2-klein:q8, not the smaller controlnet
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
     }
 }
