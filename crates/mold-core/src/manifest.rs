@@ -3289,6 +3289,79 @@ mod tests {
     }
 
     #[test]
+    fn flux2_klein_base_defaults() {
+        let manifest = find_manifest("flux2-klein-base:bf16").unwrap();
+        assert_eq!(manifest.family, "flux2");
+        assert_eq!(manifest.defaults.steps, 50);
+        assert!((manifest.defaults.guidance - 4.0).abs() < 0.01);
+        assert_eq!(manifest.defaults.width, 1024);
+    }
+
+    #[test]
+    fn flux2_klein_base_gguf_exists() {
+        assert!(find_manifest("flux2-klein-base:q8").is_some());
+        assert!(find_manifest("flux2-klein-base:q6").is_some());
+        assert!(find_manifest("flux2-klein-base:q4").is_some());
+    }
+
+    #[test]
+    fn flux2_klein_base_resolves_to_q8() {
+        let name = resolve_model_name("flux2-klein-base");
+        assert_eq!(name, "flux2-klein-base:q8");
+    }
+
+    #[test]
+    fn flux2_klein_9b_defaults() {
+        let manifest = find_manifest("flux2-klein-9b:bf16").unwrap();
+        assert_eq!(manifest.family, "flux2");
+        assert_eq!(manifest.defaults.steps, 4);
+        assert!((manifest.defaults.guidance - 1.0).abs() < 0.01);
+        assert_eq!(manifest.defaults.width, 1024);
+    }
+
+    #[test]
+    fn flux2_klein_9b_bf16_is_sharded() {
+        let manifest = find_manifest("flux2-klein-9b:bf16").unwrap();
+        let shards: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.component == ModelComponent::TransformerShard)
+            .collect();
+        assert_eq!(
+            shards.len(),
+            2,
+            "Klein-9B BF16 should have 2 transformer shards"
+        );
+    }
+
+    #[test]
+    fn flux2_klein_9b_gguf_exists() {
+        assert!(find_manifest("flux2-klein-9b:q8").is_some());
+        assert!(find_manifest("flux2-klein-9b:q6").is_some());
+        assert!(find_manifest("flux2-klein-9b:q4").is_some());
+    }
+
+    #[test]
+    fn flux2_klein_9b_resolves_to_q8() {
+        let name = resolve_model_name("flux2-klein-9b");
+        assert_eq!(name, "flux2-klein-9b:q8");
+    }
+
+    #[test]
+    fn flux2_klein_9b_shared_files_are_gated() {
+        let manifest = find_manifest("flux2-klein-9b:q8").unwrap();
+        let text_encoders: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.component == ModelComponent::TextEncoder)
+            .collect();
+        assert!(
+            text_encoders.iter().all(|f| f.gated),
+            "Klein-9B text encoder shards should be gated"
+        );
+    }
+
+    #[test]
     fn variant_quality_rank_ordering() {
         use super::variant_quality_rank;
         assert!(variant_quality_rank("flux-dev:bf16") < variant_quality_rank("flux-dev:fp16"));

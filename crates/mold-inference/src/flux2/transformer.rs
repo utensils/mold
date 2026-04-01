@@ -809,6 +809,20 @@ mod tests {
     }
 
     #[test]
+    fn klein_9b_config_dimensions() {
+        let cfg = Flux2Config::klein_9b();
+        assert_eq!(cfg.in_channels, 128);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_heads, 32);
+        assert_eq!(cfg.hidden_size / cfg.num_heads, 128); // head_dim
+        assert_eq!(cfg.depth, 8);
+        assert_eq!(cfg.depth_single_blocks, 24);
+        assert_eq!(cfg.context_in_dim, 12288);
+        assert_eq!(cfg.context_in_dim, 4096 * 3); // Qwen3 hidden_size=4096, stacked 3x
+        assert!(!cfg.guidance_embed); // distilled
+    }
+
+    #[test]
     fn timestep_embedding_shape() {
         let dev = candle_core::Device::Cpu;
         let t = Tensor::full(0.5f32, 2, &dev).unwrap();
