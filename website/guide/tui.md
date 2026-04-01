@@ -8,6 +8,8 @@ Built on [ratatui](https://ratatui.rs) with Kitty graphics protocol support for
 pixel-perfect image preview in terminals like Ghostty, kitty, and WezTerm. Falls
 back to halfblock rendering in other terminals.
 
+![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
+
 ## Quick Start
 
 ```bash
