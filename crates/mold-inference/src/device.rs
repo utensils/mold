@@ -130,8 +130,9 @@ pub(crate) fn free_system_memory_bytes() -> Option<u64> {
 
 /// Total available system memory on macOS (free + inactive pages).
 ///
-/// Inactive pages CAN be reclaimed by the OS, but doing so involves I/O for dirty pages.
-/// Use this for memory budget checks (can this model run at all?) not for real-time decisions.
+/// Inactive pages are trivially reclaimable by the OS (no I/O for anonymous pages).
+/// Used for both memory budget checks and variant selection on unified-memory systems,
+/// where free-only is too conservative (often ~1-2GB on a busy 16GB Mac).
 #[cfg(target_os = "macos")]
 pub(crate) fn available_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free + s.inactive)
@@ -200,11 +201,15 @@ pub(crate) fn free_vram_bytes() -> Option<u64> {
         .map(|(free, _total)| free as u64)
 }
 
-/// On macOS, return immediately free system memory (conservative estimate).
+/// On macOS (unified memory), return available system memory (free + inactive).
+///
+/// macOS reclaims inactive pages trivially with no I/O, so free-only is too
+/// conservative for variant selection — it can reject quantized encoders that
+/// would actually fit, forcing a BF16 fallback that doesn't fit either.
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(not(feature = "cuda"))]
 pub(crate) fn free_vram_bytes() -> Option<u64> {
-    free_system_memory_bytes()
+    available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
 /// Estimate current VRAM usage (total - free). Returns 0 if unavailable.
@@ -305,9 +310,9 @@ pub(crate) fn should_offload(transformer_size: u64, free_vram: u64) -> bool {
 
 /// Check whether a model component fits comfortably in memory.
 ///
-/// On CUDA, checks discrete VRAM (same as should_use_gpu).
-/// On Metal, checks immediately free system memory against threshold.
-/// Returns false if loading this component would require heavy page reclamation.
+/// On CUDA, checks discrete VRAM against threshold.
+/// On Metal, checks the passed `free_vram` (which should be available system
+/// memory on unified-memory systems) against threshold.
 pub(crate) fn fits_in_memory(
     is_cuda: bool,
     is_metal: bool,
@@ -535,6 +540,29 @@ mod tests {
         assert!(result.is_some(), "macOS should return system memory info");
         #[cfg(not(any(target_os = "macos", feature = "cuda")))]
         assert_eq!(result, None);
+    }
+
+    /// On macOS (unified memory), free_vram_bytes should return available memory
+    /// (free + inactive), not just free pages. This ensures variant selection
+    /// doesn't reject quantized encoders that would actually fit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn free_vram_returns_available_not_just_free_on_macos() {
+        let vram = free_vram_bytes().unwrap();
+        let available = available_system_memory_bytes().unwrap();
+        let free = free_system_memory_bytes().unwrap();
+        // free_vram_bytes should return available (>= free), not just free
+        assert!(
+            vram >= free,
+            "free_vram_bytes ({vram}) should be >= free_system_memory ({free})"
+        );
+        // Allow small delta between separate syscalls (TOCTOU: inactive pages may
+        // change between the two macos_vm_stats() calls on a busy system)
+        let max_drift = 16 * 4096; // 16 pages
+        assert!(
+            vram.abs_diff(available) < max_drift,
+            "free_vram_bytes ({vram}) should approximately equal available_system_memory ({available})"
+        );
     }
 
     // --- should_use_gpu: Metal always GPU ---

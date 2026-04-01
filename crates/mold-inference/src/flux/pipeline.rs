@@ -1731,13 +1731,24 @@ impl InferenceEngine for FluxEngine {
             tracing::info!("CLIP encoding complete");
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
-            if loaded.t5.on_gpu {
+            // Drop encoders to free memory for denoising.
+            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
+            // weights since they share the same physical RAM as GPU allocations.
+            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            let is_metal = loaded.device.is_metal();
+            if loaded.t5.on_gpu || is_metal {
                 loaded.t5.drop_weights();
-                tracing::info!("T5 encoder dropped from GPU to free VRAM for denoising");
+                tracing::info!(
+                    on_gpu = loaded.t5.on_gpu,
+                    "T5 encoder dropped to free memory for denoising"
+                );
             }
-            if loaded.clip.on_gpu {
+            if loaded.clip.on_gpu || is_metal {
                 loaded.clip.drop_weights();
-                tracing::info!("CLIP encoder dropped from GPU to free VRAM for denoising");
+                tracing::info!(
+                    on_gpu = loaded.clip.on_gpu,
+                    "CLIP encoder dropped to free memory for denoising"
+                );
             }
 
             Self::generate_with_embeddings(

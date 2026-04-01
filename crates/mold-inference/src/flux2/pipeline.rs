@@ -22,8 +22,8 @@ use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
 use super::vae::{Flux2AutoEncoder, Flux2VaeConfig};
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, prompt_text_key, CachedTensor, LruCache,
-    DEFAULT_PROMPT_CACHE_CAPACITY,
+    clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
+    LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
@@ -628,30 +628,46 @@ impl InferenceEngine for Flux2Engine {
             "starting Flux.2 generation"
         );
 
-        // Reload Qwen3 encoder if it was dropped after a previous generation
-        if loaded.text_encoder.model.is_none() {
-            progress.stage_start("Reloading Qwen3 encoder");
-            let reload_start = Instant::now();
-            loaded.text_encoder.reload(progress)?;
-            progress.stage_done("Reloading Qwen3 encoder", reload_start.elapsed());
-        }
+        // 1. Encode prompt with Qwen3 (check cache first to avoid unnecessary reload)
+        let cache_key = prompt_text_key(&req.prompt);
+        let txt_emb = if let Some(tensor) =
+            restore_cached_tensor(&self.prompt_cache, &cache_key, &loaded.device, loaded.dtype)?
+        {
+            progress.cache_hit("prompt conditioning");
+            tensor
+        } else {
+            // Cache miss — reload encoder if it was dropped after a previous generation
+            if loaded.text_encoder.model.is_none() {
+                progress.stage_start("Reloading Qwen3 encoder");
+                let reload_start = Instant::now();
+                loaded.text_encoder.reload(progress)?;
+                progress.stage_done("Reloading Qwen3 encoder", reload_start.elapsed());
+            }
 
-        // 1. Encode prompt with Qwen3
-        let txt_emb = Self::encode_prompt_cached(
-            progress,
-            &self.prompt_cache,
-            &mut loaded.text_encoder,
-            &req.prompt,
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        tracing::info!("Qwen3 encoding complete");
+            let txt_emb = Self::encode_prompt_cached(
+                progress,
+                &self.prompt_cache,
+                &mut loaded.text_encoder,
+                &req.prompt,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            tracing::info!("Qwen3 encoding complete");
 
-        // Drop Qwen3 from GPU to free VRAM for denoising
-        if loaded.text_encoder.on_gpu {
-            loaded.text_encoder.drop_weights();
-            tracing::info!("Qwen3 encoder dropped from GPU to free VRAM for denoising");
-        }
+            // Drop Qwen3 to free memory for denoising.
+            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
+            // weights since they share the same physical RAM as GPU allocations.
+            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
+                loaded.text_encoder.drop_weights();
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen3 encoder dropped to free memory for denoising"
+                );
+            }
+
+            txt_emb
+        };
 
         // 2. Generate initial noise with seed for reproducibility
         let latent_h = height.div_ceil(8);
