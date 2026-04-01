@@ -37,9 +37,10 @@ pub struct MoldProcess {
 pub fn find_mold_processes() -> Vec<MoldProcess> {
     let current_pid = std::process::id();
     let mut sys = System::new();
+    // Second param `false` = don't include threads (only main processes).
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
-        true,
+        false,
         sysinfo::ProcessRefreshKind::nothing()
             .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
             .with_exe(sysinfo::UpdateKind::OnlyIfNotSet)
@@ -74,7 +75,8 @@ pub fn find_mold_processes() -> Vec<MoldProcess> {
 
         // Only include processes with a recognized mold subcommand.
         // This filters out the GNU `mold` linker and other false positives.
-        if !KNOWN_SUBCOMMANDS.contains(&subcommand.as_str()) {
+        // Also skip "ps" — that's us (or another mold ps invocation).
+        if !KNOWN_SUBCOMMANDS.contains(&subcommand.as_str()) || subcommand == "ps" {
             continue;
         }
 
