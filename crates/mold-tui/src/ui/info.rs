@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     // Process RAM
     if ri.process_ram_mb > 0 {
         lines.push(Line::from(Span::styled(
-            format!("Process: {} MB RAM", ri.process_ram_mb),
+            format!("Mold: {} MB RAM", ri.process_ram_mb),
             theme.dim(),
         )));
     }
@@ -66,7 +66,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 pub struct ResourceInfo {
     /// Human-readable memory status (e.g., "VRAM: 16.2 GB free" or "Memory: 24.0 GB available")
     pub memory_line: Option<String>,
-    /// Process RAM usage in MB.
+    /// Total RAM used by all mold processes in MB.
     pub process_ram_mb: u64,
 }
 
@@ -76,13 +76,17 @@ impl ResourceInfo {
         // System memory / VRAM
         self.memory_line = mold_inference::device::memory_status_string();
 
-        // Process RAM via sysinfo
-        use sysinfo::{Pid, ProcessesToUpdate, System};
-        let pid = std::process::id();
+        // Total RAM across all mold processes (TUI + server + any workers)
+        use sysinfo::{ProcessesToUpdate, System};
         let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-        if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-            self.process_ram_mb = proc.memory() / (1024 * 1024);
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let mut total_bytes: u64 = 0;
+        for proc in sys.processes().values() {
+            let name = proc.name().to_string_lossy();
+            if name == "mold" || name.starts_with("mold") {
+                total_bytes += proc.memory();
+            }
         }
+        self.process_ram_mb = total_bytes / (1024 * 1024);
     }
 }

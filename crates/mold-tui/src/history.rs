@@ -51,14 +51,21 @@ impl PromptHistory {
 
     /// Append an entry and save to disk.
     pub fn push(&mut self, entry: HistoryEntry) {
+        if self.push_entry(entry) {
+            self.save();
+        }
+    }
+
+    /// Append an entry without saving. Returns true if entry was added.
+    fn push_entry(&mut self, entry: HistoryEntry) -> bool {
         // Skip empty/whitespace-only prompts
         if entry.prompt.trim().is_empty() {
-            return;
+            return false;
         }
         // Don't add duplicate of the most recent entry
         if let Some(last) = self.entries.last() {
             if last.prompt == entry.prompt {
-                return;
+                return false;
             }
         }
         self.entries.push(entry);
@@ -67,7 +74,7 @@ impl PromptHistory {
             let excess = self.entries.len() - MAX_ENTRIES;
             self.entries.drain(..excess);
         }
-        self.save();
+        true
     }
 
     /// Save history to disk (best-effort).
@@ -192,8 +199,21 @@ mod tests {
             cursor: None,
             draft: None,
         };
-        history.push(make_entry("hello"));
-        history.push(make_entry("hello"));
+        history.push_entry(make_entry("hello"));
+        history.push_entry(make_entry("hello"));
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn push_skips_empty_prompts() {
+        let mut history = PromptHistory {
+            entries: Vec::new(),
+            cursor: None,
+            draft: None,
+        };
+        assert!(!history.push_entry(make_entry("")));
+        assert!(!history.push_entry(make_entry("   ")));
+        assert!(history.push_entry(make_entry("real prompt")));
         assert_eq!(history.len(), 1);
     }
 
@@ -206,7 +226,7 @@ mod tests {
             cursor: None,
             draft: None,
         };
-        history.push(make_entry("new"));
+        history.push_entry(make_entry("new"));
         assert!(history.len() <= MAX_ENTRIES);
         // Newest should be "new"
         assert_eq!(history.entries.last().unwrap().prompt, "new");

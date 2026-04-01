@@ -104,3 +104,70 @@ pub fn family_for_model(model_name: &str, config: &Config) -> String {
         .or_else(|| mold_core::manifest::find_manifest(model_name).map(|m| m.family.clone()))
         .unwrap_or_else(|| "flux".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flux_does_not_support_controlnet() {
+        let caps = capabilities_for_family("flux");
+        assert!(!caps.supports_controlnet);
+    }
+
+    #[test]
+    fn sd15_supports_controlnet() {
+        let caps = capabilities_for_family("sd15");
+        assert!(caps.supports_controlnet);
+    }
+
+    #[test]
+    fn sd15_supports_negative_and_scheduler() {
+        let caps = capabilities_for_family("sd15");
+        assert!(caps.supports_negative_prompt);
+        assert!(caps.supports_scheduler);
+        assert!(caps.default_scheduler.is_some());
+    }
+
+    #[test]
+    fn flux_supports_lora_and_img2img() {
+        let caps = capabilities_for_family("flux");
+        assert!(caps.supports_lora);
+        assert!(caps.supports_img2img);
+    }
+
+    #[test]
+    fn flux2_has_minimal_capabilities() {
+        let caps = capabilities_for_family("flux2");
+        assert!(!caps.supports_negative_prompt);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_img2img);
+        assert!(!caps.supports_controlnet);
+        assert!(!caps.supports_lora);
+    }
+
+    #[test]
+    fn unknown_family_defaults_to_minimal() {
+        let caps = capabilities_for_family("unknown-model");
+        assert!(!caps.supports_negative_prompt);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_controlnet);
+    }
+
+    #[test]
+    fn sdxl_supports_negative_and_scheduler_but_not_controlnet() {
+        let caps = capabilities_for_family("sdxl");
+        assert!(caps.supports_negative_prompt);
+        assert!(caps.supports_scheduler);
+        assert!(!caps.supports_controlnet);
+        assert!(!caps.supports_lora);
+    }
+
+    #[test]
+    fn qwen_image_supports_negative_only() {
+        let caps = capabilities_for_family("qwen-image");
+        assert!(caps.supports_negative_prompt);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_controlnet);
+    }
+}
