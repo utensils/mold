@@ -793,7 +793,8 @@ async fn generate_local_batch(
         for mut img in response.images {
             img.index = i;
             // Save and preview each image immediately during batch generation
-            if batch > 1 {
+            // (single-image mode is handled by the caller's post-loop section)
+            if batch > 1 && (!is_piped() || output.is_some()) {
                 save_and_preview_image(&img, output, &req.model, batch, output_format, preview)?;
             }
             all_images.push(img);
