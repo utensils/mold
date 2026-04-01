@@ -201,31 +201,6 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(ref mut image_state) = app.generate.image_state {
         let image_widget = StatefulImage::default();
         frame.render_stateful_widget(image_widget, inner, image_state);
-
-        // Show seed/time info below the image if there's room
-        if let (Some(seed), Some(time_ms)) =
-            (app.generate.last_seed, app.generate.last_generation_time_ms)
-        {
-            if inner.height > 2 {
-                let seed_str = seed.to_string();
-                let seed_display = if seed_str.len() > 10 {
-                    format!("{}...", &seed_str[..8])
-                } else {
-                    seed_str
-                };
-                let info = format!("{seed_display} | {:.1}s", time_ms as f64 / 1000.0);
-                let info_area = Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height - 1,
-                    width: inner.width,
-                    height: 1,
-                };
-                let p = Paragraph::new(info)
-                    .style(theme.dim())
-                    .alignment(Alignment::Center);
-                frame.render_widget(p, info_area);
-            }
-        }
     } else if app.generate.generating {
         // Show a "generating..." message
         let msg = Paragraph::new("Generating...")

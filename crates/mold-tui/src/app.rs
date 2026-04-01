@@ -796,6 +796,67 @@ impl App {
                                 return;
                             }
                         }
+                        // Up arrow: history prev at top line, cursor up otherwise
+                        (KeyCode::Up, KeyModifiers::NONE) => {
+                            let textarea = match self.generate.focus {
+                                GenerateFocus::Prompt => &self.generate.prompt,
+                                GenerateFocus::NegativePrompt => &self.generate.negative_prompt,
+                                _ => unreachable!(),
+                            };
+                            if textarea.cursor().0 == 0 {
+                                let current =
+                                    self.generate.prompt.lines().join("\n");
+                                if let Some(prompt) = self.history.prev(&current) {
+                                    self.generate.prompt = TextArea::new(
+                                        prompt.lines().map(String::from).collect(),
+                                    );
+                                    self.generate
+                                        .prompt
+                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                }
+                                return;
+                            }
+                            let ta = match self.generate.focus {
+                                GenerateFocus::Prompt => &mut self.generate.prompt,
+                                GenerateFocus::NegativePrompt => {
+                                    &mut self.generate.negative_prompt
+                                }
+                                _ => unreachable!(),
+                            };
+                            ta.input(event);
+                            return;
+                        }
+                        // Down arrow: history next at bottom line, cursor down otherwise
+                        (KeyCode::Down, KeyModifiers::NONE) => {
+                            let textarea = match self.generate.focus {
+                                GenerateFocus::Prompt => &self.generate.prompt,
+                                GenerateFocus::NegativePrompt => &self.generate.negative_prompt,
+                                _ => unreachable!(),
+                            };
+                            let last_line = textarea.lines().len().saturating_sub(1);
+                            if textarea.cursor().0 >= last_line {
+                                let current =
+                                    self.generate.prompt.lines().join("\n");
+                                if let Some(prompt) = self.history.next(&current) {
+                                    self.generate.prompt = TextArea::new(
+                                        prompt.lines().map(String::from).collect(),
+                                    );
+                                    self.generate
+                                        .prompt
+                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                }
+                                return;
+                            }
+                            let ta = match self.generate.focus {
+                                GenerateFocus::Prompt => &mut self.generate.prompt,
+                                GenerateFocus::NegativePrompt => {
+                                    &mut self.generate.negative_prompt
+                                }
+                                _ => unreachable!(),
+                            };
+                            ta.input(event);
+                            return;
+                        }
                         (KeyCode::Char('1'), KeyModifiers::ALT)
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
                         | (KeyCode::Char('3'), KeyModifiers::ALT) => {
@@ -1052,7 +1113,7 @@ impl App {
                             (row - self.layout.gallery_list.y).saturating_sub(1) as usize;
                         if relative_row < self.gallery.entries.len() {
                             self.gallery.selected = relative_row;
-                            // TODO: load preview image for selected entry
+                            self.load_gallery_preview();
                         }
                     }
                 }
@@ -1154,6 +1215,7 @@ impl App {
                 View::Gallery => {
                     if self.gallery.selected > 0 {
                         self.gallery.selected -= 1;
+                        self.load_gallery_preview();
                     }
                 }
                 View::Models => {
@@ -1173,6 +1235,7 @@ impl App {
                 View::Gallery => {
                     if self.gallery.selected + 1 < self.gallery.entries.len() {
                         self.gallery.selected += 1;
+                        self.load_gallery_preview();
                     }
                 }
                 View::Models => {
@@ -1366,6 +1429,22 @@ impl App {
                 self.generate.params.inference_mode,
             );
         }
+    }
+
+    /// Load the currently selected gallery entry's image into the preview.
+    fn load_gallery_preview(&mut self) {
+        if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+            if entry.path.exists() && entry.path.is_file() {
+                if let Ok(img) = image::open(&entry.path) {
+                    let protocol = self.picker.new_resize_protocol(img.clone());
+                    self.gallery.preview_image = Some(img);
+                    self.gallery.image_state = Some(protocol);
+                    return;
+                }
+            }
+        }
+        self.gallery.preview_image = None;
+        self.gallery.image_state = None;
     }
 
     fn open_model_selector(&mut self) {
@@ -1622,6 +1701,8 @@ impl App {
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
+                    self.gallery.selected = 0;
+                    self.load_gallery_preview();
                 }
                 BackgroundEvent::PullComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
