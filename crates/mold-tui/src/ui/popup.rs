@@ -8,6 +8,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.popup {
         Some(Popup::Help) => render_help(frame, app),
         Some(Popup::ModelSelector { .. }) => render_model_selector(frame, app),
+        Some(Popup::HostInput { .. }) => render_host_input(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         None => {}
     }
@@ -179,6 +180,65 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
         let list = List::new(items);
         let mut state = ListState::default().with_selected(Some(*selected));
         frame.render_stateful_widget(list, list_area, &mut state);
+    }
+}
+
+fn render_host_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 50, 15);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::HostInput { input }) = &app.popup {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(" Server Host ")
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 3 {
+            return;
+        }
+
+        let hint =
+            Paragraph::new("Enter server address (or clear for local mode)").style(theme.dim());
+        let hint_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(hint, hint_area);
+
+        // Input field with cursor
+        let display = format!("{input}\u{2588}"); // block cursor
+        let input_line = Paragraph::new(display).style(Style::default().fg(theme.text));
+        let input_area = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(input_line, input_area);
+
+        // Hint at bottom
+        let actions = Line::from(vec![
+            Span::styled("Enter", theme.status_key()),
+            Span::styled(" Confirm  ", Style::default().fg(theme.text)),
+            Span::styled("Esc", theme.status_key()),
+            Span::styled(" Cancel", Style::default().fg(theme.text)),
+        ]);
+        let actions_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(actions), actions_area);
     }
 }
 

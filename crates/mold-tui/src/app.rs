@@ -432,6 +432,9 @@ pub enum Popup {
         selected: usize,
         filtered: Vec<String>,
     },
+    HostInput {
+        input: String,
+    },
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
@@ -465,19 +468,31 @@ impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
         let config = Config::load_or_default();
 
-        let server_url = if local {
-            None
+        // Determine initial server URL and inference mode based on what's configured
+        let env_host = std::env::var("MOLD_HOST").ok();
+        let (server_url, initial_mode) = if local {
+            (None, InferenceMode::Local)
+        } else if let Some(h) = host {
+            // Explicit --host flag: use it, default to auto
+            (Some(h), InferenceMode::Auto)
+        } else if let Some(h) = env_host {
+            // MOLD_HOST env var set: use it, default to auto
+            (Some(h), InferenceMode::Auto)
         } else {
-            Some(host.unwrap_or_else(|| {
-                std::env::var("MOLD_HOST")
-                    .unwrap_or_else(|_| format!("http://localhost:{}", config.server_port))
-            }))
+            // No server configured: default to local, user can enter a host later
+            (None, InferenceMode::Local)
         };
 
-        let params = GenerateParams::from_config(&config);
+        let mut params = GenerateParams::from_config(&config);
+        params.inference_mode = initial_mode;
+        // Store the server URL in params.host so it's visible/editable
+        if let Some(ref url) = server_url {
+            params.host = Some(url.clone());
+        }
+
         let family = family_for_model(&params.model, &config);
         let capabilities = capabilities_for_family(&family);
-        let visible_fields = ParamField::visible_fields(&capabilities, InferenceMode::Auto);
+        let visible_fields = ParamField::visible_fields(&capabilities, initial_mode);
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
             .and_then(|m| {
@@ -665,6 +680,42 @@ impl App {
                     KeyCode::Backspace => {
                         filter.pop();
                         self.update_model_selector_filter();
+                    }
+                    _ => {}
+                },
+                Some(Popup::HostInput { input }) => match key.code {
+                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Enter => {
+                        let host = input.trim().to_string();
+                        self.popup = None;
+                        if host.is_empty() {
+                            // Clear host → switch to local
+                            self.generate.params.host = None;
+                            self.generate.params.inference_mode = InferenceMode::Local;
+                            self.server_url = None;
+                        } else {
+                            // Normalize: add http:// if no scheme
+                            let url = if host.contains("://") {
+                                host
+                            } else {
+                                format!("http://{host}")
+                            };
+                            self.generate.params.host = Some(url.clone());
+                            self.server_url = Some(url);
+                            // Auto-switch to auto mode when a host is entered
+                            if self.generate.params.inference_mode == InferenceMode::Local {
+                                self.generate.params.inference_mode = InferenceMode::Auto;
+                            }
+                        }
+                        // Refresh visible fields (Host visibility depends on mode)
+                        self.generate.visible_fields = ParamField::visible_fields(
+                            &self.generate.capabilities,
+                            self.generate.params.inference_mode,
+                        );
+                    }
+                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Backspace => {
+                        input.pop();
                     }
                     _ => {}
                 },
@@ -896,7 +947,11 @@ impl App {
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
             ParamField::Mode => {
-                self.generate.params.inference_mode = self.generate.params.inference_mode.next()
+                self.generate.params.inference_mode = self.generate.params.inference_mode.next();
+                self.generate.visible_fields = ParamField::visible_fields(
+                    &self.generate.capabilities,
+                    self.generate.params.inference_mode,
+                );
             }
             // Cycle format
             ParamField::Format => {
@@ -918,6 +973,11 @@ impl App {
             ParamField::Seed => {
                 use rand::Rng;
                 self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+            }
+            // Open host input popup
+            ParamField::Host => {
+                let current = self.generate.params.host.clone().unwrap_or_default();
+                self.popup = Some(Popup::HostInput { input: current });
             }
             // For numeric fields, Enter does nothing special (use +/-)
             _ => {}
@@ -1085,5 +1145,161 @@ impl App {
                     Some(format!("Queued (position {position})"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inference_mode_cycle() {
+        assert_eq!(InferenceMode::Auto.next(), InferenceMode::Local);
+        assert_eq!(InferenceMode::Local.next(), InferenceMode::Remote);
+        assert_eq!(InferenceMode::Remote.next(), InferenceMode::Auto);
+    }
+
+    #[test]
+    fn inference_mode_labels() {
+        assert_eq!(InferenceMode::Auto.label(), "auto");
+        assert_eq!(InferenceMode::Local.label(), "local");
+        assert_eq!(InferenceMode::Remote.label(), "remote");
+    }
+
+    #[test]
+    fn visible_fields_hides_host_in_local_mode() {
+        let caps = crate::model_info::capabilities_for_family("flux");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Local);
+        assert!(!fields.contains(&ParamField::Host));
+    }
+
+    #[test]
+    fn visible_fields_shows_host_in_auto_mode() {
+        let caps = crate::model_info::capabilities_for_family("flux");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        assert!(fields.contains(&ParamField::Host));
+    }
+
+    #[test]
+    fn visible_fields_shows_host_in_remote_mode() {
+        let caps = crate::model_info::capabilities_for_family("flux");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Remote);
+        assert!(fields.contains(&ParamField::Host));
+    }
+
+    #[test]
+    fn visible_fields_includes_scheduler_for_sd15() {
+        let caps = crate::model_info::capabilities_for_family("sd15");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        assert!(fields.contains(&ParamField::Scheduler));
+    }
+
+    #[test]
+    fn visible_fields_excludes_scheduler_for_flux() {
+        let caps = crate::model_info::capabilities_for_family("flux");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        assert!(!fields.contains(&ParamField::Scheduler));
+    }
+
+    #[test]
+    fn visible_fields_includes_lora_for_flux() {
+        let caps = crate::model_info::capabilities_for_family("flux");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        assert!(fields.contains(&ParamField::Lora));
+    }
+
+    #[test]
+    fn visible_fields_excludes_lora_for_sdxl() {
+        let caps = crate::model_info::capabilities_for_family("sdxl");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        assert!(!fields.contains(&ParamField::Lora));
+    }
+
+    #[test]
+    fn generate_params_display_host_default() {
+        let config = Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        assert_eq!(params.display_value(&ParamField::Host), "localhost:7680");
+    }
+
+    #[test]
+    fn generate_params_display_host_custom() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.host = Some("http://gpu-server:7680".to_string());
+        assert_eq!(
+            params.display_value(&ParamField::Host),
+            "http://gpu-server:7680"
+        );
+    }
+
+    #[test]
+    fn generate_params_display_mode() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.inference_mode = InferenceMode::Auto;
+        assert_eq!(params.display_value(&ParamField::Mode), "auto");
+        params.inference_mode = InferenceMode::Local;
+        assert_eq!(params.display_value(&ParamField::Mode), "local");
+        params.inference_mode = InferenceMode::Remote;
+        assert_eq!(params.display_value(&ParamField::Mode), "remote");
+    }
+
+    #[test]
+    fn focus_navigation_next_enters_prompt() {
+        assert_eq!(GenerateFocus::Navigation.next(false), GenerateFocus::Prompt);
+        assert_eq!(GenerateFocus::Navigation.next(true), GenerateFocus::Prompt);
+    }
+
+    #[test]
+    fn focus_cycle_skips_negative_when_unsupported() {
+        assert_eq!(GenerateFocus::Prompt.next(false), GenerateFocus::Parameters);
+        assert_eq!(GenerateFocus::Parameters.prev(false), GenerateFocus::Prompt);
+    }
+
+    #[test]
+    fn focus_cycle_includes_negative_when_supported() {
+        assert_eq!(
+            GenerateFocus::Prompt.next(true),
+            GenerateFocus::NegativePrompt
+        );
+        assert_eq!(
+            GenerateFocus::Parameters.prev(true),
+            GenerateFocus::NegativePrompt
+        );
+    }
+
+    #[test]
+    fn param_field_labels_not_empty() {
+        let caps = crate::model_info::capabilities_for_family("sd15");
+        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
+        for field in &fields {
+            assert!(
+                !field.label().is_empty(),
+                "field {:?} has empty label",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn progress_state_clear_resets_all() {
+        let mut state = ProgressState::default();
+        state.denoise_step = 10;
+        state.denoise_total = 20;
+        state.weight_loaded = 1000;
+        state.download_bytes = 500;
+        state.download_filename = "test.gguf".to_string();
+        state.log.push(ProgressLogEntry {
+            message: "test".to_string(),
+            style: ProgressStyle::Done,
+        });
+        state.clear();
+        assert_eq!(state.denoise_step, 0);
+        assert_eq!(state.denoise_total, 0);
+        assert_eq!(state.weight_loaded, 0);
+        assert_eq!(state.download_bytes, 0);
+        assert!(state.download_filename.is_empty());
+        assert!(state.log.is_empty());
     }
 }
