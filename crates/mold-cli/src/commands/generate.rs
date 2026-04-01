@@ -302,7 +302,7 @@ pub async fn run(
                 img.index = i;
                 // Save and preview each image immediately during batch generation
                 // (single-image mode is handled in the post-loop section)
-                if batch > 1 && (!piped || output.is_some()) {
+                if batch > 1 {
                     save_and_preview_image(&img, &output, model, batch, output_format, preview)?;
                 }
                 all_images.push(img);
@@ -794,7 +794,7 @@ async fn generate_local_batch(
             img.index = i;
             // Save and preview each image immediately during batch generation
             // (single-image mode is handled by the caller's post-loop section)
-            if batch > 1 && (!is_piped() || output.is_some()) {
+            if batch > 1 {
                 save_and_preview_image(&img, output, &req.model, batch, output_format, preview)?;
             }
             all_images.push(img);
@@ -878,17 +878,15 @@ fn save_and_preview_image(
         Some(path) if batch == 1 => path.clone(),
         Some(path) => {
             let p = std::path::Path::new(path);
-            let parent = p.parent().and_then(|d| {
-                let s = d.to_string_lossy();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(format!("{}/", s))
-                }
-            });
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
             let ext = output_format.to_string();
-            format!("{}{stem}-{}.{ext}", parent.unwrap_or_default(), img.index)
+            let leaf = format!("{stem}-{}.{ext}", img.index);
+            p.parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.join(&leaf))
+                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+                .to_string_lossy()
+                .into_owned()
         }
         None => {
             let timestamp = std::time::SystemTime::now()
