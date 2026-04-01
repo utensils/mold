@@ -69,8 +69,20 @@ mold expand <PROMPT> [OPTIONS]
 Start the HTTP inference server.
 
 ```bash
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--discord]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text] [--discord]
 ```
+
+| Flag                  | Description                                                       |
+| --------------------- | ----------------------------------------------------------------- |
+| `--port <N>`          | Port to listen on, defaults to `7680` or `MOLD_PORT`              |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                               |
+| `--models-dir <PATH>` | Override the models directory for this process                    |
+| `--log-format <FMT>`  | `json` or `text`; defaults to `json` for production-friendly logs |
+| `--discord`           | Also starts the built-in Discord bot in the same process          |
+
+`--discord` is only available when the binary was built with the `discord`
+feature. The bot still talks to the same local server API and reads
+`MOLD_DISCORD_TOKEN` or `DISCORD_TOKEN` from the environment.
 
 ## `mold pull`
 
@@ -80,9 +92,34 @@ Download a model from HuggingFace.
 mold pull <MODEL> [--skip-verify]
 ```
 
+`mold pull` writes a `.pulling` marker while a download is in progress and
+removes it on success. If a pull is interrupted, `mold list` will show the model
+as incomplete and a later `mold pull` or `mold rm` can clean things up.
+
+`--skip-verify` disables the post-download SHA-256 integrity check. That is
+mainly useful when an upstream file has intentionally changed before the
+expected checksum in `manifest.rs` has been updated yet.
+
 ## `mold list`
 
 List configured and available models with download status and disk usage.
+
+Installed models are shown with these columns:
+
+| Column        | Meaning                                                      |
+| ------------- | ------------------------------------------------------------ |
+| `NAME`        | Model name, with `★` for the default model and `●` if loaded |
+| `FAMILY`      | Model family such as FLUX, SDXL, or Z-Image                  |
+| `SIZE`        | Model-specific download size                                 |
+| `DISK`        | Actual local disk usage for that model                       |
+| `STEPS`       | Default inference step count                                 |
+| `GUIDANCE`    | Default guidance value                                       |
+| `WIDTH`       | Default image width                                          |
+| `HEIGHT`      | Default image height                                         |
+| `DESCRIPTION` | Summary, plus `[gated]` or `[incomplete]` when relevant      |
+
+The "Available to pull" section adds a `FETCH` column, which is how much data
+still needs to be downloaded after accounting for shared cached files.
 
 ## `mold info`
 
@@ -110,6 +147,9 @@ Remove downloaded models.
 ```bash
 mold rm <MODELS...> [--force]
 ```
+
+`--force` skips the interactive confirmation prompt. Shared files such as VAEs,
+encoders, and tokenizers are preserved until no remaining model references them.
 
 ## `mold ps`
 

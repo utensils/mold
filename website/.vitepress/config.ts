@@ -18,6 +18,13 @@ export default defineConfig({
 
   lastUpdated: true,
 
+  markdown: {
+    theme: {
+      light: 'catppuccin-latte',
+      dark: 'catppuccin-mocha',
+    },
+  },
+
   sitemap: {
     hostname: 'https://utensils.github.io/mold/',
   },
@@ -49,6 +56,8 @@ export default defineConfig({
             { text: 'Generating Images', link: '/guide/generating' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
             { text: 'Prompt Expansion', link: '/guide/expansion' },
+            { text: 'Troubleshooting', link: '/guide/troubleshooting' },
+            { text: 'OpenClaw', link: '/guide/openclaw' },
             { text: 'CLI Reference', link: '/guide/cli-reference' },
           ],
         },

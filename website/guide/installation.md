@@ -32,13 +32,17 @@ nix profile install github:utensils/mold
 
 ## From Source
 
-```bash
-# Linux (NVIDIA)
-cargo build --release -p mold-ai --features cuda
+::: code-group
 
-# macOS (Apple Silicon)
-cargo build --release -p mold-ai --features metal
+```bash [Linux (CUDA)]
+cargo build --release -p mold-cli --features cuda
 ```
+
+```bash [macOS (Metal)]
+cargo build --release -p mold-cli --features metal
+```
+
+:::
 
 Requires Rust 1.85+ and CUDA toolkit (Linux) or Xcode (macOS).
 

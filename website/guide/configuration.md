@@ -5,7 +5,7 @@ default, or override with `MOLD_HOME`).
 
 ## Config File
 
-```toml
+```toml{8-11,14-17}
 default_model = "flux-schnell:q8"
 models_dir = "~/.mold/models"
 server_port = 7680
@@ -93,3 +93,33 @@ Environment variables take precedence over config file values.
 | Variable   | Default | Description                        |
 | ---------- | ------- | ---------------------------------- |
 | `HF_TOKEN` | —       | HuggingFace token for gated models |
+
+## Advanced
+
+### Device and Path Overrides
+
+| Variable                    | Default | Description                                           |
+| --------------------------- | ------- | ----------------------------------------------------- |
+| `MOLD_DEVICE`               | —       | Force device placement, currently `cpu` for debugging |
+| `MOLD_TRANSFORMER_PATH`     | —       | Override transformer weights path                     |
+| `MOLD_VAE_PATH`             | —       | Override VAE weights path                             |
+| `MOLD_T5_PATH`              | —       | Override T5 encoder path                              |
+| `MOLD_CLIP_PATH`            | —       | Override CLIP-L encoder path                          |
+| `MOLD_CLIP2_PATH`           | —       | Override CLIP-G encoder path for SDXL                 |
+| `MOLD_T5_TOKENIZER_PATH`    | —       | Override T5 tokenizer path                            |
+| `MOLD_CLIP_TOKENIZER_PATH`  | —       | Override CLIP-L tokenizer path                        |
+| `MOLD_CLIP2_TOKENIZER_PATH` | —       | Override CLIP-G tokenizer path for SDXL               |
+
+These are mainly useful for custom local model layouts, manual debugging, or
+testing alternative weight files without editing `config.toml`.
+
+### Debug and Family-Specific Knobs
+
+| Variable                           | Default | Description                                        |
+| ---------------------------------- | ------- | -------------------------------------------------- |
+| `MOLD_SD3_DEBUG`                   | —       | Enable verbose SD3.5 pipeline logging              |
+| `MOLD_QWEN_DEBUG`                  | —       | Enable verbose Qwen-Image pipeline logging         |
+| `MOLD_WUERSTCHEN_DEBUG`            | —       | Enable verbose Wuerstchen pipeline logging         |
+| `MOLD_WUERSTCHEN_DECODER_GUIDANCE` | `0.0`   | Override decoder-stage CFG guidance for Wuerstchen |
+
+These are intended for troubleshooting and development rather than normal use.

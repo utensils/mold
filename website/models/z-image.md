@@ -10,11 +10,12 @@ encoding. Excellent quality at just 9 steps.
 
 ## Variants
 
-| Model                | Steps | Size    | Notes          |
-| -------------------- | ----- | ------- | -------------- |
-| `z-image-turbo:q8`   | 9     | 6.6 GB  | Fast, great    |
-| `z-image-turbo:q4`   | 9     | 3.8 GB  | Lighter        |
-| `z-image-turbo:bf16` | 9     | 12.2 GB | Full precision |
+| Model                | Steps | Size    | Notes             |
+| -------------------- | ----- | ------- | ----------------- |
+| `z-image-turbo:q8`   | 9     | 6.6 GB  | Fast, great       |
+| `z-image-turbo:q6`   | 9     | 5.3 GB  | Best quality/size |
+| `z-image-turbo:q4`   | 9     | 3.8 GB  | Lighter           |
+| `z-image-turbo:bf16` | 9     | 12.2 GB | Full precision    |
 
 ## Defaults
 

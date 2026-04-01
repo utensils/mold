@@ -13,14 +13,15 @@ flow-matching with classifier-free guidance.
 
 ## Variants
 
-| Model           | Steps | Size    | Notes                        |
-| --------------- | ----- | ------- | ---------------------------- |
-| `qwen-image:q8` | 30    | 21.8 GB | Best quality                 |
-| `qwen-image:q6` | 30    | 16.8 GB | Best quality/size trade-off  |
-| `qwen-image:q4` | 30    | 12.3 GB | Smallest practical footprint |
+| Model             | Steps | Size    | Notes                           |
+| ----------------- | ----- | ------- | ------------------------------- |
+| `qwen-image:bf16` | 30    | 44+ GB  | Full precision, maximum quality |
+| `qwen-image:q8`   | 30    | 21.8 GB | Best quality                    |
+| `qwen-image:q6`   | 30    | 16.8 GB | Best quality/size trade-off     |
+| `qwen-image:q4`   | 30    | 12.3 GB | Smallest practical footprint    |
 
 ## Defaults
 
 - **Resolution**: 1024x1024
-- **Guidance**: 7.0
+- **Guidance**: 3.0
 - **Steps**: 30

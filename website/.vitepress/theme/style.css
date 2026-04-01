@@ -43,7 +43,46 @@
 
 /* Code block styling */
 .vp-doc div[class*='language-'] {
+  position: relative;
   border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 18%, transparent);
+}
+
+.vp-doc div[class*='language-']::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, #e879f9 0%, #06b6d4 100%);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.vp-code-group .tabs {
+  border-radius: 10px 10px 0 0;
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 16%, transparent);
+  background: color-mix(in srgb, var(--vp-c-brand-1) 6%, var(--vp-c-bg-soft));
+}
+
+.vp-code-group .tabs label {
+  color: var(--vp-c-text-2);
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.vp-code-group .tabs label:hover {
+  color: var(--vp-c-text-1);
+}
+
+.vp-code-group .tabs input:checked + label {
+  color: white;
+  background: var(--vp-c-brand-1);
+}
+
+.dark .vp-code-group .tabs input:checked + label {
+  color: #160818;
 }
 
 /* Feature cards */

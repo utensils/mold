@@ -5,19 +5,25 @@ Run mold on any NVIDIA GPU host with Docker, including cloud GPU providers like
 
 ## Building
 
-```bash
-# Default: Ada Lovelace (RTX 4090, L40S) — sm_89
+::: code-group
+
+```bash [Ada]
 docker build -t mold-server .
+```
 
-# Hopper (H100)
+```bash [Hopper]
 docker build --build-arg CUDA_COMPUTE_CAP=90 -t mold-server-h100 .
+```
 
-# Ampere (A100, RTX 3090)
+```bash [Ampere]
 docker build --build-arg CUDA_COMPUTE_CAP=80 -t mold-server-a100 .
+```
 
-# Blackwell (RTX 5090, B200)
+```bash [Blackwell]
 docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-b200 .
 ```
+
+:::
 
 ## Pre-Built Images
 
@@ -36,15 +42,19 @@ docker pull ghcr.io/utensils/mold:latest-sm120
 
 ## Running
 
-```bash
-# Basic
-docker run --gpus all -p 7680:7680 ghcr.io/utensils/mold:latest
+::: code-group
 
-# With local models directory
+```bash [Basic]
+docker run --gpus all -p 7680:7680 ghcr.io/utensils/mold:latest
+```
+
+```bash [With Models]
 docker run --gpus all -p 7680:7680 \
   -v ~/.mold:/workspace/.mold \
   ghcr.io/utensils/mold:latest
 ```
+
+:::
 
 ## RunPod Deployment
 

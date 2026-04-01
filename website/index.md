@@ -70,6 +70,12 @@ features:
     details:
       Local LLM expands short prompts into detailed descriptions. Auto-downloads
       Qwen3-1.7B, dropped before diffusion runs.
+  - icon:
+      src: /icons/openclaw.svg
+    title: OpenClaw Skill
+    details:
+      Use mold from OpenClaw as a workspace skill while your GPU server runs
+      elsewhere. Point `MOLD_HOST` at the server and generate from agent flows.
 ---
 
 ## Quick Example

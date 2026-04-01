@@ -38,7 +38,7 @@ system user, and manages the data directory at `/var/lib/mold`.
 
 ## Full Configuration Example
 
-```nix
+```nix{37-43}
 { inputs, system, config, ... }:
 {
   services.mold = {
@@ -155,13 +155,17 @@ forget to switch the package.
 
 ## Build Variants
 
-```bash
-# Ada / RTX 40-series (default, sm_89)
-nix build github:utensils/mold
+::: code-group
 
-# Blackwell / RTX 50-series (sm_120)
+```bash [Ada]
+nix build github:utensils/mold
+```
+
+```bash [Blackwell]
 nix build github:utensils/mold#mold-sm120
 ```
+
+:::
 
 ## Development Shell
 

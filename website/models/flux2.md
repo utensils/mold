@@ -13,6 +13,7 @@ requirements.
 | Model              | Steps | Size   | Notes             |
 | ------------------ | ----- | ------ | ----------------- |
 | `flux2-klein:q8`   | 4     | 4.3 GB | Good quality      |
+| `flux2-klein:q6`   | 4     | 3.4 GB | Better quality    |
 | `flux2-klein:q4`   | 4     | 2.6 GB | Smallest FLUX     |
 | `flux2-klein:bf16` | 4     | 7.8 GB | Full precision 4B |
 
