@@ -95,9 +95,9 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 vec![("", "Generating...")]
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
+                    ("\u{2190}\u{2192}", "Views"),
                     ("1/2/3", "Views"),
                     ("Enter", "Edit"),
-                    ("Tab", "Focus"),
                     ("?", "Help"),
                     ("q", "Quit"),
                 ]

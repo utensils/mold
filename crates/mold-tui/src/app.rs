@@ -118,6 +118,7 @@ pub enum ParamField {
     Batch,
     Format,
     Mode,
+    Host,
     // Advanced
     Scheduler,
     Lora,
@@ -134,8 +135,8 @@ pub enum ParamField {
 }
 
 impl ParamField {
-    /// All fields in display order, filtering by model capabilities.
-    pub fn visible_fields(caps: &ModelCapabilities) -> Vec<ParamField> {
+    /// All fields in display order, filtering by model capabilities and mode.
+    pub fn visible_fields(caps: &ModelCapabilities, mode: InferenceMode) -> Vec<ParamField> {
         let mut fields = vec![
             ParamField::Model,
             ParamField::Width,
@@ -147,6 +148,10 @@ impl ParamField {
             ParamField::Format,
             ParamField::Mode,
         ];
+        // Show Host field when server connection is possible
+        if mode != InferenceMode::Local {
+            fields.push(ParamField::Host);
+        }
         // Advanced
         if caps.supports_scheduler {
             fields.push(ParamField::Scheduler);
@@ -182,6 +187,7 @@ impl ParamField {
             Self::Batch => "Batch",
             Self::Format => "Format",
             Self::Mode => "Mode",
+            Self::Host => "Host",
             Self::Scheduler => "Scheduler",
             Self::Lora => "LoRA",
             Self::Expand => "Expand",
@@ -218,7 +224,8 @@ pub struct GenerateParams {
     pub batch: u32,
     pub format: OutputFormat,
     pub scheduler: Option<Scheduler>,
-    pub local_mode: bool,
+    pub inference_mode: InferenceMode,
+    pub host: Option<String>,
     // Advanced
     pub lora_path: Option<String>,
     pub lora_scale: f64,
@@ -232,6 +239,36 @@ pub struct GenerateParams {
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
     pub control_scale: f64,
+}
+
+/// How inference is dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InferenceMode {
+    /// Try remote server first, fall back to local GPU if unreachable.
+    #[default]
+    Auto,
+    /// Force local GPU inference only.
+    Local,
+    /// Force remote server only (no fallback).
+    Remote,
+}
+
+impl InferenceMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Local,
+            Self::Local => Self::Remote,
+            Self::Remote => Self::Auto,
+        }
+    }
 }
 
 impl GenerateParams {
@@ -249,7 +286,8 @@ impl GenerateParams {
             batch: 1,
             format: OutputFormat::Png,
             scheduler: None,
-            local_mode: false,
+            inference_mode: InferenceMode::Auto,
+            host: None,
             lora_path: None,
             lora_scale: 1.0,
             expand: false,
@@ -277,13 +315,8 @@ impl GenerateParams {
                 .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string()),
             ParamField::Batch => self.batch.to_string(),
             ParamField::Format => format!("{:?}", self.format).to_uppercase(),
-            ParamField::Mode => {
-                if self.local_mode {
-                    "local".to_string()
-                } else {
-                    "remote".to_string()
-                }
-            }
+            ParamField::Mode => self.inference_mode.label().to_string(),
+            ParamField::Host => self.host.as_deref().unwrap_or("localhost:7680").to_string(),
             ParamField::Scheduler => self
                 .scheduler
                 .as_ref()
@@ -444,7 +477,7 @@ impl App {
         let params = GenerateParams::from_config(&config);
         let family = family_for_model(&params.model, &config);
         let capabilities = capabilities_for_family(&family);
-        let visible_fields = ParamField::visible_fields(&capabilities);
+        let visible_fields = ParamField::visible_fields(&capabilities, InferenceMode::Auto);
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
             .and_then(|m| {
@@ -522,7 +555,10 @@ impl App {
 
         let family = family_for_model(&model_name, &self.config);
         self.generate.capabilities = capabilities_for_family(&family);
-        self.generate.visible_fields = ParamField::visible_fields(&self.generate.capabilities);
+        self.generate.visible_fields = ParamField::visible_fields(
+            &self.generate.capabilities,
+            self.generate.params.inference_mode,
+        );
         self.generate.param_index = 0;
 
         self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
@@ -671,6 +707,20 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::SwitchView(view) => self.active_view = view,
+            Action::ViewNext => {
+                self.active_view = match self.active_view {
+                    View::Generate => View::Gallery,
+                    View::Gallery => View::Models,
+                    View::Models => View::Generate,
+                };
+            }
+            Action::ViewPrev => {
+                self.active_view = match self.active_view {
+                    View::Generate => View::Models,
+                    View::Gallery => View::Generate,
+                    View::Models => View::Gallery,
+                };
+            }
             Action::FocusNext => {
                 if self.active_view == View::Generate {
                     self.generate.focus = self
@@ -750,7 +800,7 @@ impl App {
                 self.generate.params.seed = None;
             }
             Action::ToggleMode => {
-                self.generate.params.local_mode = !self.generate.params.local_mode;
+                self.generate.params.inference_mode = self.generate.params.inference_mode.next();
             }
             Action::ShowHelp => {
                 self.popup = Some(Popup::Help);
@@ -805,7 +855,7 @@ impl App {
                 };
             }
             ParamField::Mode => {
-                p.local_mode = !p.local_mode;
+                p.inference_mode = p.inference_mode.next();
             }
             ParamField::Expand => {
                 p.expand = !p.expand;
@@ -814,6 +864,13 @@ impl App {
                 p.offload = !p.offload;
             }
             _ => {}
+        }
+        // Refresh visible fields when mode changes (Host visibility)
+        if field == ParamField::Mode {
+            self.generate.visible_fields = ParamField::visible_fields(
+                &self.generate.capabilities,
+                self.generate.params.inference_mode,
+            );
         }
     }
 
@@ -838,7 +895,9 @@ impl App {
             // Toggle boolean fields
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
-            ParamField::Mode => self.generate.params.local_mode = !self.generate.params.local_mode,
+            ParamField::Mode => {
+                self.generate.params.inference_mode = self.generate.params.inference_mode.next()
+            }
             // Cycle format
             ParamField::Format => {
                 self.generate.params.format = match self.generate.params.format {

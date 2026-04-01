@@ -5,6 +5,10 @@ pub enum Action {
     Quit,
     /// Switch to a specific view tab.
     SwitchView(View),
+    /// Switch to the next view tab (right arrow).
+    ViewNext,
+    /// Switch to the previous view tab (left arrow).
+    ViewPrev,
     /// Cycle focus to the next panel/field.
     FocusNext,
     /// Cycle focus to the previous panel/field.

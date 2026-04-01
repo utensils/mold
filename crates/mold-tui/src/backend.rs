@@ -6,7 +6,7 @@ use mold_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::app::{BackgroundEvent, GenerateParams};
+use crate::app::{BackgroundEvent, GenerateParams, InferenceMode};
 
 /// Run a generation request — tries remote first, falls back to local on connection error.
 pub async fn run_generation(
@@ -16,12 +16,15 @@ pub async fn run_generation(
     negative_prompt: Option<String>,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    if params.local_mode {
+    if params.inference_mode == InferenceMode::Local {
         run_local_generation(params, prompt, negative_prompt, tx).await;
         return;
     }
 
-    if let Some(url) = server_url {
+    // Determine which server URL to use (params.host overrides server_url)
+    let effective_url = params.host.clone().or(server_url);
+
+    if let Some(url) = effective_url {
         let client = MoldClient::new(&url);
         let req = build_request(&params, &prompt, &negative_prompt);
 
@@ -74,7 +77,14 @@ pub async fn run_generation(
         }
     }
 
-    // Fall through: no server URL or server unreachable — try local
+    // Fall through: no server URL or server unreachable
+    if params.inference_mode == InferenceMode::Remote {
+        let _ = tx.send(BackgroundEvent::Error(
+            "Server unreachable and mode is set to 'remote'. Switch to 'auto' or 'local'."
+                .to_string(),
+        ));
+        return;
+    }
     run_local_generation(params, prompt, negative_prompt, tx).await;
 }
 

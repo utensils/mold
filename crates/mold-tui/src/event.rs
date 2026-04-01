@@ -75,14 +75,16 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         return Action::Unfocus;
     }
 
-    // Navigation mode: number keys switch views, Enter/Tab focuses prompt
+    // Navigation mode: number keys switch views, arrows cycle, Enter focuses prompt
     if app.generate.focus == GenerateFocus::Navigation {
         return match key.code {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
+            KeyCode::Right | KeyCode::Char('l') => Action::ViewNext,
+            KeyCode::Left | KeyCode::Char('h') => Action::ViewPrev,
             KeyCode::Char('q') => Action::Quit,
-            KeyCode::Enter | KeyCode::Char('i') => Action::FocusNext, // Enter/i to focus prompt
+            KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
             _ => Action::None,
         };
     }
@@ -122,10 +124,10 @@ fn map_gallery_key(key: &KeyEvent) -> Action {
         KeyCode::Char('e') => Action::EditAndGenerate,
         KeyCode::Char('d') => Action::DeleteImage,
         KeyCode::Char('o') => Action::OpenFile,
-        KeyCode::Char('h') | KeyCode::Left => Action::PanLeft,
-        KeyCode::Char('l') | KeyCode::Right => Action::PanRight,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
         KeyCode::Char('-') => Action::ZoomOut,
+        KeyCode::Left => Action::ViewPrev,
+        KeyCode::Right => Action::ViewNext,
         KeyCode::Esc => Action::SwitchView(View::Generate),
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
@@ -145,6 +147,8 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('u') => Action::UnloadModel,
         KeyCode::Char('/') => Action::FilterModels,
         KeyCode::Char('q') => Action::Quit,
+        KeyCode::Left => Action::ViewPrev,
+        KeyCode::Right => Action::ViewNext,
         KeyCode::Esc => Action::SwitchView(View::Generate),
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
