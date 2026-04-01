@@ -745,13 +745,16 @@ impl InferenceEngine for ZImageEngine {
 
         // Drop text encoder to free memory for denoising + VAE decode.
         // It will be reloaded on the next generate() call.
-        // On unified-memory systems (Apple Silicon), CPU-loaded weights share the
-        // same physical RAM as Metal GPU allocations, so we must drop unconditionally.
-        loaded.text_encoder.drop_weights();
-        tracing::info!(
-            on_gpu = loaded.text_encoder.on_gpu,
-            "Qwen3 text encoder dropped to free memory for denoising"
-        );
+        // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded weights
+        // since they share the same physical RAM as GPU allocations.
+        // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+        if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
+            loaded.text_encoder.drop_weights();
+            tracing::info!(
+                on_gpu = loaded.text_encoder.on_gpu,
+                "Qwen3 text encoder dropped to free memory for denoising"
+            );
+        }
 
         // 3. Calculate latent dimensions: 2 * (image_size / 16)
         let vae_align = 16;

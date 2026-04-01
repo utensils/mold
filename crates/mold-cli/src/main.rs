@@ -458,9 +458,12 @@ async fn main() {
         let display = if short.is_empty() { &msg } else { &short };
 
         // Detect CUDA/Metal OOM and print a friendly message with suggestions.
+        // Note: candle wraps Metal allocation failures as CUDA_ERROR_OUT_OF_MEMORY,
+        // and Metal buffer creation failures as "Failed to create metal resource".
         if msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
             || msg.contains("out of memory")
             || msg.contains("exceeds available VRAM")
+            || msg.contains("Failed to create metal resource")
         {
             eprintln!("{} {display}", theme::prefix_error());
             eprintln!();
