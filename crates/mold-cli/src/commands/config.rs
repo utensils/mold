@@ -766,12 +766,14 @@ pub fn run_edit() -> Result<()> {
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    // Use sh -c to handle $EDITOR values with args like "code --wait"
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{} \"$1\"", editor))
-        .arg("--") // $0
-        .arg(&path) // $1
+    // Split to handle EDITOR="code --wait" without shell injection risk
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let (prog, args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow!("EDITOR is empty"))?;
+    let status = std::process::Command::new(prog)
+        .args(args)
+        .arg(&path)
         .status()?;
 
     if !status.success() {

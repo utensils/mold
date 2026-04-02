@@ -41,7 +41,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ),
                     Span::styled(
                         "\u{2500}"
-                            .repeat(inner.width.saturating_sub(name.len() as u16 + 5) as usize),
+                            .repeat(inner.width.saturating_sub(name.chars().count() as u16 + 5)
+                                as usize),
                         Style::default().fg(theme.border),
                     ),
                 ]));

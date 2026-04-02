@@ -916,6 +916,7 @@ impl App {
                 let first_model = config.models.keys().next().cloned();
                 SettingsState {
                     selected_model: first_model,
+                    row_index: 1, // skip first section header
                     ..Default::default()
                 }
             },
@@ -4096,6 +4097,7 @@ mod tests {
             },
             settings: SettingsState {
                 selected_model: Some("test-model:q8".to_string()),
+                row_index: 1,
                 skip_save: true,
                 ..Default::default()
             },
