@@ -715,9 +715,11 @@ impl App {
         // Load session from previous TUI run
         let session = crate::session::TuiSession::load();
 
-        // Restore all settings from session
+        // Restore all settings from session.
+        // Check both local downloads and the catalog (which includes remote models).
+        let model_in_catalog = catalog.iter().any(|m| m.name == session.last_model);
         if !session.last_model.is_empty()
-            && config.manifest_model_is_downloaded(&session.last_model)
+            && (config.manifest_model_is_downloaded(&session.last_model) || model_in_catalog)
         {
             params.model = session.last_model.clone();
             // Apply all saved params (width, height, steps, guidance, batch, etc.)
@@ -2223,7 +2225,9 @@ impl App {
                                 metadata: meta,
                                 generation_time_ms: Some(response.generation_time_ms),
                                 timestamp: ts,
-                                server_url: self.server_url.clone(),
+                                // Entry is local — the TUI saved this file directly.
+                                // The server has its own copy via output_dir.
+                                server_url: None,
                             },
                         );
                         self.gallery.thumbnail_states.insert(0, None);

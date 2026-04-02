@@ -785,10 +785,12 @@ async fn health() -> impl IntoResponse {
 async fn list_gallery(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
-    let output_dir = {
-        let config = state.config.read().await;
-        config.effective_output_dir()
-    };
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Ok(Json(Vec::new()));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
 
     if !output_dir.is_dir() {
         return Ok(Json(Vec::new()));
@@ -806,10 +808,12 @@ async fn get_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let output_dir = {
-        let config = state.config.read().await;
-        config.effective_output_dir()
-    };
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
 
     // Sanitize: prevent directory traversal
     let clean_name = std::path::Path::new(&filename)
@@ -851,10 +855,12 @@ async fn delete_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let output_dir = {
-        let config = state.config.read().await;
-        config.effective_output_dir()
-    };
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
 
     let clean_name = std::path::Path::new(&filename)
         .file_name()
@@ -884,10 +890,12 @@ async fn get_gallery_thumbnail(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let output_dir = {
-        let config = state.config.read().await;
-        config.effective_output_dir()
-    };
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
 
     let clean_name = std::path::Path::new(&filename)
         .file_name()
