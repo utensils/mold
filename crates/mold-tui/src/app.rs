@@ -4003,6 +4003,102 @@ mod tests {
 
     // ── Settings view tests ────────────────────────────────
 
+    /// Build a minimal App for settings tests, bypassing server checks.
+    /// Config mutations are tested in-memory; save_config() may fail
+    /// (save_error is set) but that's fine for mutation tests.
+    fn make_settings_test_app() -> App {
+        let mut config = Config::load_or_default();
+        // Insert a test model so the Model Defaults section appears
+        config.models.insert(
+            "test-model:q8".to_string(),
+            mold_core::config::ModelConfig {
+                transformer: Some("/path/to/transformer.gguf".into()),
+                vae: Some("/path/to/vae.safetensors".into()),
+                default_steps: Some(20),
+                default_guidance: Some(3.5),
+                default_width: Some(1024),
+                default_height: Some(1024),
+                lora: Some("/path/to/lora.safetensors".into()),
+                lora_scale: Some(0.8),
+                negative_prompt: Some("blurry, low quality".into()),
+                scheduler: Some(Scheduler::EulerAncestral),
+                ..Default::default()
+            },
+        );
+
+        let picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let params = GenerateParams::from_config(&config);
+        let family = crate::model_info::family_for_model(&params.model, &config);
+        let caps = crate::model_info::capabilities_for_family(&family);
+        let visible = ParamField::visible_fields(&caps, params.inference_mode);
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+
+        let app = App {
+            active_view: View::Settings,
+            generate: GenerateState {
+                prompt: TextArea::default(),
+                negative_prompt: TextArea::default(),
+                params,
+                focus: GenerateFocus::Navigation,
+                param_index: 0,
+                visible_fields: visible,
+                capabilities: caps,
+                progress: ProgressState::default(),
+                preview_image: None,
+                image_state: None,
+                generating: false,
+                last_seed: None,
+                last_generation_time_ms: None,
+                error_message: None,
+                model_description: String::new(),
+            },
+            gallery: GalleryState {
+                entries: Vec::new(),
+                selected: 0,
+                preview_image: None,
+                image_state: None,
+                scanning: false,
+                view_mode: GalleryViewMode::Grid,
+                thumbnail_states: Vec::new(),
+                thumb_dimensions: Vec::new(),
+                grid_cols: 3,
+                grid_scroll: 0,
+            },
+            models: ModelsState {
+                catalog: Vec::new(),
+                selected: 0,
+                filter: String::new(),
+                filtering: false,
+            },
+            settings: SettingsState {
+                selected_model: Some("test-model:q8".to_string()),
+                ..Default::default()
+            },
+            config,
+            server_url: None,
+            picker,
+            theme: crate::ui::theme::Theme::default(),
+            popup: None,
+            should_quit: false,
+            bg_tx,
+            bg_rx,
+            tokio_handle: tokio::runtime::Handle::current(),
+            resource_info: crate::ui::info::ResourceInfo::default(),
+            history: crate::history::PromptHistory::load(),
+            layout: LayoutAreas::default(),
+            server_process: None,
+        };
+        app
+    }
+
+    /// Helper: find the row_index for a given SettingsKey.
+    fn find_settings_row(app: &App, key: SettingsKey) -> usize {
+        let rows = app.build_settings_rows();
+        rows.iter()
+            .position(|r| matches!(r, SettingsRow::Field { key: k, .. } if *k == key))
+            .unwrap_or_else(|| panic!("SettingsKey {key:?} not found in rows"))
+    }
+
     #[test]
     fn settings_state_default_values() {
         let state = SettingsState::default();
@@ -4013,7 +4109,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_row_is_field() {
+    fn settings_row_is_field_and_read_only() {
         let header = SettingsRow::SectionHeader {
             name: "General".into(),
         };
@@ -4025,113 +4121,21 @@ mod tests {
             field_type: SettingsFieldType::Text,
         };
         assert!(field.is_field());
-    }
+        assert!(!field.is_read_only());
 
-    #[test]
-    fn settings_row_is_read_only() {
-        let field = SettingsRow::Field {
+        let ro = SettingsRow::Field {
             key: SettingsKey::ModelTransformer,
             label: "Transformer",
             field_type: SettingsFieldType::ReadOnly,
         };
-        assert!(field.is_read_only());
-
-        let editable = SettingsRow::Field {
-            key: SettingsKey::DefaultWidth,
-            label: "Width",
-            field_type: SettingsFieldType::Number {
-                min: 64.0,
-                max: 4096.0,
-                step: 64.0,
-            },
-        };
-        assert!(!editable.is_read_only());
-    }
-
-    #[test]
-    fn settings_key_enum_has_all_sections() {
-        // Verify variants for each section exist
-        let _general = SettingsKey::DefaultModel;
-        let _expand = SettingsKey::ExpandEnabled;
-        let _logging = SettingsKey::LogLevel;
-        let _model = SettingsKey::ModelSteps;
-        let _read_only = SettingsKey::ModelTransformer;
-    }
-
-    #[test]
-    fn settings_display_value_global_defaults() {
-        let config = Config::load_or_default();
-        let settings = SettingsState::default();
-        // Create a minimal App-like context to test display values
-        // We test the config directly since display_value reads from config
-        assert_eq!(config.default_model, "flux2-klein");
-        assert_eq!(config.server_port, 7680);
-        assert_eq!(config.default_width, 768);
-        assert_eq!(config.default_height, 768);
-        assert_eq!(config.default_steps, 4);
-        assert!(config.embed_metadata);
-        assert_eq!(settings.row_index, 0);
+        assert!(ro.is_read_only());
     }
 
     #[test]
     fn settings_env_override_returns_none_for_unset() {
-        // Most env vars won't be set in test environment
-        let result = App::settings_env_override(&SettingsKey::ServerPort);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn settings_env_override_returns_none_for_unmapped_keys() {
-        // Keys without env var mappings return None
+        assert!(App::settings_env_override(&SettingsKey::ServerPort).is_none());
         assert!(App::settings_env_override(&SettingsKey::DefaultWidth).is_none());
-        assert!(App::settings_env_override(&SettingsKey::DefaultHeight).is_none());
         assert!(App::settings_env_override(&SettingsKey::LogLevel).is_none());
-    }
-
-    #[test]
-    fn settings_field_type_variants() {
-        let text = SettingsFieldType::Text;
-        let num = SettingsFieldType::Number {
-            min: 0.0,
-            max: 100.0,
-            step: 1.0,
-        };
-        let toggle = SettingsFieldType::Toggle {
-            options: vec!["a", "b"],
-        };
-        let bool_type = SettingsFieldType::Bool;
-        let path = SettingsFieldType::Path;
-        let read_only = SettingsFieldType::ReadOnly;
-
-        // Verify the enum has all expected variants by pattern matching
-        match text {
-            SettingsFieldType::Text => {}
-            _ => panic!("unexpected variant"),
-        }
-        match num {
-            SettingsFieldType::Number { min, max, step } => {
-                assert_eq!(min, 0.0);
-                assert_eq!(max, 100.0);
-                assert_eq!(step, 1.0);
-            }
-            _ => panic!("unexpected variant"),
-        }
-        match toggle {
-            SettingsFieldType::Toggle { options } => assert_eq!(options.len(), 2),
-            _ => panic!("unexpected variant"),
-        }
-        match bool_type {
-            SettingsFieldType::Bool => {}
-            _ => panic!("unexpected variant"),
-        }
-        match path {
-            SettingsFieldType::Path => {}
-            _ => panic!("unexpected variant"),
-        }
-        match read_only {
-            SettingsFieldType::ReadOnly => {}
-            _ => panic!("unexpected variant"),
-        }
     }
 
     #[test]
@@ -4155,11 +4159,571 @@ mod tests {
     fn view_settings_label_and_index() {
         assert_eq!(View::Settings.label(), "Settings");
         assert_eq!(View::Settings.index(), 3);
-    }
-
-    #[test]
-    fn view_all_includes_settings() {
         assert_eq!(View::ALL.len(), 4);
         assert_eq!(View::ALL[3], View::Settings);
+    }
+
+    // ── Settings E2E: display values ──────────────────────
+
+    #[tokio::test]
+    async fn settings_display_all_global_defaults() {
+        let app = make_settings_test_app();
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::DefaultModel),
+            "flux2-klein"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::ServerPort), "7680");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::DefaultWidth),
+            "768"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::DefaultHeight),
+            "768"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::DefaultSteps), "4");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::EmbedMetadata),
+            "on"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::T5Variant), "auto");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::Qwen3Variant),
+            "auto"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::DefaultNegativePrompt),
+            "(none)"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_display_all_expand_defaults() {
+        let app = make_settings_test_app();
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandEnabled),
+            "off"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandBackend),
+            "local"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandModel),
+            "qwen3-expand:q8"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandApiModel),
+            "qwen2.5:3b"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandTemperature),
+            "0.7"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::ExpandTopP), "0.90");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandMaxTokens),
+            "300"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ExpandThinking),
+            "off"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_display_all_logging_defaults() {
+        let app = make_settings_test_app();
+        assert_eq!(app.settings_display_value(&SettingsKey::LogLevel), "info");
+        assert_eq!(app.settings_display_value(&SettingsKey::LogFile), "off");
+        assert_eq!(app.settings_display_value(&SettingsKey::LogMaxDays), "7");
+    }
+
+    #[tokio::test]
+    async fn settings_display_all_model_defaults() {
+        let app = make_settings_test_app();
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelSelector),
+            "test-model:q8"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::ModelSteps), "20");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelGuidance),
+            "3.5"
+        );
+        assert_eq!(app.settings_display_value(&SettingsKey::ModelWidth), "1024");
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelHeight),
+            "1024"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelScheduler),
+            "euler-ancestral"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelNegativePrompt),
+            "blurry, low quality"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelLora),
+            "/path/to/lora.safetensors"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelLoraScale),
+            "0.8"
+        );
+        // Read-only paths
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelTransformer),
+            "/path/to/transformer.gguf"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelVae),
+            "/path/to/vae.safetensors"
+        );
+    }
+
+    // ── Settings E2E: numeric adjustments ─────────────────
+
+    #[tokio::test]
+    async fn settings_adjust_server_port() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ServerPort, 1.0, 1024.0, 65535.0);
+        assert_eq!(app.config.server_port, 7681);
+        app.settings_adjust_number(SettingsKey::ServerPort, -2.0, 1024.0, 65535.0);
+        assert_eq!(app.config.server_port, 7679);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_default_width() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::DefaultWidth, 64.0, 64.0, 4096.0);
+        assert_eq!(app.config.default_width, 832);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_default_height() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::DefaultHeight, -64.0, 64.0, 4096.0);
+        assert_eq!(app.config.default_height, 704);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_default_steps() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::DefaultSteps, 1.0, 1.0, 200.0);
+        assert_eq!(app.config.default_steps, 5);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_expand_temperature() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ExpandTemperature, 0.1, 0.0, 2.0);
+        assert!((app.config.expand.temperature - 0.8).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_expand_top_p() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ExpandTopP, -0.05, 0.0, 1.0);
+        assert!((app.config.expand.top_p - 0.85).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_expand_max_tokens() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ExpandMaxTokens, 64.0, 64.0, 4096.0);
+        assert_eq!(app.config.expand.max_tokens, 364);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_log_max_days() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::LogMaxDays, 1.0, 1.0, 365.0);
+        assert_eq!(app.config.logging.max_days, 8);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_model_steps() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ModelSteps, 1.0, 1.0, 200.0);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.default_steps, Some(21));
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_model_guidance() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ModelGuidance, 0.5, 0.0, 30.0);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert!((mc.default_guidance.unwrap() - 4.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_model_width() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ModelWidth, 64.0, 64.0, 4096.0);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.default_width, Some(1088));
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_model_height() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ModelHeight, -64.0, 64.0, 4096.0);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.default_height, Some(960));
+    }
+
+    #[tokio::test]
+    async fn settings_adjust_model_lora_scale() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::ModelLoraScale, 0.1, 0.0, 2.0);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert!((mc.lora_scale.unwrap() - 0.9).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn settings_numeric_clamps_at_min() {
+        let mut app = make_settings_test_app();
+        // Steps = 4, try decrementing by 100
+        app.settings_adjust_number(SettingsKey::DefaultSteps, -100.0, 1.0, 200.0);
+        assert_eq!(app.config.default_steps, 1);
+    }
+
+    #[tokio::test]
+    async fn settings_numeric_clamps_at_max() {
+        let mut app = make_settings_test_app();
+        app.settings_adjust_number(SettingsKey::DefaultSteps, 500.0, 1.0, 200.0);
+        assert_eq!(app.config.default_steps, 200);
+    }
+
+    // ── Settings E2E: boolean toggles ─────────────────────
+
+    #[tokio::test]
+    async fn settings_toggle_embed_metadata() {
+        let mut app = make_settings_test_app();
+        assert!(app.config.embed_metadata);
+        app.settings_toggle_bool(SettingsKey::EmbedMetadata);
+        assert!(!app.config.embed_metadata);
+        app.settings_toggle_bool(SettingsKey::EmbedMetadata);
+        assert!(app.config.embed_metadata);
+    }
+
+    #[tokio::test]
+    async fn settings_toggle_expand_enabled() {
+        let mut app = make_settings_test_app();
+        assert!(!app.config.expand.enabled);
+        app.settings_toggle_bool(SettingsKey::ExpandEnabled);
+        assert!(app.config.expand.enabled);
+    }
+
+    #[tokio::test]
+    async fn settings_toggle_expand_thinking() {
+        let mut app = make_settings_test_app();
+        assert!(!app.config.expand.thinking);
+        app.settings_toggle_bool(SettingsKey::ExpandThinking);
+        assert!(app.config.expand.thinking);
+    }
+
+    #[tokio::test]
+    async fn settings_toggle_log_file() {
+        let mut app = make_settings_test_app();
+        assert!(!app.config.logging.file);
+        app.settings_toggle_bool(SettingsKey::LogFile);
+        assert!(app.config.logging.file);
+    }
+
+    // ── Settings E2E: toggle cycles ───────────────────────
+
+    #[tokio::test]
+    async fn settings_cycle_t5_variant() {
+        let mut app = make_settings_test_app();
+        let opts = &["auto", "fp16", "q8", "q6", "q5", "q4", "q3"];
+        assert_eq!(app.settings_display_value(&SettingsKey::T5Variant), "auto");
+        app.settings_cycle_toggle(SettingsKey::T5Variant, opts, 1);
+        assert_eq!(app.config.t5_variant, Some("fp16".into()));
+        app.settings_cycle_toggle(SettingsKey::T5Variant, opts, 1);
+        assert_eq!(app.config.t5_variant, Some("q8".into()));
+        // Cycle backward wraps around: q8 (idx 2) - 2 = auto (idx 0)
+        app.settings_cycle_toggle(SettingsKey::T5Variant, opts, -2);
+        assert!(app.config.t5_variant.is_none()); // "auto" → None
+    }
+
+    #[tokio::test]
+    async fn settings_cycle_qwen3_variant() {
+        let mut app = make_settings_test_app();
+        let opts = &["auto", "bf16", "q8", "q6", "iq4", "q3"];
+        app.settings_cycle_toggle(SettingsKey::Qwen3Variant, opts, 1);
+        assert_eq!(app.config.qwen3_variant, Some("bf16".into()));
+        app.settings_cycle_toggle(SettingsKey::Qwen3Variant, opts, -1);
+        assert!(app.config.qwen3_variant.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_cycle_log_level() {
+        let mut app = make_settings_test_app();
+        let opts = &["trace", "debug", "info", "warn", "error"];
+        assert_eq!(app.config.logging.level, "info");
+        app.settings_cycle_toggle(SettingsKey::LogLevel, opts, 1);
+        assert_eq!(app.config.logging.level, "warn");
+        app.settings_cycle_toggle(SettingsKey::LogLevel, opts, 1);
+        assert_eq!(app.config.logging.level, "error");
+        app.settings_cycle_toggle(SettingsKey::LogLevel, opts, 1); // wraps
+        assert_eq!(app.config.logging.level, "trace");
+    }
+
+    #[tokio::test]
+    async fn settings_cycle_model_scheduler() {
+        let mut app = make_settings_test_app();
+        let opts = &["(none)", "ddim", "euler-ancestral", "uni-pc"];
+        // Current is euler-ancestral
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::ModelScheduler),
+            "euler-ancestral"
+        );
+        app.settings_cycle_toggle(SettingsKey::ModelScheduler, opts, 1);
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.scheduler, Some(Scheduler::UniPc));
+        app.settings_cycle_toggle(SettingsKey::ModelScheduler, opts, 1); // wraps to (none)
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert!(mc.scheduler.is_none());
+    }
+
+    // ── Settings E2E: text/path apply ─────────────────────
+
+    #[tokio::test]
+    async fn settings_apply_default_model() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::DefaultModel, "sd15:fp16".into());
+        assert_eq!(app.config.default_model, "sd15:fp16");
+    }
+
+    #[tokio::test]
+    async fn settings_apply_models_dir() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::ModelsDir, "/tmp/models".into());
+        assert_eq!(app.config.models_dir, "/tmp/models");
+    }
+
+    #[tokio::test]
+    async fn settings_apply_output_dir() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::OutputDir, "/tmp/output".into());
+        assert_eq!(app.config.output_dir, Some("/tmp/output".into()));
+        // Empty clears
+        app.settings_apply_input(SettingsKey::OutputDir, String::new());
+        assert!(app.config.output_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_apply_default_negative_prompt() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::DefaultNegativePrompt, "ugly, deformed".into());
+        assert_eq!(
+            app.config.default_negative_prompt,
+            Some("ugly, deformed".into())
+        );
+        app.settings_apply_input(SettingsKey::DefaultNegativePrompt, String::new());
+        assert!(app.config.default_negative_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_apply_expand_backend() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::ExpandBackend, "http://localhost:11434".into());
+        assert_eq!(app.config.expand.backend, "http://localhost:11434");
+    }
+
+    #[tokio::test]
+    async fn settings_apply_expand_model() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::ExpandModel, "qwen3-expand:q4".into());
+        assert_eq!(app.config.expand.model, "qwen3-expand:q4");
+    }
+
+    #[tokio::test]
+    async fn settings_apply_expand_api_model() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::ExpandApiModel, "gpt-4o".into());
+        assert_eq!(app.config.expand.api_model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn settings_apply_log_dir() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::LogDir, "/tmp/logs".into());
+        assert_eq!(app.config.logging.dir, Some("/tmp/logs".into()));
+        app.settings_apply_input(SettingsKey::LogDir, String::new());
+        assert!(app.config.logging.dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_apply_model_negative_prompt() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(SettingsKey::ModelNegativePrompt, "watermark".into());
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.negative_prompt, Some("watermark".into()));
+    }
+
+    #[tokio::test]
+    async fn settings_apply_model_lora() {
+        let mut app = make_settings_test_app();
+        app.settings_apply_input(
+            SettingsKey::ModelLora,
+            "/new/path/to/lora.safetensors".into(),
+        );
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert_eq!(mc.lora, Some("/new/path/to/lora.safetensors".into()));
+        // Clear
+        app.settings_apply_input(SettingsKey::ModelLora, String::new());
+        let mc = app.config.models.get("test-model:q8").unwrap();
+        assert!(mc.lora.is_none());
+    }
+
+    // ── Settings E2E: model selector cycling ──────────────
+
+    #[tokio::test]
+    async fn settings_cycle_model_selector() {
+        let mut app = make_settings_test_app();
+        // Add a second model
+        app.config.models.insert(
+            "second-model:fp16".to_string(),
+            mold_core::config::ModelConfig::default(),
+        );
+        assert_eq!(app.settings.selected_model, Some("test-model:q8".into()));
+        app.settings_cycle_model(1);
+        // Should have moved to the other model (HashMap order is not guaranteed,
+        // but it should be a different model)
+        assert!(app.settings.selected_model.is_some());
+        let selected = app.settings.selected_model.clone().unwrap();
+        app.settings_cycle_model(1); // cycle back
+        assert_ne!(
+            app.settings.selected_model.as_deref(),
+            Some(selected.as_str())
+        );
+    }
+
+    // ── Settings E2E: navigation ──────────────────────────
+
+    #[tokio::test]
+    async fn settings_navigate_skips_headers() {
+        let mut app = make_settings_test_app();
+        // Start at index 0, which is a section header
+        app.settings.row_index = 0;
+        app.settings_navigate(1); // should skip header, land on first field
+        let rows = app.build_settings_rows();
+        assert!(rows[app.settings.row_index].is_field());
+    }
+
+    #[tokio::test]
+    async fn settings_navigate_clamps_at_boundaries() {
+        let mut app = make_settings_test_app();
+        app.settings.row_index = 0;
+        app.settings_navigate(-1); // can't go above 0
+        assert_eq!(app.settings.row_index, 0);
+    }
+
+    // ── Settings E2E: build_settings_rows structure ───────
+
+    #[tokio::test]
+    async fn settings_rows_have_all_sections() {
+        let app = make_settings_test_app();
+        let rows = app.build_settings_rows();
+        let headers: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SettingsRow::SectionHeader { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.iter().any(|h| h == "General"));
+        assert!(headers.iter().any(|h| h == "Expand"));
+        assert!(headers.iter().any(|h| h == "Logging"));
+        assert!(headers.iter().any(|h| h.starts_with("Model Defaults")));
+    }
+
+    #[tokio::test]
+    async fn settings_rows_contain_read_only_paths() {
+        let app = make_settings_test_app();
+        let rows = app.build_settings_rows();
+        let has_ro = rows.iter().any(|r| {
+            matches!(
+                r,
+                SettingsRow::Field {
+                    key: SettingsKey::ModelTransformer,
+                    field_type: SettingsFieldType::ReadOnly,
+                    ..
+                }
+            )
+        });
+        assert!(has_ro, "ModelTransformer should be ReadOnly");
+    }
+
+    // ── Settings E2E: full increment via row_index ────────
+
+    #[tokio::test]
+    async fn settings_increment_via_row_index_adjusts_width() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::DefaultWidth);
+        app.settings.row_index = idx;
+        app.settings_increment(1);
+        assert_eq!(app.config.default_width, 832); // 768 + 64
+    }
+
+    #[tokio::test]
+    async fn settings_increment_via_row_index_toggles_bool() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::EmbedMetadata);
+        app.settings.row_index = idx;
+        assert!(app.config.embed_metadata);
+        app.settings_increment(1);
+        assert!(!app.config.embed_metadata);
+    }
+
+    #[tokio::test]
+    async fn settings_increment_via_row_index_cycles_toggle() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::LogLevel);
+        app.settings.row_index = idx;
+        assert_eq!(app.config.logging.level, "info");
+        app.settings_increment(1);
+        assert_eq!(app.config.logging.level, "warn");
+    }
+
+    // ── Settings E2E: confirm opens popup for text fields ─
+
+    #[tokio::test]
+    async fn settings_confirm_opens_popup_for_text_field() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::DefaultModel);
+        app.settings.row_index = idx;
+        app.settings_confirm();
+        assert!(matches!(app.popup, Some(Popup::SettingsInput { .. })));
+        if let Some(Popup::SettingsInput { key, input, .. }) = &app.popup {
+            assert_eq!(*key, SettingsKey::DefaultModel);
+            assert_eq!(input, "flux2-klein");
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_confirm_toggles_bool_field() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::ExpandEnabled);
+        app.settings.row_index = idx;
+        assert!(!app.config.expand.enabled);
+        app.settings_confirm();
+        assert!(app.config.expand.enabled);
+        assert!(app.popup.is_none()); // no popup for bools
+    }
+
+    #[tokio::test]
+    async fn settings_confirm_cycles_toggle_field() {
+        let mut app = make_settings_test_app();
+        let idx = find_settings_row(&app, SettingsKey::T5Variant);
+        app.settings.row_index = idx;
+        app.settings_confirm();
+        assert_eq!(app.config.t5_variant, Some("fp16".into()));
+        assert!(app.popup.is_none());
     }
 }
