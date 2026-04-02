@@ -1,3 +1,4 @@
+pub mod config;
 pub mod default;
 #[cfg(feature = "discord")]
 pub mod discord;
