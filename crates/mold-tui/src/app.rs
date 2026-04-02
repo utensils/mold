@@ -646,9 +646,19 @@ impl App {
         let (server_url, initial_mode) = if local {
             (None, InferenceMode::Local)
         } else if let Some(h) = host {
-            (Some(h), InferenceMode::Auto)
+            let url = mold_core::client::normalize_host(&h);
+            if check_server_health(&url) {
+                (Some(url), InferenceMode::Auto)
+            } else {
+                (None, InferenceMode::Local)
+            }
         } else if let Some(h) = env_host {
-            (Some(h), InferenceMode::Auto)
+            let url = mold_core::client::normalize_host(&h);
+            if check_server_health(&url) {
+                (Some(url), InferenceMode::Auto)
+            } else {
+                (None, InferenceMode::Local)
+            }
         } else {
             // No explicit server — try to detect or auto-start one
             if check_server_health(&local_url) {
@@ -657,12 +667,14 @@ impl App {
             } else {
                 // Try to start a background server
                 match start_background_server(port) {
-                    Some(child) => {
-                        server_process = Some(child);
+                    Some(mut child) => {
                         if wait_for_server_health(&local_url, 8) {
+                            server_process = Some(child);
                             (Some(local_url.clone()), InferenceMode::Auto)
                         } else {
-                            // Server didn't start in time — fall back to local
+                            // Server didn't start in time — kill it and fall back to local
+                            let _ = child.kill();
+                            let _ = child.wait();
                             (None, InferenceMode::Local)
                         }
                     }
@@ -682,7 +694,24 @@ impl App {
         let mut capabilities = capabilities_for_family(&family);
         let mut visible_fields = ParamField::visible_fields(&capabilities, initial_mode);
 
-        let catalog = mold_core::build_model_catalog(&config, None, false);
+        // Build initial catalog — try server first if connected, fall back to local
+        let catalog = if let Some(ref url) = server_url {
+            // Blocking fetch from server for startup catalog
+            let rt = tokio::runtime::Handle::current();
+            let url_clone = url.clone();
+            std::thread::spawn(move || {
+                rt.block_on(async {
+                    let client = mold_core::MoldClient::new(&url_clone);
+                    client.list_models_extended().await.ok()
+                })
+            })
+            .join()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| mold_core::build_model_catalog(&config, None, false))
+        } else {
+            mold_core::build_model_catalog(&config, None, false)
+        };
 
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
 

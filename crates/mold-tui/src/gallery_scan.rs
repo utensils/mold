@@ -51,7 +51,7 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        if ext.as_deref() != Some("png") {
+        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
             continue;
         }
 
@@ -63,8 +63,13 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        if let Some(gallery_entry) = read_png_metadata(&path, timestamp) {
-            entries.push(gallery_entry);
+        let gallery_entry = if ext.as_deref() == Some("png") {
+            read_png_metadata(&path, timestamp)
+        } else {
+            read_jpeg_metadata(&path, timestamp)
+        };
+        if let Some(ge) = gallery_entry {
+            entries.push(ge);
         }
     }
 
@@ -108,6 +113,49 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
         }
     }
 
+    None
+}
+
+/// Read OutputMetadata from a JPEG file's COM marker.
+/// Mold writes `mold:parameters {json}` as the COM comment.
+fn read_jpeg_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
+    let data = std::fs::read(path).ok()?;
+    // Scan for COM markers (0xFF 0xFE)
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0xFF && data[i + 1] == 0xFE {
+            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if i + 2 + len <= data.len() {
+                let comment = &data[i + 4..i + 2 + len];
+                if let Ok(text) = std::str::from_utf8(comment) {
+                    if let Some(json) = text.strip_prefix("mold:parameters ") {
+                        if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(json) {
+                            return Some(GalleryEntry {
+                                path: path.to_path_buf(),
+                                metadata: meta,
+                                generation_time_ms: None,
+                                timestamp,
+                                server_url: None,
+                            });
+                        }
+                    }
+                }
+            }
+            i += 2 + len;
+        } else if data[i] == 0xFF {
+            if data[i + 1] == 0xD9 {
+                break; // EOI
+            }
+            if i + 3 < data.len() {
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                i += 2 + len;
+            } else {
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
     None
 }
 

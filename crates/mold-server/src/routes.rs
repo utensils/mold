@@ -835,7 +835,7 @@ async fn get_gallery_image(
     Ok((headers, data))
 }
 
-/// Scan a directory for PNG files with mold metadata.
+/// Scan a directory for image files with mold metadata.
 fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
     let mut images = Vec::new();
 
@@ -850,7 +850,7 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        if ext.as_deref() != Some("png") {
+        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
             continue;
         }
 
@@ -867,7 +867,13 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        if let Some(meta) = read_png_metadata(path) {
+        let meta = if ext.as_deref() == Some("png") {
+            read_png_metadata(path)
+        } else {
+            read_jpeg_metadata(path)
+        };
+
+        if let Some(meta) = meta {
             images.push(mold_core::GalleryImage {
                 filename,
                 metadata: meta,
@@ -901,6 +907,41 @@ fn read_png_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata
                     return Some(meta);
                 }
             }
+        }
+    }
+    None
+}
+
+/// Read OutputMetadata from a JPEG file's COM marker.
+fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
+    let data = std::fs::read(path).ok()?;
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0xFF && data[i + 1] == 0xFE {
+            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if i + 2 + len <= data.len() {
+                let comment = &data[i + 4..i + 2 + len];
+                if let Ok(text) = std::str::from_utf8(comment) {
+                    if let Some(json) = text.strip_prefix("mold:parameters ") {
+                        if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(json) {
+                            return Some(meta);
+                        }
+                    }
+                }
+            }
+            i += 2 + len;
+        } else if data[i] == 0xFF {
+            if data[i + 1] == 0xD9 {
+                break;
+            }
+            if i + 3 < data.len() {
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                i += 2 + len;
+            } else {
+                break;
+            }
+        } else {
+            i += 1;
         }
     }
     None
