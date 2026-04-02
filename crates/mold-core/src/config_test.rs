@@ -859,4 +859,153 @@ is_schnell = false
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result, Some("sdxl-turbo:fp16".to_string()));
     }
+
+    // ── effective_output_dir ──────────────────────────────────────────────
+
+    #[test]
+    fn effective_output_dir_defaults_to_mold_output() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        assert!(
+            dir.to_string_lossy().ends_with(".mold/output"),
+            "should end with .mold/output: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn effective_output_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        unsafe { std::env::set_var("MOLD_HOME", "/custom/mold") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        assert_eq!(dir, PathBuf::from("/custom/mold/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_env_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/env/output") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert_eq!(dir, PathBuf::from("/env/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_config_field_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/output".to_string());
+        assert_eq!(cfg.effective_output_dir(), PathBuf::from("/config/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_env_beats_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/env/wins") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/loses".to_string());
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert_eq!(dir, PathBuf::from("/env/wins"));
+    }
+
+    // ── resolved_log_dir ─────────────────────────────────────────────────
+
+    #[test]
+    fn resolved_log_dir_defaults_to_mold_logs() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        let cfg = Config::default();
+        let dir = cfg.resolved_log_dir();
+        assert!(
+            dir.to_string_lossy().ends_with(".mold/logs"),
+            "should end with .mold/logs: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn resolved_log_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_HOME", "/custom/mold") };
+        let cfg = Config::default();
+        let dir = cfg.resolved_log_dir();
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        assert_eq!(dir, PathBuf::from("/custom/mold/logs"));
+    }
+
+    #[test]
+    fn resolved_log_dir_custom_dir_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.logging.dir = Some("/var/log/mold".to_string());
+        assert_eq!(cfg.resolved_log_dir(), PathBuf::from("/var/log/mold"));
+    }
+
+    #[test]
+    fn resolved_log_dir_expands_tilde() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.logging.dir = Some("~/mold-logs".to_string());
+        let dir = cfg.resolved_log_dir();
+        assert!(
+            !dir.to_string_lossy().starts_with('~'),
+            "tilde should be expanded: got {:?}",
+            dir
+        );
+        assert!(
+            dir.to_string_lossy().ends_with("mold-logs"),
+            "should end with mold-logs: got {:?}",
+            dir
+        );
+    }
+
+    // ── logging config deserialization ────────────────────────────────────
+
+    #[test]
+    fn logging_config_defaults_when_absent() {
+        let toml = r#"default_model = "test""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "info");
+        assert!(!cfg.logging.file);
+        assert!(cfg.logging.dir.is_none());
+        assert_eq!(cfg.logging.max_days, 7);
+    }
+
+    #[test]
+    fn logging_config_from_toml() {
+        let toml = r#"
+            [logging]
+            level = "debug"
+            file = true
+            dir = "/var/log/mold"
+            max_days = 30
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "debug");
+        assert!(cfg.logging.file);
+        assert_eq!(cfg.logging.dir.as_deref(), Some("/var/log/mold"));
+        assert_eq!(cfg.logging.max_days, 30);
+    }
+
+    #[test]
+    fn logging_config_partial_toml() {
+        let toml = r#"
+            [logging]
+            file = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "info"); // default
+        assert!(cfg.logging.file); // set
+        assert!(cfg.logging.dir.is_none()); // default
+        assert_eq!(cfg.logging.max_days, 7); // default
+    }
 }
