@@ -18,7 +18,7 @@ fn check_model_memory_budget(
     peak_bytes: u64,
     available_bytes: u64,
 ) -> Result<(), ApiError> {
-    let hard_limit = available_bytes / 10 * 9; // 90%
+    let hard_limit = available_bytes * 9 / 10; // 90%
     if peak_bytes > hard_limit {
         return Err(ApiError::insufficient_memory(format!(
             "model '{}' needs ~{:.1} GB but only ~{:.1} GB available. \
@@ -29,7 +29,7 @@ fn check_model_memory_budget(
         )));
     }
 
-    let warn_limit = available_bytes / 10 * 8; // 80%
+    let warn_limit = available_bytes * 8 / 10; // 80%
     if peak_bytes > warn_limit {
         tracing::warn!(
             model = %model_name,

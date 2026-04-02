@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
-use ratatui_image::{Image, Resize, StatefulImage};
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, GalleryViewMode};
 
@@ -207,40 +207,14 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
-            if let Ok(img) = image::open(&thumb_path) {
-                // Build a fixed protocol for the current tile, then center the
-                // fitted protocol area within the available thumbnail box.
-                if let Ok(mut protocol) =
-                    app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
-                {
-                    let fitted = protocol.area();
-                    let centered = center_rect(thumb_area, fitted.width, fitted.height);
-                    frame.render_widget(Image::new(&mut protocol), centered);
-                } else {
-                    // Fall back to the old stateful path if protocol creation fails.
-                    let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                        .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-                    let font_size = app.picker.font_size();
-                    let centered = centered_thumb_rect(
-                        thumb_area,
-                        iw,
-                        ih,
-                        font_size,
-                        app.picker.protocol_type(),
-                    );
-                    let image_widget = StatefulImage::default();
-                    frame.render_stateful_widget(image_widget, centered, state);
-                }
-            } else {
-                let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                    .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-                let font_size = app.picker.font_size();
-                let centered =
-                    centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
-                let image_widget = StatefulImage::default();
-                frame.render_stateful_widget(image_widget, centered, state);
-            }
+            // Center using cached thumbnail dimensions — no disk I/O in the render path.
+            let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
+            let font_size = app.picker.font_size();
+            let centered =
+                centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
+            let image_widget = StatefulImage::default();
+            frame.render_stateful_widget(image_widget, centered, state);
         }
     }
 
