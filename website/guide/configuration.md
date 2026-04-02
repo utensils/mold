@@ -3,6 +3,20 @@
 mold looks for `config.toml` inside the base mold directory (`~/.mold/` by
 default, or override with `MOLD_HOME`).
 
+## Managing Config from the CLI
+
+Use `mold config` to view and edit settings without manually editing TOML:
+
+```bash
+mold config list                    # Show all settings
+mold config get server_port         # Get a value
+mold config set server_port 8080    # Set a value
+mold config edit                    # Open in $EDITOR
+```
+
+See the [CLI Reference](/guide/cli-reference#mold-config) for the full list of
+keys and options.
+
 ## Config File
 
 ```toml{8-11,14-17}

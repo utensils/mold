@@ -25,7 +25,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `serve`, `info`, `ps`, `rm`, `unload`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `info`, `ps`, `rm`, `unload`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -250,6 +250,25 @@ mold info flux-dev:q4        # Show model details and file sizes
 mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
 ```
+
+## Configuration Management
+
+View and edit `config.toml` settings from the CLI using dot-notation keys:
+
+```bash
+mold config list                          # Show all settings grouped by section
+mold config list --json                   # Machine-readable output
+mold config get server_port               # Get a single value
+mold config get server_port --raw         # Raw value for scripting
+mold config set server_port 8080          # Set and persist a value
+mold config set expand.enabled true       # Nested key (dot-notation)
+mold config set output_dir none           # Clear an optional field
+mold config set models.flux-dev:q4.default_steps 30  # Per-model setting
+mold config path                          # Show config file location
+mold config edit                          # Open in $EDITOR
+```
+
+Keys use dot-notation matching the TOML structure. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active.
 
 ## Server Mode
 

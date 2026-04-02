@@ -154,7 +154,7 @@ mold tui
 </p>
 
 Features:
-- **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3, arrows, or click)
+- **Four views** — Generate, Gallery, Models, Settings (switch with Esc + 1/2/3/4, arrows, or click)
 - **Live image preview** — Kitty, Sixel, iTerm2, or halfblock auto-detected
 - **Gallery grid** — thumbnail grid with cached previews, detail view with full metadata, edit/regenerate/delete actions
 - **Auto-start server** — background `mold serve` keeps models hot between generations
@@ -380,6 +380,17 @@ Mold looks for `config.toml` inside the base mold directory (`~/.mold/` by defau
 ```bash
 export MOLD_HOME=/data/mold    # config at /data/mold/config.toml, models at /data/mold/models/
 ```
+
+Use `mold config` to view and edit settings from the CLI:
+
+```bash
+mold config list                          # show all settings
+mold config get server_port --raw         # raw value for scripting
+mold config set expand.enabled true       # set a value
+mold config edit                          # open in $EDITOR
+```
+
+See the [configuration guide](https://utensils.github.io/mold/guide/configuration) and [CLI reference](https://utensils.github.io/mold/guide/cli-reference#mold-config) for full details.
 
 Key environment variables (highest precedence, override config file):
 

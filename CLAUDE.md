@@ -232,6 +232,11 @@ mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generati
         --expand-model <MODEL>  LLM model name override
 
 mold default [MODEL]               Get or set the default model
+mold config list [--json]          List all config settings
+mold config get <KEY> [--raw]      Get a config value
+mold config set <KEY> <VALUE>      Set a config value
+mold config path                   Show config file path
+mold config edit                   Open config in $EDITOR
 mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
 mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models

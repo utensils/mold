@@ -140,6 +140,68 @@ mold default              # show current
 mold default flux-dev:q4  # set default
 ```
 
+## `mold config`
+
+View and edit configuration settings using dot-notation keys.
+
+```bash
+mold config list [--json]
+mold config get <KEY> [--raw]
+mold config set <KEY> <VALUE>
+mold config path
+mold config edit
+```
+
+### Subcommands
+
+| Subcommand | Description                                                                 |
+| ---------- | --------------------------------------------------------------------------- |
+| `list`     | Show all settings grouped by section. `--json` for machine-readable output. |
+| `get`      | Get a single value. `--raw` outputs bare value for scripting.               |
+| `set`      | Set a value and persist to config.toml. Validates type and range.           |
+| `path`     | Show the config file path.                                                  |
+| `edit`     | Open config file in `$EDITOR` (falls back to `$VISUAL`, then `vi`).         |
+
+### Key Names
+
+Keys use dot-notation matching the TOML structure:
+
+| Section   | Keys                                                                                                                                                                                       |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `default_negative_prompt` |
+| Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                       |
+| Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                         |
+| Per-model | `models.<name>.<field>` where field is one of: `default_steps`, `default_guidance`, `default_width`, `default_height`, `scheduler`, `negative_prompt`, `lora`, `lora_scale`                |
+
+### Examples
+
+```bash
+# List all settings
+mold config list
+
+# Scripting: capture a value
+PORT=$(mold config get server_port --raw)
+
+# Set values with validation
+mold config set server_port 8080
+mold config set expand.enabled true
+mold config set logging.level debug
+
+# Clear optional fields
+mold config set output_dir none
+
+# Per-model defaults
+mold config set models.flux-dev:q4.default_steps 30
+mold config set models.sd15:fp16.scheduler euler-ancestral
+
+# JSON output for tooling
+mold config list --json | jq '.server_port'
+```
+
+Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to
+clear optional string fields. Environment variable overrides are flagged in
+`list` output and warned about when using `set`.
+
 ## `mold rm`
 
 Remove downloaded models.
