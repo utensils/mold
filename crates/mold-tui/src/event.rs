@@ -124,12 +124,7 @@ fn map_gallery_key(key: &KeyEvent) -> Action {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
-        KeyCode::Enter => Action::Regenerate,
-        KeyCode::Char('e') => Action::EditAndGenerate,
-        KeyCode::Char('d') => Action::DeleteImage,
-        KeyCode::Char('o') => Action::OpenFile,
-        KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
-        KeyCode::Char('-') => Action::ZoomOut,
+        // TODO: implement gallery actions (Regenerate, Edit, Delete, Open)
         KeyCode::Left => Action::ViewPrev,
         KeyCode::Right => Action::ViewNext,
         KeyCode::Esc => Action::SwitchView(View::Generate),

@@ -867,16 +867,17 @@ impl App {
                                 return;
                             }
                         }
-                        // Up arrow: history prev at top line, cursor up otherwise
+                        // Up/Down arrows: history only in Prompt field, cursor move in Negative
                         (KeyCode::Up, KeyModifiers::NONE) => {
                             let textarea = match self.generate.focus {
                                 GenerateFocus::Prompt => &self.generate.prompt,
                                 GenerateFocus::NegativePrompt => &self.generate.negative_prompt,
                                 _ => unreachable!(),
                             };
-                            if textarea.cursor().0 == 0 {
-                                let current =
-                                    self.generate.prompt.lines().join("\n");
+                            if self.generate.focus == GenerateFocus::Prompt
+                                && textarea.cursor().0 == 0
+                            {
+                                let current = self.generate.prompt.lines().join("\n");
                                 if let Some(prompt) = self.history.prev(&current) {
                                     self.generate.prompt = TextArea::new(
                                         prompt.lines().map(String::from).collect(),
@@ -897,7 +898,6 @@ impl App {
                             ta.input(event);
                             return;
                         }
-                        // Down arrow: history next at bottom line, cursor down otherwise
                         (KeyCode::Down, KeyModifiers::NONE) => {
                             let textarea = match self.generate.focus {
                                 GenerateFocus::Prompt => &self.generate.prompt,
@@ -905,9 +905,10 @@ impl App {
                                 _ => unreachable!(),
                             };
                             let last_line = textarea.lines().len().saturating_sub(1);
-                            if textarea.cursor().0 >= last_line {
-                                let current =
-                                    self.generate.prompt.lines().join("\n");
+                            if self.generate.focus == GenerateFocus::Prompt
+                                && textarea.cursor().0 >= last_line
+                            {
+                                let current = self.generate.prompt.lines().join("\n");
                                 if let Some(prompt) = self.history.next(&current) {
                                     self.generate.prompt = TextArea::new(
                                         prompt.lines().map(String::from).collect(),
@@ -1376,7 +1377,11 @@ impl App {
                         let model_name = model.name.clone();
                         let tx = self.bg_tx.clone();
                         self.tokio_handle.spawn(async move {
-                            let _ = crate::backend::auto_pull_model(&model_name, &tx).await;
+                            if let Err(msg) =
+                                crate::backend::auto_pull_model(&model_name, &tx).await
+                            {
+                                let _ = tx.send(BackgroundEvent::Error(msg));
+                            }
                         });
                     }
                 }

@@ -128,10 +128,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
         View::Gallery => vec![
             ("1/2/3", "Views"),
-            ("Enter", "Re-gen"),
-            ("e", "Edit"),
-            ("d", "Delete"),
-            ("o", "Open"),
+            ("j/k", "Select"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
