@@ -411,13 +411,13 @@
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
+                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
-                help = "start the mold server";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
+                help = "start the mold server (debug logging)";
+                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
               }
               {
                 category = "run";

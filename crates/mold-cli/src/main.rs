@@ -227,6 +227,10 @@ environment before starting mold serve.")]
         #[arg(long, default_value = "json")]
         log_format: LogFormat,
 
+        /// Write logs to file (~/.mold/logs/)
+        #[arg(long)]
+        log_file: bool,
+
         /// Also start the Discord bot in this process
         #[cfg(feature = "discord")]
         #[arg(long)]
@@ -526,33 +530,34 @@ async fn run() -> anyhow::Result<()> {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
 
-    // `mold serve` defaults to info (server needs request visibility);
-    // all other commands default to warn (quiet CLI output).
-    let default_level = match &cli.command {
-        Commands::Serve { .. } => "info",
-        _ => "warn",
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
-
-    match &cli.command {
+    // Initialize tracing. `mold serve` uses the logging module for optional
+    // file output; all other commands use stderr-only with warn level.
+    let _log_guard = match &cli.command {
         Commands::Serve {
-            log_format: LogFormat::Json,
+            log_format,
+            log_file,
             ..
         } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .with_writer(std::io::stderr)
-                .init();
+            let config = mold_core::Config::load_or_default();
+            let log_dir = config.resolved_log_dir();
+            Some(mold_server::logging::init_tracing(
+                *log_file,
+                matches!(log_format, LogFormat::Json),
+                &config.logging,
+                "info",
+                log_dir,
+            ))
         }
         _ => {
+            let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
                 .init();
+            None
         }
-    }
+    };
 
     match cli.command {
         Commands::Run {

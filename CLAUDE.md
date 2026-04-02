@@ -232,7 +232,7 @@ mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generati
         --expand-model <MODEL>  LLM model name override
 
 mold default [MODEL]               Get or set the default model
-mold serve [--port N] [--bind ADDR] [--models-dir PATH]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
 mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
@@ -330,6 +330,12 @@ temperature = 0.7
 # [expand.families.flux]
 # word_limit = 200
 # style_notes = "Rich natural language descriptions."
+
+[logging]
+# level = "info"              # Log level (overridden by MOLD_LOG env var)
+# file = false                # Enable file logging to ~/.mold/logs/
+# dir = "~/.mold/logs"        # Custom log directory
+# max_days = 7                # Days to retain rotated log files
 ```
 
 ## Model System

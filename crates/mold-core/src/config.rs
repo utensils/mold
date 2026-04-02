@@ -329,9 +329,51 @@ pub struct Config {
     #[serde(default)]
     pub expand: ExpandSettings,
 
+    /// Logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
+}
+
+/// Logging configuration for file output and rotation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoggingConfig {
+    /// Log level: trace, debug, info, warn, error. Overridden by MOLD_LOG env var.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    /// Enable file logging. When true, logs go to ~/.mold/logs/.
+    #[serde(default)]
+    pub file: bool,
+
+    /// Custom log file directory (default: ~/.mold/logs/).
+    #[serde(default)]
+    pub dir: Option<String>,
+
+    /// Number of days to retain log files. Default: 7.
+    #[serde(default = "default_log_max_days")]
+    pub max_days: u32,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_max_days() -> u32 {
+    7
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            file: false,
+            dir: None,
+            max_days: default_log_max_days(),
+        }
+    }
 }
 
 fn default_model() -> String {
@@ -377,6 +419,7 @@ impl Default for Config {
             output_dir: None,
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
+            logging: LoggingConfig::default(),
             models: HashMap::new(),
         }
     }
@@ -588,6 +631,24 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from(".mold"))
                 .join("output")
         })
+    }
+
+    /// Resolved log directory from config or default (~/.mold/logs/).
+    pub fn resolved_log_dir(&self) -> PathBuf {
+        if let Some(ref dir) = self.logging.dir {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            if dir == "~" {
+                home
+            } else if let Some(rest) = dir.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(dir)
+            }
+        } else {
+            Self::mold_dir()
+                .unwrap_or_else(|| PathBuf::from(".mold"))
+                .join("logs")
+        }
     }
 
     pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {

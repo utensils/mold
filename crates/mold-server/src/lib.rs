@@ -1,3 +1,4 @@
+pub mod logging;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;

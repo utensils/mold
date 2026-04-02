@@ -71,6 +71,24 @@ in
       description = "Log level for the mold server.";
     };
 
+    logToFile = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable file logging to logDir. When false, logs go to journal only.";
+    };
+
+    logDir = lib.mkOption {
+      type = lib.types.str;
+      default = "${cfg.homeDir}/logs";
+      description = "Directory for log files when logToFile is enabled.";
+    };
+
+    logRetentionDays = lib.mkOption {
+      type = lib.types.int;
+      default = 7;
+      description = "Number of days to retain rotated log files.";
+    };
+
     corsOrigin = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -176,6 +194,9 @@ in
     ]
     ++ lib.optionals (cfg.outputDir != null) [
       "d ${cfg.outputDir} 0775 mold mold -"
+    ]
+    ++ lib.optionals cfg.logToFile [
+      "d ${cfg.logDir} 0775 mold mold -"
     ];
 
     systemd.services.mold = {
@@ -213,7 +234,7 @@ in
             chmod 600 /run/mold/env
           ''}"
         ];
-        ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}";
+        ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}${lib.optionalString cfg.logToFile " --log-file"}";
         Restart = "on-failure";
         RestartSec = 5;
 
@@ -236,7 +257,8 @@ in
           cfg.homeDir
           cfg.modelsDir
         ]
-        ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ];
+        ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ]
+        ++ lib.optionals cfg.logToFile [ cfg.logDir ];
 
         # GPU access
         SupplementaryGroups = [

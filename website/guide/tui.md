@@ -43,6 +43,34 @@ faster subsequent runs. The server is killed when you quit the TUI.
 - `mold tui --local` — skip server, use local GPU only
 - `mold tui --host http://gpu:7680` — connect to an existing remote server
 
+### Server Logs
+
+When the TUI auto-starts a background server, logs are written to
+`~/.mold/logs/` with daily rotation. This is useful for debugging generation
+failures since the server's stderr is suppressed while the TUI controls the
+terminal.
+
+Log files follow the naming pattern `mold-server.YYYY-MM-DD` and are
+automatically cleaned up after 7 days (configurable via `logging.max_days` in
+`~/.mold/config.toml`).
+
+To view live logs while the TUI is running, open a second terminal:
+
+```bash
+tail -f ~/.mold/logs/mold-server.$(date +%Y-%m-%d)
+```
+
+You can also enable file logging for manual `mold serve` with `--log-file`, or
+permanently via the config file:
+
+```toml
+[logging]
+level = "info"
+file = true
+# dir = "~/.mold/logs"
+# max_days = 7
+```
+
 ## Views
 
 The TUI has three main views, shown as tabs at the top of the screen:

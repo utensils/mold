@@ -614,7 +614,7 @@ fn check_server_health(url: &str) -> bool {
 fn start_background_server(port: u16) -> Option<std::process::Child> {
     let exe = std::env::current_exe().ok()?;
     std::process::Command::new(exe)
-        .args(["serve", "--port", &port.to_string()])
+        .args(["serve", "--port", &port.to_string(), "--log-file"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
