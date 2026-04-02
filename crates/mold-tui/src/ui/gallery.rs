@@ -7,6 +7,41 @@ use crate::app::{App, GalleryViewMode};
 const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
 
+/// Compute a horizontally centered rect for an image within the thumbnail area.
+///
+/// `ratatui-image` fits the image to the given area preserving aspect ratio,
+/// rendering from the top-left. To center, we predict how many terminal columns
+/// the image will actually occupy and offset the rect accordingly.
+///
+/// `font_size` is (width_px, height_px) per terminal cell — typically (8, 16).
+fn centered_thumb_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)) -> Rect {
+    if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 {
+        return area;
+    }
+
+    let (fw, fh) = (font_size.0.max(1) as f64, font_size.1.max(1) as f64);
+
+    // Image size in terminal cells (what ratatui-image computes)
+    let img_cols = img_w as f64 / fw;
+    let img_rows = img_h as f64 / fh;
+
+    // Scale to fit within area, preserving aspect ratio
+    let scale_x = area.width as f64 / img_cols;
+    let scale_y = area.height as f64 / img_rows;
+    let scale = scale_x.min(scale_y);
+
+    let used_cols = (img_cols * scale).round().max(1.0) as u16;
+    let used_rows = (img_rows * scale).round().max(1.0) as u16;
+
+    let used_w = used_cols.min(area.width);
+    let used_h = used_rows.min(area.height);
+
+    let offset_x = (area.width.saturating_sub(used_w)) / 2;
+    let offset_y = (area.height.saturating_sub(used_h)) / 2;
+
+    Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
+}
+
 /// Render the Gallery view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.gallery.view_mode {
@@ -131,10 +166,14 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            // Let ratatui-image handle aspect-ratio scaling and centering
-            // within the full thumbnail area (same as the detail view).
+            // Center the image within the thumbnail area. ratatui-image renders
+            // from top-left, so we compute a centered sub-rect based on the
+            // image's aspect ratio and the terminal font size.
+            let (iw, ih) = (entry.metadata.width.max(1), entry.metadata.height.max(1));
+            let font_size = app.picker.font_size();
+            let centered = centered_thumb_rect(thumb_area, iw, ih, font_size);
             let image_widget = StatefulImage::default();
-            frame.render_stateful_widget(image_widget, thumb_area, state);
+            frame.render_stateful_widget(image_widget, centered, state);
         }
     }
 
