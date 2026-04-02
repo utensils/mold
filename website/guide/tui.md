@@ -10,7 +10,7 @@ back to halfblock rendering in other terminals.
 
 <!-- prettier-ignore-start -->
 ::: warning Beta
-The TUI is under active development. Core generation, model management, and image preview work well. Some features (prompt expansion, gallery actions, theme customization) are planned but not yet implemented.
+The TUI is under active development. Core generation, model management, gallery, and image preview work well. Some features (prompt expansion, theme customization) are planned but not yet implemented.
 :::
 <!-- prettier-ignore-end -->
 
@@ -24,8 +24,8 @@ mold tui
 
 The TUI launches in the **Generate** view with your cursor in the prompt field.
 Type a prompt, press **Enter**, and watch the progress panel as your image
-generates. The result appears in the Preview panel and is saved to the current
-directory.
+generates. The result appears in the Preview panel and is saved to
+`~/.mold/gallery/`.
 
 <!-- prettier-ignore-start -->
 ::: tip
@@ -130,7 +130,8 @@ The prompt editor supports standard emacs/shell keybindings:
 
 Browse generated images stored in `~/.mold/gallery/` (or `MOLD_OUTPUT_DIR`).
 Images are displayed as a thumbnail grid with cached 256x256 thumbnails for fast
-loading. Only PNG files with embedded `mold:parameters` metadata are shown.
+loading. Only images with embedded `mold:parameters` metadata are shown (PNG and
+JPEG).
 
 ### Grid Mode
 
@@ -254,7 +255,11 @@ The TUI uses a three-mode inference system:
 | remote | Force remote server only (error if unreachable)    |
 
 Cycle with **+/-** on the Mode field. The Host field (visible in auto/remote
-mode) can be edited with **Enter** to point at a custom server.
+mode) can be edited with **Enter** to point at a custom server. Host input is
+normalized automatically: `hal9000` becomes `http://hal9000:7680`,
+`hal9000:8080` becomes `http://hal9000:8080`, and full URLs like
+`https://gpu.example.com` are used as-is. The TUI verifies connectivity before
+switching.
 
 ## Image Preview
 
