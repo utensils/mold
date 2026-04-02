@@ -392,7 +392,7 @@ impl GenerateParams {
             ParamField::SeedValue => self
                 .seed
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "\u{27e8}auto\u{27e9}".to_string()),
+                .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string()),
             ParamField::Batch => self.batch.to_string(),
             ParamField::Format => format!("{:?}", self.format).to_uppercase(),
             ParamField::Mode => self.inference_mode.label().to_string(),
@@ -494,6 +494,8 @@ pub struct GalleryState {
     pub view_mode: GalleryViewMode,
     /// Thumbnail StatefulProtocol instances, lazily populated during render.
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
+    /// Actual thumbnail pixel dimensions (width, height), populated when loaded.
+    pub thumb_dimensions: Vec<Option<(u32, u32)>>,
     /// Number of columns in the grid (computed from terminal width).
     pub grid_cols: usize,
     /// Scroll offset in rows for the grid view.
@@ -786,6 +788,7 @@ impl App {
                 scanning: false,
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
+                thumb_dimensions: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
@@ -1871,6 +1874,9 @@ impl App {
         if idx < self.gallery.thumbnail_states.len() {
             self.gallery.thumbnail_states.remove(idx);
         }
+        if idx < self.gallery.thumb_dimensions.len() {
+            self.gallery.thumb_dimensions.remove(idx);
+        }
 
         // Adjust selection
         if !self.gallery.entries.is_empty() {
@@ -2231,6 +2237,7 @@ impl App {
                             },
                         );
                         self.gallery.thumbnail_states.insert(0, None);
+                        self.gallery.thumb_dimensions.insert(0, None);
 
                         // Generate thumbnail in background
                         self.tokio_handle.spawn(async move {
@@ -2248,6 +2255,7 @@ impl App {
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.thumbnail_states = vec![None; entries.len()];
+                    self.gallery.thumb_dimensions = vec![None; entries.len()];
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
                     self.gallery.selected = 0;
@@ -2275,15 +2283,37 @@ impl App {
                                 if let Some(url) = server_url {
                                     // Fetch pre-generated thumbnail from server (fast, ~10KB)
                                     let client = mold_core::MoldClient::new(&url);
-                                    if let Ok(data) = client.get_gallery_thumbnail(&filename).await
+                                    let fetched = if let Ok(data) =
+                                        client.get_gallery_thumbnail(&filename).await
                                     {
-                                        let key = path;
+                                        let key = path.clone();
                                         tokio::task::spawn_blocking(move || {
                                             crate::thumbnails::save_thumbnail_bytes(&data, &key)
                                                 .ok();
                                         })
                                         .await
                                         .ok();
+                                        true
+                                    } else {
+                                        false
+                                    };
+
+                                    // Fallback: generate from locally cached image if server fetch failed
+                                    if !fetched {
+                                        let cache_path =
+                                            crate::gallery_scan::image_cache_dir().join(&filename);
+                                        if cache_path.is_file() {
+                                            let key = path;
+                                            tokio::task::spawn_blocking(move || {
+                                                crate::thumbnails::generate_thumbnail_from_cached(
+                                                    &cache_path,
+                                                    &key,
+                                                )
+                                                .ok();
+                                            })
+                                            .await
+                                            .ok();
+                                        }
                                     }
                                 } else {
                                     // Local file — generate thumbnail directly
@@ -2313,6 +2343,7 @@ impl App {
                     // Invalidate all thumbnail states so they reload on next render
                     let len = self.gallery.entries.len();
                     self.gallery.thumbnail_states = vec![None; len];
+                    self.gallery.thumb_dimensions = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.server_url = Some(url.clone());
@@ -2688,11 +2719,11 @@ mod tests {
     }
 
     #[test]
-    fn seed_value_display_auto_when_none() {
+    fn seed_value_display_random_when_none() {
         let config = Config::load_or_default();
         let params = GenerateParams::from_config(&config);
         let display = params.display_value(&ParamField::SeedValue);
-        assert!(display.contains("auto"));
+        assert!(display.contains("random"));
     }
 
     #[test]
@@ -3068,6 +3099,7 @@ mod tests {
             scanning: false,
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
+            thumb_dimensions: Vec::new(),
             grid_cols: 3,
             grid_scroll: 0,
         };

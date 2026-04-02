@@ -147,7 +147,18 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         return;
     }
 
-    // 2. Run inference in spawn_blocking
+    // 2. Low-memory warning (MPS/unified memory only — observability aid)
+    #[cfg(target_os = "macos")]
+    if let Some(available) = mold_inference::device::available_system_memory_bytes() {
+        if available < 1_000_000_000 {
+            tracing::warn!(
+                available_mb = available / 1_000_000,
+                "low memory before inference — system may become unstable"
+            );
+        }
+    }
+
+    // 3. Run inference in spawn_blocking
     let model_cache = state.model_cache.clone();
     let active_gen = state.active_generation.clone();
     let gen_state = state.clone();

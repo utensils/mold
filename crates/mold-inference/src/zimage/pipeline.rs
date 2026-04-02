@@ -969,6 +969,10 @@ impl InferenceEngine for ZImageEngine {
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
     }
+
+    fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
+        Some(&self.base.paths)
+    }
 }
 
 #[cfg(test)]

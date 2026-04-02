@@ -24,9 +24,11 @@ pub fn thumbnail_path(source: &Path) -> PathBuf {
     thumbnail_dir().join(format!("{key}.thumb.png"))
 }
 
-/// Check if a thumbnail exists for the given source.
+/// Check if a valid thumbnail exists for the given source.
+/// A 0-byte file is treated as missing (corrupt/partial write).
 pub fn thumbnail_exists(source: &Path) -> bool {
-    thumbnail_path(source).exists()
+    let path = thumbnail_path(source);
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
 /// Generate a thumbnail for the given source image.

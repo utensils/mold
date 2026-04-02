@@ -1,40 +1,61 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui_image::StatefulImage;
+use ratatui_image::picker::ProtocolType;
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, GalleryViewMode};
 
 const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
-const THUMB_H: u16 = 12;
 
-/// Compute a centered sub-rect for an image with the given pixel dimensions
-/// within the available terminal area, accounting for the ~2:1 cell aspect ratio.
-fn center_image_rect(area: Rect, img_w: u32, img_h: u32) -> Rect {
-    if area.width == 0 || area.height == 0 {
+/// Compute a centered sub-rect for an image within the thumbnail area.
+///
+/// `ratatui-image` pads fitted images from the top-left of the render rect. To
+/// make gallery tiles look balanced, we compute the fitted rect ourselves and
+/// render into that centered region instead.
+///
+/// Halfblocks terminals encode two image rows into one terminal row, so the
+/// effective character height is half the reported font height for aspect-fit
+/// purposes.
+fn centered_thumb_rect(
+    area: Rect,
+    img_w: u32,
+    img_h: u32,
+    font_size: (u16, u16),
+    protocol: ProtocolType,
+) -> Rect {
+    if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 {
         return area;
     }
-    // Terminal cells are roughly 2:1 (each cell is ~8px wide, ~16px tall).
-    // Convert image dimensions to terminal cell units.
-    let cell_cols = img_w as f64; // 1 pixel-width per column (approximate)
-    let cell_rows = img_h as f64 / 2.0; // 2 pixel-heights per row
-    let img_aspect = cell_cols / cell_rows.max(1.0);
-    let area_aspect = area.width as f64 / area.height as f64;
 
-    let (used_w, used_h) = if img_aspect > area_aspect {
-        // Image is wider than area — full width, less height
-        let h = (area.width as f64 / img_aspect).round() as u16;
-        (area.width, h.min(area.height))
-    } else {
-        // Image is taller than area — full height, less width
-        let w = (area.height as f64 * img_aspect).round() as u16;
-        (w.min(area.width), area.height)
+    let fw = font_size.0.max(1) as f64;
+    let fh = match protocol {
+        ProtocolType::Halfblocks => (font_size.1.max(2) / 2).max(1) as f64,
+        _ => font_size.1.max(1) as f64,
     };
 
-    let offset_x = (area.width.saturating_sub(used_w)) / 2;
-    let offset_y = (area.height.saturating_sub(used_h)) / 2;
+    // Convert image pixel dimensions to terminal cell units.
+    let img_cols = img_w as f64 / fw;
+    let img_rows = img_h as f64 / fh;
+
+    // Scale to fit within area, preserving aspect ratio.
+    let scale = (area.width as f64 / img_cols).min(area.height as f64 / img_rows);
+
+    let used_w = (img_cols * scale).ceil().min(area.width as f64) as u16;
+    let used_h = (img_rows * scale).ceil().min(area.height as f64) as u16;
+
+    let offset_x = area.width.saturating_sub(used_w) / 2;
+    let offset_y = area.height.saturating_sub(used_h) / 2;
 
     Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
+}
+
+fn center_rect(area: Rect, used_w: u16, used_h: u16) -> Rect {
+    let width = used_w.min(area.width);
+    let height = used_h.min(area.height);
+    let offset_x = area.width.saturating_sub(width) / 2;
+    let offset_y = area.height.saturating_sub(height) / 2;
+    Rect::new(area.x + offset_x, area.y + offset_y, width, height)
 }
 
 /// Render the Gallery view.
@@ -152,8 +173,33 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
     if idx < app.gallery.thumbnail_states.len() {
         if app.gallery.thumbnail_states[idx].is_none() {
             let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+            let mut loaded = false;
+
             if thumb_path.exists() {
+                match image::open(&thumb_path) {
+                    Ok(img) => {
+                        // Store actual thumbnail pixel dimensions for centering.
+                        app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
+                        let protocol = app.picker.new_resize_protocol(img);
+                        app.gallery.thumbnail_states[idx] = Some(protocol);
+                        loaded = true;
+                    }
+                    Err(_) => {
+                        // Corrupt/empty thumbnail — remove so we regenerate below
+                        let _ = std::fs::remove_file(&thumb_path);
+                    }
+                }
+            }
+
+            // Regenerate missing thumbnail from source image (local entries only).
+            // Server entries are regenerated via the background fetch task.
+            if !loaded
+                && entry.server_url.is_none()
+                && entry.path.is_file()
+                && crate::thumbnails::generate_thumbnail(&entry.path).is_ok()
+            {
                 if let Ok(img) = image::open(&thumb_path) {
+                    app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
                     let protocol = app.picker.new_resize_protocol(img);
                     app.gallery.thumbnail_states[idx] = Some(protocol);
                 }
@@ -161,11 +207,12 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            // Center the image within the thumbnail area based on aspect ratio.
-            // Terminal cells are roughly 2:1 (height:width in pixels), so a
-            // square image occupies ~half the columns compared to rows.
-            let (iw, ih) = (entry.metadata.width.max(1), entry.metadata.height.max(1));
-            let centered = center_image_rect(thumb_area, iw, ih);
+            // Center using cached thumbnail dimensions — no disk I/O in the render path.
+            let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
+            let font_size = app.picker.font_size();
+            let centered =
+                centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
             let image_widget = StatefulImage::default();
             frame.render_stateful_widget(image_widget, centered, state);
         }
@@ -191,6 +238,41 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         .style(name_style)
         .alignment(Alignment::Center);
     frame.render_widget(label, label_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{center_rect, centered_thumb_rect};
+    use ratatui::layout::Rect;
+    use ratatui_image::picker::ProtocolType;
+
+    #[test]
+    fn centers_portrait_thumbnails_for_halfblocks() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = centered_thumb_rect(area, 256, 512, (8, 16), ProtocolType::Halfblocks);
+
+        assert_eq!(rect.height, area.height);
+        assert!(rect.width < area.width);
+        assert_eq!(rect.x, (area.width - rect.width) / 2);
+    }
+
+    #[test]
+    fn centers_landscape_thumbnails_for_normal_cell_protocols() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = centered_thumb_rect(area, 512, 256, (8, 16), ProtocolType::Kitty);
+
+        assert_eq!(rect.width, area.width);
+        assert!(rect.height < area.height);
+        assert_eq!(rect.y, (area.height - rect.height) / 2);
+    }
+
+    #[test]
+    fn gallery_thumbnail_fixed_protocol_area_is_centered() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = center_rect(area, 10, 6);
+
+        assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -363,7 +445,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(preview_block, layout[1]);
 
     if let Some(ref mut image_state) = app.gallery.image_state {
-        let image_widget = StatefulImage::default();
+        let image_widget = StatefulImage::default().resize(Resize::Scale(None));
         frame.render_stateful_widget(image_widget, preview_inner, image_state);
     } else {
         let msg = Paragraph::new("Loading...")

@@ -6,6 +6,68 @@ use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
+
+// ── MPS memory guard ────────────────────────────────────────────────────────
+
+/// Pure logic for the server memory guard, factored out for testing.
+///
+/// Hard-fails if peak > 90% of available (model won't fit even with page reclamation).
+/// Warns if peak > 80% of available (tight but feasible).
+fn check_model_memory_budget(
+    model_name: &str,
+    peak_bytes: u64,
+    available_bytes: u64,
+) -> Result<(), ApiError> {
+    let hard_limit = available_bytes * 9 / 10; // 90%
+    if peak_bytes > hard_limit {
+        return Err(ApiError::insufficient_memory(format!(
+            "model '{}' needs ~{:.1} GB but only ~{:.1} GB available. \
+             Close other applications, unload the current model, or use a smaller variant.",
+            model_name,
+            peak_bytes as f64 / 1_000_000_000.0,
+            available_bytes as f64 / 1_000_000_000.0,
+        )));
+    }
+
+    let warn_limit = available_bytes * 8 / 10; // 80%
+    if peak_bytes > warn_limit {
+        tracing::warn!(
+            model = %model_name,
+            peak_gb = format_args!("{:.1}", peak_bytes as f64 / 1_000_000_000.0),
+            available_gb = format_args!("{:.1}", available_bytes as f64 / 1_000_000_000.0),
+            "model is close to memory limit — may trigger page reclamation"
+        );
+    }
+
+    Ok(())
+}
+
+/// On macOS (MPS/unified memory), check whether estimated peak memory fits
+/// before committing to a model load. No-op on CUDA or non-macOS.
+///
+/// `active_vram_bytes` is the footprint of the currently GPU-resident model
+/// that will be unloaded before loading the new one. This memory will become
+/// available, so we add it to the budget to avoid false rejections during
+/// model swaps.
+fn preflight_memory_guard(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+) -> Result<(), ApiError> {
+    let available = match mold_inference::device::available_system_memory_bytes() {
+        Some(a) if a > 0 => a,
+        _ => return Ok(()), // Non-macOS or can't query — skip
+    };
+
+    let peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
+
+    // The active model will be unloaded before loading the new one,
+    // so its footprint becomes available memory.
+    let effective_available = available.saturating_add(active_vram_bytes);
+
+    check_model_memory_budget(model_name, peak, effective_available)
+}
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
@@ -98,6 +160,8 @@ pub(crate) async fn ensure_model_ready(
     // Fast path: model is in cache and loaded.
     {
         let mut cache = state.model_cache.lock().await;
+        // Grab active model's VRAM before mutable borrow via get_mut.
+        let active_vram = cache.active_vram_bytes();
         if let Some(entry) = cache.get_mut(model_name) {
             if entry.residency == ModelResidency::Gpu {
                 // Already loaded — just set up progress callback.
@@ -112,6 +176,12 @@ pub(crate) async fn ensure_model_ready(
             }
 
             // Cached but not on GPU (Unloaded or Parked) — need to reload.
+            // MPS memory guard: check before unloading the active model.
+            // Include the active model's footprint as reclaimable memory.
+            if let Some(paths) = entry.engine.model_paths() {
+                preflight_memory_guard(model_name, paths, active_vram)?;
+            }
+
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
@@ -245,6 +315,14 @@ async fn create_and_load_engine(
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
+    // MPS memory guard: reject before unloading current model so it stays operational.
+    // Include the active model's footprint as reclaimable memory.
+    let active_vram = {
+        let cache = state.model_cache.lock().await;
+        cache.active_vram_bytes()
+    };
+    preflight_memory_guard(model_name, &paths, active_vram)?;
+
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
     // reclaim_gpu_memory() (CUDA primary context reset) when nothing was
@@ -315,4 +393,51 @@ async fn update_snapshot(state: &AppState, cache: &crate::model_cache::ModelCach
     snapshot.model_name = cache.active_model().map(|s| s.to_string());
     snapshot.is_loaded = cache.active_model().is_some();
     snapshot.cached_models = cache.cached_model_names();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn memory_guard_ok_when_plenty_of_memory() {
+        assert!(check_model_memory_budget("test-model", 5 * GB, 20 * GB).is_ok());
+    }
+
+    #[test]
+    fn memory_guard_rejects_over_90pct() {
+        let result = check_model_memory_budget("flux-dev:bf16", 19 * GB, 20 * GB);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "INSUFFICIENT_MEMORY");
+        assert!(err.error.contains("flux-dev:bf16"));
+        assert!(err.error.contains("available"));
+    }
+
+    #[test]
+    fn memory_guard_ok_at_90pct_boundary() {
+        // 18 GB peak, 20 GB available → 90% exactly → should pass
+        assert!(check_model_memory_budget("test", 18 * GB, 20 * GB).is_ok());
+    }
+
+    #[test]
+    fn memory_guard_ok_in_warn_zone() {
+        // 17 GB peak, 20 GB available → 85% → passes but would warn
+        assert!(check_model_memory_budget("test", 17 * GB, 20 * GB).is_ok());
+    }
+
+    #[test]
+    fn memory_guard_ok_below_warn_zone() {
+        // 15 GB peak, 20 GB available → 75% → no warn, no error
+        assert!(check_model_memory_budget("test", 15 * GB, 20 * GB).is_ok());
+    }
+
+    #[test]
+    fn memory_guard_rejects_tiny_available() {
+        // Model larger than total available
+        let result = check_model_memory_budget("huge-model", 30 * GB, 16 * GB);
+        assert!(result.is_err());
+    }
 }

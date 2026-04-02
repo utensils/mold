@@ -199,7 +199,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Show the image if we have one
     if let Some(ref mut image_state) = app.generate.image_state {
-        let image_widget = StatefulImage::default();
+        let image_widget = StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(image_widget, inner, image_state);
     } else if app.generate.generating {
         // Show a "generating..." message

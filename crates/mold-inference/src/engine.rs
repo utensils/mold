@@ -30,6 +30,11 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
     /// Clear any previously installed progress callback.
     fn clear_on_progress(&mut self) {}
+    /// Return the model's resolved file paths, if available.
+    /// Used by the server for pre-load memory checks on unified-memory systems.
+    fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
+        None
+    }
 }
 
 /// Restores an `Option<T>` slot even if the current scope unwinds.
