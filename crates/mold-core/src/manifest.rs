@@ -158,18 +158,21 @@ impl ModelManifest {
                 .decoder
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            default_steps: Some(self.defaults.steps),
-            default_guidance: Some(self.defaults.guidance),
-            default_width: Some(self.defaults.width),
-            default_height: Some(self.defaults.height),
-            is_schnell: Some(self.defaults.is_schnell),
+            // Manifest defaults are NOT written to config — resolved at runtime
+            // via resolved_model_config() so manifest updates take effect
+            // immediately without stale config values. See #129.
+            default_steps: None,
+            default_guidance: None,
+            default_width: None,
+            default_height: None,
+            is_schnell: None,
             is_turbo: None,
-            scheduler: self.defaults.scheduler,
+            scheduler: None,
             negative_prompt: None,
             lora: None,
             lora_scale: None,
-            description: Some(self.description.clone()),
-            family: Some(self.family.clone()),
+            description: None,
+            family: None,
         }
     }
 }

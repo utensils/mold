@@ -1096,4 +1096,132 @@ is_schnell = false
             "metadata should be enabled by default for old configs"
         );
     }
+
+    // ── manifest precedence (#129) ───────────────────────────────────────
+
+    #[test]
+    fn manifest_defaults_override_stale_config_values() {
+        // Simulate stale config with old/wrong values for a known manifest model
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                default_guidance: Some(0.0), // stale — manifest has 3.5
+                default_steps: Some(999),    // stale
+                description: Some("[alpha] old description".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        let manifest = crate::manifest::find_manifest("flux-dev:q8").unwrap();
+        // Manifest values should always win for known models
+        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
+        assert_eq!(resolved.default_guidance, Some(manifest.defaults.guidance));
+        assert_eq!(resolved.description, Some(manifest.description.clone()));
+        assert_eq!(resolved.family, Some(manifest.family.clone()));
+    }
+
+    #[test]
+    fn manifest_overrides_all_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-schnell:q8".to_string(),
+            ModelConfig {
+                default_steps: Some(100),
+                default_width: Some(256),
+                default_height: Some(256),
+                is_schnell: Some(false),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-schnell:q8");
+        let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
+        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
+        assert_eq!(resolved.default_width, Some(manifest.defaults.width));
+        assert_eq!(resolved.default_height, Some(manifest.defaults.height));
+        assert_eq!(resolved.is_schnell, Some(manifest.defaults.is_schnell));
+    }
+
+    #[test]
+    fn custom_model_keeps_config_values() {
+        // Non-manifest models (custom user models) should keep their config values
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "my-custom-model".to_string(),
+            ModelConfig {
+                default_steps: Some(50),
+                default_guidance: Some(7.5),
+                description: Some("My custom model".to_string()),
+                family: Some("flux".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("my-custom-model");
+        assert_eq!(resolved.default_steps, Some(50));
+        assert_eq!(resolved.default_guidance, Some(7.5));
+        assert_eq!(resolved.description.as_deref(), Some("My custom model"));
+    }
+
+    #[test]
+    fn manifest_preserves_user_lora_config() {
+        // lora and lora_scale are user overrides — manifest should not touch them
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                lora: Some("/path/to/adapter.safetensors".to_string()),
+                lora_scale: Some(0.8),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        assert_eq!(
+            resolved.lora.as_deref(),
+            Some("/path/to/adapter.safetensors")
+        );
+        assert_eq!(resolved.lora_scale, Some(0.8));
+    }
+
+    #[test]
+    fn to_model_config_does_not_write_defaults() {
+        // to_model_config should only set path fields, not defaults or metadata
+        let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/tmp/transformer.gguf"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/tmp/vae.safetensors"),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mc = manifest.to_model_config(&paths);
+        // Paths should be set
+        assert!(mc.transformer.is_some());
+        assert!(mc.vae.is_some());
+        // Defaults and metadata should NOT be set
+        assert!(mc.default_steps.is_none(), "steps should not be in config");
+        assert!(
+            mc.default_guidance.is_none(),
+            "guidance should not be in config"
+        );
+        assert!(mc.default_width.is_none());
+        assert!(mc.default_height.is_none());
+        assert!(mc.is_schnell.is_none());
+        assert!(mc.scheduler.is_none());
+        assert!(
+            mc.description.is_none(),
+            "description should not be in config"
+        );
+        assert!(mc.family.is_none(), "family should not be in config");
+    }
 }
