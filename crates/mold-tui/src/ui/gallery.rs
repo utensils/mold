@@ -158,9 +158,15 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         if app.gallery.thumbnail_states[idx].is_none() {
             let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
             if thumb_path.exists() {
-                if let Ok(img) = image::open(&thumb_path) {
-                    let protocol = app.picker.new_resize_protocol(img);
-                    app.gallery.thumbnail_states[idx] = Some(protocol);
+                match image::open(&thumb_path) {
+                    Ok(img) => {
+                        let protocol = app.picker.new_resize_protocol(img);
+                        app.gallery.thumbnail_states[idx] = Some(protocol);
+                    }
+                    Err(_) => {
+                        // Corrupt/empty thumbnail — remove so it can be regenerated
+                        let _ = std::fs::remove_file(&thumb_path);
+                    }
                 }
             }
         }
