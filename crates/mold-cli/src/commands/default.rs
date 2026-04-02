@@ -132,6 +132,7 @@ mod tests {
             output_dir: None,
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
+            logging: mold_core::LoggingConfig::default(),
             models: HashMap::new(),
         }
     }
