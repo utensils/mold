@@ -25,7 +25,7 @@ mold tui
 The TUI launches in the **Generate** view with your cursor in the prompt field.
 Type a prompt, press **Enter**, and watch the progress panel as your image
 generates. The result appears in the Preview panel and is saved to
-`~/.mold/gallery/`.
+`~/.mold/output/`.
 
 <!-- prettier-ignore-start -->
 ::: tip
@@ -128,7 +128,7 @@ The prompt editor supports standard emacs/shell keybindings:
 
 ## Gallery View
 
-Browse generated images stored in `~/.mold/gallery/` (or `MOLD_OUTPUT_DIR`).
+Browse generated images stored in `~/.mold/output/` (or `MOLD_OUTPUT_DIR`).
 Images are displayed as a thumbnail grid with cached 256x256 thumbnails for fast
 loading. Only images with embedded `mold:parameters` metadata are shown (PNG and
 JPEG).
@@ -230,7 +230,7 @@ Use **Reset** in the Actions section of Parameters to restore model defaults
 without losing your prompt. **Unload** frees GPU memory by unloading the active
 model.
 
-Generated images are saved to `~/.mold/gallery/` by default (override with
+Generated images are saved to `~/.mold/output/` by default (override with
 `MOLD_OUTPUT_DIR` env var or `output_dir` in config). All images include embedded
 PNG metadata that preserves the full generation parameters, making them portable
 across machines.

@@ -43,3 +43,4 @@ utoipa = { version = "5", features = ["preserve_order"] }
 sha2 = "0.10"
 walkdir = "2"
 png = "0.18"
+image = "0.25"

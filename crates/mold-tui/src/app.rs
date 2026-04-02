@@ -2234,33 +2234,32 @@ impl App {
                         .collect();
                     let tx = self.bg_tx.clone();
                     self.tokio_handle.spawn(async move {
-                        // Spawn all thumbnail jobs concurrently
+                        // Spawn all thumbnail fetches concurrently
                         let mut handles = Vec::new();
                         for (path, server_url) in entries_info {
                             if crate::thumbnails::thumbnail_exists(&path) {
                                 continue;
                             }
                             let handle = tokio::spawn(async move {
+                                let filename = path
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_default();
                                 if let Some(url) = server_url {
-                                    let filename = path
-                                        .file_name()
-                                        .map(|f| f.to_string_lossy().to_string())
-                                        .unwrap_or_default();
-                                    if let Some(cached) =
-                                        crate::gallery_scan::fetch_and_cache_image(&url, &filename)
-                                            .await
+                                    // Fetch pre-generated thumbnail from server (fast, ~10KB)
+                                    let client = mold_core::MoldClient::new(&url);
+                                    if let Ok(data) = client.get_gallery_thumbnail(&filename).await
                                     {
                                         let key = path;
                                         tokio::task::spawn_blocking(move || {
-                                            crate::thumbnails::generate_thumbnail_from_cached(
-                                                &cached, &key,
-                                            )
-                                            .ok();
+                                            crate::thumbnails::save_thumbnail_bytes(&data, &key)
+                                                .ok();
                                         })
                                         .await
                                         .ok();
                                     }
                                 } else {
+                                    // Local file — generate thumbnail directly
                                     tokio::task::spawn_blocking(move || {
                                         crate::thumbnails::generate_thumbnail(&path).ok();
                                     })
@@ -2270,7 +2269,6 @@ impl App {
                             });
                             handles.push(handle);
                         }
-                        // Wait for all to complete
                         for h in handles {
                             let _ = h.await;
                         }
@@ -2821,7 +2819,7 @@ mod tests {
     #[test]
     fn gallery_entry_filename_extracts_name() {
         let entry = GalleryEntry {
-            path: std::path::PathBuf::from("/home/user/.mold/gallery/mold-flux-1234.png"),
+            path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
                 prompt: "test".to_string(),
                 negative_prompt: None,
@@ -2957,7 +2955,7 @@ mod tests {
 
     fn make_test_entry() -> GalleryEntry {
         GalleryEntry {
-            path: std::path::PathBuf::from("/home/user/.mold/gallery/mold-flux-1234.png"),
+            path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: make_test_metadata(),
             generation_time_ms: Some(5000),
             timestamp: 1234,
@@ -3060,12 +3058,12 @@ mod tests {
     }
 
     #[test]
-    fn default_gallery_dir_path() {
+    fn default_output_dir_path() {
         let dir = crate::gallery_scan::default_gallery_dir();
         let s = dir.to_string_lossy();
         assert!(
-            s.ends_with("gallery"),
-            "expected path ending in 'gallery': {s}"
+            s.ends_with("output"),
+            "expected path ending in 'output': {s}"
         );
     }
 

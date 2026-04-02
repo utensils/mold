@@ -580,13 +580,13 @@ impl Config {
         })
     }
 
-    /// Resolved output directory with a default fallback to `~/.mold/gallery/`.
+    /// Resolved output directory with a default fallback to `~/.mold/output/`.
     /// Unlike `resolved_output_dir()`, this always returns a path.
     pub fn effective_output_dir(&self) -> PathBuf {
         self.resolved_output_dir().unwrap_or_else(|| {
             Self::mold_dir()
                 .unwrap_or_else(|| PathBuf::from(".mold"))
-                .join("gallery")
+                .join("output")
         })
     }
 

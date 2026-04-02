@@ -384,6 +384,22 @@ impl MoldClient {
         Ok(resp.to_vec())
     }
 
+    /// Download a gallery thumbnail by filename. Smaller/faster than full image.
+    pub async fn get_gallery_thumbnail(&self, filename: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/{filename}/thumbnail",
+                self.base_url
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        Ok(resp.to_vec())
+    }
+
     /// Expand a prompt using the server's LLM prompt expansion endpoint.
     pub async fn expand_prompt(&self, req: &ExpandRequest) -> Result<ExpandResponse> {
         let resp = self

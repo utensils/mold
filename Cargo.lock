@@ -2745,6 +2745,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures-core",
+ "image",
  "mold-ai-core",
  "mold-ai-inference",
  "png",

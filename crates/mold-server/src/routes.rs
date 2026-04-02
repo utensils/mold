@@ -129,6 +129,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route("/api/gallery/{filename}", get(get_gallery_image))
+        .route(
+            "/api/gallery/{filename}/thumbnail",
+            get(get_gallery_thumbnail),
+        )
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
@@ -833,6 +837,115 @@ async fn get_gallery_image(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
 
     Ok((headers, data))
+}
+
+/// Serve a thumbnail for a gallery image. Generated on-demand and cached
+/// at ~/.mold/cache/thumbnails/ on the server side.
+async fn get_gallery_thumbnail(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let output_dir = {
+        let config = state.config.read().await;
+        config.effective_output_dir()
+    };
+
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let source_path = output_dir.join(&clean_name);
+    if !source_path.is_file() {
+        return Err(ApiError::not_found(format!(
+            "image not found: {clean_name}"
+        )));
+    }
+
+    // Check if server-side thumbnail already exists
+    let thumb_dir = server_thumbnail_dir();
+    let thumb_path = thumb_dir.join(&clean_name);
+
+    if !thumb_path.is_file() {
+        // Generate thumbnail on-demand
+        let source = source_path.clone();
+        let dest = thumb_path.clone();
+        tokio::task::spawn_blocking(move || generate_server_thumbnail(&source, &dest))
+            .await
+            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?
+            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?;
+    }
+
+    let data = tokio::fs::read(&thumb_path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+
+    Ok((headers, data))
+}
+
+/// Server-side thumbnail cache directory.
+fn server_thumbnail_dir() -> std::path::PathBuf {
+    mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails")
+}
+
+/// Generate a 256x256 max thumbnail from source image.
+fn generate_server_thumbnail(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    let img = image::open(source)?;
+    let thumb = img.thumbnail(256, 256);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    thumb.save(dest)?;
+    Ok(())
+}
+
+/// Pre-generate thumbnails for all gallery images on server startup.
+pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
+    let output_dir = config.effective_output_dir();
+    std::thread::spawn(move || {
+        if !output_dir.is_dir() {
+            return;
+        }
+        let thumb_dir = server_thumbnail_dir();
+        let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
+        for entry in walker.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase());
+            if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+                continue;
+            }
+            let filename = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let thumb_path = thumb_dir.join(&filename);
+            if !thumb_path.is_file() {
+                if let Err(e) = generate_server_thumbnail(path, &thumb_path) {
+                    tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
+                }
+            }
+        }
+        tracing::info!("thumbnail warmup complete");
+    });
 }
 
 /// Scan a directory for image files with mold metadata.

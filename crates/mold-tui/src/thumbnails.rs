@@ -14,12 +14,15 @@ pub fn thumbnail_dir() -> PathBuf {
 }
 
 /// Compute the thumbnail path for a given source image path.
+/// Uses the filename only (not full path) so local and server entries
+/// produce the same cache key.
 pub fn thumbnail_path(source: &Path) -> PathBuf {
-    let canonical = source
-        .canonicalize()
-        .unwrap_or_else(|_| source.to_path_buf());
+    let key = source
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| source.to_string_lossy().to_string());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
+    key.hash(&mut hasher);
     let hash = hasher.finish();
     thumbnail_dir().join(format!("{hash:016x}.png"))
 }
@@ -40,6 +43,16 @@ pub fn generate_thumbnail(source: &Path) -> Result<PathBuf> {
         std::fs::create_dir_all(parent)?;
     }
     thumb.save(&thumb_path)?;
+    Ok(thumb_path)
+}
+
+/// Save pre-generated thumbnail bytes (from server) to the local cache.
+pub fn save_thumbnail_bytes(data: &[u8], key: &Path) -> Result<PathBuf> {
+    let thumb_path = thumbnail_path(key);
+    if let Some(parent) = thumb_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&thumb_path, data)?;
     Ok(thumb_path)
 }
 

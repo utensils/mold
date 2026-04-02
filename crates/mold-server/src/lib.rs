@@ -86,6 +86,12 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     let worker_state = state.clone();
     tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
 
+    // Pre-generate thumbnails for existing gallery images in background.
+    {
+        let config = state.config.read().await;
+        routes::spawn_thumbnail_warmup(&config);
+    }
+
     let cors = build_cors_layer()?;
 
     let app = routes::create_router(state)

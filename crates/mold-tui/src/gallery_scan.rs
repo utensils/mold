@@ -3,7 +3,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::app::GalleryEntry;
 
-/// Returns the default gallery directory: ~/.mold/gallery/
+/// Returns the default output directory: ~/.mold/output/
 pub fn default_gallery_dir() -> PathBuf {
     mold_core::Config::load_or_default().effective_output_dir()
 }
@@ -192,12 +192,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_gallery_dir_contains_gallery() {
+    fn default_gallery_dir_contains_output() {
         let dir = default_gallery_dir();
         let dir_str = dir.to_string_lossy();
         assert!(
-            dir_str.contains("gallery"),
-            "default_gallery_dir should contain 'gallery': {dir_str}"
+            dir_str.contains("output"),
+            "default_gallery_dir should contain 'output': {dir_str}"
         );
     }
 
