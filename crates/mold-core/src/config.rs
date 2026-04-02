@@ -314,9 +314,9 @@ pub struct Config {
     #[serde(default)]
     pub qwen3_variant: Option<String>,
 
-    /// Optional directory to persist copies of generated images (server mode).
-    /// When set, every image produced by /api/generate is saved here.
-    /// Disabled by default (None).
+    /// Directory to persist generated images. Default: `~/.mold/output/`.
+    /// Override with `MOLD_OUTPUT_DIR` env var. Set to empty string to disable
+    /// (TUI gallery will not function when disabled).
     #[serde(default)]
     pub output_dir: Option<String>,
 
@@ -621,6 +621,15 @@ impl Config {
                 PathBuf::from(dir)
             }
         })
+    }
+
+    /// Check if image output has been explicitly disabled by the user
+    /// (empty `MOLD_OUTPUT_DIR` env var or empty `output_dir` config field).
+    pub fn is_output_disabled(&self) -> bool {
+        if let Ok(env_dir) = std::env::var("MOLD_OUTPUT_DIR") {
+            return env_dir.is_empty();
+        }
+        matches!(self.output_dir.as_deref(), Some(""))
     }
 
     /// Resolved output directory with a default fallback to `~/.mold/output/`.

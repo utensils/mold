@@ -216,7 +216,11 @@ async fn prepare_generation(
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;
-        let output_dir = Some(config.effective_output_dir());
+        let output_dir = if config.is_output_disabled() {
+            None
+        } else {
+            Some(config.effective_output_dir())
+        };
         let family = config.resolved_model_config(&request.model).family;
         let dim_warning = family
             .as_deref()

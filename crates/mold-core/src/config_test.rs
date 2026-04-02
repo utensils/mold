@@ -1008,4 +1008,92 @@ is_schnell = false
         assert!(cfg.logging.dir.is_none()); // default
         assert_eq!(cfg.logging.max_days, 7); // default
     }
+
+    // ── is_output_disabled ───────────────────────────────────────────────
+
+    #[test]
+    fn output_not_disabled_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let cfg = Config::default();
+        assert!(
+            !cfg.is_output_disabled(),
+            "output should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn output_not_disabled_when_env_set() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/some/path") };
+        let cfg = Config::default();
+        let disabled = cfg.is_output_disabled();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert!(!disabled);
+    }
+
+    #[test]
+    fn output_disabled_when_env_empty() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "") };
+        let cfg = Config::default();
+        let disabled = cfg.is_output_disabled();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert!(disabled, "empty env var should disable output");
+    }
+
+    #[test]
+    fn output_disabled_when_config_empty_string() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some(String::new());
+        assert!(
+            cfg.is_output_disabled(),
+            "empty config string should disable output"
+        );
+    }
+
+    #[test]
+    fn output_not_disabled_when_config_has_path() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/images".to_string());
+        assert!(!cfg.is_output_disabled());
+    }
+
+    #[test]
+    fn old_config_without_output_dir_saves_to_default() {
+        // Simulate an old config.toml that doesn't mention output_dir at all.
+        // Images should still be saved to the default directory.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let toml = r#"
+            default_model = "flux-schnell:q8"
+            server_port = 7680
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            !cfg.is_output_disabled(),
+            "old config should not disable output"
+        );
+        let dir = cfg.effective_output_dir();
+        assert!(
+            dir.to_string_lossy().ends_with("output"),
+            "old config should use default output dir: {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn old_config_with_metadata_enabled() {
+        // Old configs should still embed metadata by default
+        let toml = r#"default_model = "flux-schnell:q8""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            cfg.effective_embed_metadata(None),
+            "metadata should be enabled by default for old configs"
+        );
+    }
 }

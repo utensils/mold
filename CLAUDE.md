@@ -268,7 +268,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
-| `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
+| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Directory to save generated images (set empty to disable) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
@@ -299,7 +299,7 @@ default_width = 1024
 default_height = 1024
 # t5_variant = "auto"
 # qwen3_variant = "auto"
-# output_dir = "/srv/mold/gallery"
+# output_dir = "/srv/mold/output"    # default: ~/.mold/output (set "" to disable)
 # default_negative_prompt = "low quality, worst quality, blurry, watermark"
 
 [models."flux2-klein:q8"]

@@ -85,7 +85,7 @@ Environment variables take precedence over config file values.
 
 | Variable           | Default | Description                          |
 | ------------------ | ------- | ------------------------------------ |
-| `MOLD_OUTPUT_DIR`  | —       | Save server-generated images to disk |
+| `MOLD_OUTPUT_DIR`  | `~/.mold/output` | Image output directory (set empty to disable) |
 | `MOLD_CORS_ORIGIN` | —       | Restrict CORS to specific origin     |
 
 ### Auth

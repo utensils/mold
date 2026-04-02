@@ -110,7 +110,7 @@ system user, and manages the data directory at `/var/lib/mold`.
 | `corsOrigin`   | null/string | `null`              | CORS origin restriction (null = permissive)      |
 | `openFirewall` | bool        | `false`             | Open firewall port                               |
 | `defaultModel` | null/string | `null`              | Default model name                               |
-| `outputDir`    | null/string | `null`              | Save server-generated images to this directory   |
+| `outputDir`    | null/string | `null`              | Image output directory (default: `homeDir/output`) |
 | `hfTokenFile`  | null/path   | `null`              | Path to file with HuggingFace token              |
 | `environment`  | attrs       | `{}`                | Extra environment variables                      |
 
