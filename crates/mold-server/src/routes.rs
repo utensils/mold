@@ -70,6 +70,14 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    pub fn insufficient_memory(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "INSUFFICIENT_MEMORY".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
