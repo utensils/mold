@@ -26,7 +26,12 @@ pub fn init_tracing(
     if file_enabled {
         let _ = std::fs::create_dir_all(&log_dir);
         cleanup_old_logs(&log_dir, config.max_days);
-        let appender = tracing_appender::rolling::daily(&log_dir, "mold-server");
+        let appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("mold-server")
+            .filename_suffix("log")
+            .build(&log_dir)
+            .expect("failed to create log file appender");
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
         file_guard = Some(guard);
 
@@ -75,7 +80,12 @@ pub fn init_tracing_file_only(
 
     let _ = std::fs::create_dir_all(&log_dir);
     cleanup_old_logs(&log_dir, config.max_days);
-    let appender = tracing_appender::rolling::daily(&log_dir, "mold-tui");
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("mold-tui")
+        .filename_suffix("log")
+        .build(&log_dir)
+        .expect("failed to create log file appender");
     let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     let filter = make_filter(&filter_str, default_level);
@@ -125,7 +135,9 @@ fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
             .and_then(|f| f.to_str())
             .unwrap_or_default();
 
-        if !filename.starts_with("mold-server.") && !filename.starts_with("mold-tui.") {
+        // Match both old (no .log) and new (.log suffix) patterns
+        let is_mold_log = filename.starts_with("mold-server.") || filename.starts_with("mold-tui.");
+        if !is_mold_log {
             continue;
         }
 

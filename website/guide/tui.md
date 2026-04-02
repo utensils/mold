@@ -50,14 +50,14 @@ When the TUI auto-starts a background server, logs are written to
 failures since the server's stderr is suppressed while the TUI controls the
 terminal.
 
-Log files follow the naming pattern `mold-server.YYYY-MM-DD` and are
+Log files follow the naming pattern `mold-server.YYYY-MM-DD.log` and are
 automatically cleaned up after 7 days (configurable via `logging.max_days` in
 `~/.mold/config.toml`).
 
 To view live logs while the TUI is running, open a second terminal:
 
 ```bash
-tail -f ~/.mold/logs/mold-server.$(date +%Y-%m-%d)
+tail -f ~/.mold/logs/mold-server.$(date +%Y-%m-%d).log
 ```
 
 You can also enable file logging for manual `mold serve` with `--log-file`, or
