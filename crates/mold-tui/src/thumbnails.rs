@@ -1,4 +1,3 @@
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -14,17 +13,15 @@ pub fn thumbnail_dir() -> PathBuf {
 }
 
 /// Compute the thumbnail path for a given source image path.
-/// Uses the filename only (not full path) so local and server entries
-/// produce the same cache key.
+/// Uses the filename directly as the cache key (stable across Rust versions,
+/// more debuggable than a hash). Local and server entries with the same
+/// filename share the same thumbnail.
 pub fn thumbnail_path(source: &Path) -> PathBuf {
     let key = source
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| source.to_string_lossy().to_string());
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    let hash = hasher.finish();
-    thumbnail_dir().join(format!("{hash:016x}.png"))
+    thumbnail_dir().join(format!("{key}.thumb.png"))
 }
 
 /// Check if a thumbnail exists for the given source.
