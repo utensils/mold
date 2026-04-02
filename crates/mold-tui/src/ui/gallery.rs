@@ -6,36 +6,6 @@ use crate::app::{App, GalleryViewMode};
 
 const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
-const THUMB_H: u16 = 12;
-
-/// Compute a centered sub-rect for an image with the given pixel dimensions
-/// within the available terminal area, accounting for the ~2:1 cell aspect ratio.
-fn center_image_rect(area: Rect, img_w: u32, img_h: u32) -> Rect {
-    if area.width == 0 || area.height == 0 {
-        return area;
-    }
-    // Terminal cells are roughly 2:1 (each cell is ~8px wide, ~16px tall).
-    // Convert image dimensions to terminal cell units.
-    let cell_cols = img_w as f64; // 1 pixel-width per column (approximate)
-    let cell_rows = img_h as f64 / 2.0; // 2 pixel-heights per row
-    let img_aspect = cell_cols / cell_rows.max(1.0);
-    let area_aspect = area.width as f64 / area.height as f64;
-
-    let (used_w, used_h) = if img_aspect > area_aspect {
-        // Image is wider than area — full width, less height
-        let h = (area.width as f64 / img_aspect).round() as u16;
-        (area.width, h.min(area.height))
-    } else {
-        // Image is taller than area — full height, less width
-        let w = (area.height as f64 * img_aspect).round() as u16;
-        (w.min(area.width), area.height)
-    };
-
-    let offset_x = (area.width.saturating_sub(used_w)) / 2;
-    let offset_y = (area.height.saturating_sub(used_h)) / 2;
-
-    Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
-}
 
 /// Render the Gallery view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -161,13 +131,10 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            // Center the image within the thumbnail area based on aspect ratio.
-            // Terminal cells are roughly 2:1 (height:width in pixels), so a
-            // square image occupies ~half the columns compared to rows.
-            let (iw, ih) = (entry.metadata.width.max(1), entry.metadata.height.max(1));
-            let centered = center_image_rect(thumb_area, iw, ih);
+            // Let ratatui-image handle aspect-ratio scaling and centering
+            // within the full thumbnail area (same as the detail view).
             let image_widget = StatefulImage::default();
-            frame.render_stateful_widget(image_widget, centered, state);
+            frame.render_stateful_widget(image_widget, thumb_area, state);
         }
     }
 

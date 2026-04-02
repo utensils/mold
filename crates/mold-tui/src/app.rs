@@ -2275,15 +2275,33 @@ impl App {
                                 if let Some(url) = server_url {
                                     // Fetch pre-generated thumbnail from server (fast, ~10KB)
                                     let client = mold_core::MoldClient::new(&url);
-                                    if let Ok(data) = client.get_gallery_thumbnail(&filename).await
-                                    {
-                                        let key = path;
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::thumbnails::save_thumbnail_bytes(&data, &key)
-                                                .ok();
-                                        })
-                                        .await
-                                        .ok();
+                                    let fetched =
+                                        if let Ok(data) = client.get_gallery_thumbnail(&filename).await
+                                        {
+                                            let key = path.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                crate::thumbnails::save_thumbnail_bytes(&data, &key)
+                                                    .ok();
+                                            })
+                                            .await
+                                            .ok();
+                                            true
+                                        } else {
+                                            false
+                                        };
+
+                                    // Fallback: generate from locally cached image if server fetch failed
+                                    if !fetched {
+                                        let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
+                                        if cache_path.is_file() {
+                                            let key = path;
+                                            tokio::task::spawn_blocking(move || {
+                                                crate::thumbnails::generate_thumbnail_from_cached(&cache_path, &key)
+                                                    .ok();
+                                            })
+                                            .await
+                                            .ok();
+                                        }
                                     }
                                 } else {
                                     // Local file — generate thumbnail directly
