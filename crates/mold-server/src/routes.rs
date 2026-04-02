@@ -128,9 +128,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
-        .route("/api/gallery/{filename}", get(get_gallery_image))
+        .route("/api/gallery/image/:filename", get(get_gallery_image))
         .route(
-            "/api/gallery/{filename}/thumbnail",
+            "/api/gallery/thumbnail/:filename",
             get(get_gallery_thumbnail),
         )
         .route("/api/status", get(server_status))

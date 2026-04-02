@@ -375,7 +375,7 @@ impl MoldClient {
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
             .client
-            .get(format!("{}/api/gallery/{filename}", self.base_url))
+            .get(format!("{}/api/gallery/image/{filename}", self.base_url))
             .send()
             .await?
             .error_for_status()?
@@ -389,7 +389,7 @@ impl MoldClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/gallery/{filename}/thumbnail",
+                "{}/api/gallery/thumbnail/{filename}",
                 self.base_url
             ))
             .send()
