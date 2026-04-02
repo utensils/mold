@@ -392,7 +392,7 @@ impl GenerateParams {
             ParamField::SeedValue => self
                 .seed
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "\u{27e8}auto\u{27e9}".to_string()),
+                .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string()),
             ParamField::Batch => self.batch.to_string(),
             ParamField::Format => format!("{:?}", self.format).to_uppercase(),
             ParamField::Mode => self.inference_mode.label().to_string(),
@@ -2688,11 +2688,11 @@ mod tests {
     }
 
     #[test]
-    fn seed_value_display_auto_when_none() {
+    fn seed_value_display_random_when_none() {
         let config = Config::load_or_default();
         let params = GenerateParams::from_config(&config);
         let display = params.display_value(&ParamField::SeedValue);
-        assert!(display.contains("auto"));
+        assert!(display.contains("random"));
     }
 
     #[test]

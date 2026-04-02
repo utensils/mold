@@ -144,6 +144,15 @@ impl ModelCache {
         self.entries.drain().map(|(_, e)| e.engine).collect()
     }
 
+    /// VRAM footprint of the currently GPU-resident model (0 if none loaded).
+    pub fn active_vram_bytes(&self) -> u64 {
+        self.entries
+            .values()
+            .find(|e| e.residency == ModelResidency::Gpu)
+            .map(|e| e.vram_bytes)
+            .unwrap_or(0)
+    }
+
     /// The currently GPU-loaded model name.
     pub fn active_model(&self) -> Option<&str> {
         self.entries

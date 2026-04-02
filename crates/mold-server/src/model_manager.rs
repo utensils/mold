@@ -44,7 +44,16 @@ fn check_model_memory_budget(
 
 /// On macOS (MPS/unified memory), check whether estimated peak memory fits
 /// before committing to a model load. No-op on CUDA or non-macOS.
-fn preflight_memory_guard(model_name: &str, paths: &ModelPaths) -> Result<(), ApiError> {
+///
+/// `active_vram_bytes` is the footprint of the currently GPU-resident model
+/// that will be unloaded before loading the new one. This memory will become
+/// available, so we add it to the budget to avoid false rejections during
+/// model swaps.
+fn preflight_memory_guard(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+) -> Result<(), ApiError> {
     let available = match mold_inference::device::available_system_memory_bytes() {
         Some(a) if a > 0 => a,
         _ => return Ok(()), // Non-macOS or can't query — skip
@@ -55,7 +64,11 @@ fn preflight_memory_guard(model_name: &str, paths: &ModelPaths) -> Result<(), Ap
         mold_inference::LoadStrategy::Eager,
     );
 
-    check_model_memory_budget(model_name, peak, available)
+    // The active model will be unloaded before loading the new one,
+    // so its footprint becomes available memory.
+    let effective_available = available.saturating_add(active_vram_bytes);
+
+    check_model_memory_budget(model_name, peak, effective_available)
 }
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
@@ -149,6 +162,8 @@ pub(crate) async fn ensure_model_ready(
     // Fast path: model is in cache and loaded.
     {
         let mut cache = state.model_cache.lock().await;
+        // Grab active model's VRAM before mutable borrow via get_mut.
+        let active_vram = cache.active_vram_bytes();
         if let Some(entry) = cache.get_mut(model_name) {
             if entry.residency == ModelResidency::Gpu {
                 // Already loaded — just set up progress callback.
@@ -164,8 +179,9 @@ pub(crate) async fn ensure_model_ready(
 
             // Cached but not on GPU (Unloaded or Parked) — need to reload.
             // MPS memory guard: check before unloading the active model.
+            // Include the active model's footprint as reclaimable memory.
             if let Some(paths) = entry.engine.model_paths() {
-                preflight_memory_guard(model_name, paths)?;
+                preflight_memory_guard(model_name, paths, active_vram)?;
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -302,7 +318,12 @@ async fn create_and_load_engine(
     progress: Option<EngineProgressCallback>,
 ) -> Result<(), ApiError> {
     // MPS memory guard: reject before unloading current model so it stays operational.
-    preflight_memory_guard(model_name, &paths)?;
+    // Include the active model's footprint as reclaimable memory.
+    let active_vram = {
+        let cache = state.model_cache.lock().await;
+        cache.active_vram_bytes()
+    };
+    preflight_memory_guard(model_name, &paths, active_vram)?;
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling

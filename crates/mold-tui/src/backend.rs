@@ -28,52 +28,13 @@ pub async fn run_generation(
         let client = MoldClient::new(&url);
         let req = build_request(&params, &prompt, &negative_prompt);
 
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
-
-        let tx_progress = tx.clone();
-        tokio::spawn(async move {
-            while let Some(event) = progress_rx.recv().await {
-                let _ = tx_progress.send(BackgroundEvent::Progress(event));
-            }
-        });
-
-        match client.generate_stream(&req, progress_tx).await {
-            Ok(Some(response)) => {
-                let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+        match try_server_generate(&client, &req, &tx).await {
+            ServerResult::Done => return,
+            ServerResult::FallbackLocal => {} // fall through to local inference
+            ServerResult::Error(e) => {
+                let _ = tx.send(BackgroundEvent::Error(e));
                 return;
             }
-            Ok(None) => {
-                // Server doesn't support SSE — try blocking API
-                match client.generate(req).await {
-                    Ok(response) => {
-                        let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
-                        return;
-                    }
-                    Err(e) => match classify_generate_error(&e) {
-                        GenerateServerAction::FallbackLocal => {
-                            let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
-                                message: "Server unreachable, using local inference".to_string(),
-                            }));
-                        }
-                        _ => {
-                            let _ =
-                                tx.send(BackgroundEvent::Error(format!("Generation failed: {e}")));
-                            return;
-                        }
-                    },
-                }
-            }
-            Err(e) => match classify_generate_error(&e) {
-                GenerateServerAction::FallbackLocal => {
-                    let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
-                        message: "Server unreachable, using local inference".to_string(),
-                    }));
-                }
-                _ => {
-                    let _ = tx.send(BackgroundEvent::Error(format!("Generation failed: {e}")));
-                    return;
-                }
-            },
         }
     }
 
@@ -169,6 +130,103 @@ pub async fn auto_pull_model(
             Ok(config)
         }
         Err(e) => Err(format!("Failed to pull '{}': {}", model_name, e)),
+    }
+}
+
+enum ServerResult {
+    Done,
+    FallbackLocal,
+    Error(String),
+}
+
+/// Try generating via the server. If the server says the model isn't downloaded,
+/// auto-pull it and retry once.
+async fn try_server_generate(
+    client: &MoldClient,
+    req: &GenerateRequest,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> ServerResult {
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
+
+    let tx_progress = tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let _ = tx_progress.send(BackgroundEvent::Progress(event));
+        }
+    });
+
+    match try_server_generate_once(client, req, progress_tx).await {
+        Ok(response) => {
+            let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+            ServerResult::Done
+        }
+        Err(e) => match classify_generate_error(&e) {
+            GenerateServerAction::FallbackLocal => ServerResult::FallbackLocal,
+            GenerateServerAction::PullModelAndRetry => {
+                // Auto-pull the model via the server, then retry
+                let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                    message: format!(
+                        "Model '{}' not downloaded, pulling via server...",
+                        req.model
+                    ),
+                }));
+
+                let (pull_tx, mut pull_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
+                let tx_pull = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = pull_rx.recv().await {
+                        let _ = tx_pull.send(BackgroundEvent::Progress(event));
+                    }
+                });
+
+                if let Err(pull_err) = client.pull_model_stream(&req.model, pull_tx).await {
+                    return ServerResult::Error(format!(
+                        "Failed to pull '{}': {pull_err}",
+                        req.model
+                    ));
+                }
+
+                // Retry generation after pull
+                let (retry_tx, mut retry_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
+                let tx_retry = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = retry_rx.recv().await {
+                        let _ = tx_retry.send(BackgroundEvent::Progress(event));
+                    }
+                });
+
+                match try_server_generate_once(client, req, retry_tx).await {
+                    Ok(response) => {
+                        let _ =
+                            tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+                        ServerResult::Done
+                    }
+                    Err(retry_err) => match classify_generate_error(&retry_err) {
+                        GenerateServerAction::FallbackLocal => ServerResult::FallbackLocal,
+                        _ => ServerResult::Error(format!("Generation failed: {retry_err}")),
+                    },
+                }
+            }
+            GenerateServerAction::SurfaceError => {
+                ServerResult::Error(format!("Generation failed: {e}"))
+            }
+        },
+    }
+}
+
+/// Single attempt to generate via server (SSE with blocking fallback).
+async fn try_server_generate_once(
+    client: &MoldClient,
+    req: &GenerateRequest,
+    progress_tx: mpsc::UnboundedSender<SseProgressEvent>,
+) -> Result<GenerateResponse, anyhow::Error> {
+    match client.generate_stream(req, progress_tx).await {
+        Ok(Some(response)) => Ok(response),
+        Ok(None) => {
+            // Server doesn't support SSE — try blocking API
+            client.generate(req.clone()).await
+        }
+        Err(e) => Err(e),
     }
 }
 
