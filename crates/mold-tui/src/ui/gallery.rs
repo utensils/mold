@@ -471,7 +471,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(preview_block, layout[1]);
 
     if let Some(ref mut image_state) = app.gallery.image_state {
-        let image_widget = StatefulImage::default();
+        let image_widget = StatefulImage::default().resize(Resize::Scale(None));
         frame.render_stateful_widget(image_widget, preview_inner, image_state);
     } else {
         let msg = Paragraph::new("Loading...")
