@@ -163,34 +163,34 @@ JPEG).
 
 ### Grid Mode
 
-| Key        | Action                    |
-| ---------- | ------------------------- |
-| h/j/k/l    | Navigate the grid         |
-| Arrow keys | Navigate the grid         |
-| Enter      | Open detail view          |
-| e          | Load into Generate (edit) |
+| Key        | Action                           |
+| ---------- | -------------------------------- |
+| h/j/k/l    | Navigate the grid                |
+| Arrow keys | Navigate the grid                |
+| Enter      | Open detail view                 |
+| e          | Load into Generate (edit)        |
 | d          | Delete image (with confirmation) |
-| o          | Open in system viewer     |
-| Esc        | Back to Generate          |
+| o          | Open in system viewer            |
+| Esc        | Back to Generate                 |
 
 ### Detail Mode
 
 Press **Enter** on a grid thumbnail to see the full image with all metadata.
 
-| Key   | Action                    |
-| ----- | ------------------------- |
-| e     | Load into Generate (edit) |
-| r     | Regenerate immediately    |
-| d     | Delete image              |
-| o     | Open in system viewer     |
-| j/k   | Previous / next image     |
-| Esc   | Back to grid              |
+| Key | Action                    |
+| --- | ------------------------- |
+| e   | Load into Generate (edit) |
+| r   | Regenerate immediately    |
+| d   | Delete image              |
+| o   | Open in system viewer     |
+| j/k | Previous / next image     |
+| Esc | Back to grid              |
 
 ### Thumbnails
 
-Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated
-automatically on first scan and after each generation. Delete the cache
-directory to force regeneration.
+Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated automatically
+on first scan and after each generation. Delete the cache directory to force
+regeneration.
 
 ## Models View
 
@@ -259,9 +259,9 @@ without losing your prompt. **Unload** frees GPU memory by unloading the active
 model.
 
 Generated images are saved to `~/.mold/output/` by default (override with
-`MOLD_OUTPUT_DIR` env var or `output_dir` in config). All images include embedded
-PNG metadata that preserves the full generation parameters, making them portable
-across machines.
+`MOLD_OUTPUT_DIR` env var or `output_dir` in config). All images include
+embedded PNG metadata that preserves the full generation parameters, making them
+portable across machines.
 
 ## Info Panel
 

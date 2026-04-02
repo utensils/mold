@@ -187,7 +187,8 @@ data: {"type":"pull_complete","model":"flux-schnell:q8"}
 
 ## Image Output
 
-Generated images are saved to `~/.mold/output/` by default. Override with a custom path:
+Generated images are saved to `~/.mold/output/` by default. Override with a
+custom path:
 
 ```bash
 MOLD_OUTPUT_DIR=/srv/mold/output mold serve

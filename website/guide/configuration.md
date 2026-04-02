@@ -83,10 +83,10 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable           | Default | Description                          |
-| ------------------ | ------- | ------------------------------------ |
+| Variable           | Default          | Description                                   |
+| ------------------ | ---------------- | --------------------------------------------- |
 | `MOLD_OUTPUT_DIR`  | `~/.mold/output` | Image output directory (set empty to disable) |
-| `MOLD_CORS_ORIGIN` | —       | Restrict CORS to specific origin     |
+| `MOLD_CORS_ORIGIN` | —                | Restrict CORS to specific origin              |
 
 ### Auth
 
