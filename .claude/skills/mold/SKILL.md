@@ -262,8 +262,8 @@ mold unload                          # Free GPU memory
 # Connect from another machine
 MOLD_HOST=http://gpu-host:7680 mold run "a cat"
 
-# Save all generated images to disk (server-side persistence)
-MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
+# Custom image output directory (default: ~/.mold/output/)
+MOLD_OUTPUT_DIR=/srv/mold/output mold serve
 ```
 
 ## Key Environment Variables
@@ -274,7 +274,7 @@ MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
 | `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
-| `MOLD_OUTPUT_DIR` | unset | Save server-generated images to this directory |
+| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Image output directory (set empty to disable) |
 | `MOLD_PORT` | `7680` | Server port |
 | `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
 | `MOLD_EAGER` | unset | Set `1` to keep all components loaded |

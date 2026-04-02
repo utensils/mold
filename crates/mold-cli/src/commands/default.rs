@@ -120,6 +120,7 @@ mod tests {
 
     fn empty_config() -> Config {
         Config {
+            config_version: 1,
             default_model: "flux2-klein".to_string(),
             models_dir: "/nonexistent".to_string(),
             server_port: 7680,
@@ -132,6 +133,7 @@ mod tests {
             output_dir: None,
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
+            logging: mold_core::LoggingConfig::default(),
             models: HashMap::new(),
         }
     }

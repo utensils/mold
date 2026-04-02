@@ -127,6 +127,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
+        .route("/api/gallery", get(list_gallery))
+        .route(
+            "/api/gallery/image/:filename",
+            get(get_gallery_image).delete(delete_gallery_image),
+        )
+        .route(
+            "/api/gallery/thumbnail/:filename",
+            get(get_gallery_thumbnail),
+        )
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
@@ -207,7 +216,11 @@ async fn prepare_generation(
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;
-        let output_dir = config.resolved_output_dir().map(|p| p.to_path_buf());
+        let output_dir = if config.is_output_disabled() {
+            None
+        } else {
+            Some(config.effective_output_dir())
+        };
         let family = config.resolved_model_config(&request.model).family;
         let dim_warning = family
             .as_deref()
@@ -763,6 +776,354 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/gallery ──────────────────────────────────────────────────────────────
+
+/// List gallery images from the server's output directory.
+/// Returns metadata from PNG `mold:parameters` chunks, sorted newest-first.
+async fn list_gallery(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Ok(Json(Vec::new()));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+
+    if !output_dir.is_dir() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let images = tokio::task::spawn_blocking(move || scan_gallery_dir(&output_dir))
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?;
+
+    Ok(Json(images))
+}
+
+/// Serve a gallery image file by filename.
+async fn get_gallery_image(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+
+    // Sanitize: prevent directory traversal
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let path = output_dir.join(&clean_name);
+    if !path.is_file() {
+        return Err(ApiError::not_found(format!(
+            "image not found: {clean_name}"
+        )));
+    }
+
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read image: {e}")))?;
+
+    let content_type = if clean_name.ends_with(".png") {
+        "image/png"
+    } else if clean_name.ends_with(".jpg") || clean_name.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+
+    Ok((headers, data))
+}
+
+/// Delete a gallery image and its server-side thumbnail.
+async fn delete_gallery_image(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let path = output_dir.join(&clean_name);
+    if path.is_file() {
+        std::fs::remove_file(&path)
+            .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
+    }
+
+    // Also remove server-side thumbnail
+    let thumb_path = server_thumbnail_dir().join(&clean_name);
+    let _ = std::fs::remove_file(&thumb_path);
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Serve a thumbnail for a gallery image. Generated on-demand and cached
+/// at ~/.mold/cache/thumbnails/ on the server side.
+async fn get_gallery_thumbnail(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let source_path = output_dir.join(&clean_name);
+    if !source_path.is_file() {
+        return Err(ApiError::not_found(format!(
+            "image not found: {clean_name}"
+        )));
+    }
+
+    // Check if server-side thumbnail already exists
+    let thumb_dir = server_thumbnail_dir();
+    let thumb_path = thumb_dir.join(&clean_name);
+
+    if !thumb_path.is_file() {
+        // Generate thumbnail on-demand
+        let source = source_path.clone();
+        let dest = thumb_path.clone();
+        tokio::task::spawn_blocking(move || generate_server_thumbnail(&source, &dest))
+            .await
+            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?
+            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?;
+    }
+
+    let data = tokio::fs::read(&thumb_path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+
+    Ok((headers, data))
+}
+
+/// Server-side thumbnail cache directory.
+fn server_thumbnail_dir() -> std::path::PathBuf {
+    mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails")
+}
+
+/// Generate a 256x256 max thumbnail from source image.
+fn generate_server_thumbnail(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    let img = image::open(source)?;
+    let thumb = img.thumbnail(256, 256);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    thumb.save(dest)?;
+    Ok(())
+}
+
+/// Pre-generate thumbnails for all gallery images on server startup.
+pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
+    let output_dir = config.effective_output_dir();
+    std::thread::spawn(move || {
+        if !output_dir.is_dir() {
+            return;
+        }
+        let thumb_dir = server_thumbnail_dir();
+        let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
+        for entry in walker.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase());
+            if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+                continue;
+            }
+            let filename = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let thumb_path = thumb_dir.join(&filename);
+            if !thumb_path.is_file() {
+                if let Err(e) = generate_server_thumbnail(path, &thumb_path) {
+                    tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
+                }
+            }
+        }
+        tracing::info!("thumbnail warmup complete");
+    });
+}
+
+/// Scan a directory for image files with mold metadata.
+fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
+    let mut images = Vec::new();
+
+    let walker = walkdir::WalkDir::new(dir).max_depth(1).into_iter();
+    for entry in walker.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+            continue;
+        }
+
+        let timestamp = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let filename = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let meta = if ext.as_deref() == Some("png") {
+            read_png_metadata(path)
+        } else {
+            read_jpeg_metadata(path)
+        };
+
+        if let Some(meta) = meta {
+            images.push(mold_core::GalleryImage {
+                filename,
+                metadata: meta,
+                timestamp,
+            });
+        }
+    }
+
+    images.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    images
+}
+
+/// Read OutputMetadata from a PNG file's text chunks.
+fn read_png_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
+    let file = std::fs::File::open(path).ok()?;
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let reader = decoder.read_info().ok()?;
+    let info = reader.info();
+
+    for chunk in &info.uncompressed_latin1_text {
+        if chunk.keyword == "mold:parameters" {
+            if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&chunk.text) {
+                return Some(meta);
+            }
+        }
+    }
+    for chunk in &info.utf8_text {
+        if chunk.keyword == "mold:parameters" {
+            if let Ok(text) = chunk.get_text() {
+                if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&text) {
+                    return Some(meta);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read OutputMetadata from a JPEG file's COM marker.
+fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
+    let data = std::fs::read(path).ok()?;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        match marker {
+            // Standalone markers (no length field): SOI, EOI, RST0-7, TEM
+            0xD8 | 0x01 => {
+                i += 2;
+            }
+            0xD9 => break, // EOI — end of image
+            0xD0..=0xD7 => {
+                i += 2; // RST markers
+            }
+            // COM marker — check for mold:parameters
+            0xFE => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
+                let comment = &data[i + 4..i + 2 + len];
+                if let Ok(text) = std::str::from_utf8(comment) {
+                    if let Some(json) = text.strip_prefix("mold:parameters ") {
+                        if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(json) {
+                            return Some(meta);
+                        }
+                    }
+                }
+                i += 2 + len;
+            }
+            // All other markers have a 2-byte length field
+            _ => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
+                i += 2 + len;
+            }
+        }
+    }
+    None
 }
 
 // ── /api/openapi.json ─────────────────────────────────────────────────────────

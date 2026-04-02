@@ -280,8 +280,16 @@ impl ModelPaths {
     }
 }
 
+/// Current config schema version. Increment when adding migrations.
+const CURRENT_CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Config schema version for migrations. Old configs without this field
+    /// default to 0 and are migrated on first load.
+    #[serde(default)]
+    pub config_version: u32,
+
     #[serde(default = "default_model")]
     pub default_model: String,
 
@@ -314,9 +322,9 @@ pub struct Config {
     #[serde(default)]
     pub qwen3_variant: Option<String>,
 
-    /// Optional directory to persist copies of generated images (server mode).
-    /// When set, every image produced by /api/generate is saved here.
-    /// Disabled by default (None).
+    /// Directory to persist generated images. Default: `~/.mold/output/`.
+    /// Override with `MOLD_OUTPUT_DIR` env var. Set to empty string to disable
+    /// (TUI gallery will not function when disabled).
     #[serde(default)]
     pub output_dir: Option<String>,
 
@@ -329,9 +337,51 @@ pub struct Config {
     #[serde(default)]
     pub expand: ExpandSettings,
 
+    /// Logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
+}
+
+/// Logging configuration for file output and rotation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoggingConfig {
+    /// Log level: trace, debug, info, warn, error. Overridden by MOLD_LOG env var.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    /// Enable file logging. When true, logs go to ~/.mold/logs/.
+    #[serde(default)]
+    pub file: bool,
+
+    /// Custom log file directory (default: ~/.mold/logs/).
+    #[serde(default)]
+    pub dir: Option<String>,
+
+    /// Number of days to retain log files. Default: 7.
+    #[serde(default = "default_log_max_days")]
+    pub max_days: u32,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_max_days() -> u32 {
+    7
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            file: false,
+            dir: None,
+            max_days: default_log_max_days(),
+        }
+    }
 }
 
 fn default_model() -> String {
@@ -365,6 +415,7 @@ fn default_embed_metadata() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             default_model: default_model(),
             models_dir: default_models_dir(),
             server_port: default_port(),
@@ -377,6 +428,7 @@ impl Default for Config {
             output_dir: None,
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
+            logging: LoggingConfig::default(),
             models: HashMap::new(),
         }
     }
@@ -392,7 +444,7 @@ impl Config {
             eprintln!("warning: could not determine home directory — using default config");
             return Config::default();
         };
-        if config_path.exists() {
+        let mut cfg = if config_path.exists() {
             match std::fs::read_to_string(&config_path) {
                 Ok(contents) => match toml::from_str(&contents) {
                     Ok(cfg) => cfg,
@@ -414,7 +466,54 @@ impl Config {
             }
         } else {
             Config::default()
+        };
+
+        // Run config migrations if needed
+        if cfg.config_version < CURRENT_CONFIG_VERSION {
+            Self::run_migrations(&mut cfg);
+            cfg.config_version = CURRENT_CONFIG_VERSION;
+            if let Err(e) = cfg.save() {
+                eprintln!("warning: failed to save migrated config: {e}");
+            }
         }
+
+        cfg
+    }
+
+    /// Run all pending config migrations from cfg.config_version to CURRENT.
+    pub(crate) fn run_migrations(cfg: &mut Config) {
+        if cfg.config_version < 1 {
+            Self::migrate_v0_to_v1(cfg);
+        }
+        // Future migrations:
+        // if cfg.config_version < 2 { Self::migrate_v1_to_v2(cfg); }
+    }
+
+    /// v0 → v1: Strip stale manifest defaults from known model entries.
+    ///
+    /// Old `mold pull` wrote all manifest defaults (steps, guidance, dimensions,
+    /// description, family, is_schnell, scheduler) into config.toml. These become
+    /// stale when manifests update. This migration removes them so
+    /// `resolved_model_config()` reads fresh values from the manifest at runtime.
+    fn migrate_v0_to_v1(cfg: &mut Config) {
+        let model_names: Vec<String> = cfg.models.keys().cloned().collect();
+        for name in model_names {
+            if crate::manifest::find_manifest(&name).is_some() {
+                if let Some(mc) = cfg.models.get_mut(&name) {
+                    mc.default_steps = None;
+                    mc.default_guidance = None;
+                    mc.default_width = None;
+                    mc.default_height = None;
+                    mc.is_schnell = None;
+                    mc.is_turbo = None;
+                    mc.scheduler = None;
+                    mc.negative_prompt = None;
+                    mc.description = None;
+                    mc.family = None;
+                }
+            }
+        }
+        eprintln!("config: migrated v0 → v1 (cleared stale manifest defaults)");
     }
 
     /// Reload config from disk while preserving runtime-only overrides.
@@ -580,6 +679,43 @@ impl Config {
         })
     }
 
+    /// Check if image output has been explicitly disabled by the user
+    /// (empty `MOLD_OUTPUT_DIR` env var or empty `output_dir` config field).
+    pub fn is_output_disabled(&self) -> bool {
+        if let Ok(env_dir) = std::env::var("MOLD_OUTPUT_DIR") {
+            return env_dir.is_empty();
+        }
+        matches!(self.output_dir.as_deref(), Some(""))
+    }
+
+    /// Resolved output directory with a default fallback to `~/.mold/output/`.
+    /// Unlike `resolved_output_dir()`, this always returns a path.
+    pub fn effective_output_dir(&self) -> PathBuf {
+        self.resolved_output_dir().unwrap_or_else(|| {
+            Self::mold_dir()
+                .unwrap_or_else(|| PathBuf::from(".mold"))
+                .join("output")
+        })
+    }
+
+    /// Resolved log directory from config or default (~/.mold/logs/).
+    pub fn resolved_log_dir(&self) -> PathBuf {
+        if let Some(ref dir) = self.logging.dir {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            if dir == "~" {
+                home
+            } else if let Some(rest) = dir.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(dir)
+            }
+        } else {
+            Self::mold_dir()
+                .unwrap_or_else(|| PathBuf::from(".mold"))
+                .join("logs")
+        }
+    }
+
     pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {
         if let Some(value) = override_value {
             return value;
@@ -647,6 +783,10 @@ impl Config {
         let mut cfg = self.model_config(name);
 
         if let Some(manifest) = crate::manifest::find_manifest(name) {
+            // Manifest provides defaults when the config file doesn't specify them.
+            // Since to_model_config() no longer writes manifest defaults to config,
+            // config values are only Some when the user explicitly set them.
+            // User overrides are preserved; manifest fills in the rest.
             if cfg.default_steps.is_none() {
                 cfg.default_steps = Some(manifest.defaults.steps);
             }
@@ -668,12 +808,10 @@ impl Config {
             if cfg.negative_prompt.is_none() {
                 cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
             }
-            if cfg.description.is_none() {
-                cfg.description = Some(manifest.description.clone());
-            }
-            if cfg.family.is_none() {
-                cfg.family = Some(manifest.family.clone());
-            }
+            // Description and family always come from the manifest for known models.
+            // These are metadata, not user-configurable settings.
+            cfg.description = Some(manifest.description.clone());
+            cfg.family = Some(manifest.family.clone());
         }
 
         cfg

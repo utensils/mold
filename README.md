@@ -51,9 +51,9 @@ cargo build --release -p mold-ai --features metal   # macOS (Apple Silicon)
 ```
 
 Optional features can be added to the same build, for example
-`--features cuda,preview,expand,discord` or
-`--features metal,preview,expand,discord` if you also want terminal preview,
-local prompt expansion, or the Discord bot commands.
+`--features cuda,preview,expand,discord,tui` or
+`--features metal,preview,expand,discord,tui` if you also want terminal preview,
+local prompt expansion, the Discord bot, or the interactive TUI.
 
 ### Manual download
 
@@ -138,6 +138,36 @@ In `~/.mold/config.toml` (or `$MOLD_HOME/config.toml`):
 ```toml
 embed_metadata = false
 ```
+
+### Terminal UI (beta)
+
+Launch a full interactive TUI for generating images, browsing models, and previewing results — all without leaving the terminal. The TUI is under active development; core features work well but some are still being built.
+
+```bash
+mold tui
+```
+
+<p align="center">
+  <img src="website/public/gallery/tui-generate.png" alt="mold TUI — Generate view with image preview" width="720" />
+  <br/>
+  <em>The TUI Generate view with Kitty graphics protocol image preview in Ghostty</em>
+</p>
+
+Features:
+- **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3, arrows, or click)
+- **Live image preview** — Kitty, Sixel, iTerm2, or halfblock auto-detected
+- **Gallery grid** — thumbnail grid with cached previews, detail view with full metadata, edit/regenerate/delete actions
+- **Auto-start server** — background `mold serve` keeps models hot between generations
+- **Model selector** — fuzzy-filtered popup (Ctrl+M or Enter on Model field)
+- **Auto-pull** — generates with any model, auto-downloads if not installed
+- **Prompt history** — Up/Down arrows or `/` for fuzzy search, persisted across sessions
+- **Session persistence** — all settings saved and restored on next launch
+- **Shell keybindings** — Ctrl+A/E/K/U/W in prompt fields
+- **Mouse support** — click panels, tabs, parameters, gallery thumbnails; scroll wheel in lists
+- **Real-time progress** — stage completion, denoising gauge, download bars
+- **Info panel** — model details, system memory, process memory (mmap-aware)
+
+Use `mold tui --local` to skip the server and run locally. See the full [TUI documentation](https://utensils.github.io/mold/guide/tui) for keybindings and configuration.
 
 ### Image-to-image
 
@@ -326,16 +356,19 @@ mold serve
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 ```
 
-### Server image persistence
+### Image output
 
-Save a copy of every server-generated image to disk (disabled by default):
+Generated images are saved to `~/.mold/output/` by default. This is required for the TUI gallery to function. Override the location with `MOLD_OUTPUT_DIR` or `output_dir` in `config.toml`:
 
 ```bash
-# Via environment variable
-MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
+# Custom output directory
+MOLD_OUTPUT_DIR=/srv/mold/output mold serve
 
 # Via config file
-# output_dir = "/srv/mold/gallery"
+# output_dir = "/srv/mold/output"
+
+# Disable saving (TUI gallery will be empty)
+# MOLD_OUTPUT_DIR="" mold serve
 ```
 
 Images are saved alongside the normal HTTP response using the same naming convention as the CLI (`mold-{model}-{timestamp}.{ext}`). Save failures log a warning but never fail the request.
@@ -356,7 +389,7 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model (smart fallback to only downloaded model) |
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage directory |
-| `MOLD_OUTPUT_DIR` | — | Save server-generated images to this directory (disabled by default) |
+| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Image output directory (set empty to disable) |
 | `MOLD_LOG` | `warn` / `info` | Log level |
 | `MOLD_PORT` | `7680` | Server port |
 | `MOLD_EAGER` | — | Set `1` to keep all model components loaded simultaneously |

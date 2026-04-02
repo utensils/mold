@@ -736,7 +736,9 @@ pub fn download_single_file_sync(
 ) -> Result<PathBuf, DownloadError> {
     use hf_hub::api::sync::ApiBuilder;
 
-    let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
+    let mut builder = ApiBuilder::from_env()
+        .with_cache_dir(hf_cache_dir())
+        .with_progress(false);
     if let Some(token) = resolve_hf_token() {
         builder = builder.with_token(Some(token));
     }

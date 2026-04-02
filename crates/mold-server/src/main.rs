@@ -27,6 +27,10 @@ enum Command {
         /// Log output format
         #[arg(long, default_value = "json")]
         log_format: LogFormat,
+
+        /// Write logs to file (~/.mold/logs/)
+        #[arg(long)]
+        log_file: bool,
     },
 }
 
@@ -46,21 +50,17 @@ async fn main() -> anyhow::Result<()> {
             bind,
             models_dir,
             log_format,
+            log_file,
         } => {
-            let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-            match log_format {
-                LogFormat::Json => {
-                    tracing_subscriber::fmt()
-                        .with_env_filter(filter)
-                        .json()
-                        .init();
-                }
-                LogFormat::Text => {
-                    tracing_subscriber::fmt().with_env_filter(filter).init();
-                }
-            }
+            let config = mold_core::Config::load_or_default();
+            let log_dir = config.resolved_log_dir();
+            let _log_guard = mold_server::logging::init_tracing(
+                log_file,
+                matches!(log_format, LogFormat::Json),
+                &config.logging,
+                "info",
+                log_dir,
+            );
 
             let models_path = models_dir
                 .map(PathBuf::from)

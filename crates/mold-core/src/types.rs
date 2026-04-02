@@ -1156,6 +1156,14 @@ mod tests {
     }
 }
 
+/// A gallery image entry returned by the server API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryImage {
+    pub filename: String,
+    pub metadata: OutputMetadata,
+    pub timestamp: u64,
+}
+
 /// Build a default output filename, sanitizing colons from model names.
 pub fn default_output_filename(
     model: &str,

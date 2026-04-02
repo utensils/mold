@@ -1,7 +1,7 @@
 use crate::error::MoldError;
 use crate::types::{
-    ExpandRequest, ExpandResponse, GenerateRequest, GenerateResponse, ImageData, ModelInfo,
-    ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
+    ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use anyhow::Result;
 use base64::Engine as _;
@@ -358,6 +358,58 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// List gallery images from the server's output directory.
+    pub async fn list_gallery(&self) -> Result<Vec<GalleryImage>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<GalleryImage>>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Download a gallery image by filename.
+    pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        Ok(resp.to_vec())
+    }
+
+    /// Delete a gallery image on the server.
+    pub async fn delete_gallery_image(&self, filename: &str) -> Result<()> {
+        self.client
+            .delete(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Download a gallery thumbnail by filename. Smaller/faster than full image.
+    pub async fn get_gallery_thumbnail(&self, filename: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/thumbnail/{filename}",
+                self.base_url
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        Ok(resp.to_vec())
+    }
+
     /// Expand a prompt using the server's LLM prompt expansion endpoint.
     pub async fn expand_prompt(&self, req: &ExpandRequest) -> Result<ExpandResponse> {
         let resp = self
@@ -380,7 +432,7 @@ impl MoldClient {
 /// - Host with port: `hal9000:8080` → `http://hal9000:8080`
 /// - Full URL: `http://hal9000:7680` → unchanged
 /// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
-fn normalize_host(input: &str) -> String {
+pub fn normalize_host(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
     if trimmed.contains("://") {
         trimmed.to_string()

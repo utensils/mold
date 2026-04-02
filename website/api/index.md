@@ -124,8 +124,11 @@ curl -N http://localhost:7680/api/generate/stream \
 The final `complete` event matches the `GenerateResponse` JSON shape used by the
 server internally.
 
-::: tip RunPod Note RunPod's proxy has a 100-second timeout. Use the SSE
-streaming endpoint for long generations to keep the connection alive. :::
+<!-- prettier-ignore-start -->
+::: tip RunPod Note
+RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
+:::
+<!-- prettier-ignore-end -->
 
 ## `/api/status`
 
@@ -182,10 +185,17 @@ event: progress
 data: {"type":"pull_complete","model":"flux-schnell:q8"}
 ```
 
-## Server Image Persistence
+## Image Output
 
-Save copies of all server-generated images:
+Generated images are saved to `~/.mold/output/` by default. Override with a
+custom path:
 
 ```bash
-MOLD_OUTPUT_DIR=/srv/mold/gallery mold serve
+MOLD_OUTPUT_DIR=/srv/mold/output mold serve
+```
+
+To disable image persistence (TUI gallery will not function):
+
+```bash
+MOLD_OUTPUT_DIR="" mold serve
 ```

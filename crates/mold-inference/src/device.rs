@@ -124,7 +124,7 @@ fn macos_vm_stats() -> Option<MacOSMemInfo> {
 /// Use this for variant selection to avoid triggering page reclamation storms that
 /// make the system unresponsive.
 #[cfg(target_os = "macos")]
-pub(crate) fn free_system_memory_bytes() -> Option<u64> {
+pub fn free_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free)
 }
 
@@ -134,17 +134,17 @@ pub(crate) fn free_system_memory_bytes() -> Option<u64> {
 /// Used for both memory budget checks and variant selection on unified-memory systems,
 /// where free-only is too conservative (often ~1-2GB on a busy 16GB Mac).
 #[cfg(target_os = "macos")]
-pub(crate) fn available_system_memory_bytes() -> Option<u64> {
+pub fn available_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free + s.inactive)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn free_system_memory_bytes() -> Option<u64> {
+pub fn free_system_memory_bytes() -> Option<u64> {
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn available_system_memory_bytes() -> Option<u64> {
+pub fn available_system_memory_bytes() -> Option<u64> {
     None
 }
 
@@ -195,7 +195,7 @@ pub fn reclaim_gpu_memory() {}
 
 /// Query free VRAM in bytes from the current CUDA context.
 #[cfg(feature = "cuda")]
-pub(crate) fn free_vram_bytes() -> Option<u64> {
+pub fn free_vram_bytes() -> Option<u64> {
     candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
         .ok()
         .map(|(free, _total)| free as u64)
@@ -208,7 +208,7 @@ pub(crate) fn free_vram_bytes() -> Option<u64> {
 /// would actually fit, forcing a BF16 fallback that doesn't fit either.
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(not(feature = "cuda"))]
-pub(crate) fn free_vram_bytes() -> Option<u64> {
+pub fn free_vram_bytes() -> Option<u64> {
     available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
@@ -463,7 +463,7 @@ fn preflight_check_budget(
 /// On CUDA: "VRAM: X.X GB free"
 /// On macOS: "Memory: X.X GB free / Y.Y GB available"
 /// Returns None if no memory info is available.
-pub(crate) fn memory_status_string() -> Option<String> {
+pub fn memory_status_string() -> Option<String> {
     #[cfg(feature = "cuda")]
     {
         if let Some(free) = free_vram_bytes() {

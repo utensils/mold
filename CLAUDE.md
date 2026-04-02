@@ -81,10 +81,11 @@ crates/
 ├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
 ├── mold-server/              # Axum HTTP inference server (library, consumed by mold-cli)
 ├── mold-cli/                 # Main binary — CLI (clap), single `mold` binary with feature flags
-└── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
+├── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
+└── mold-tui/                 # Interactive terminal UI (feature-gated, consumed by mold-cli via `tui` feature)
 ```
 
-**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`).
+**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`).
 
 ### mold-core
 
@@ -231,7 +232,7 @@ mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generati
         --expand-model <MODEL>  LLM model name override
 
 mold default [MODEL]               Get or set the default model
-mold serve [--port N] [--bind ADDR] [--models-dir PATH]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
 mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
@@ -267,7 +268,7 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
-| `MOLD_OUTPUT_DIR` | — | Directory to save copies of server-generated images (disabled by default) |
+| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Directory to save generated images (set empty to disable) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
@@ -298,7 +299,7 @@ default_width = 1024
 default_height = 1024
 # t5_variant = "auto"
 # qwen3_variant = "auto"
-# output_dir = "/srv/mold/gallery"
+# output_dir = "/srv/mold/output"    # default: ~/.mold/output (set "" to disable)
 # default_negative_prompt = "low quality, worst quality, blurry, watermark"
 
 [models."flux2-klein:q8"]
@@ -329,6 +330,12 @@ temperature = 0.7
 # [expand.families.flux]
 # word_limit = 200
 # style_notes = "Rich natural language descriptions."
+
+[logging]
+# level = "info"              # Log level (overridden by MOLD_LOG env var)
+# file = false                # Enable file logging to ~/.mold/logs/
+# dir = "~/.mold/logs"        # Custom log directory
+# max_days = 7                # Days to retain rotated log files
 ```
 
 ## Model System

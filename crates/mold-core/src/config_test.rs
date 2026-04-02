@@ -859,4 +859,502 @@ is_schnell = false
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result, Some("sdxl-turbo:fp16".to_string()));
     }
+
+    // ── effective_output_dir ──────────────────────────────────────────────
+
+    #[test]
+    fn effective_output_dir_defaults_to_mold_output() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        assert!(
+            dir.to_string_lossy().ends_with(".mold/output"),
+            "should end with .mold/output: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn effective_output_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        unsafe { std::env::set_var("MOLD_HOME", "/custom/mold") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        assert_eq!(dir, PathBuf::from("/custom/mold/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_env_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/env/output") };
+        let cfg = Config::default();
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert_eq!(dir, PathBuf::from("/env/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_config_field_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/output".to_string());
+        assert_eq!(cfg.effective_output_dir(), PathBuf::from("/config/output"));
+    }
+
+    #[test]
+    fn effective_output_dir_env_beats_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/env/wins") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/config/loses".to_string());
+        let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert_eq!(dir, PathBuf::from("/env/wins"));
+    }
+
+    // ── resolved_log_dir ─────────────────────────────────────────────────
+
+    #[test]
+    fn resolved_log_dir_defaults_to_mold_logs() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        let cfg = Config::default();
+        let dir = cfg.resolved_log_dir();
+        assert!(
+            dir.to_string_lossy().ends_with(".mold/logs"),
+            "should end with .mold/logs: got {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn resolved_log_dir_respects_mold_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_HOME", "/custom/mold") };
+        let cfg = Config::default();
+        let dir = cfg.resolved_log_dir();
+        unsafe { std::env::remove_var("MOLD_HOME") };
+        assert_eq!(dir, PathBuf::from("/custom/mold/logs"));
+    }
+
+    #[test]
+    fn resolved_log_dir_custom_dir_overrides_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.logging.dir = Some("/var/log/mold".to_string());
+        assert_eq!(cfg.resolved_log_dir(), PathBuf::from("/var/log/mold"));
+    }
+
+    #[test]
+    fn resolved_log_dir_expands_tilde() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.logging.dir = Some("~/mold-logs".to_string());
+        let dir = cfg.resolved_log_dir();
+        assert!(
+            !dir.to_string_lossy().starts_with('~'),
+            "tilde should be expanded: got {:?}",
+            dir
+        );
+        assert!(
+            dir.to_string_lossy().ends_with("mold-logs"),
+            "should end with mold-logs: got {:?}",
+            dir
+        );
+    }
+
+    // ── logging config deserialization ────────────────────────────────────
+
+    #[test]
+    fn logging_config_defaults_when_absent() {
+        let toml = r#"default_model = "test""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "info");
+        assert!(!cfg.logging.file);
+        assert!(cfg.logging.dir.is_none());
+        assert_eq!(cfg.logging.max_days, 7);
+    }
+
+    #[test]
+    fn logging_config_from_toml() {
+        let toml = r#"
+            [logging]
+            level = "debug"
+            file = true
+            dir = "/var/log/mold"
+            max_days = 30
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "debug");
+        assert!(cfg.logging.file);
+        assert_eq!(cfg.logging.dir.as_deref(), Some("/var/log/mold"));
+        assert_eq!(cfg.logging.max_days, 30);
+    }
+
+    #[test]
+    fn logging_config_partial_toml() {
+        let toml = r#"
+            [logging]
+            file = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.logging.level, "info"); // default
+        assert!(cfg.logging.file); // set
+        assert!(cfg.logging.dir.is_none()); // default
+        assert_eq!(cfg.logging.max_days, 7); // default
+    }
+
+    // ── is_output_disabled ───────────────────────────────────────────────
+
+    #[test]
+    fn output_not_disabled_by_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let cfg = Config::default();
+        assert!(
+            !cfg.is_output_disabled(),
+            "output should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn output_not_disabled_when_env_set() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/some/path") };
+        let cfg = Config::default();
+        let disabled = cfg.is_output_disabled();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert!(!disabled);
+    }
+
+    #[test]
+    fn output_disabled_when_env_empty() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "") };
+        let cfg = Config::default();
+        let disabled = cfg.is_output_disabled();
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        assert!(disabled, "empty env var should disable output");
+    }
+
+    #[test]
+    fn output_disabled_when_config_empty_string() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some(String::new());
+        assert!(
+            cfg.is_output_disabled(),
+            "empty config string should disable output"
+        );
+    }
+
+    #[test]
+    fn output_not_disabled_when_config_has_path() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("/srv/images".to_string());
+        assert!(!cfg.is_output_disabled());
+    }
+
+    #[test]
+    fn old_config_without_output_dir_saves_to_default() {
+        // Simulate an old config.toml that doesn't mention output_dir at all.
+        // Images should still be saved to the default directory.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
+        let toml = r#"
+            default_model = "flux-schnell:q8"
+            server_port = 7680
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            !cfg.is_output_disabled(),
+            "old config should not disable output"
+        );
+        let dir = cfg.effective_output_dir();
+        assert!(
+            dir.to_string_lossy().ends_with("output"),
+            "old config should use default output dir: {:?}",
+            dir
+        );
+    }
+
+    #[test]
+    fn old_config_with_metadata_enabled() {
+        // Old configs should still embed metadata by default
+        let toml = r#"default_model = "flux-schnell:q8""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            cfg.effective_embed_metadata(None),
+            "metadata should be enabled by default for old configs"
+        );
+    }
+
+    // ── manifest precedence (#129) ───────────────────────────────────────
+
+    #[test]
+    fn manifest_description_always_wins_over_config() {
+        // Description and family always come from manifest for known models
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                description: Some("[alpha] old description".to_string()),
+                family: Some("wrong-family".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        let manifest = crate::manifest::find_manifest("flux-dev:q8").unwrap();
+        assert_eq!(resolved.description, Some(manifest.description.clone()));
+        assert_eq!(resolved.family, Some(manifest.family.clone()));
+    }
+
+    #[test]
+    fn user_config_overrides_take_precedence_for_defaults() {
+        // Explicit user config values override manifest defaults
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-schnell:q8".to_string(),
+            ModelConfig {
+                default_steps: Some(8), // user wants 8 steps
+                default_width: Some(512),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-schnell:q8");
+        // User values preserved
+        assert_eq!(resolved.default_steps, Some(8));
+        assert_eq!(resolved.default_width, Some(512));
+        // Manifest fills in the rest
+        let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
+        assert_eq!(resolved.default_height, Some(manifest.defaults.height));
+        assert_eq!(resolved.is_schnell, Some(manifest.defaults.is_schnell));
+    }
+
+    #[test]
+    fn fresh_pull_gets_manifest_defaults() {
+        // After pull, config has no defaults (to_model_config sets None),
+        // so manifest fills everything in
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                // Only paths set (simulating a fresh pull)
+                transformer: Some("/path/to/transformer.gguf".to_string()),
+                vae: Some("/path/to/vae.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        let manifest = crate::manifest::find_manifest("flux-dev:q8").unwrap();
+        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
+        assert_eq!(resolved.default_guidance, Some(manifest.defaults.guidance));
+        assert_eq!(resolved.default_width, Some(manifest.defaults.width));
+        assert_eq!(resolved.default_height, Some(manifest.defaults.height));
+    }
+
+    #[test]
+    fn custom_model_keeps_config_values() {
+        // Non-manifest models (custom user models) should keep their config values
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "my-custom-model".to_string(),
+            ModelConfig {
+                default_steps: Some(50),
+                default_guidance: Some(7.5),
+                description: Some("My custom model".to_string()),
+                family: Some("flux".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("my-custom-model");
+        assert_eq!(resolved.default_steps, Some(50));
+        assert_eq!(resolved.default_guidance, Some(7.5));
+        assert_eq!(resolved.description.as_deref(), Some("My custom model"));
+    }
+
+    #[test]
+    fn manifest_preserves_user_lora_config() {
+        // lora and lora_scale are user overrides — manifest should not touch them
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                lora: Some("/path/to/adapter.safetensors".to_string()),
+                lora_scale: Some(0.8),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        assert_eq!(
+            resolved.lora.as_deref(),
+            Some("/path/to/adapter.safetensors")
+        );
+        assert_eq!(resolved.lora_scale, Some(0.8));
+    }
+
+    #[test]
+    fn to_model_config_does_not_write_defaults() {
+        // to_model_config should only set path fields, not defaults or metadata
+        let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/tmp/transformer.gguf"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/tmp/vae.safetensors"),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mc = manifest.to_model_config(&paths);
+        // Paths should be set
+        assert!(mc.transformer.is_some());
+        assert!(mc.vae.is_some());
+        // Defaults and metadata should NOT be set
+        assert!(mc.default_steps.is_none(), "steps should not be in config");
+        assert!(
+            mc.default_guidance.is_none(),
+            "guidance should not be in config"
+        );
+        assert!(mc.default_width.is_none());
+        assert!(mc.default_height.is_none());
+        assert!(mc.is_schnell.is_none());
+        assert!(mc.scheduler.is_none());
+        assert!(
+            mc.description.is_none(),
+            "description should not be in config"
+        );
+        assert!(mc.family.is_none(), "family should not be in config");
+    }
+
+    // ── config versioning / migrations ───────────────────────────────────
+
+    #[test]
+    fn old_config_without_version_defaults_to_zero() {
+        let toml = r#"default_model = "flux-schnell:q8""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.config_version, 0);
+    }
+
+    #[test]
+    fn new_config_has_current_version() {
+        let cfg = Config::default();
+        assert!(
+            cfg.config_version > 0,
+            "default config should have current version"
+        );
+    }
+
+    #[test]
+    fn migrate_v0_strips_stale_manifest_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config {
+            config_version: 0,
+            ..Config::default()
+        };
+        // Simulate old stale config with manifest defaults baked in
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                transformer: Some("/path/to/transformer.gguf".to_string()),
+                vae: Some("/path/to/vae.safetensors".to_string()),
+                default_steps: Some(999),
+                default_guidance: Some(0.0),
+                default_width: Some(512),
+                default_height: Some(512),
+                description: Some("[alpha] stale desc".to_string()),
+                family: Some("flux".to_string()),
+                is_schnell: Some(false),
+                ..ModelConfig::default()
+            },
+        );
+        // Also add a custom model that should NOT be touched
+        cfg.models.insert(
+            "my-custom-model".to_string(),
+            ModelConfig {
+                default_steps: Some(50),
+                description: Some("My model".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+
+        Config::run_migrations(&mut cfg);
+
+        // Manifest model should have defaults stripped
+        let flux = cfg.models.get("flux-dev:q8").unwrap();
+        assert!(
+            flux.default_steps.is_none(),
+            "stale steps should be cleared"
+        );
+        assert!(
+            flux.default_guidance.is_none(),
+            "stale guidance should be cleared"
+        );
+        assert!(
+            flux.description.is_none(),
+            "stale description should be cleared"
+        );
+        assert!(flux.family.is_none(), "stale family should be cleared");
+        // Paths should be preserved
+        assert!(flux.transformer.is_some(), "paths should survive migration");
+        assert!(flux.vae.is_some(), "paths should survive migration");
+
+        // Custom model should be untouched
+        let custom = cfg.models.get("my-custom-model").unwrap();
+        assert_eq!(custom.default_steps, Some(50));
+        assert_eq!(custom.description.as_deref(), Some("My model"));
+    }
+
+    #[test]
+    fn migration_preserves_user_lora() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config {
+            config_version: 0,
+            ..Config::default()
+        };
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                lora: Some("/path/to/adapter.safetensors".to_string()),
+                lora_scale: Some(0.8),
+                default_steps: Some(999), // stale
+                ..ModelConfig::default()
+            },
+        );
+
+        Config::run_migrations(&mut cfg);
+
+        let flux = cfg.models.get("flux-dev:q8").unwrap();
+        assert_eq!(flux.lora.as_deref(), Some("/path/to/adapter.safetensors"));
+        assert_eq!(flux.lora_scale, Some(0.8));
+        assert!(flux.default_steps.is_none());
+    }
+
+    #[test]
+    fn config_version_serializes_to_toml() {
+        let cfg = Config::default();
+        let toml = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            toml.contains("config_version"),
+            "config_version should be in serialized TOML"
+        );
+    }
 }

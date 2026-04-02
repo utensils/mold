@@ -1,3 +1,4 @@
+pub mod logging;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
@@ -85,6 +86,22 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
     let worker_state = state.clone();
     tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+
+    // Ensure output directory exists and pre-generate thumbnails.
+    {
+        let config = state.config.read().await;
+        if config.is_output_disabled() {
+            tracing::warn!(
+                "image output is disabled (output_dir is empty) — \
+                 generated images will not be saved and the TUI gallery will be empty"
+            );
+        } else {
+            let output_dir = config.effective_output_dir();
+            let _ = std::fs::create_dir_all(&output_dir);
+            info!(output_dir = %output_dir.display(), "gallery output directory");
+            routes::spawn_thumbnail_warmup(&config);
+        }
+    }
 
     let cors = build_cors_layer()?;
 
