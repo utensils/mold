@@ -87,9 +87,12 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     let worker_state = state.clone();
     tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
 
-    // Pre-generate thumbnails for existing gallery images in background.
+    // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
+        let output_dir = config.effective_output_dir();
+        let _ = std::fs::create_dir_all(&output_dir);
+        info!(output_dir = %output_dir.display(), "gallery output directory");
         routes::spawn_thumbnail_warmup(&config);
     }
 
