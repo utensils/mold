@@ -1,7 +1,7 @@
 use crate::error::MoldError;
 use crate::types::{
-    ExpandRequest, ExpandResponse, GenerateRequest, GenerateResponse, ImageData, ModelInfo,
-    ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
+    ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use anyhow::Result;
 use base64::Engine as _;
@@ -356,6 +356,32 @@ impl MoldClient {
             .json::<ServerStatus>()
             .await?;
         Ok(resp)
+    }
+
+    /// List gallery images from the server's output directory.
+    pub async fn list_gallery(&self) -> Result<Vec<GalleryImage>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<GalleryImage>>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Download a gallery image by filename.
+    pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/{filename}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        Ok(resp.to_vec())
     }
 
     /// Expand a prompt using the server's LLM prompt expansion endpoint.

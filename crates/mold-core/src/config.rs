@@ -580,6 +580,16 @@ impl Config {
         })
     }
 
+    /// Resolved output directory with a default fallback to `~/.mold/gallery/`.
+    /// Unlike `resolved_output_dir()`, this always returns a path.
+    pub fn effective_output_dir(&self) -> PathBuf {
+        self.resolved_output_dir().unwrap_or_else(|| {
+            Self::mold_dir()
+                .unwrap_or_else(|| PathBuf::from(".mold"))
+                .join("gallery")
+        })
+    }
+
     pub fn effective_embed_metadata(&self, override_value: Option<bool>) -> bool {
         if let Some(value) = override_value {
             return value;

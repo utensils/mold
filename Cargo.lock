@@ -2747,6 +2747,7 @@ dependencies = [
  "futures-core",
  "mold-ai-core",
  "mold-ai-inference",
+ "png",
  "serde",
  "serde_json",
  "sha2",
@@ -2757,6 +2758,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utoipa",
+ "walkdir",
 ]
 
 [[package]]

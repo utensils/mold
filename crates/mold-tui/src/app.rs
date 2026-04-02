@@ -28,6 +28,8 @@ pub enum BackgroundEvent {
     PullComplete(String),
     /// Background thumbnail generation finished.
     ThumbnailsReady,
+    /// Gallery image bytes fetched from server for preview.
+    GalleryPreviewReady(Vec<u8>),
     /// Remote server health check + model list succeeded.
     ServerConnected {
         url: String,
@@ -501,10 +503,13 @@ pub struct GalleryState {
 /// A single gallery entry backed by PNG metadata.
 #[derive(Debug, Clone)]
 pub struct GalleryEntry {
+    /// Local file path, or just the filename for server-backed entries.
     pub path: std::path::PathBuf,
     pub metadata: mold_core::OutputMetadata,
     pub generation_time_ms: Option<u64>,
     pub timestamp: u64,
+    /// When set, this entry is served by the remote server at this URL.
+    pub server_url: Option<String>,
 }
 
 impl GalleryEntry {
@@ -779,19 +784,29 @@ impl App {
 
         // Spawn background gallery scan
         if let Ok(ref app) = app {
-            let tx = app.bg_tx.clone();
-            app.tokio_handle.spawn(async move {
-                let entries = tokio::task::spawn_blocking(crate::gallery_scan::scan_images)
-                    .await
-                    .unwrap_or_default();
-                let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
-            });
+            app.spawn_gallery_scan();
         }
 
         app
     }
 
-    /// Update model-dependent state when the model selection changes.
+    /// Spawn a background gallery scan. Uses server API when connected,
+    /// local filesystem scan otherwise.
+    pub fn spawn_gallery_scan(&self) {
+        let tx = self.bg_tx.clone();
+        let server_url = self.server_url.clone();
+        self.tokio_handle.spawn(async move {
+            let entries = if let Some(ref url) = server_url {
+                crate::gallery_scan::scan_images_from_server(url).await
+            } else {
+                tokio::task::spawn_blocking(crate::gallery_scan::scan_images_local)
+                    .await
+                    .unwrap_or_default()
+            };
+            let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
+        });
+    }
+
     /// Clean up resources on quit (kills background server if we spawned it).
     pub fn shutdown(&mut self) {
         if let Some(ref mut child) = self.server_process {
@@ -1710,7 +1725,21 @@ impl App {
     /// Load the currently selected gallery entry's image into the preview.
     fn load_gallery_preview(&mut self) {
         if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
-            if entry.path.exists() && entry.path.is_file() {
+            if let Some(ref server_url) = entry.server_url {
+                // Server-backed: fetch image asynchronously
+                let url = server_url.clone();
+                let filename = entry.filename();
+                let tx = self.bg_tx.clone();
+                self.tokio_handle.spawn(async move {
+                    let client = mold_core::MoldClient::new(&url);
+                    if let Ok(data) = client.get_gallery_image(&filename).await {
+                        let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
+                    }
+                });
+                // Clear stale preview while loading
+                self.gallery.preview_image = None;
+                self.gallery.image_state = None;
+            } else if entry.path.exists() && entry.path.is_file() {
                 if let Ok(img) = image::open(&entry.path) {
                     let protocol = self.picker.new_resize_protocol(img.clone());
                     self.gallery.preview_image = Some(img);
@@ -1978,10 +2007,7 @@ impl App {
                         self.generate.params.seed_mode.advance(response.seed_used);
 
                     // Resolve output directory
-                    let output_dir = self
-                        .config
-                        .resolved_output_dir()
-                        .unwrap_or_else(crate::gallery_scan::default_gallery_dir);
+                    let output_dir = self.config.effective_output_dir();
                     let _ = std::fs::create_dir_all(&output_dir);
 
                     // Save images to disk and display preview
@@ -2115,6 +2141,7 @@ impl App {
                                 metadata: meta,
                                 generation_time_ms: Some(response.generation_time_ms),
                                 timestamp: ts,
+                                server_url: self.server_url.clone(),
                             },
                         );
                         self.gallery.thumbnail_states.insert(0, None);
@@ -2140,21 +2167,55 @@ impl App {
                     self.gallery.selected = 0;
 
                     // Spawn background thumbnail generation
-                    let paths: Vec<std::path::PathBuf> = self
+                    let entries_info: Vec<(std::path::PathBuf, Option<String>)> = self
                         .gallery
                         .entries
                         .iter()
-                        .map(|e| e.path.clone())
+                        .map(|e| (e.path.clone(), e.server_url.clone()))
                         .collect();
                     let tx = self.bg_tx.clone();
                     self.tokio_handle.spawn(async move {
-                        tokio::task::spawn_blocking(move || {
-                            crate::thumbnails::ensure_thumbnails(&paths);
-                        })
-                        .await
-                        .ok();
+                        for (path, server_url) in &entries_info {
+                            if crate::thumbnails::thumbnail_exists(path) {
+                                continue;
+                            }
+                            if let Some(url) = server_url {
+                                // Fetch image from server and generate thumbnail
+                                let filename = path
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                let client = mold_core::MoldClient::new(url);
+                                if let Ok(data) = client.get_gallery_image(&filename).await {
+                                    let path = path.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::thumbnails::generate_thumbnail_from_bytes(
+                                            &data, &path,
+                                        )
+                                        .ok();
+                                    })
+                                    .await
+                                    .ok();
+                                }
+                            } else {
+                                // Local file — generate directly
+                                let path = path.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    crate::thumbnails::generate_thumbnail(&path).ok();
+                                })
+                                .await
+                                .ok();
+                            }
+                        }
                         let _ = tx.send(BackgroundEvent::ThumbnailsReady);
                     });
+                }
+                BackgroundEvent::GalleryPreviewReady(data) => {
+                    if let Ok(img) = image::load_from_memory(&data) {
+                        let protocol = self.picker.new_resize_protocol(img.clone());
+                        self.gallery.preview_image = Some(img);
+                        self.gallery.image_state = Some(protocol);
+                    }
                 }
                 BackgroundEvent::ThumbnailsReady => {
                     // Invalidate all thumbnail states so they reload on next render
@@ -2177,15 +2238,9 @@ impl App {
                         message: format!("Connected to {url}"),
                         style: ProgressStyle::Done,
                     });
-                    // Re-scan gallery (remote server may have different output dir)
+                    // Re-scan gallery from the (now-connected) server
                     self.gallery.scanning = true;
-                    let tx = self.bg_tx.clone();
-                    self.tokio_handle.spawn(async move {
-                        let entries = tokio::task::spawn_blocking(crate::gallery_scan::scan_images)
-                            .await
-                            .unwrap_or_default();
-                        let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
-                    });
+                    self.spawn_gallery_scan();
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
                     self.generate.progress.log.push(ProgressLogEntry {
@@ -2718,6 +2773,7 @@ mod tests {
             },
             generation_time_ms: Some(5000),
             timestamp: 1234,
+            server_url: None,
         };
         assert_eq!(entry.filename(), "mold-flux-1234.png");
     }
@@ -2744,6 +2800,7 @@ mod tests {
             },
             generation_time_ms: None,
             timestamp: 0,
+            server_url: None,
         };
         assert_eq!(entry.filename(), "unknown");
     }
@@ -2837,6 +2894,7 @@ mod tests {
             metadata: make_test_metadata(),
             generation_time_ms: Some(5000),
             timestamp: 1234,
+            server_url: None,
         }
     }
 

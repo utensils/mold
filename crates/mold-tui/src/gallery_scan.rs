@@ -5,19 +5,35 @@ use crate::app::GalleryEntry;
 
 /// Returns the default gallery directory: ~/.mold/gallery/
 pub fn default_gallery_dir() -> PathBuf {
-    mold_core::Config::mold_dir()
-        .unwrap_or_else(|| PathBuf::from(".mold"))
-        .join("gallery")
+    mold_core::Config::load_or_default().effective_output_dir()
 }
 
-/// Scan for mold-generated PNG images in the output directory.
+/// Scan for gallery images via the server API.
+/// Downloads the listing and creates entries with server-backed paths.
+pub async fn scan_images_from_server(server_url: &str) -> Vec<GalleryEntry> {
+    let client = mold_core::MoldClient::new(server_url);
+    let images = match client.list_gallery().await {
+        Ok(images) => images,
+        Err(_) => return Vec::new(),
+    };
+
+    images
+        .into_iter()
+        .map(|img| GalleryEntry {
+            path: PathBuf::from(&img.filename),
+            metadata: img.metadata,
+            generation_time_ms: None,
+            timestamp: img.timestamp,
+            server_url: Some(server_url.to_string()),
+        })
+        .collect()
+}
+
+/// Scan for mold-generated PNG images in the local output directory.
 /// Only includes PNGs with valid `mold:parameters` metadata.
 /// Returns entries sorted newest-first by modification time.
-pub fn scan_images() -> Vec<GalleryEntry> {
-    let config = mold_core::Config::load_or_default();
-    let output_dir = config
-        .resolved_output_dir()
-        .unwrap_or_else(default_gallery_dir);
+pub fn scan_images_local() -> Vec<GalleryEntry> {
+    let output_dir = default_gallery_dir();
 
     if !output_dir.is_dir() {
         return Vec::new();
@@ -31,7 +47,6 @@ pub fn scan_images() -> Vec<GalleryEntry> {
             continue;
         }
 
-        // Only PNG files
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -48,13 +63,11 @@ pub fn scan_images() -> Vec<GalleryEntry> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // Only include files with valid mold metadata
         if let Some(gallery_entry) = read_png_metadata(&path, timestamp) {
             entries.push(gallery_entry);
         }
     }
 
-    // Sort by modification time, newest first
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     entries
 }
@@ -66,7 +79,6 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
     let reader = decoder.read_info().ok()?;
     let info = reader.info();
 
-    // Check tEXt chunks (Latin-1)
     for chunk in &info.uncompressed_latin1_text {
         if chunk.keyword == "mold:parameters" {
             if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&chunk.text) {
@@ -75,12 +87,12 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
                     metadata: meta,
                     generation_time_ms: None,
                     timestamp,
+                    server_url: None,
                 });
             }
         }
     }
 
-    // Check iTXt chunks (UTF-8)
     for chunk in &info.utf8_text {
         if chunk.keyword == "mold:parameters" {
             let text = chunk.get_text().ok()?;
@@ -90,6 +102,7 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
                     metadata: meta,
                     generation_time_ms: None,
                     timestamp,
+                    server_url: None,
                 });
             }
         }
@@ -123,10 +136,8 @@ mod tests {
     }
 
     #[test]
-    fn scan_images_returns_empty_for_nonexistent_dir() {
-        // With no output dir configured and default not existing, should return empty
-        let entries = scan_images();
-        // This test just verifies it doesn't panic
+    fn scan_images_local_returns_empty_for_nonexistent_dir() {
+        let entries = scan_images_local();
         let _ = entries;
     }
 }

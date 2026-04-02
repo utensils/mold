@@ -127,6 +127,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
+        .route("/api/gallery", get(list_gallery))
+        .route("/api/gallery/{filename}", get(get_gallery_image))
         .route("/api/status", get(server_status))
         .route("/health", get(health))
         .with_state(state)
@@ -207,7 +209,7 @@ async fn prepare_generation(
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;
-        let output_dir = config.resolved_output_dir().map(|p| p.to_path_buf());
+        let output_dir = Some(config.effective_output_dir());
         let family = config.resolved_model_config(&request.model).family;
         let dim_warning = family
             .as_deref()
@@ -763,6 +765,145 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/gallery ──────────────────────────────────────────────────────────────
+
+/// List gallery images from the server's output directory.
+/// Returns metadata from PNG `mold:parameters` chunks, sorted newest-first.
+async fn list_gallery(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
+    let output_dir = {
+        let config = state.config.read().await;
+        config.effective_output_dir()
+    };
+
+    if !output_dir.is_dir() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let images = tokio::task::spawn_blocking(move || scan_gallery_dir(&output_dir))
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?;
+
+    Ok(Json(images))
+}
+
+/// Serve a gallery image file by filename.
+async fn get_gallery_image(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let output_dir = {
+        let config = state.config.read().await;
+        config.effective_output_dir()
+    };
+
+    // Sanitize: prevent directory traversal
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let path = output_dir.join(&clean_name);
+    if !path.is_file() {
+        return Err(ApiError::not_found(format!(
+            "image not found: {clean_name}"
+        )));
+    }
+
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read image: {e}")))?;
+
+    let content_type = if clean_name.ends_with(".png") {
+        "image/png"
+    } else if clean_name.ends_with(".jpg") || clean_name.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "application/octet-stream"
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+
+    Ok((headers, data))
+}
+
+/// Scan a directory for PNG files with mold metadata.
+fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
+    let mut images = Vec::new();
+
+    let walker = walkdir::WalkDir::new(dir).max_depth(1).into_iter();
+    for entry in walker.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        if ext.as_deref() != Some("png") {
+            continue;
+        }
+
+        let timestamp = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let filename = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if let Some(meta) = read_png_metadata(path) {
+            images.push(mold_core::GalleryImage {
+                filename,
+                metadata: meta,
+                timestamp,
+            });
+        }
+    }
+
+    images.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    images
+}
+
+/// Read OutputMetadata from a PNG file's text chunks.
+fn read_png_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
+    let file = std::fs::File::open(path).ok()?;
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let reader = decoder.read_info().ok()?;
+    let info = reader.info();
+
+    for chunk in &info.uncompressed_latin1_text {
+        if chunk.keyword == "mold:parameters" {
+            if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&chunk.text) {
+                return Some(meta);
+            }
+        }
+    }
+    for chunk in &info.utf8_text {
+        if chunk.keyword == "mold:parameters" {
+            if let Ok(text) = chunk.get_text() {
+                if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&text) {
+                    return Some(meta);
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── /api/openapi.json ─────────────────────────────────────────────────────────
