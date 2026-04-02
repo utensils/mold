@@ -380,7 +380,7 @@ impl MoldClient {
 /// - Host with port: `hal9000:8080` → `http://hal9000:8080`
 /// - Full URL: `http://hal9000:7680` → unchanged
 /// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
-fn normalize_host(input: &str) -> String {
+pub fn normalize_host(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
     if trimmed.contains("://") {
         trimmed.to_string()

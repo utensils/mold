@@ -1061,12 +1061,11 @@ impl App {
                             self.generate.params.inference_mode = InferenceMode::Local;
                             self.server_url = None;
                         } else {
-                            // Normalize: add http:// if no scheme
-                            let url = if host.contains("://") {
-                                host
-                            } else {
-                                format!("http://{host}")
-                            };
+                            // Normalize using same logic as CLI/MoldClient:
+                            // bare hostname → http://host:7680
+                            // host:port → http://host:port
+                            // http(s)://host → unchanged
+                            let url = mold_core::client::normalize_host(&host);
                             self.generate.params.host = Some(url.clone());
                             self.server_url = Some(url);
                             // Auto-switch to auto mode when a host is entered
