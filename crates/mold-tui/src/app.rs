@@ -2219,7 +2219,7 @@ impl App {
             key: SettingsKey::ServerPort,
             label: "Port",
             field_type: SettingsFieldType::Number {
-                min: 1024.0,
+                min: 1.0,
                 max: 65535.0,
                 step: 1.0,
             },
@@ -2229,7 +2229,7 @@ impl App {
             label: "Width",
             field_type: SettingsFieldType::Number {
                 min: 64.0,
-                max: 4096.0,
+                max: 8192.0,
                 step: 64.0,
             },
         });
@@ -2238,7 +2238,7 @@ impl App {
             label: "Height",
             field_type: SettingsFieldType::Number {
                 min: 64.0,
-                max: 4096.0,
+                max: 8192.0,
                 step: 64.0,
             },
         });
@@ -2247,7 +2247,7 @@ impl App {
             label: "Steps",
             field_type: SettingsFieldType::Number {
                 min: 1.0,
-                max: 200.0,
+                max: 1000.0,
                 step: 1.0,
             },
         });
@@ -2322,8 +2322,8 @@ impl App {
             key: SettingsKey::ExpandMaxTokens,
             label: "Max Tokens",
             field_type: SettingsFieldType::Number {
-                min: 64.0,
-                max: 4096.0,
+                min: 1.0,
+                max: 65535.0,
                 step: 64.0,
             },
         });
@@ -2359,7 +2359,7 @@ impl App {
             label: "Max Days",
             field_type: SettingsFieldType::Number {
                 min: 1.0,
-                max: 365.0,
+                max: 3650.0,
                 step: 1.0,
             },
         });
@@ -2390,7 +2390,7 @@ impl App {
                 label: "Steps",
                 field_type: SettingsFieldType::Number {
                     min: 1.0,
-                    max: 200.0,
+                    max: 1000.0,
                     step: 1.0,
                 },
             });
@@ -2399,7 +2399,7 @@ impl App {
                 label: "Guidance",
                 field_type: SettingsFieldType::Number {
                     min: 0.0,
-                    max: 30.0,
+                    max: 100.0,
                     step: 0.5,
                 },
             });
@@ -2408,7 +2408,7 @@ impl App {
                 label: "Width",
                 field_type: SettingsFieldType::Number {
                     min: 64.0,
-                    max: 4096.0,
+                    max: 8192.0,
                     step: 64.0,
                 },
             });
@@ -2417,7 +2417,7 @@ impl App {
                 label: "Height",
                 field_type: SettingsFieldType::Number {
                     min: 64.0,
-                    max: 4096.0,
+                    max: 8192.0,
                     step: 64.0,
                 },
             });

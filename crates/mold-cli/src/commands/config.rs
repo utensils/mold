@@ -766,7 +766,13 @@ pub fn run_edit() -> Result<()> {
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    let status = std::process::Command::new(&editor).arg(&path).status()?;
+    // Use sh -c to handle $EDITOR values with args like "code --wait"
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} \"$1\"", editor))
+        .arg("--") // $0
+        .arg(&path) // $1
+        .status()?;
 
     if !status.success() {
         eprintln!("{} Editor exited with {}", theme::icon_fail(), status);
