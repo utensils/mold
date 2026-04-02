@@ -8,8 +8,17 @@ pub fn default_gallery_dir() -> PathBuf {
     mold_core::Config::load_or_default().effective_output_dir()
 }
 
+/// Returns the image cache directory for server-fetched images: ~/.mold/cache/images/
+pub fn image_cache_dir() -> PathBuf {
+    mold_core::Config::mold_dir()
+        .unwrap_or_else(|| PathBuf::from(".mold"))
+        .join("cache")
+        .join("images")
+}
+
 /// Scan for gallery images via the server API.
-/// Downloads the listing and creates entries with server-backed paths.
+/// All entries are server-backed — images are fetched via API for
+/// thumbnails, previews, and opening, then cached locally.
 pub async fn scan_images_from_server(server_url: &str) -> Vec<GalleryEntry> {
     let client = mold_core::MoldClient::new(server_url);
     let images = match client.list_gallery().await {
@@ -27,6 +36,25 @@ pub async fn scan_images_from_server(server_url: &str) -> Vec<GalleryEntry> {
             server_url: Some(server_url.to_string()),
         })
         .collect()
+}
+
+/// Fetch an image from the server and cache it locally.
+/// Returns the local cache path if successful.
+pub async fn fetch_and_cache_image(server_url: &str, filename: &str) -> Option<PathBuf> {
+    let cache_dir = image_cache_dir();
+    let cached_path = cache_dir.join(filename);
+
+    // Return cached copy if it exists
+    if cached_path.is_file() {
+        return Some(cached_path);
+    }
+
+    let client = mold_core::MoldClient::new(server_url);
+    let data = client.get_gallery_image(filename).await.ok()?;
+
+    std::fs::create_dir_all(&cache_dir).ok()?;
+    std::fs::write(&cached_path, &data).ok()?;
+    Some(cached_path)
 }
 
 /// Scan for mold-generated PNG images in the local output directory.

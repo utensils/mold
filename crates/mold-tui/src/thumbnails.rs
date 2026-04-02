@@ -43,10 +43,24 @@ pub fn generate_thumbnail(source: &Path) -> Result<PathBuf> {
     Ok(thumb_path)
 }
 
-/// Generate a thumbnail from raw image bytes (for server-fetched images).
+/// Generate a thumbnail from raw image bytes.
 /// The `key` is used to compute the cache path (typically the filename).
 pub fn generate_thumbnail_from_bytes(data: &[u8], key: &Path) -> Result<PathBuf> {
     let img = image::load_from_memory(data)?;
+    let thumb = img.thumbnail(THUMBNAIL_MAX_DIM, THUMBNAIL_MAX_DIM);
+
+    let thumb_path = thumbnail_path(key);
+    if let Some(parent) = thumb_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    thumb.save(&thumb_path)?;
+    Ok(thumb_path)
+}
+
+/// Generate a thumbnail from a cached image file, keyed by a different path.
+/// Used when the source was fetched from a server and cached locally.
+pub fn generate_thumbnail_from_cached(source: &Path, key: &Path) -> Result<PathBuf> {
+    let img = image::open(source)?;
     let thumb = img.thumbnail(THUMBNAIL_MAX_DIM, THUMBNAIL_MAX_DIM);
 
     let thumb_path = thumbnail_path(key);

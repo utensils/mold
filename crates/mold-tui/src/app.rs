@@ -1755,17 +1755,29 @@ impl App {
     fn load_gallery_preview(&mut self) {
         if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
             if let Some(ref server_url) = entry.server_url {
-                // Server-backed: fetch image asynchronously
+                // Server-backed: check cache first, then fetch async
                 let url = server_url.clone();
                 let filename = entry.filename();
+                let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
+                if cache_path.is_file() {
+                    // Cached locally — load synchronously
+                    if let Ok(img) = image::open(&cache_path) {
+                        let protocol = self.picker.new_resize_protocol(img.clone());
+                        self.gallery.preview_image = Some(img);
+                        self.gallery.image_state = Some(protocol);
+                        return;
+                    }
+                }
+                // Not cached — fetch asynchronously
                 let tx = self.bg_tx.clone();
                 self.tokio_handle.spawn(async move {
-                    let client = mold_core::MoldClient::new(&url);
-                    if let Ok(data) = client.get_gallery_image(&filename).await {
+                    if let Some(cached) =
+                        crate::gallery_scan::fetch_and_cache_image(&url, &filename).await
+                    {
+                        let data = tokio::fs::read(&cached).await.unwrap_or_default();
                         let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
                     }
                 });
-                // Clear stale preview while loading
                 self.gallery.preview_image = None;
                 self.gallery.image_state = None;
             } else if entry.path.exists() && entry.path.is_file() {
@@ -1861,9 +1873,27 @@ impl App {
     }
 
     /// Open the selected gallery image in the system viewer.
-    fn open_gallery_file(&self) {
-        if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+    /// For server-backed entries, fetches and caches locally first.
+    fn open_gallery_file(&mut self) {
+        let entry = match self.gallery.entries.get(self.gallery.selected) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+
+        if entry.server_url.is_none() && entry.path.is_file() {
+            // Local file — open directly
             let _ = open::that(&entry.path);
+        } else if let Some(ref url) = entry.server_url {
+            // Server-backed — fetch to cache, then open
+            let url = url.clone();
+            let filename = entry.filename();
+            self.tokio_handle.spawn(async move {
+                if let Some(cached) =
+                    crate::gallery_scan::fetch_and_cache_image(&url, &filename).await
+                {
+                    let _ = open::that(&cached);
+                }
+            });
         }
     }
 
@@ -2204,37 +2234,45 @@ impl App {
                         .collect();
                     let tx = self.bg_tx.clone();
                     self.tokio_handle.spawn(async move {
-                        for (path, server_url) in &entries_info {
-                            if crate::thumbnails::thumbnail_exists(path) {
+                        // Spawn all thumbnail jobs concurrently
+                        let mut handles = Vec::new();
+                        for (path, server_url) in entries_info {
+                            if crate::thumbnails::thumbnail_exists(&path) {
                                 continue;
                             }
-                            if let Some(url) = server_url {
-                                // Fetch image from server and generate thumbnail
-                                let filename = path
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                let client = mold_core::MoldClient::new(url);
-                                if let Ok(data) = client.get_gallery_image(&filename).await {
-                                    let path = path.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        crate::thumbnails::generate_thumbnail_from_bytes(
-                                            &data, &path,
-                                        )
+                            let handle = tokio::spawn(async move {
+                                if let Some(url) = server_url {
+                                    let filename = path
+                                        .file_name()
+                                        .map(|f| f.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    if let Some(cached) =
+                                        crate::gallery_scan::fetch_and_cache_image(&url, &filename)
+                                            .await
+                                    {
+                                        let key = path;
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::thumbnails::generate_thumbnail_from_cached(
+                                                &cached, &key,
+                                            )
+                                            .ok();
+                                        })
+                                        .await
                                         .ok();
+                                    }
+                                } else {
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::thumbnails::generate_thumbnail(&path).ok();
                                     })
                                     .await
                                     .ok();
                                 }
-                            } else {
-                                // Local file — generate directly
-                                let path = path.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    crate::thumbnails::generate_thumbnail(&path).ok();
-                                })
-                                .await
-                                .ok();
-                            }
+                            });
+                            handles.push(handle);
+                        }
+                        // Wait for all to complete
+                        for h in handles {
+                            let _ = h.await;
                         }
                         let _ = tx.send(BackgroundEvent::ThumbnailsReady);
                     });
