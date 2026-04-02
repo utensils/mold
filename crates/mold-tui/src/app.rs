@@ -599,15 +599,12 @@ pub struct LayoutAreas {
 
 /// Check if a server is responding at the given URL.
 fn check_server_health(url: &str) -> bool {
-    // Use a blocking HTTP request since this runs before the async runtime matters
     let health_url = format!("{url}/health");
-    std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "2", &health_url])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .build()
+        .new_agent();
+    agent.get(&health_url).call().is_ok()
 }
 
 /// Spawn a background `mold serve` process.
@@ -1846,19 +1843,25 @@ impl App {
         }
 
         let entry = &self.gallery.entries[idx];
-        // Delete the image file — via server API for server-backed entries
+        let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+        let _ = std::fs::remove_file(&thumb_path);
+        // Also remove the local cached copy (image cache)
+        let cache_path = crate::gallery_scan::image_cache_dir().join(entry.filename());
+        let _ = std::fs::remove_file(&cache_path);
+
         if let Some(ref url) = entry.server_url {
+            // Delete from server via API
             let url = url.clone();
             let filename = entry.filename();
-            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
-            let _ = std::fs::remove_file(&thumb_path);
             self.tokio_handle.spawn(async move {
                 let client = mold_core::MoldClient::new(&url);
                 let _ = client.delete_gallery_image(&filename).await;
             });
-        } else {
+        }
+        // Always try to remove the local file (covers both local and server-backed entries
+        // where the TUI also saved a copy during generation)
+        if entry.path.is_file() {
             let _ = std::fs::remove_file(&entry.path);
-            let _ = std::fs::remove_file(crate::thumbnails::thumbnail_path(&entry.path));
         }
 
         // Remove from state
@@ -2077,9 +2080,14 @@ impl App {
                     self.generate.params.seed =
                         self.generate.params.seed_mode.advance(response.seed_used);
 
-                    // Resolve output directory
-                    let output_dir = self.config.effective_output_dir();
-                    let _ = std::fs::create_dir_all(&output_dir);
+                    // Resolve output directory (None when explicitly disabled)
+                    let output_dir = if self.config.is_output_disabled() {
+                        None
+                    } else {
+                        let dir = self.config.effective_output_dir();
+                        let _ = std::fs::create_dir_all(&dir);
+                        Some(dir)
+                    };
 
                     // Save images to disk and display preview
                     let mut saved_path = std::path::PathBuf::new();
@@ -2109,9 +2117,12 @@ impl App {
                             response.images.len() as u32,
                             i as u32,
                         );
-                        let path = output_dir.join(&filename);
-                        if std::fs::write(&path, &img_data.data).is_ok() && i == 0 {
-                            saved_path = path;
+                        // Save to disk when output is enabled
+                        if let Some(ref dir) = output_dir {
+                            let path = dir.join(&filename);
+                            if std::fs::write(&path, &img_data.data).is_ok() && i == 0 {
+                                saved_path = path;
+                            }
                         }
 
                         // Display preview for first image

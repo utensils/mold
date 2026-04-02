@@ -1100,48 +1100,68 @@ is_schnell = false
     // ── manifest precedence (#129) ───────────────────────────────────────
 
     #[test]
-    fn manifest_defaults_override_stale_config_values() {
-        // Simulate stale config with old/wrong values for a known manifest model
+    fn manifest_description_always_wins_over_config() {
+        // Description and family always come from manifest for known models
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = Config::default();
         cfg.models.insert(
             "flux-dev:q8".to_string(),
             ModelConfig {
-                default_guidance: Some(0.0), // stale — manifest has 3.5
-                default_steps: Some(999),    // stale
                 description: Some("[alpha] old description".to_string()),
+                family: Some("wrong-family".to_string()),
                 ..ModelConfig::default()
             },
         );
         let resolved = cfg.resolved_model_config("flux-dev:q8");
         let manifest = crate::manifest::find_manifest("flux-dev:q8").unwrap();
-        // Manifest values should always win for known models
-        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
-        assert_eq!(resolved.default_guidance, Some(manifest.defaults.guidance));
         assert_eq!(resolved.description, Some(manifest.description.clone()));
         assert_eq!(resolved.family, Some(manifest.family.clone()));
     }
 
     #[test]
-    fn manifest_overrides_all_defaults() {
+    fn user_config_overrides_take_precedence_for_defaults() {
+        // Explicit user config values override manifest defaults
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = Config::default();
         cfg.models.insert(
             "flux-schnell:q8".to_string(),
             ModelConfig {
-                default_steps: Some(100),
-                default_width: Some(256),
-                default_height: Some(256),
-                is_schnell: Some(false),
+                default_steps: Some(8), // user wants 8 steps
+                default_width: Some(512),
                 ..ModelConfig::default()
             },
         );
         let resolved = cfg.resolved_model_config("flux-schnell:q8");
+        // User values preserved
+        assert_eq!(resolved.default_steps, Some(8));
+        assert_eq!(resolved.default_width, Some(512));
+        // Manifest fills in the rest
         let manifest = crate::manifest::find_manifest("flux-schnell:q8").unwrap();
-        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
-        assert_eq!(resolved.default_width, Some(manifest.defaults.width));
         assert_eq!(resolved.default_height, Some(manifest.defaults.height));
         assert_eq!(resolved.is_schnell, Some(manifest.defaults.is_schnell));
+    }
+
+    #[test]
+    fn fresh_pull_gets_manifest_defaults() {
+        // After pull, config has no defaults (to_model_config sets None),
+        // so manifest fills everything in
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                // Only paths set (simulating a fresh pull)
+                transformer: Some("/path/to/transformer.gguf".to_string()),
+                vae: Some("/path/to/vae.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let resolved = cfg.resolved_model_config("flux-dev:q8");
+        let manifest = crate::manifest::find_manifest("flux-dev:q8").unwrap();
+        assert_eq!(resolved.default_steps, Some(manifest.defaults.steps));
+        assert_eq!(resolved.default_guidance, Some(manifest.defaults.guidance));
+        assert_eq!(resolved.default_width, Some(manifest.defaults.width));
+        assert_eq!(resolved.default_height, Some(manifest.defaults.height));
     }
 
     #[test]

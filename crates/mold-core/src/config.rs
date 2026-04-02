@@ -727,17 +727,33 @@ impl Config {
         let mut cfg = self.model_config(name);
 
         if let Some(manifest) = crate::manifest::find_manifest(name) {
-            // Manifest is authoritative for model defaults and metadata.
-            // This prevents stale config values from overriding updated manifests
-            // (e.g. guidance corrected from 0.0 to 3.0, alpha tags removed).
-            // Config file paths and user overrides (lora, etc.) are preserved.
-            cfg.default_steps = Some(manifest.defaults.steps);
-            cfg.default_guidance = Some(manifest.defaults.guidance);
-            cfg.default_width = Some(manifest.defaults.width);
-            cfg.default_height = Some(manifest.defaults.height);
-            cfg.is_schnell = Some(manifest.defaults.is_schnell);
-            cfg.scheduler = manifest.defaults.scheduler;
-            cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
+            // Manifest provides defaults when the config file doesn't specify them.
+            // Since to_model_config() no longer writes manifest defaults to config,
+            // config values are only Some when the user explicitly set them.
+            // User overrides are preserved; manifest fills in the rest.
+            if cfg.default_steps.is_none() {
+                cfg.default_steps = Some(manifest.defaults.steps);
+            }
+            if cfg.default_guidance.is_none() {
+                cfg.default_guidance = Some(manifest.defaults.guidance);
+            }
+            if cfg.default_width.is_none() {
+                cfg.default_width = Some(manifest.defaults.width);
+            }
+            if cfg.default_height.is_none() {
+                cfg.default_height = Some(manifest.defaults.height);
+            }
+            if cfg.is_schnell.is_none() {
+                cfg.is_schnell = Some(manifest.defaults.is_schnell);
+            }
+            if cfg.scheduler.is_none() {
+                cfg.scheduler = manifest.defaults.scheduler;
+            }
+            if cfg.negative_prompt.is_none() {
+                cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
+            }
+            // Description and family always come from the manifest for known models.
+            // These are metadata, not user-configurable settings.
             cfg.description = Some(manifest.description.clone());
             cfg.family = Some(manifest.family.clone());
         }
