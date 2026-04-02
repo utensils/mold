@@ -28,6 +28,13 @@ pub enum BackgroundEvent {
     PullComplete(String),
     /// Background thumbnail generation finished.
     ThumbnailsReady,
+    /// Remote server health check + model list succeeded.
+    ServerConnected {
+        url: String,
+        models: Vec<ModelInfoExtended>,
+    },
+    /// Remote server health check failed.
+    ServerUnreachable(String),
 }
 
 /// A single entry in the progress log.
@@ -1060,24 +1067,39 @@ impl App {
                             self.generate.params.host = None;
                             self.generate.params.inference_mode = InferenceMode::Local;
                             self.server_url = None;
+                            self.generate.visible_fields = ParamField::visible_fields(
+                                &self.generate.capabilities,
+                                self.generate.params.inference_mode,
+                            );
+                            // Refresh to local catalog
+                            self.models.catalog =
+                                mold_core::build_model_catalog(&self.config, None, false);
                         } else {
-                            // Normalize using same logic as CLI/MoldClient:
-                            // bare hostname → http://host:7680
-                            // host:port → http://host:port
-                            // http(s)://host → unchanged
+                            // Normalize using same logic as CLI/MoldClient
                             let url = mold_core::client::normalize_host(&host);
                             self.generate.params.host = Some(url.clone());
-                            self.server_url = Some(url);
-                            // Auto-switch to auto mode when a host is entered
-                            if self.generate.params.inference_mode == InferenceMode::Local {
-                                self.generate.params.inference_mode = InferenceMode::Auto;
-                            }
+                            // Show connecting status
+                            self.generate.progress.log.push(ProgressLogEntry {
+                                message: format!("Connecting to {url}..."),
+                                style: ProgressStyle::Info,
+                            });
+                            // Spawn background health check + model list fetch
+                            let tx = self.bg_tx.clone();
+                            self.tokio_handle.spawn(async move {
+                                let client = mold_core::MoldClient::new(&url);
+                                match client.list_models_extended().await {
+                                    Ok(models) => {
+                                        let _ = tx
+                                            .send(BackgroundEvent::ServerConnected { url, models });
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(BackgroundEvent::ServerUnreachable(
+                                            format!("{url}: {e}"),
+                                        ));
+                                    }
+                                }
+                            });
                         }
-                        // Refresh visible fields (Host visibility depends on mode)
-                        self.generate.visible_fields = ParamField::visible_fields(
-                            &self.generate.capabilities,
-                            self.generate.params.inference_mode,
-                        );
                     }
                     KeyCode::Char(c) => input.push(c),
                     KeyCode::Backspace => {
@@ -2138,6 +2160,40 @@ impl App {
                     // Invalidate all thumbnail states so they reload on next render
                     let len = self.gallery.entries.len();
                     self.gallery.thumbnail_states = vec![None; len];
+                }
+                BackgroundEvent::ServerConnected { url, models } => {
+                    self.server_url = Some(url.clone());
+                    self.models.catalog = models;
+                    self.models.selected = 0;
+                    // Auto-switch to auto mode
+                    if self.generate.params.inference_mode == InferenceMode::Local {
+                        self.generate.params.inference_mode = InferenceMode::Auto;
+                    }
+                    self.generate.visible_fields = ParamField::visible_fields(
+                        &self.generate.capabilities,
+                        self.generate.params.inference_mode,
+                    );
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: format!("Connected to {url}"),
+                        style: ProgressStyle::Done,
+                    });
+                    // Re-scan gallery (remote server may have different output dir)
+                    self.gallery.scanning = true;
+                    let tx = self.bg_tx.clone();
+                    self.tokio_handle.spawn(async move {
+                        let entries = tokio::task::spawn_blocking(crate::gallery_scan::scan_images)
+                            .await
+                            .unwrap_or_default();
+                        let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
+                    });
+                }
+                BackgroundEvent::ServerUnreachable(msg) => {
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: format!("Server unreachable: {msg}"),
+                        style: ProgressStyle::Error,
+                    });
+                    // Revert host — don't set server_url
+                    self.generate.params.host = self.server_url.clone();
                 }
                 BackgroundEvent::PullComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
