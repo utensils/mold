@@ -10,13 +10,7 @@ pub struct LogGuard {
     _file_guard: Option<WorkerGuard>,
 }
 
-/// Initialize tracing with optional file logging.
-///
-/// - `log_file`: CLI `--log-file` flag (overrides config).
-/// - `json`: use JSON format for stderr output (ignored when file logging is active).
-/// - `config`: the `[logging]` section from config.toml.
-/// - `default_level`: fallback level if neither env var nor config is set.
-/// - `log_dir`: resolved log directory path.
+/// Initialize tracing with optional file logging and stderr output.
 pub fn init_tracing(
     log_file: bool,
     json: bool,
@@ -24,14 +18,7 @@ pub fn init_tracing(
     default_level: &str,
     log_dir: PathBuf,
 ) -> LogGuard {
-    // Priority: MOLD_LOG env > config level > default_level
-    let filter_str = std::env::var("MOLD_LOG").unwrap_or_else(|_| {
-        if config.level.is_empty() {
-            default_level.to_string()
-        } else {
-            config.level.clone()
-        }
-    });
+    let filter_str = resolve_filter(config, default_level);
     let file_enabled = log_file || config.file;
 
     let mut file_guard: Option<WorkerGuard> = None;
@@ -46,8 +33,6 @@ pub fn init_tracing(
         let stderr_filter = make_filter(&filter_str, default_level);
         let file_filter = make_filter(&filter_str, default_level);
 
-        // Both layers use text format for type compatibility.
-        // File layer disables ANSI escape codes.
         let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
@@ -77,6 +62,44 @@ pub fn init_tracing(
     }
 }
 
+/// Initialize tracing with file-only output (no stderr).
+///
+/// Used by the TUI which owns the terminal and cannot have tracing
+/// output on stderr.
+pub fn init_tracing_file_only(
+    config: &LoggingConfig,
+    default_level: &str,
+    log_dir: PathBuf,
+) -> LogGuard {
+    let filter_str = resolve_filter(config, default_level);
+
+    let _ = std::fs::create_dir_all(&log_dir);
+    cleanup_old_logs(&log_dir, config.max_days);
+    let appender = tracing_appender::rolling::daily(&log_dir, "mold-tui");
+    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+
+    let filter = make_filter(&filter_str, default_level);
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .init();
+
+    LogGuard {
+        _file_guard: Some(guard),
+    }
+}
+
+fn resolve_filter(config: &LoggingConfig, default_level: &str) -> String {
+    std::env::var("MOLD_LOG").unwrap_or_else(|_| {
+        if config.level.is_empty() {
+            default_level.to_string()
+        } else {
+            config.level.clone()
+        }
+    })
+}
+
 fn make_filter(filter_str: &str, default_level: &str) -> EnvFilter {
     EnvFilter::try_new(filter_str).unwrap_or_else(|_| EnvFilter::new(default_level))
 }
@@ -102,7 +125,7 @@ fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
             .and_then(|f| f.to_str())
             .unwrap_or_default();
 
-        if !filename.starts_with("mold-server.") {
+        if !filename.starts_with("mold-server.") && !filename.starts_with("mold-tui.") {
             continue;
         }
 

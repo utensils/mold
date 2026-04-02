@@ -548,6 +548,17 @@ async fn run() -> anyhow::Result<()> {
                 log_dir,
             ))
         }
+        #[cfg(feature = "tui")]
+        Commands::Tui { .. } => {
+            // TUI owns the terminal — file-only logging, no stderr output.
+            let config = mold_core::Config::load_or_default();
+            let log_dir = config.resolved_log_dir();
+            Some(mold_server::logging::init_tracing_file_only(
+                &config.logging,
+                "warn",
+                log_dir,
+            ))
+        }
         _ => {
             let filter = tracing_subscriber::EnvFilter::try_from_env("MOLD_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
