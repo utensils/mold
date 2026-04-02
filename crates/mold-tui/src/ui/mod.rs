@@ -126,13 +126,28 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ]
             }
         }
-        View::Gallery => vec![
-            ("1/2/3", "Views"),
-            ("j/k", "Select"),
-            ("Esc", "Back"),
-            ("?", "Help"),
-            ("q", "Quit"),
-        ],
+        View::Gallery => {
+            if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
+                vec![
+                    ("e", "Edit"),
+                    ("r", "Regen"),
+                    ("d", "Delete"),
+                    ("o/Enter", "Open"),
+                    ("j/k", "Prev/Next"),
+                    ("Esc", "Grid"),
+                ]
+            } else {
+                vec![
+                    ("hjkl", "Navigate"),
+                    ("Enter", "Details"),
+                    ("e", "Edit"),
+                    ("d", "Delete"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
+            }
+        }
         View::Models => vec![
             ("1/2/3", "Views"),
             ("Enter", "Select"),

@@ -9,6 +9,7 @@ mod gallery_scan;
 mod history;
 mod model_info;
 mod session;
+mod thumbnails;
 mod ui;
 
 use std::io;

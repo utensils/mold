@@ -75,10 +75,12 @@ Navigate to Parameters with **Tab** or click, then:
 - **+**/**-** or left/right to adjust numeric values
 - **Enter** or click to activate a field:
   - **Model** — opens the fuzzy model selector
-  - **Seed** — opens seed value input popup
+  - **Seed** (mode row) — cycles random / fixed / increment
+  - **Seed** (value row) — opens seed value input popup
   - **Format** / **Mode** / **Expand** / **Offload** — toggles the value
   - **Scheduler** — cycles through Ddim, Euler Ancestral, UniPC
   - **Reset** — restores all parameters to model defaults (keeps prompt)
+  - **Unload** — unloads the model from GPU to free memory
 
 ### Seed Modes
 
@@ -90,7 +92,7 @@ Cycle with **Ctrl+R** or **+/-** on the Seed field:
 | fixed     | Same seed every time (reproducibility) |
 | increment | Seed +1 after each generation          |
 
-Press **Enter** on Seed to type an exact value.
+Press **Enter** on the Seed value row to type an exact value.
 
 ### Model Selector
 
@@ -126,15 +128,40 @@ The prompt editor supports standard emacs/shell keybindings:
 
 ## Gallery View
 
-Browse generated images from the current directory and `MOLD_OUTPUT_DIR`. Reads
-PNG metadata (prompt, model, seed) from mold-generated files. All `.png`/`.jpg`
-files are shown for future img2img selection.
+Browse generated images stored in `~/.mold/gallery/` (or `MOLD_OUTPUT_DIR`).
+Images are displayed as a thumbnail grid with cached 256x256 thumbnails for fast
+loading. Only PNG files with embedded `mold:parameters` metadata are shown.
 
-| Key   | Action                               |
-| ----- | ------------------------------------ |
-| j/k   | Navigate the history list            |
-| Enter | Re-generate with the same parameters |
-| Esc   | Back to Generate                     |
+### Grid Mode
+
+| Key        | Action                    |
+| ---------- | ------------------------- |
+| h/j/k/l    | Navigate the grid         |
+| Arrow keys | Navigate the grid         |
+| Enter      | Open detail view          |
+| e          | Load into Generate (edit) |
+| d          | Delete image (with confirmation) |
+| o          | Open in system viewer     |
+| Esc        | Back to Generate          |
+
+### Detail Mode
+
+Press **Enter** on a grid thumbnail to see the full image with all metadata.
+
+| Key   | Action                    |
+| ----- | ------------------------- |
+| e     | Load into Generate (edit) |
+| r     | Regenerate immediately    |
+| d     | Delete image              |
+| o     | Open in system viewer     |
+| j/k   | Previous / next image     |
+| Esc   | Back to grid              |
+
+### Thumbnails
+
+Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated
+automatically on first scan and after each generation. Delete the cache
+directory to force regeneration.
 
 ## Models View
 
@@ -184,7 +211,8 @@ views.
 - Click tabs to switch views
 - Click panels to focus them
 - Click parameter rows to select and activate
-- Click gallery/model rows to select
+- Click gallery thumbnails to select, double-click for detail view
+- Click model rows to select
 - Scroll wheel navigates lists and popups
 
 ## Session Persistence
@@ -197,8 +225,14 @@ restored on next launch:
 - All generation parameters (dimensions, steps, guidance, seed mode, batch,
   format, scheduler, lora, expand, offload, strength)
 
-Use **Reset** at the bottom of Parameters to restore model defaults without
-losing your prompt.
+Use **Reset** in the Actions section of Parameters to restore model defaults
+without losing your prompt. **Unload** frees GPU memory by unloading the active
+model.
+
+Generated images are saved to `~/.mold/gallery/` by default (override with
+`MOLD_OUTPUT_DIR` env var or `output_dir` in config). All images include embedded
+PNG metadata that preserves the full generation parameters, making them portable
+across machines.
 
 ## Info Panel
 

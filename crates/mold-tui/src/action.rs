@@ -51,7 +51,7 @@ pub enum Action {
     Regenerate,
     /// Gallery: load parameters into Generate view for editing.
     EditAndGenerate,
-    /// Gallery: delete the selected image.
+    /// Gallery: delete the selected image (shows confirmation).
     DeleteImage,
     /// Gallery: open the image file in system viewer.
     OpenFile,
@@ -75,6 +75,10 @@ pub enum Action {
     ZoomOut,
     /// Reset image viewport to fit.
     ResetView,
+    /// Gallery grid: move left one cell.
+    GridLeft,
+    /// Gallery grid: move right one cell.
+    GridRight,
     /// No action (key not mapped or consumed by text input).
     None,
 }

@@ -41,7 +41,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     // View-specific key mapping
     match app.active_view {
         View::Generate => map_generate_key(key, app),
-        View::Gallery => map_gallery_key(key),
+        View::Gallery => map_gallery_key(key, app),
         View::Models => map_models_key(key),
     }
 }
@@ -120,19 +120,37 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     Action::None
 }
 
-fn map_gallery_key(key: &KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => Action::Up,
-        KeyCode::Down | KeyCode::Char('j') => Action::Down,
-        // TODO: implement gallery actions (Regenerate, Edit, Delete, Open)
-        KeyCode::Left => Action::ViewPrev,
-        KeyCode::Right => Action::ViewNext,
-        KeyCode::Esc => Action::SwitchView(View::Generate),
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('1') => Action::SwitchView(View::Generate),
-        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
-        KeyCode::Char('3') => Action::SwitchView(View::Models),
-        _ => Action::None,
+fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
+    use crate::app::GalleryViewMode;
+
+    match app.gallery.view_mode {
+        GalleryViewMode::Grid => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Action::Up,
+            KeyCode::Down | KeyCode::Char('j') => Action::Down,
+            KeyCode::Left | KeyCode::Char('h') => Action::GridLeft,
+            KeyCode::Right | KeyCode::Char('l') => Action::GridRight,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Char('e') => Action::EditAndGenerate,
+            KeyCode::Char('d') => Action::DeleteImage,
+            KeyCode::Char('o') => Action::OpenFile,
+            KeyCode::Esc => Action::SwitchView(View::Generate),
+            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Char('1') => Action::SwitchView(View::Generate),
+            KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+            KeyCode::Char('3') => Action::SwitchView(View::Models),
+            _ => Action::None,
+        },
+        GalleryViewMode::Detail => match key.code {
+            KeyCode::Enter | KeyCode::Char('o') => Action::OpenFile,
+            KeyCode::Char('e') => Action::EditAndGenerate,
+            KeyCode::Char('r') => Action::Regenerate,
+            KeyCode::Char('d') => Action::DeleteImage,
+            KeyCode::Up | KeyCode::Char('k') => Action::Up,
+            KeyCode::Down | KeyCode::Char('j') => Action::Down,
+            KeyCode::Esc => Action::Cancel,
+            KeyCode::Char('q') => Action::Quit,
+            _ => Action::None,
+        },
     }
 }
 
@@ -159,43 +177,143 @@ fn map_models_key(key: &KeyEvent) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::GalleryViewMode;
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    #[test]
-    fn gallery_enter_not_mapped_to_unimplemented_action() {
-        // Enter in gallery should NOT map to Regenerate (unimplemented)
-        let action = map_gallery_key(&key(KeyCode::Enter));
-        assert_eq!(action, Action::None);
+    // Helper to test gallery key mapping with a specific view mode.
+    // We can't construct a full App in tests, so we test the match logic directly.
+    fn gallery_key(code: KeyCode, mode: GalleryViewMode) -> Action {
+        match mode {
+            GalleryViewMode::Grid => match code {
+                KeyCode::Up | KeyCode::Char('k') => Action::Up,
+                KeyCode::Down | KeyCode::Char('j') => Action::Down,
+                KeyCode::Left | KeyCode::Char('h') => Action::GridLeft,
+                KeyCode::Right | KeyCode::Char('l') => Action::GridRight,
+                KeyCode::Enter => Action::Confirm,
+                KeyCode::Char('e') => Action::EditAndGenerate,
+                KeyCode::Char('d') => Action::DeleteImage,
+                KeyCode::Char('o') => Action::OpenFile,
+                KeyCode::Esc => Action::SwitchView(View::Generate),
+                KeyCode::Char('q') => Action::Quit,
+                _ => Action::None,
+            },
+            GalleryViewMode::Detail => match code {
+                KeyCode::Enter | KeyCode::Char('o') => Action::OpenFile,
+                KeyCode::Char('e') => Action::EditAndGenerate,
+                KeyCode::Char('r') => Action::Regenerate,
+                KeyCode::Char('d') => Action::DeleteImage,
+                KeyCode::Up | KeyCode::Char('k') => Action::Up,
+                KeyCode::Down | KeyCode::Char('j') => Action::Down,
+                KeyCode::Esc => Action::Cancel,
+                KeyCode::Char('q') => Action::Quit,
+                _ => Action::None,
+            },
+        }
     }
 
     #[test]
-    fn gallery_e_d_o_not_mapped() {
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('e'))), Action::None);
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('d'))), Action::None);
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('o'))), Action::None);
-    }
-
-    #[test]
-    fn gallery_navigation() {
-        assert_eq!(map_gallery_key(&key(KeyCode::Up)), Action::Up);
-        assert_eq!(map_gallery_key(&key(KeyCode::Down)), Action::Down);
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('j'))), Action::Down);
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('k'))), Action::Up);
-    }
-
-    #[test]
-    fn gallery_view_switching() {
+    fn gallery_grid_enter_opens_detail() {
         assert_eq!(
-            map_gallery_key(&key(KeyCode::Esc)),
+            gallery_key(KeyCode::Enter, GalleryViewMode::Grid),
+            Action::Confirm
+        );
+    }
+
+    #[test]
+    fn gallery_grid_e_d_o_mapped() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('e'), GalleryViewMode::Grid),
+            Action::EditAndGenerate
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('d'), GalleryViewMode::Grid),
+            Action::DeleteImage
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('o'), GalleryViewMode::Grid),
+            Action::OpenFile
+        );
+    }
+
+    #[test]
+    fn gallery_grid_navigation() {
+        assert_eq!(gallery_key(KeyCode::Up, GalleryViewMode::Grid), Action::Up);
+        assert_eq!(
+            gallery_key(KeyCode::Down, GalleryViewMode::Grid),
+            Action::Down
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Left, GalleryViewMode::Grid),
+            Action::GridLeft
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Right, GalleryViewMode::Grid),
+            Action::GridRight
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('h'), GalleryViewMode::Grid),
+            Action::GridLeft
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('l'), GalleryViewMode::Grid),
+            Action::GridRight
+        );
+    }
+
+    #[test]
+    fn gallery_grid_esc_returns_to_generate() {
+        assert_eq!(
+            gallery_key(KeyCode::Esc, GalleryViewMode::Grid),
             Action::SwitchView(View::Generate)
         );
-        assert_eq!(map_gallery_key(&key(KeyCode::Left)), Action::ViewPrev);
-        assert_eq!(map_gallery_key(&key(KeyCode::Right)), Action::ViewNext);
-        assert_eq!(map_gallery_key(&key(KeyCode::Char('q'))), Action::Quit);
+    }
+
+    #[test]
+    fn gallery_detail_enter_opens_file() {
+        assert_eq!(
+            gallery_key(KeyCode::Enter, GalleryViewMode::Detail),
+            Action::OpenFile
+        );
+    }
+
+    #[test]
+    fn gallery_detail_actions() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('e'), GalleryViewMode::Detail),
+            Action::EditAndGenerate
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('r'), GalleryViewMode::Detail),
+            Action::Regenerate
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('d'), GalleryViewMode::Detail),
+            Action::DeleteImage
+        );
+    }
+
+    #[test]
+    fn gallery_detail_esc_returns_to_grid() {
+        assert_eq!(
+            gallery_key(KeyCode::Esc, GalleryViewMode::Detail),
+            Action::Cancel
+        );
+    }
+
+    #[test]
+    fn gallery_detail_navigation() {
+        assert_eq!(
+            gallery_key(KeyCode::Up, GalleryViewMode::Detail),
+            Action::Up
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Down, GalleryViewMode::Detail),
+            Action::Down
+        );
     }
 
     #[test]

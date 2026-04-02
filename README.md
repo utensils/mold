@@ -156,13 +156,14 @@ mold tui
 Features:
 - **Three views** — Generate, Gallery, Models (switch with Esc + 1/2/3, arrows, or click)
 - **Live image preview** — Kitty, Sixel, iTerm2, or halfblock auto-detected
+- **Gallery grid** — thumbnail grid with cached previews, detail view with full metadata, edit/regenerate/delete actions
 - **Auto-start server** — background `mold serve` keeps models hot between generations
 - **Model selector** — fuzzy-filtered popup (Ctrl+M or Enter on Model field)
 - **Auto-pull** — generates with any model, auto-downloads if not installed
 - **Prompt history** — Up/Down arrows or `/` for fuzzy search, persisted across sessions
 - **Session persistence** — all settings saved and restored on next launch
 - **Shell keybindings** — Ctrl+A/E/K/U/W in prompt fields
-- **Mouse support** — click panels, tabs, parameters; scroll wheel in lists
+- **Mouse support** — click panels, tabs, parameters, gallery thumbnails; scroll wheel in lists
 - **Real-time progress** — stage completion, denoising gauge, download bars
 - **Info panel** — model details, system memory, process memory (mmap-aware)
 

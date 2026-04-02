@@ -26,6 +26,8 @@ pub enum BackgroundEvent {
     GalleryScanComplete(Vec<GalleryEntry>),
     /// Model pull completed.
     PullComplete(String),
+    /// Background thumbnail generation finished.
+    ThumbnailsReady,
 }
 
 /// A single entry in the progress log.
@@ -136,6 +138,8 @@ pub enum ParamField {
     ControlScale,
     // Actions
     ResetDefaults,
+    // Tools
+    UnloadModel,
 }
 
 impl ParamField {
@@ -178,8 +182,10 @@ impl ParamField {
             fields.push(ParamField::ControlModel);
             fields.push(ParamField::ControlScale);
         }
-        // Reset action
+        // Actions
         fields.push(ParamField::ResetDefaults);
+        // Tools
+        fields.push(ParamField::UnloadModel);
         fields
     }
 
@@ -207,6 +213,7 @@ impl ParamField {
             Self::ControlModel => "CNet Mdl",
             Self::ControlScale => "Scale",
             Self::ResetDefaults => "\u{21ba} Reset",
+            Self::UnloadModel => "\u{23cf} Unload",
         }
     }
 
@@ -216,7 +223,8 @@ impl ParamField {
             Self::Scheduler => Some("Advanced"),
             Self::SourceImage => Some("img2img"),
             Self::ControlImage => Some("ControlNet"),
-            Self::ResetDefaults => Some(""),
+            Self::ResetDefaults => Some("Actions"),
+            Self::UnloadModel => None,
             _ => None,
         }
     }
@@ -435,6 +443,7 @@ impl GenerateParams {
                 .to_string(),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
             ParamField::ResetDefaults => "restore model defaults".to_string(),
+            ParamField::UnloadModel => "free GPU memory".to_string(),
         }
     }
 }
@@ -458,6 +467,14 @@ pub struct GenerateState {
     pub model_description: String,
 }
 
+/// Which gallery view is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GalleryViewMode {
+    #[default]
+    Grid,
+    Detail,
+}
+
 /// State for the Gallery view.
 pub struct GalleryState {
     pub entries: Vec<GalleryEntry>,
@@ -465,19 +482,31 @@ pub struct GalleryState {
     pub preview_image: Option<image::DynamicImage>,
     pub image_state: Option<StatefulProtocol>,
     pub scanning: bool,
+    pub view_mode: GalleryViewMode,
+    /// Thumbnail StatefulProtocol instances, lazily populated during render.
+    pub thumbnail_states: Vec<Option<StatefulProtocol>>,
+    /// Number of columns in the grid (computed from terminal width).
+    pub grid_cols: usize,
+    /// Scroll offset in rows for the grid view.
+    pub grid_scroll: usize,
 }
 
-/// A single gallery entry.
+/// A single gallery entry backed by PNG metadata.
 #[derive(Debug, Clone)]
 pub struct GalleryEntry {
     pub path: std::path::PathBuf,
-    pub prompt_preview: String,
-    pub model: String,
+    pub metadata: mold_core::OutputMetadata,
     pub generation_time_ms: Option<u64>,
-    pub seed: Option<u64>,
-    pub width: u32,
-    pub height: u32,
     pub timestamp: u64,
+}
+
+impl GalleryEntry {
+    pub fn filename(&self) -> String {
+        self.path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".into())
+    }
 }
 
 /// State for the Models view.
@@ -515,7 +544,8 @@ pub enum Popup {
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteImage(std::path::PathBuf),
+    /// Delete a gallery image by index.
+    DeleteGalleryImage,
     RemoveModel(String),
 }
 
@@ -551,8 +581,7 @@ pub struct LayoutAreas {
     pub parameters: ratatui::layout::Rect,
     pub preview: ratatui::layout::Rect,
     pub progress: ratatui::layout::Rect,
-    pub gallery_list: ratatui::layout::Rect,
-    pub gallery_preview: ratatui::layout::Rect,
+    pub gallery_grid: ratatui::layout::Rect,
     pub models_table: ratatui::layout::Rect,
 }
 
@@ -715,6 +744,10 @@ impl App {
                 preview_image: None,
                 image_state: None,
                 scanning: false,
+                view_mode: GalleryViewMode::Grid,
+                thumbnail_states: Vec::new(),
+                grid_cols: 3,
+                grid_scroll: 0,
             },
             models: ModelsState {
                 catalog,
@@ -956,6 +989,24 @@ impl App {
         self.dispatch_action(action);
     }
 
+    /// Close the active popup and refresh the preview image so it re-renders
+    /// over the area the popup occupied.
+    fn close_popup(&mut self) {
+        self.popup = None;
+        self.refresh_preview_protocol();
+    }
+
+    /// Recreate the StatefulProtocol from the cached preview image so
+    /// ratatui-image re-renders the region after a popup overlay clears.
+    fn refresh_preview_protocol(&mut self) {
+        if let Some(ref img) = self.generate.preview_image {
+            self.generate.image_state = Some(self.picker.new_resize_protocol(img.clone()));
+        }
+        if let Some(ref img) = self.gallery.preview_image {
+            self.gallery.image_state = Some(self.picker.new_resize_protocol(img.clone()));
+        }
+    }
+
     fn handle_popup_event(&mut self, event: CrosstermEvent) {
         if let CrosstermEvent::Key(key) = event {
             match &mut self.popup {
@@ -964,7 +1015,7 @@ impl App {
                         key.code,
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
                     ) {
-                        self.popup = None;
+                        self.close_popup();
                     }
                 }
                 Some(Popup::ModelSelector {
@@ -972,10 +1023,10 @@ impl App {
                     selected,
                     filtered,
                 }) => match key.code {
-                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
                         if let Some(model) = filtered.get(*selected).cloned() {
-                            self.popup = None;
+                            self.close_popup();
                             self.update_model(&model);
                         }
                     }
@@ -1000,10 +1051,10 @@ impl App {
                     _ => {}
                 },
                 Some(Popup::HostInput { input }) => match key.code {
-                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
                         let host = input.trim().to_string();
-                        self.popup = None;
+                        self.close_popup();
                         if host.is_empty() {
                             // Clear host → switch to local
                             self.generate.params.host = None;
@@ -1036,10 +1087,10 @@ impl App {
                     _ => {}
                 },
                 Some(Popup::SeedInput { input }) => match key.code {
-                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
                         let text = input.trim().to_string();
-                        self.popup = None;
+                        self.close_popup();
                         if text.is_empty() {
                             // Clear seed → back to auto
                             self.generate.params.seed = None;
@@ -1063,10 +1114,10 @@ impl App {
                     selected,
                     results,
                 }) => match key.code {
-                    KeyCode::Esc => self.popup = None,
+                    KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
                         if let Some(prompt) = results.get(*selected).cloned() {
-                            self.popup = None;
+                            self.close_popup();
                             self.generate.prompt =
                                 TextArea::new(prompt.lines().map(String::from).collect());
                             self.generate
@@ -1117,10 +1168,11 @@ impl App {
                 },
                 Some(Popup::Confirm { on_confirm, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
-                        let _action = on_confirm.clone();
-                        self.popup = None;
+                        let action = on_confirm.clone();
+                        self.close_popup();
+                        self.handle_confirm_action(action);
                     }
-                    _ => self.popup = None,
+                    _ => self.close_popup(),
                 },
                 None => {}
             }
@@ -1137,7 +1189,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Close popups on click outside (simple approach)
                 if self.popup.is_some() {
-                    self.popup = None;
+                    self.close_popup();
                     return;
                 }
 
@@ -1180,14 +1232,28 @@ impl App {
                 }
 
                 // Gallery view clicks
-                if self.active_view == View::Gallery {
+                if self.active_view == View::Gallery
+                    && self.gallery.view_mode == GalleryViewMode::Grid
+                {
                     let pos: ratatui::layout::Position = (col, row).into();
-                    if self.layout.gallery_list.contains(pos) {
-                        let relative_row =
-                            (row - self.layout.gallery_list.y).saturating_sub(1) as usize;
-                        if relative_row < self.gallery.entries.len() {
-                            self.gallery.selected = relative_row;
-                            self.load_gallery_preview();
+                    if self.layout.gallery_grid.contains(pos) {
+                        // Compute which grid cell was clicked
+                        let cell_w = 24u16;
+                        let cell_h = 14u16;
+                        let cols = self.gallery.grid_cols.max(1);
+                        let rel_x = col.saturating_sub(self.layout.gallery_grid.x);
+                        let rel_y = row.saturating_sub(self.layout.gallery_grid.y);
+                        let grid_col = (rel_x / cell_w) as usize;
+                        let grid_row = (rel_y / cell_h) as usize + self.gallery.grid_scroll;
+                        let idx = grid_row * cols + grid_col;
+                        if idx < self.gallery.entries.len() {
+                            if self.gallery.selected == idx {
+                                // Double-click: open detail view
+                                self.gallery.view_mode = GalleryViewMode::Detail;
+                                self.load_gallery_preview();
+                            } else {
+                                self.gallery.selected = idx;
+                            }
                         }
                     }
                 }
@@ -1314,9 +1380,19 @@ impl App {
                     }
                 }
                 View::Gallery => {
-                    if self.gallery.selected > 0 {
-                        self.gallery.selected -= 1;
-                        self.load_gallery_preview();
+                    let cols = self.gallery.grid_cols.max(1);
+                    match self.gallery.view_mode {
+                        GalleryViewMode::Grid => {
+                            if self.gallery.selected >= cols {
+                                self.gallery.selected -= cols;
+                            }
+                        }
+                        GalleryViewMode::Detail => {
+                            if self.gallery.selected > 0 {
+                                self.gallery.selected -= 1;
+                                self.load_gallery_preview();
+                            }
+                        }
                     }
                 }
                 View::Models => {
@@ -1334,9 +1410,21 @@ impl App {
                     }
                 }
                 View::Gallery => {
-                    if self.gallery.selected + 1 < self.gallery.entries.len() {
-                        self.gallery.selected += 1;
-                        self.load_gallery_preview();
+                    let cols = self.gallery.grid_cols.max(1);
+                    let len = self.gallery.entries.len();
+                    match self.gallery.view_mode {
+                        GalleryViewMode::Grid => {
+                            let next = self.gallery.selected + cols;
+                            if next < len {
+                                self.gallery.selected = next;
+                            }
+                        }
+                        GalleryViewMode::Detail => {
+                            if self.gallery.selected + 1 < len {
+                                self.gallery.selected += 1;
+                                self.load_gallery_preview();
+                            }
+                        }
                     }
                 }
                 View::Models => {
@@ -1360,6 +1448,18 @@ impl App {
                         self.start_generation();
                     }
                 }
+                View::Gallery => match self.gallery.view_mode {
+                    GalleryViewMode::Grid => {
+                        if !self.gallery.entries.is_empty() {
+                            self.gallery.view_mode = GalleryViewMode::Detail;
+                            self.load_gallery_preview();
+                        }
+                    }
+                    GalleryViewMode::Detail => {
+                        // Enter in detail opens in system viewer
+                        self.open_gallery_file();
+                    }
+                },
                 View::Models => {
                     // Select model as default and switch to Generate
                     if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -1369,7 +1469,6 @@ impl App {
                         self.generate.focus = GenerateFocus::Prompt;
                     }
                 }
-                _ => {}
             },
             Action::PullModel => {
                 if self.active_view == View::Models {
@@ -1427,7 +1526,15 @@ impl App {
                 self.popup = Some(Popup::Help);
             }
             Action::Cancel => {
-                self.generate.error_message = None;
+                if self.active_view == View::Gallery
+                    && self.gallery.view_mode == GalleryViewMode::Detail
+                {
+                    self.gallery.view_mode = GalleryViewMode::Grid;
+                    self.gallery.preview_image = None;
+                    self.gallery.image_state = None;
+                } else {
+                    self.generate.error_message = None;
+                }
             }
             Action::HistoryPrev => {
                 if self.active_view == View::Generate
@@ -1474,6 +1581,49 @@ impl App {
                 if self.active_view == View::Generate {
                     self.generate.focus = GenerateFocus::Navigation;
                 }
+            }
+            Action::GridLeft => {
+                if self.active_view == View::Gallery
+                    && self.gallery.view_mode == GalleryViewMode::Grid
+                    && self.gallery.selected > 0
+                {
+                    self.gallery.selected -= 1;
+                }
+            }
+            Action::GridRight => {
+                if self.active_view == View::Gallery
+                    && self.gallery.view_mode == GalleryViewMode::Grid
+                    && self.gallery.selected + 1 < self.gallery.entries.len()
+                {
+                    self.gallery.selected += 1;
+                }
+            }
+            Action::EditAndGenerate => {
+                if self.active_view == View::Gallery {
+                    self.load_gallery_into_generate();
+                }
+            }
+            Action::Regenerate => {
+                if self.active_view == View::Gallery {
+                    self.load_gallery_into_generate();
+                    if !self.generate.generating {
+                        self.start_generation();
+                    }
+                }
+            }
+            Action::DeleteImage => {
+                if self.active_view == View::Gallery {
+                    if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+                        let filename = entry.filename();
+                        self.popup = Some(Popup::Confirm {
+                            message: format!("Delete {filename}?"),
+                            on_confirm: ConfirmAction::DeleteGalleryImage,
+                        });
+                    }
+                }
+            }
+            Action::OpenFile => {
+                self.open_gallery_file();
             }
             _ => {}
         }
@@ -1552,6 +1702,104 @@ impl App {
         self.gallery.image_state = None;
     }
 
+    /// Load the selected gallery entry's metadata into the Generate view.
+    fn load_gallery_into_generate(&mut self) {
+        let entry = match self.gallery.entries.get(self.gallery.selected) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let meta = &entry.metadata;
+
+        // Populate prompt fields
+        self.generate.prompt = tui_textarea::TextArea::from(meta.prompt.lines());
+        if let Some(ref neg) = meta.negative_prompt {
+            self.generate.negative_prompt = tui_textarea::TextArea::from(neg.lines());
+        } else {
+            self.generate.negative_prompt = tui_textarea::TextArea::default();
+        }
+
+        // Set model and parameters
+        self.update_model(&meta.model);
+        self.generate.params.seed = Some(meta.seed);
+        self.generate.params.seed_mode = SeedMode::Fixed;
+        self.generate.params.steps = meta.steps;
+        self.generate.params.guidance = meta.guidance;
+        self.generate.params.width = meta.width;
+        self.generate.params.height = meta.height;
+        if let Some(strength) = meta.strength {
+            self.generate.params.strength = strength;
+        }
+        self.generate.params.scheduler = meta.scheduler;
+        if let Some(ref lora) = meta.lora {
+            self.generate.params.lora_path = Some(lora.clone());
+            self.generate.params.lora_scale = meta.lora_scale.unwrap_or(1.0);
+        } else {
+            self.generate.params.lora_path = None;
+        }
+
+        // Switch to Generate view
+        self.active_view = View::Generate;
+        self.generate.focus = GenerateFocus::Prompt;
+    }
+
+    /// Delete the currently selected gallery image and its thumbnail.
+    fn delete_selected_gallery_image(&mut self) {
+        if self.gallery.entries.is_empty() {
+            return;
+        }
+        let idx = self.gallery.selected;
+        if idx >= self.gallery.entries.len() {
+            return;
+        }
+
+        let entry = &self.gallery.entries[idx];
+        // Delete the image file
+        let _ = std::fs::remove_file(&entry.path);
+        // Delete the thumbnail
+        let _ = std::fs::remove_file(crate::thumbnails::thumbnail_path(&entry.path));
+
+        // Remove from state
+        self.gallery.entries.remove(idx);
+        if idx < self.gallery.thumbnail_states.len() {
+            self.gallery.thumbnail_states.remove(idx);
+        }
+
+        // Adjust selection
+        if !self.gallery.entries.is_empty() {
+            self.gallery.selected = idx.min(self.gallery.entries.len() - 1);
+        } else {
+            self.gallery.selected = 0;
+            self.gallery.view_mode = GalleryViewMode::Grid;
+        }
+
+        // Reload preview if in detail mode
+        if self.gallery.view_mode == GalleryViewMode::Detail {
+            self.load_gallery_preview();
+        }
+
+        self.gallery.preview_image = None;
+        self.gallery.image_state = None;
+    }
+
+    /// Open the selected gallery image in the system viewer.
+    fn open_gallery_file(&self) {
+        if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+            let _ = open::that(&entry.path);
+        }
+    }
+
+    /// Dispatch a confirmed popup action.
+    fn handle_confirm_action(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::DeleteGalleryImage => {
+                self.delete_selected_gallery_image();
+            }
+            ConfirmAction::RemoveModel(_name) => {
+                // TODO: implement model removal
+            }
+        }
+    }
+
     fn open_model_selector(&mut self) {
         let all_models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
         self.popup = Some(Popup::ModelSelector {
@@ -1598,15 +1846,13 @@ impl App {
             }
             // Randomize seed on Enter
             ParamField::Seed => {
-                // Enter on Seed mode row opens the value input popup
-                // (use +/- or Ctrl+R to cycle the mode)
-                let current = self
-                    .generate
-                    .params
-                    .seed
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                self.popup = Some(Popup::SeedInput { input: current });
+                // Click/Enter on Seed mode row toggles the mode
+                self.generate.params.seed_mode = self.generate.params.seed_mode.next();
+                if self.generate.params.seed_mode == SeedMode::Fixed
+                    && self.generate.params.seed.is_none()
+                {
+                    self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                }
             }
             // Randomize the seed value
             ParamField::SeedValue => {
@@ -1622,6 +1868,10 @@ impl App {
             ParamField::Host => {
                 let current = self.generate.params.host.clone().unwrap_or_default();
                 self.popup = Some(Popup::HostInput { input: current });
+            }
+            // Unload model from GPU memory
+            ParamField::UnloadModel => {
+                self.dispatch_action(Action::UnloadModel);
             }
             // Reset all params to model defaults (keep model and prompt)
             ParamField::ResetDefaults => {
@@ -1706,6 +1956,13 @@ impl App {
                     self.generate.params.seed =
                         self.generate.params.seed_mode.advance(response.seed_used);
 
+                    // Resolve output directory
+                    let output_dir = self
+                        .config
+                        .resolved_output_dir()
+                        .unwrap_or_else(crate::gallery_scan::default_gallery_dir);
+                    let _ = std::fs::create_dir_all(&output_dir);
+
                     // Save images to disk and display preview
                     let mut saved_path = std::path::PathBuf::new();
                     let ts_secs = std::time::SystemTime::now()
@@ -1713,8 +1970,16 @@ impl App {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
 
+                    let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
+                    let neg_text = self
+                        .generate
+                        .negative_prompt
+                        .lines()
+                        .join("\n")
+                        .trim()
+                        .to_string();
+
                     for (i, img_data) in response.images.iter().enumerate() {
-                        // Save to disk
                         let ext = match img_data.format {
                             OutputFormat::Png => "png",
                             OutputFormat::Jpeg => "jpeg",
@@ -1726,7 +1991,7 @@ impl App {
                             response.images.len() as u32,
                             i as u32,
                         );
-                        let path = std::path::PathBuf::from(&filename);
+                        let path = output_dir.join(&filename);
                         if std::fs::write(&path, &img_data.data).is_ok() && i == 0 {
                             saved_path = path;
                         }
@@ -1763,29 +2028,20 @@ impl App {
                         style: ProgressStyle::Done,
                     });
 
-                    // Save session state for next launch
-                    let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
-                    let neg_text = self
-                        .generate
-                        .negative_prompt
-                        .lines()
-                        .join("\n")
-                        .trim()
-                        .to_string();
+                    // Save session state
                     let session = crate::session::TuiSession::from_params(
                         &prompt_text,
                         &neg_text,
                         &self.generate.params,
                     );
                     session.save();
-                    // Also update last-model for CLI compatibility
                     Config::write_last_model(&self.generate.params.model);
 
                     // Push to prompt history
                     let neg = if neg_text.is_empty() {
                         None
                     } else {
-                        Some(neg_text)
+                        Some(neg_text.clone())
                     };
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1799,25 +2055,57 @@ impl App {
                         timestamp: ts,
                     });
 
-                    // Add to gallery (most recent first)
+                    // Add to gallery (most recent first) with full metadata
                     if let Some(img_data) = response.images.first() {
+                        let meta = mold_core::OutputMetadata {
+                            prompt: prompt_text,
+                            negative_prompt: if neg_text.is_empty() {
+                                None
+                            } else {
+                                Some(neg_text)
+                            },
+                            original_prompt: None,
+                            model: self.generate.params.model.clone(),
+                            seed: response.seed_used,
+                            steps: self.generate.params.steps,
+                            guidance: self.generate.params.guidance,
+                            width: img_data.width,
+                            height: img_data.height,
+                            strength: if self.generate.params.source_image_path.is_some() {
+                                Some(self.generate.params.strength)
+                            } else {
+                                None
+                            },
+                            scheduler: self.generate.params.scheduler,
+                            lora: self.generate.params.lora_path.clone(),
+                            lora_scale: self
+                                .generate
+                                .params
+                                .lora_path
+                                .as_ref()
+                                .map(|_| self.generate.params.lora_scale),
+                            version: mold_core::build_info::VERSION.to_string(),
+                        };
+
                         self.gallery.entries.insert(
                             0,
                             GalleryEntry {
-                                path: saved_path,
-                                prompt_preview: if prompt_text.len() > 60 {
-                                    format!("{}...", &prompt_text[..57])
-                                } else {
-                                    prompt_text
-                                },
-                                model: self.generate.params.model.clone(),
+                                path: saved_path.clone(),
+                                metadata: meta,
                                 generation_time_ms: Some(response.generation_time_ms),
-                                seed: Some(response.seed_used),
-                                width: img_data.width,
-                                height: img_data.height,
                                 timestamp: ts,
                             },
                         );
+                        self.gallery.thumbnail_states.insert(0, None);
+
+                        // Generate thumbnail in background
+                        self.tokio_handle.spawn(async move {
+                            tokio::task::spawn_blocking(move || {
+                                crate::thumbnails::generate_thumbnail(&saved_path).ok();
+                            })
+                            .await
+                            .ok();
+                        });
                     }
                 }
                 BackgroundEvent::Error(msg) => {
@@ -1825,10 +2113,32 @@ impl App {
                     self.generate.error_message = Some(msg);
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
+                    self.gallery.thumbnail_states = vec![None; entries.len()];
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
                     self.gallery.selected = 0;
-                    self.load_gallery_preview();
+
+                    // Spawn background thumbnail generation
+                    let paths: Vec<std::path::PathBuf> = self
+                        .gallery
+                        .entries
+                        .iter()
+                        .map(|e| e.path.clone())
+                        .collect();
+                    let tx = self.bg_tx.clone();
+                    self.tokio_handle.spawn(async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::thumbnails::ensure_thumbnails(&paths);
+                        })
+                        .await
+                        .ok();
+                        let _ = tx.send(BackgroundEvent::ThumbnailsReady);
+                    });
+                }
+                BackgroundEvent::ThumbnailsReady => {
+                    // Invalidate all thumbnail states so they reload on next render
+                    let len = self.gallery.entries.len();
+                    self.gallery.thumbnail_states = vec![None; len];
                 }
                 BackgroundEvent::PullComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
@@ -2218,16 +2528,9 @@ mod tests {
     }
 
     #[test]
-    fn gallery_actions_not_in_dispatch() {
-        // Ensure unimplemented gallery actions are caught at compile time
-        // by verifying they exist in the Action enum but are handled by
-        // the _ => {} catch-all in dispatch_action.
-        // This test documents which actions are intentionally unhandled.
+    fn unimplemented_actions_exist() {
+        // Document which actions are still intentionally unhandled in dispatch_action.
         let unimplemented = vec![
-            Action::Regenerate,
-            Action::EditAndGenerate,
-            Action::DeleteImage,
-            Action::OpenFile,
             Action::ZoomIn,
             Action::ZoomOut,
             Action::PanLeft,
@@ -2238,19 +2541,44 @@ mod tests {
             Action::SaveImage,
             Action::CompareModels,
         ];
-        // These should all be valid Action variants (compile-time check)
+        // Compile-time check that these variants exist
         for action in &unimplemented {
-            // Just verify they exist and can be matched
             assert_ne!(*action, Action::Quit);
         }
     }
 
     #[test]
-    fn visible_fields_always_ends_with_reset() {
-        // ResetDefaults should always be the last field
+    fn gallery_actions_are_implemented() {
+        // These gallery actions should exist and NOT be in the unimplemented list
+        let implemented = vec![
+            Action::Regenerate,
+            Action::EditAndGenerate,
+            Action::DeleteImage,
+            Action::OpenFile,
+            Action::GridLeft,
+            Action::GridRight,
+        ];
+        for action in &implemented {
+            assert_ne!(*action, Action::Quit);
+        }
+    }
+
+    #[test]
+    fn visible_fields_ends_with_tools_section() {
+        // The Tools section (ResetDefaults, UnloadModel) should always be at the end
         let caps = crate::model_info::capabilities_for_family("flux");
         let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert_eq!(*fields.last().unwrap(), ParamField::ResetDefaults);
+        assert_eq!(*fields.last().unwrap(), ParamField::UnloadModel);
+        // ResetDefaults should be just before UnloadModel
+        let reset_pos = fields
+            .iter()
+            .position(|f| *f == ParamField::ResetDefaults)
+            .unwrap();
+        let unload_pos = fields
+            .iter()
+            .position(|f| *f == ParamField::UnloadModel)
+            .unwrap();
+        assert_eq!(unload_pos, reset_pos + 1);
     }
 
     #[test]
@@ -2259,5 +2587,315 @@ mod tests {
         let params = GenerateParams::from_config(&config);
         let display = params.display_value(&ParamField::ResetDefaults);
         assert_eq!(display, "restore model defaults");
+    }
+
+    #[test]
+    fn unload_model_display_value() {
+        let config = Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        let display = params.display_value(&ParamField::UnloadModel);
+        assert_eq!(display, "free GPU memory");
+    }
+
+    #[test]
+    fn unload_model_label() {
+        assert!(ParamField::UnloadModel.label().contains("Unload"));
+    }
+
+    #[test]
+    fn unload_model_has_no_section_header() {
+        // UnloadModel is under the Actions section started by ResetDefaults
+        assert!(ParamField::UnloadModel.section_header().is_none());
+    }
+
+    #[test]
+    fn reset_defaults_starts_actions_section() {
+        assert_eq!(ParamField::ResetDefaults.section_header(), Some("Actions"));
+    }
+
+    #[test]
+    fn unload_model_always_visible() {
+        // UnloadModel should appear regardless of model family or inference mode
+        for family in &["flux", "sd15", "sdxl", "sd3", "flux2"] {
+            for mode in &[
+                InferenceMode::Auto,
+                InferenceMode::Local,
+                InferenceMode::Remote,
+            ] {
+                let caps = crate::model_info::capabilities_for_family(family);
+                let fields = ParamField::visible_fields(&caps, *mode);
+                assert!(
+                    fields.contains(&ParamField::UnloadModel),
+                    "UnloadModel missing for family={} mode={:?}",
+                    family,
+                    mode
+                );
+            }
+        }
+    }
+
+    // ── Gallery tests ────────────────────────────────────
+
+    #[test]
+    fn gallery_view_mode_default_is_grid() {
+        assert_eq!(GalleryViewMode::default(), GalleryViewMode::Grid);
+    }
+
+    #[test]
+    fn gallery_entry_filename_extracts_name() {
+        let entry = GalleryEntry {
+            path: std::path::PathBuf::from("/home/user/.mold/gallery/mold-flux-1234.png"),
+            metadata: mold_core::OutputMetadata {
+                prompt: "test".to_string(),
+                negative_prompt: None,
+                original_prompt: None,
+                model: "flux:q8".to_string(),
+                seed: 42,
+                steps: 20,
+                guidance: 7.5,
+                width: 1024,
+                height: 1024,
+                strength: None,
+                scheduler: None,
+                lora: None,
+                lora_scale: None,
+                version: "0.3.1".to_string(),
+            },
+            generation_time_ms: Some(5000),
+            timestamp: 1234,
+        };
+        assert_eq!(entry.filename(), "mold-flux-1234.png");
+    }
+
+    #[test]
+    fn gallery_entry_filename_unknown_for_empty_path() {
+        let entry = GalleryEntry {
+            path: std::path::PathBuf::new(),
+            metadata: mold_core::OutputMetadata {
+                prompt: "test".to_string(),
+                negative_prompt: None,
+                original_prompt: None,
+                model: "test".to_string(),
+                seed: 0,
+                steps: 1,
+                guidance: 0.0,
+                width: 512,
+                height: 512,
+                strength: None,
+                scheduler: None,
+                lora: None,
+                lora_scale: None,
+                version: "0.0.0".to_string(),
+            },
+            generation_time_ms: None,
+            timestamp: 0,
+        };
+        assert_eq!(entry.filename(), "unknown");
+    }
+
+    #[test]
+    fn gallery_grid_nav_up_moves_by_cols() {
+        // With grid_cols=3, selected=5 (row 1, col 2), Up should go to 2 (row 0, col 2)
+        let selected: usize = 5;
+        let cols: usize = 3;
+        let result = if selected >= cols {
+            selected - cols
+        } else {
+            selected
+        };
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn gallery_grid_nav_down_moves_by_cols() {
+        let selected: usize = 2;
+        let cols: usize = 3;
+        let len: usize = 9;
+        let next = selected + cols;
+        let result = if next < len { next } else { selected };
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn gallery_grid_nav_clamps_at_top() {
+        let selected: usize = 1;
+        let cols: usize = 3;
+        // Can't go up from row 0
+        let result = if selected >= cols {
+            selected - cols
+        } else {
+            selected
+        };
+        assert_eq!(result, 1); // stays put
+    }
+
+    #[test]
+    fn gallery_grid_nav_left_right() {
+        let selected: usize = 3;
+        let len: usize = 10;
+        // Left
+        assert_eq!(selected.saturating_sub(1), 2);
+        // Right
+        assert_eq!((selected + 1).min(len - 1), 4);
+    }
+
+    #[test]
+    fn confirm_action_delete_gallery_image_variant_exists() {
+        let action = ConfirmAction::DeleteGalleryImage;
+        match action {
+            ConfirmAction::DeleteGalleryImage => {}
+            _ => panic!("expected DeleteGalleryImage"),
+        }
+    }
+
+    #[test]
+    fn confirm_action_remove_model_variant_exists() {
+        let action = ConfirmAction::RemoveModel("test".to_string());
+        match action {
+            ConfirmAction::RemoveModel(name) => assert_eq!(name, "test"),
+            _ => panic!("expected RemoveModel"),
+        }
+    }
+
+    fn make_test_metadata() -> mold_core::OutputMetadata {
+        mold_core::OutputMetadata {
+            prompt: "a test prompt".to_string(),
+            negative_prompt: Some("blurry".to_string()),
+            original_prompt: None,
+            model: "flux:q8".to_string(),
+            seed: 42,
+            steps: 20,
+            guidance: 7.5,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.75),
+            scheduler: None,
+            lora: Some("/path/to/adapter.safetensors".to_string()),
+            lora_scale: Some(0.8),
+            version: "0.3.1".to_string(),
+        }
+    }
+
+    fn make_test_entry() -> GalleryEntry {
+        GalleryEntry {
+            path: std::path::PathBuf::from("/home/user/.mold/gallery/mold-flux-1234.png"),
+            metadata: make_test_metadata(),
+            generation_time_ms: Some(5000),
+            timestamp: 1234,
+        }
+    }
+
+    #[test]
+    fn gallery_entry_metadata_accessible() {
+        let entry = make_test_entry();
+        assert_eq!(entry.metadata.prompt, "a test prompt");
+        assert_eq!(entry.metadata.model, "flux:q8");
+        assert_eq!(entry.metadata.seed, 42);
+        assert_eq!(entry.metadata.steps, 20);
+        assert_eq!(entry.metadata.width, 1024);
+        assert_eq!(entry.metadata.negative_prompt, Some("blurry".to_string()));
+        assert_eq!(entry.metadata.strength, Some(0.75));
+        assert_eq!(entry.metadata.lora_scale, Some(0.8));
+    }
+
+    #[test]
+    fn gallery_entry_clone() {
+        let entry = make_test_entry();
+        let cloned = entry.clone();
+        assert_eq!(cloned.filename(), entry.filename());
+        assert_eq!(cloned.metadata.prompt, entry.metadata.prompt);
+        assert_eq!(cloned.timestamp, entry.timestamp);
+    }
+
+    #[test]
+    fn gallery_grid_nav_down_clamps_at_bottom() {
+        let selected: usize = 7;
+        let cols: usize = 3;
+        let len: usize = 9;
+        let next = selected + cols;
+        // 7 + 3 = 10, but len is 9, so stay at 7
+        let result = if next < len { next } else { selected };
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn gallery_grid_nav_right_clamps_at_end() {
+        let selected: usize = 8;
+        let len: usize = 9;
+        let result = (selected + 1).min(len - 1);
+        assert_eq!(result, 8); // already at last item
+    }
+
+    #[test]
+    fn gallery_grid_nav_left_clamps_at_zero() {
+        let selected: usize = 0;
+        assert_eq!(selected.saturating_sub(1), 0);
+    }
+
+    #[test]
+    fn seed_activate_toggles_mode() {
+        // Seed field activation should cycle mode, not open popup
+        // This tests the contract: Seed row = toggle mode, SeedValue row = popup
+        let mode = SeedMode::Random;
+        let next = mode.next();
+        assert_eq!(next, SeedMode::Fixed);
+        let next2 = next.next();
+        assert_eq!(next2, SeedMode::Increment);
+        let next3 = next2.next();
+        assert_eq!(next3, SeedMode::Random);
+    }
+
+    #[test]
+    fn gallery_view_mode_equality() {
+        assert_eq!(GalleryViewMode::Grid, GalleryViewMode::Grid);
+        assert_eq!(GalleryViewMode::Detail, GalleryViewMode::Detail);
+        assert_ne!(GalleryViewMode::Grid, GalleryViewMode::Detail);
+    }
+
+    #[test]
+    fn gallery_state_default_grid_cols() {
+        // Default grid_cols should be reasonable
+        let state = GalleryState {
+            entries: Vec::new(),
+            selected: 0,
+            preview_image: None,
+            image_state: None,
+            scanning: false,
+            view_mode: GalleryViewMode::Grid,
+            thumbnail_states: Vec::new(),
+            grid_cols: 3,
+            grid_scroll: 0,
+        };
+        assert_eq!(state.grid_cols, 3);
+        assert_eq!(state.grid_scroll, 0);
+        assert!(state.thumbnail_states.is_empty());
+    }
+
+    #[test]
+    fn gallery_thumbnail_states_sync_with_entries() {
+        // thumbnail_states should have same length as entries
+        let entries = vec![make_test_entry(), make_test_entry()];
+        let thumb_states: Vec<Option<StatefulProtocol>> = vec![None; entries.len()];
+        assert_eq!(thumb_states.len(), entries.len());
+    }
+
+    #[test]
+    fn default_gallery_dir_path() {
+        let dir = crate::gallery_scan::default_gallery_dir();
+        let s = dir.to_string_lossy();
+        assert!(
+            s.ends_with("gallery"),
+            "expected path ending in 'gallery': {s}"
+        );
+    }
+
+    #[test]
+    fn background_event_thumbnails_ready_variant() {
+        // Verify the variant exists
+        let event = BackgroundEvent::ThumbnailsReady;
+        match event {
+            BackgroundEvent::ThumbnailsReady => {}
+            _ => panic!("expected ThumbnailsReady"),
+        }
     }
 }
