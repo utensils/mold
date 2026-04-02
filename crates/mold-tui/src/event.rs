@@ -155,3 +155,70 @@ fn map_models_key(key: &KeyEvent) -> Action {
         _ => Action::None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn gallery_enter_not_mapped_to_unimplemented_action() {
+        // Enter in gallery should NOT map to Regenerate (unimplemented)
+        let action = map_gallery_key(&key(KeyCode::Enter));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn gallery_e_d_o_not_mapped() {
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('e'))), Action::None);
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('d'))), Action::None);
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('o'))), Action::None);
+    }
+
+    #[test]
+    fn gallery_navigation() {
+        assert_eq!(map_gallery_key(&key(KeyCode::Up)), Action::Up);
+        assert_eq!(map_gallery_key(&key(KeyCode::Down)), Action::Down);
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('j'))), Action::Down);
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('k'))), Action::Up);
+    }
+
+    #[test]
+    fn gallery_view_switching() {
+        assert_eq!(
+            map_gallery_key(&key(KeyCode::Esc)),
+            Action::SwitchView(View::Generate)
+        );
+        assert_eq!(map_gallery_key(&key(KeyCode::Left)), Action::ViewPrev);
+        assert_eq!(map_gallery_key(&key(KeyCode::Right)), Action::ViewNext);
+        assert_eq!(map_gallery_key(&key(KeyCode::Char('q'))), Action::Quit);
+    }
+
+    #[test]
+    fn models_enter_confirms() {
+        assert_eq!(map_models_key(&key(KeyCode::Enter)), Action::Confirm);
+    }
+
+    #[test]
+    fn models_pull_and_unload() {
+        assert_eq!(map_models_key(&key(KeyCode::Char('p'))), Action::PullModel);
+        assert_eq!(
+            map_models_key(&key(KeyCode::Char('u'))),
+            Action::UnloadModel
+        );
+    }
+
+    #[test]
+    fn models_navigation() {
+        assert_eq!(map_models_key(&key(KeyCode::Up)), Action::Up);
+        assert_eq!(map_models_key(&key(KeyCode::Down)), Action::Down);
+        assert_eq!(
+            map_models_key(&key(KeyCode::Esc)),
+            Action::SwitchView(View::Generate)
+        );
+    }
+}

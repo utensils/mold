@@ -57,7 +57,7 @@ impl PromptHistory {
     }
 
     /// Append an entry without saving. Returns true if entry was added.
-    fn push_entry(&mut self, entry: HistoryEntry) -> bool {
+    pub(crate) fn push_entry(&mut self, entry: HistoryEntry) -> bool {
         // Skip empty/whitespace-only prompts
         if entry.prompt.trim().is_empty() {
             return false;
@@ -316,5 +316,39 @@ mod tests {
         let restored: HistoryEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.prompt, "a cat");
         assert_eq!(restored.negative, Some("blurry".to_string()));
+    }
+
+    #[test]
+    fn prev_does_not_navigate_when_empty() {
+        let mut history = PromptHistory {
+            entries: Vec::new(),
+            cursor: None,
+            draft: None,
+        };
+        assert!(history.prev("current").is_none());
+        assert!(!history.is_navigating());
+    }
+
+    #[test]
+    fn next_without_prev_returns_none() {
+        let mut history = PromptHistory {
+            entries: vec![make_entry("test")],
+            cursor: None,
+            draft: None,
+        };
+        // next without prior prev should return None
+        assert!(history.next("current").is_none());
+    }
+
+    #[test]
+    fn push_entry_returns_false_for_duplicates() {
+        let mut history = PromptHistory {
+            entries: Vec::new(),
+            cursor: None,
+            draft: None,
+        };
+        assert!(history.push_entry(make_entry("hello")));
+        assert!(!history.push_entry(make_entry("hello"))); // duplicate
+        assert!(history.push_entry(make_entry("world"))); // different
     }
 }
