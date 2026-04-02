@@ -280,8 +280,16 @@ impl ModelPaths {
     }
 }
 
+/// Current config schema version. Increment when adding migrations.
+const CURRENT_CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Config schema version for migrations. Old configs without this field
+    /// default to 0 and are migrated on first load.
+    #[serde(default)]
+    pub config_version: u32,
+
     #[serde(default = "default_model")]
     pub default_model: String,
 
@@ -407,6 +415,7 @@ fn default_embed_metadata() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             default_model: default_model(),
             models_dir: default_models_dir(),
             server_port: default_port(),
@@ -435,7 +444,7 @@ impl Config {
             eprintln!("warning: could not determine home directory — using default config");
             return Config::default();
         };
-        if config_path.exists() {
+        let mut cfg = if config_path.exists() {
             match std::fs::read_to_string(&config_path) {
                 Ok(contents) => match toml::from_str(&contents) {
                     Ok(cfg) => cfg,
@@ -457,7 +466,54 @@ impl Config {
             }
         } else {
             Config::default()
+        };
+
+        // Run config migrations if needed
+        if cfg.config_version < CURRENT_CONFIG_VERSION {
+            Self::run_migrations(&mut cfg);
+            cfg.config_version = CURRENT_CONFIG_VERSION;
+            if let Err(e) = cfg.save() {
+                eprintln!("warning: failed to save migrated config: {e}");
+            }
         }
+
+        cfg
+    }
+
+    /// Run all pending config migrations from cfg.config_version to CURRENT.
+    pub(crate) fn run_migrations(cfg: &mut Config) {
+        if cfg.config_version < 1 {
+            Self::migrate_v0_to_v1(cfg);
+        }
+        // Future migrations:
+        // if cfg.config_version < 2 { Self::migrate_v1_to_v2(cfg); }
+    }
+
+    /// v0 → v1: Strip stale manifest defaults from known model entries.
+    ///
+    /// Old `mold pull` wrote all manifest defaults (steps, guidance, dimensions,
+    /// description, family, is_schnell, scheduler) into config.toml. These become
+    /// stale when manifests update. This migration removes them so
+    /// `resolved_model_config()` reads fresh values from the manifest at runtime.
+    fn migrate_v0_to_v1(cfg: &mut Config) {
+        let model_names: Vec<String> = cfg.models.keys().cloned().collect();
+        for name in model_names {
+            if crate::manifest::find_manifest(&name).is_some() {
+                if let Some(mc) = cfg.models.get_mut(&name) {
+                    mc.default_steps = None;
+                    mc.default_guidance = None;
+                    mc.default_width = None;
+                    mc.default_height = None;
+                    mc.is_schnell = None;
+                    mc.is_turbo = None;
+                    mc.scheduler = None;
+                    mc.negative_prompt = None;
+                    mc.description = None;
+                    mc.family = None;
+                }
+            }
+        }
+        eprintln!("config: migrated v0 → v1 (cleared stale manifest defaults)");
     }
 
     /// Reload config from disk while preserving runtime-only overrides.

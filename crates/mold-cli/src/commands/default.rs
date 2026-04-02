@@ -120,6 +120,7 @@ mod tests {
 
     fn empty_config() -> Config {
         Config {
+            config_version: 1,
             default_model: "flux2-klein".to_string(),
             models_dir: "/nonexistent".to_string(),
             server_port: 7680,

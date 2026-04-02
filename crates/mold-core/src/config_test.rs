@@ -1244,4 +1244,117 @@ is_schnell = false
         );
         assert!(mc.family.is_none(), "family should not be in config");
     }
+
+    // ── config versioning / migrations ───────────────────────────────────
+
+    #[test]
+    fn old_config_without_version_defaults_to_zero() {
+        let toml = r#"default_model = "flux-schnell:q8""#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.config_version, 0);
+    }
+
+    #[test]
+    fn new_config_has_current_version() {
+        let cfg = Config::default();
+        assert!(
+            cfg.config_version > 0,
+            "default config should have current version"
+        );
+    }
+
+    #[test]
+    fn migrate_v0_strips_stale_manifest_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config {
+            config_version: 0,
+            ..Config::default()
+        };
+        // Simulate old stale config with manifest defaults baked in
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                transformer: Some("/path/to/transformer.gguf".to_string()),
+                vae: Some("/path/to/vae.safetensors".to_string()),
+                default_steps: Some(999),
+                default_guidance: Some(0.0),
+                default_width: Some(512),
+                default_height: Some(512),
+                description: Some("[alpha] stale desc".to_string()),
+                family: Some("flux".to_string()),
+                is_schnell: Some(false),
+                ..ModelConfig::default()
+            },
+        );
+        // Also add a custom model that should NOT be touched
+        cfg.models.insert(
+            "my-custom-model".to_string(),
+            ModelConfig {
+                default_steps: Some(50),
+                description: Some("My model".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+
+        Config::run_migrations(&mut cfg);
+
+        // Manifest model should have defaults stripped
+        let flux = cfg.models.get("flux-dev:q8").unwrap();
+        assert!(
+            flux.default_steps.is_none(),
+            "stale steps should be cleared"
+        );
+        assert!(
+            flux.default_guidance.is_none(),
+            "stale guidance should be cleared"
+        );
+        assert!(
+            flux.description.is_none(),
+            "stale description should be cleared"
+        );
+        assert!(flux.family.is_none(), "stale family should be cleared");
+        // Paths should be preserved
+        assert!(flux.transformer.is_some(), "paths should survive migration");
+        assert!(flux.vae.is_some(), "paths should survive migration");
+
+        // Custom model should be untouched
+        let custom = cfg.models.get("my-custom-model").unwrap();
+        assert_eq!(custom.default_steps, Some(50));
+        assert_eq!(custom.description.as_deref(), Some("My model"));
+    }
+
+    #[test]
+    fn migration_preserves_user_lora() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config {
+            config_version: 0,
+            ..Config::default()
+        };
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                lora: Some("/path/to/adapter.safetensors".to_string()),
+                lora_scale: Some(0.8),
+                default_steps: Some(999), // stale
+                ..ModelConfig::default()
+            },
+        );
+
+        Config::run_migrations(&mut cfg);
+
+        let flux = cfg.models.get("flux-dev:q8").unwrap();
+        assert_eq!(flux.lora.as_deref(), Some("/path/to/adapter.safetensors"));
+        assert_eq!(flux.lora_scale, Some(0.8));
+        assert!(flux.default_steps.is_none());
+    }
+
+    #[test]
+    fn config_version_serializes_to_toml() {
+        let cfg = Config::default();
+        let toml = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            toml.contains("config_version"),
+            "config_version should be in serialized TOML"
+        );
+    }
 }
