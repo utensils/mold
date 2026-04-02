@@ -2534,7 +2534,7 @@ impl App {
                 .unwrap_or_else(|| "(global)".into()),
             SettingsKey::ModelScheduler => model_cfg
                 .and_then(|m| m.scheduler)
-                .map(|s| format!("{s:?}").to_lowercase())
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| "(none)".into()),
             SettingsKey::ModelNegativePrompt => model_cfg
                 .and_then(|m| m.negative_prompt.as_deref())
@@ -2542,13 +2542,8 @@ impl App {
                 .to_string(),
             SettingsKey::ModelLora => model_cfg
                 .and_then(|m| m.lora.as_deref())
-                .map(|p| {
-                    std::path::Path::new(p)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_else(|| p.to_string())
-                })
-                .unwrap_or_else(|| "(none)".into()),
+                .unwrap_or("(none)")
+                .to_string(),
             SettingsKey::ModelLoraScale => model_cfg
                 .and_then(|m| m.lora_scale)
                 .map(|v| format!("{v:.1}"))
