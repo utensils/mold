@@ -59,10 +59,8 @@ fn preflight_memory_guard(
         _ => return Ok(()), // Non-macOS or can't query — skip
     };
 
-    let peak = mold_inference::device::estimate_peak_memory(
-        paths,
-        mold_inference::LoadStrategy::Eager,
-    );
+    let peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
 
     // The active model will be unloaded before loading the new one,
     // so its footprint becomes available memory.
