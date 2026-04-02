@@ -494,6 +494,8 @@ pub struct GalleryState {
     pub view_mode: GalleryViewMode,
     /// Thumbnail StatefulProtocol instances, lazily populated during render.
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
+    /// Actual thumbnail pixel dimensions (width, height), populated when loaded.
+    pub thumb_dimensions: Vec<Option<(u32, u32)>>,
     /// Number of columns in the grid (computed from terminal width).
     pub grid_cols: usize,
     /// Scroll offset in rows for the grid view.
@@ -786,6 +788,7 @@ impl App {
                 scanning: false,
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
+                thumb_dimensions: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
@@ -1871,6 +1874,9 @@ impl App {
         if idx < self.gallery.thumbnail_states.len() {
             self.gallery.thumbnail_states.remove(idx);
         }
+        if idx < self.gallery.thumb_dimensions.len() {
+            self.gallery.thumb_dimensions.remove(idx);
+        }
 
         // Adjust selection
         if !self.gallery.entries.is_empty() {
@@ -2231,6 +2237,7 @@ impl App {
                             },
                         );
                         self.gallery.thumbnail_states.insert(0, None);
+                        self.gallery.thumb_dimensions.insert(0, None);
 
                         // Generate thumbnail in background
                         self.tokio_handle.spawn(async move {
@@ -2248,6 +2255,7 @@ impl App {
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.thumbnail_states = vec![None; entries.len()];
+                    self.gallery.thumb_dimensions = vec![None; entries.len()];
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
                     self.gallery.selected = 0;
@@ -2331,6 +2339,7 @@ impl App {
                     // Invalidate all thumbnail states so they reload on next render
                     let len = self.gallery.entries.len();
                     self.gallery.thumbnail_states = vec![None; len];
+                    self.gallery.thumb_dimensions = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.server_url = Some(url.clone());
@@ -3086,6 +3095,7 @@ mod tests {
             scanning: false,
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
+            thumb_dimensions: Vec::new(),
             grid_cols: 3,
             grid_scroll: 0,
         };

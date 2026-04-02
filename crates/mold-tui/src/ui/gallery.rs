@@ -7,13 +7,13 @@ use crate::app::{App, GalleryViewMode};
 const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
 
-/// Compute a horizontally centered rect for an image within the thumbnail area.
+/// Compute a centered sub-rect for an image within the thumbnail area.
 ///
-/// `ratatui-image` fits the image to the given area preserving aspect ratio,
-/// rendering from the top-left. To center, we predict how many terminal columns
-/// the image will actually occupy and offset the rect accordingly.
-///
-/// `font_size` is (width_px, height_px) per terminal cell — typically (8, 16).
+/// `ratatui-image`'s halfblocks protocol renders 2 pixel rows per terminal row
+/// (upper/lower half-blocks), so terminal cells have an effective pixel aspect
+/// ratio of `font_w : font_h` (typically 8:16 = 1:2). We convert the image
+/// dimensions to terminal cell units, fit to the area preserving aspect ratio,
+/// and center the result.
 fn centered_thumb_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)) -> Rect {
     if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 {
         return area;
@@ -21,23 +21,18 @@ fn centered_thumb_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)
 
     let (fw, fh) = (font_size.0.max(1) as f64, font_size.1.max(1) as f64);
 
-    // Image size in terminal cells (what ratatui-image computes)
+    // Convert image pixel dimensions to terminal cell units.
     let img_cols = img_w as f64 / fw;
     let img_rows = img_h as f64 / fh;
 
-    // Scale to fit within area, preserving aspect ratio
-    let scale_x = area.width as f64 / img_cols;
-    let scale_y = area.height as f64 / img_rows;
-    let scale = scale_x.min(scale_y);
+    // Scale to fit within area, preserving aspect ratio.
+    let scale = (area.width as f64 / img_cols).min(area.height as f64 / img_rows);
 
-    let used_cols = (img_cols * scale).round().max(1.0) as u16;
-    let used_rows = (img_rows * scale).round().max(1.0) as u16;
+    let used_w = (img_cols * scale).ceil().min(area.width as f64) as u16;
+    let used_h = (img_rows * scale).ceil().min(area.height as f64) as u16;
 
-    let used_w = used_cols.min(area.width);
-    let used_h = used_rows.min(area.height);
-
-    let offset_x = (area.width.saturating_sub(used_w)) / 2;
-    let offset_y = (area.height.saturating_sub(used_h)) / 2;
+    let offset_x = area.width.saturating_sub(used_w) / 2;
+    let offset_y = area.height.saturating_sub(used_h) / 2;
 
     Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
 }
@@ -157,25 +152,45 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
     if idx < app.gallery.thumbnail_states.len() {
         if app.gallery.thumbnail_states[idx].is_none() {
             let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+            let mut loaded = false;
+
             if thumb_path.exists() {
                 match image::open(&thumb_path) {
                     Ok(img) => {
+                        // Store actual thumbnail pixel dimensions for centering.
+                        app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
                         let protocol = app.picker.new_resize_protocol(img);
                         app.gallery.thumbnail_states[idx] = Some(protocol);
+                        loaded = true;
                     }
                     Err(_) => {
-                        // Corrupt/empty thumbnail — remove so it can be regenerated
+                        // Corrupt/empty thumbnail — remove so we regenerate below
                         let _ = std::fs::remove_file(&thumb_path);
                     }
+                }
+            }
+
+            // Regenerate missing thumbnail from source image (local entries only).
+            // Server entries are regenerated via the background fetch task.
+            if !loaded
+                && entry.server_url.is_none()
+                && entry.path.is_file()
+                && crate::thumbnails::generate_thumbnail(&entry.path).is_ok()
+            {
+                if let Ok(img) = image::open(&thumb_path) {
+                    app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
+                    let protocol = app.picker.new_resize_protocol(img);
+                    app.gallery.thumbnail_states[idx] = Some(protocol);
                 }
             }
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
             // Center the image within the thumbnail area. ratatui-image renders
-            // from top-left, so we compute a centered sub-rect based on the
-            // image's aspect ratio and the terminal font size.
-            let (iw, ih) = (entry.metadata.width.max(1), entry.metadata.height.max(1));
+            // from top-left, so we compute a centered sub-rect matching the
+            // image's aspect ratio and position it in the middle of the cell.
+            let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
             let font_size = app.picker.font_size();
             let centered = centered_thumb_rect(thumb_area, iw, ih, font_size);
             let image_widget = StatefulImage::default();
