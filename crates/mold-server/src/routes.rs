@@ -128,7 +128,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
-        .route("/api/gallery/image/:filename", get(get_gallery_image))
+        .route(
+            "/api/gallery/image/:filename",
+            get(get_gallery_image).delete(delete_gallery_image),
+        )
         .route(
             "/api/gallery/thumbnail/:filename",
             get(get_gallery_thumbnail),
@@ -839,6 +842,38 @@ async fn get_gallery_image(
     Ok((headers, data))
 }
 
+/// Delete a gallery image and its server-side thumbnail.
+async fn delete_gallery_image(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let output_dir = {
+        let config = state.config.read().await;
+        config.effective_output_dir()
+    };
+
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let path = output_dir.join(&clean_name);
+    if path.is_file() {
+        std::fs::remove_file(&path)
+            .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
+    }
+
+    // Also remove server-side thumbnail
+    let thumb_path = server_thumbnail_dir().join(&clean_name);
+    let _ = std::fs::remove_file(&thumb_path);
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Serve a thumbnail for a gallery image. Generated on-demand and cached
 /// at ~/.mold/cache/thumbnails/ on the server side.
 async fn get_gallery_thumbnail(
@@ -1029,10 +1064,30 @@ fn read_png_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata
 fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
     let data = std::fs::read(path).ok()?;
     let mut i = 0;
-    while i + 3 < data.len() {
-        if data[i] == 0xFF && data[i + 1] == 0xFE {
-            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-            if i + 2 + len <= data.len() {
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        match marker {
+            // Standalone markers (no length field): SOI, EOI, RST0-7, TEM
+            0xD8 | 0x01 => {
+                i += 2;
+            }
+            0xD9 => break, // EOI — end of image
+            0xD0..=0xD7 => {
+                i += 2; // RST markers
+            }
+            // COM marker — check for mold:parameters
+            0xFE => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
                 let comment = &data[i + 4..i + 2 + len];
                 if let Ok(text) = std::str::from_utf8(comment) {
                     if let Some(json) = text.strip_prefix("mold:parameters ") {
@@ -1041,20 +1096,19 @@ fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadat
                         }
                     }
                 }
-            }
-            i += 2 + len;
-        } else if data[i] == 0xFF {
-            if data[i + 1] == 0xD9 {
-                break;
-            }
-            if i + 3 < data.len() {
-                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
                 i += 2 + len;
-            } else {
-                break;
             }
-        } else {
-            i += 1;
+            // All other markers have a 2-byte length field
+            _ => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
+                i += 2 + len;
+            }
         }
     }
     None

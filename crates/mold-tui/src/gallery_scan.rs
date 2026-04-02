@@ -148,12 +148,31 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
 /// Mold writes `mold:parameters {json}` as the COM comment.
 fn read_jpeg_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
     let data = std::fs::read(path).ok()?;
-    // Scan for COM markers (0xFF 0xFE)
     let mut i = 0;
-    while i + 3 < data.len() {
-        if data[i] == 0xFF && data[i + 1] == 0xFE {
-            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-            if i + 2 + len <= data.len() {
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        match marker {
+            // Standalone markers (no length field): SOI, TEM
+            0xD8 | 0x01 => {
+                i += 2;
+            }
+            0xD9 => break, // EOI
+            0xD0..=0xD7 => {
+                i += 2; // RST markers
+            }
+            // COM marker
+            0xFE => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
                 let comment = &data[i + 4..i + 2 + len];
                 if let Ok(text) = std::str::from_utf8(comment) {
                     if let Some(json) = text.strip_prefix("mold:parameters ") {
@@ -168,20 +187,19 @@ fn read_jpeg_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
                         }
                     }
                 }
-            }
-            i += 2 + len;
-        } else if data[i] == 0xFF {
-            if data[i + 1] == 0xD9 {
-                break; // EOI
-            }
-            if i + 3 < data.len() {
-                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
                 i += 2 + len;
-            } else {
-                break;
             }
-        } else {
-            i += 1;
+            // All other markers have a 2-byte length field
+            _ => {
+                if i + 3 >= data.len() {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                if len < 2 || i + 2 + len > data.len() {
+                    break;
+                }
+                i += 2 + len;
+            }
         }
     }
     None

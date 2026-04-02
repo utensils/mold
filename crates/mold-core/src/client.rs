@@ -384,6 +384,16 @@ impl MoldClient {
         Ok(resp.to_vec())
     }
 
+    /// Delete a gallery image on the server.
+    pub async fn delete_gallery_image(&self, filename: &str) -> Result<()> {
+        self.client
+            .delete(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Download a gallery thumbnail by filename. Smaller/faster than full image.
     pub async fn get_gallery_thumbnail(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self

@@ -1115,9 +1115,11 @@ impl App {
                                 &self.generate.capabilities,
                                 self.generate.params.inference_mode,
                             );
-                            // Refresh to local catalog
+                            // Refresh to local catalog and gallery
                             self.models.catalog =
                                 mold_core::build_model_catalog(&self.config, None, false);
+                            self.gallery.scanning = true;
+                            self.spawn_gallery_scan();
                         } else {
                             // Normalize using same logic as CLI/MoldClient
                             let url = mold_core::client::normalize_host(&host);
@@ -1844,10 +1846,20 @@ impl App {
         }
 
         let entry = &self.gallery.entries[idx];
-        // Delete the image file
-        let _ = std::fs::remove_file(&entry.path);
-        // Delete the thumbnail
-        let _ = std::fs::remove_file(crate::thumbnails::thumbnail_path(&entry.path));
+        // Delete the image file — via server API for server-backed entries
+        if let Some(ref url) = entry.server_url {
+            let url = url.clone();
+            let filename = entry.filename();
+            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+            let _ = std::fs::remove_file(&thumb_path);
+            self.tokio_handle.spawn(async move {
+                let client = mold_core::MoldClient::new(&url);
+                let _ = client.delete_gallery_image(&filename).await;
+            });
+        } else {
+            let _ = std::fs::remove_file(&entry.path);
+            let _ = std::fs::remove_file(crate::thumbnails::thumbnail_path(&entry.path));
+        }
 
         // Remove from state
         self.gallery.entries.remove(idx);
@@ -2073,7 +2085,7 @@ impl App {
                     let mut saved_path = std::path::PathBuf::new();
                     let ts_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
+                        .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
 
                     let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
