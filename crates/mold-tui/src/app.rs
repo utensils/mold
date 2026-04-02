@@ -634,6 +634,9 @@ pub struct SettingsState {
     pub selected_model: Option<String>,
     /// Brief error message if a save fails.
     pub save_error: Option<String>,
+    /// When true, `save_config()` skips writing to disk (used in tests).
+    #[cfg(test)]
+    pub skip_save: bool,
 }
 
 /// Active popup/overlay.
@@ -2464,6 +2467,14 @@ impl App {
     /// Get the display value for a settings key.
     pub fn settings_display_value(&self, key: &SettingsKey) -> String {
         let cfg = &self.config;
+        // For model defaults, use resolved config (merges manifest defaults)
+        // so the display shows effective runtime values, not raw None/Some.
+        let resolved_model = self
+            .settings
+            .selected_model
+            .as_ref()
+            .map(|name| cfg.resolved_model_config(name));
+        // Raw model config for path fields (those come from config, not manifest)
         let model_cfg = self
             .settings
             .selected_model
@@ -2516,23 +2527,28 @@ impl App {
                 .as_deref()
                 .unwrap_or("(none)")
                 .to_string(),
-            SettingsKey::ModelSteps => model_cfg
+            SettingsKey::ModelSteps => resolved_model
+                .as_ref()
                 .and_then(|m| m.default_steps)
                 .map(|v| v.to_string())
-                .unwrap_or_else(|| "(global)".into()),
-            SettingsKey::ModelGuidance => model_cfg
+                .unwrap_or_else(|| cfg.default_steps.to_string()),
+            SettingsKey::ModelGuidance => resolved_model
+                .as_ref()
                 .and_then(|m| m.default_guidance)
                 .map(|v| format!("{v:.1}"))
-                .unwrap_or_else(|| "(global)".into()),
-            SettingsKey::ModelWidth => model_cfg
+                .unwrap_or_else(|| "0.0".into()),
+            SettingsKey::ModelWidth => resolved_model
+                .as_ref()
                 .and_then(|m| m.default_width)
                 .map(|v| v.to_string())
-                .unwrap_or_else(|| "(global)".into()),
-            SettingsKey::ModelHeight => model_cfg
+                .unwrap_or_else(|| cfg.default_width.to_string()),
+            SettingsKey::ModelHeight => resolved_model
+                .as_ref()
                 .and_then(|m| m.default_height)
                 .map(|v| v.to_string())
-                .unwrap_or_else(|| "(global)".into()),
-            SettingsKey::ModelScheduler => model_cfg
+                .unwrap_or_else(|| cfg.default_height.to_string()),
+            SettingsKey::ModelScheduler => resolved_model
+                .as_ref()
                 .and_then(|m| m.scheduler)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "(none)".into()),
@@ -2670,8 +2686,9 @@ impl App {
             }
             SettingsKey::ModelSteps => {
                 if let Some(name) = &self.settings.selected_model {
+                    let resolved = self.config.resolved_model_config(name);
+                    let cur = resolved.effective_steps(&self.config) as f64;
                     if let Some(mc) = self.config.models.get_mut(name) {
-                        let cur = mc.default_steps.unwrap_or(self.config.default_steps) as f64;
                         mc.default_steps = Some((cur + delta).clamp(min, max) as u32);
                     }
                 }
@@ -2680,8 +2697,9 @@ impl App {
             }
             SettingsKey::ModelGuidance => {
                 if let Some(name) = &self.settings.selected_model {
+                    let resolved = self.config.resolved_model_config(name);
+                    let cur = resolved.effective_guidance();
                     if let Some(mc) = self.config.models.get_mut(name) {
-                        let cur = mc.default_guidance.unwrap_or(0.0);
                         mc.default_guidance = Some((cur + delta).clamp(min, max));
                     }
                 }
@@ -2690,8 +2708,9 @@ impl App {
             }
             SettingsKey::ModelWidth => {
                 if let Some(name) = &self.settings.selected_model {
+                    let resolved = self.config.resolved_model_config(name);
+                    let cur = resolved.effective_width(&self.config) as f64;
                     if let Some(mc) = self.config.models.get_mut(name) {
-                        let cur = mc.default_width.unwrap_or(self.config.default_width) as f64;
                         mc.default_width = Some((cur + delta).clamp(min, max) as u32);
                     }
                 }
@@ -2700,8 +2719,9 @@ impl App {
             }
             SettingsKey::ModelHeight => {
                 if let Some(name) = &self.settings.selected_model {
+                    let resolved = self.config.resolved_model_config(name);
+                    let cur = resolved.effective_height(&self.config) as f64;
                     if let Some(mc) = self.config.models.get_mut(name) {
-                        let cur = mc.default_height.unwrap_or(self.config.default_height) as f64;
                         mc.default_height = Some((cur + delta).clamp(min, max) as u32);
                     }
                 }
@@ -2892,6 +2912,10 @@ impl App {
 
     /// Save config to disk, storing any error in settings state.
     fn save_config(&mut self) {
+        #[cfg(test)]
+        if self.settings.skip_save {
+            return;
+        }
         if let Err(e) = self.config.save() {
             self.settings.save_error = Some(format!("Save failed: {e}"));
         } else {
@@ -4072,6 +4096,7 @@ mod tests {
             },
             settings: SettingsState {
                 selected_model: Some("test-model:q8".to_string()),
+                skip_save: true,
                 ..Default::default()
             },
             config,

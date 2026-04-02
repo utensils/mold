@@ -85,6 +85,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
+            KeyCode::Char('4') => Action::SwitchView(View::Settings),
             KeyCode::Right | KeyCode::Char('l') => Action::ViewNext,
             KeyCode::Left | KeyCode::Char('h') => Action::ViewPrev,
             KeyCode::Char('/') => Action::SearchHistory,
@@ -115,6 +116,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => return Action::SwitchView(View::Generate),
             KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
+            KeyCode::Char('4') => return Action::SwitchView(View::Settings),
             _ => {}
         }
     }
@@ -140,6 +142,7 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
+            KeyCode::Char('4') => Action::SwitchView(View::Settings),
             _ => Action::None,
         },
         GalleryViewMode::Detail => match key.code {
