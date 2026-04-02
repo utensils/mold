@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui_image::StatefulImage;
+use ratatui_image::picker::ProtocolType;
+use ratatui_image::{Image, Resize, StatefulImage};
 
 use crate::app::{App, GalleryViewMode};
 
@@ -9,17 +10,29 @@ const CELL_H: u16 = 14;
 
 /// Compute a centered sub-rect for an image within the thumbnail area.
 ///
-/// `ratatui-image`'s halfblocks protocol renders 2 pixel rows per terminal row
-/// (upper/lower half-blocks), so terminal cells have an effective pixel aspect
-/// ratio of `font_w : font_h` (typically 8:16 = 1:2). We convert the image
-/// dimensions to terminal cell units, fit to the area preserving aspect ratio,
-/// and center the result.
-fn centered_thumb_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)) -> Rect {
+/// `ratatui-image` pads fitted images from the top-left of the render rect. To
+/// make gallery tiles look balanced, we compute the fitted rect ourselves and
+/// render into that centered region instead.
+///
+/// Halfblocks terminals encode two image rows into one terminal row, so the
+/// effective character height is half the reported font height for aspect-fit
+/// purposes.
+fn centered_thumb_rect(
+    area: Rect,
+    img_w: u32,
+    img_h: u32,
+    font_size: (u16, u16),
+    protocol: ProtocolType,
+) -> Rect {
     if area.width == 0 || area.height == 0 || img_w == 0 || img_h == 0 {
         return area;
     }
 
-    let (fw, fh) = (font_size.0.max(1) as f64, font_size.1.max(1) as f64);
+    let fw = font_size.0.max(1) as f64;
+    let fh = match protocol {
+        ProtocolType::Halfblocks => (font_size.1.max(2) / 2).max(1) as f64,
+        _ => font_size.1.max(1) as f64,
+    };
 
     // Convert image pixel dimensions to terminal cell units.
     let img_cols = img_w as f64 / fw;
@@ -35,6 +48,14 @@ fn centered_thumb_rect(area: Rect, img_w: u32, img_h: u32, font_size: (u16, u16)
     let offset_y = area.height.saturating_sub(used_h) / 2;
 
     Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
+}
+
+fn center_rect(area: Rect, used_w: u16, used_h: u16) -> Rect {
+    let width = used_w.min(area.width);
+    let height = used_h.min(area.height);
+    let offset_x = area.width.saturating_sub(width) / 2;
+    let offset_y = area.height.saturating_sub(height) / 2;
+    Rect::new(area.x + offset_x, area.y + offset_y, width, height)
 }
 
 /// Render the Gallery view.
@@ -186,15 +207,40 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
 
         if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            // Center the image within the thumbnail area. ratatui-image renders
-            // from top-left, so we compute a centered sub-rect matching the
-            // image's aspect ratio and position it in the middle of the cell.
-            let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-            let font_size = app.picker.font_size();
-            let centered = centered_thumb_rect(thumb_area, iw, ih, font_size);
-            let image_widget = StatefulImage::default();
-            frame.render_stateful_widget(image_widget, centered, state);
+            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+            if let Ok(img) = image::open(&thumb_path) {
+                // Build a fixed protocol for the current tile, then center the
+                // fitted protocol area within the available thumbnail box.
+                if let Ok(mut protocol) =
+                    app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
+                {
+                    let fitted = protocol.area();
+                    let centered = center_rect(thumb_area, fitted.width, fitted.height);
+                    frame.render_widget(Image::new(&mut protocol), centered);
+                } else {
+                    // Fall back to the old stateful path if protocol creation fails.
+                    let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                        .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
+                    let font_size = app.picker.font_size();
+                    let centered = centered_thumb_rect(
+                        thumb_area,
+                        iw,
+                        ih,
+                        font_size,
+                        app.picker.protocol_type(),
+                    );
+                    let image_widget = StatefulImage::default();
+                    frame.render_stateful_widget(image_widget, centered, state);
+                }
+            } else {
+                let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                    .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
+                let font_size = app.picker.font_size();
+                let centered =
+                    centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
+                let image_widget = StatefulImage::default();
+                frame.render_stateful_widget(image_widget, centered, state);
+            }
         }
     }
 
@@ -218,6 +264,41 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         .style(name_style)
         .alignment(Alignment::Center);
     frame.render_widget(label, label_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{center_rect, centered_thumb_rect};
+    use ratatui::layout::Rect;
+    use ratatui_image::picker::ProtocolType;
+
+    #[test]
+    fn centers_portrait_thumbnails_for_halfblocks() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = centered_thumb_rect(area, 256, 512, (8, 16), ProtocolType::Halfblocks);
+
+        assert_eq!(rect.height, area.height);
+        assert!(rect.width < area.width);
+        assert_eq!(rect.x, (area.width - rect.width) / 2);
+    }
+
+    #[test]
+    fn centers_landscape_thumbnails_for_normal_cell_protocols() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = centered_thumb_rect(area, 512, 256, (8, 16), ProtocolType::Kitty);
+
+        assert_eq!(rect.width, area.width);
+        assert!(rect.height < area.height);
+        assert_eq!(rect.y, (area.height - rect.height) / 2);
+    }
+
+    #[test]
+    fn gallery_thumbnail_fixed_protocol_area_is_centered() {
+        let area = Rect::new(0, 0, 22, 10);
+        let rect = center_rect(area, 10, 6);
+
+        assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {

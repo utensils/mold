@@ -28,9 +28,7 @@ pub fn thumbnail_path(source: &Path) -> PathBuf {
 /// A 0-byte file is treated as missing (corrupt/partial write).
 pub fn thumbnail_exists(source: &Path) -> bool {
     let path = thumbnail_path(source);
-    path.metadata()
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
 /// Generate a thumbnail for the given source image.

@@ -197,8 +197,7 @@ async fn try_server_generate(
 
                 match try_server_generate_once(client, req, retry_tx).await {
                     Ok(response) => {
-                        let _ =
-                            tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+                        let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
                         ServerResult::Done
                     }
                     Err(retry_err) => match classify_generate_error(&retry_err) {
