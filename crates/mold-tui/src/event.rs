@@ -34,6 +34,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => return Action::SwitchView(View::Generate),
             KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
+            KeyCode::Char('4') => return Action::SwitchView(View::Settings),
             _ => {}
         }
     }
@@ -43,6 +44,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         View::Generate => map_generate_key(key, app),
         View::Gallery => map_gallery_key(key, app),
         View::Models => map_models_key(key),
+        View::Settings => map_settings_key(key),
     }
 }
 
@@ -170,6 +172,24 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
+        KeyCode::Char('4') => Action::SwitchView(View::Settings),
+        _ => Action::None,
+    }
+}
+
+fn map_settings_key(key: &KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Action::Up,
+        KeyCode::Down | KeyCode::Char('j') => Action::Down,
+        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => Action::Increment,
+        KeyCode::Char('-') | KeyCode::Left => Action::Decrement,
+        KeyCode::Enter => Action::Confirm,
+        KeyCode::Esc => Action::SwitchView(View::Generate),
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('1') => Action::SwitchView(View::Generate),
+        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+        KeyCode::Char('3') => Action::SwitchView(View::Models),
+        KeyCode::Char('4') => Action::SwitchView(View::Settings),
         _ => Action::None,
     }
 }
@@ -337,6 +357,76 @@ mod tests {
         assert_eq!(
             map_models_key(&key(KeyCode::Esc)),
             Action::SwitchView(View::Generate)
+        );
+    }
+
+    // ── Settings key mapping tests ─────────────────────────
+
+    #[test]
+    fn settings_navigation() {
+        assert_eq!(map_settings_key(&key(KeyCode::Up)), Action::Up);
+        assert_eq!(map_settings_key(&key(KeyCode::Down)), Action::Down);
+        assert_eq!(map_settings_key(&key(KeyCode::Char('k'))), Action::Up);
+        assert_eq!(map_settings_key(&key(KeyCode::Char('j'))), Action::Down);
+    }
+
+    #[test]
+    fn settings_increment_decrement() {
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('+'))),
+            Action::Increment
+        );
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('='))),
+            Action::Increment
+        );
+        assert_eq!(map_settings_key(&key(KeyCode::Right)), Action::Increment);
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('-'))),
+            Action::Decrement
+        );
+        assert_eq!(map_settings_key(&key(KeyCode::Left)), Action::Decrement);
+    }
+
+    #[test]
+    fn settings_confirm_and_cancel() {
+        assert_eq!(map_settings_key(&key(KeyCode::Enter)), Action::Confirm);
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Esc)),
+            Action::SwitchView(View::Generate)
+        );
+    }
+
+    #[test]
+    fn settings_quit_and_help() {
+        assert_eq!(map_settings_key(&key(KeyCode::Char('q'))), Action::Quit);
+    }
+
+    #[test]
+    fn settings_view_switch_keys() {
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('1'))),
+            Action::SwitchView(View::Generate)
+        );
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('2'))),
+            Action::SwitchView(View::Gallery)
+        );
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('3'))),
+            Action::SwitchView(View::Models)
+        );
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('4'))),
+            Action::SwitchView(View::Settings)
+        );
+    }
+
+    #[test]
+    fn models_view_switch_to_settings() {
+        assert_eq!(
+            map_models_key(&key(KeyCode::Char('4'))),
+            Action::SwitchView(View::Settings)
         );
     }
 }

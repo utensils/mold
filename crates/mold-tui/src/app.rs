@@ -531,6 +531,111 @@ pub struct ModelsState {
     pub filtering: bool,
 }
 
+// ── Settings view types ─────────────────────────────────────────────
+
+/// Identifies a single config field in the Settings view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsKey {
+    // General
+    DefaultModel,
+    ModelsDir,
+    OutputDir,
+    ServerPort,
+    DefaultWidth,
+    DefaultHeight,
+    DefaultSteps,
+    EmbedMetadata,
+    T5Variant,
+    Qwen3Variant,
+    DefaultNegativePrompt,
+    // Expand
+    ExpandEnabled,
+    ExpandBackend,
+    ExpandModel,
+    ExpandApiModel,
+    ExpandTemperature,
+    ExpandTopP,
+    ExpandMaxTokens,
+    ExpandThinking,
+    // Logging
+    LogLevel,
+    LogFile,
+    LogDir,
+    LogMaxDays,
+    // Model defaults (operate on selected_model)
+    ModelSelector,
+    ModelSteps,
+    ModelGuidance,
+    ModelWidth,
+    ModelHeight,
+    ModelScheduler,
+    ModelNegativePrompt,
+    ModelLora,
+    ModelLoraScale,
+    // Model paths (read-only)
+    ModelTransformer,
+    ModelVae,
+}
+
+/// The type of a settings field — determines editing behavior.
+#[derive(Debug, Clone)]
+pub enum SettingsFieldType {
+    /// Opens a text popup on Enter.
+    Text,
+    /// Inline +/- adjustment with clamping.
+    Number { min: f64, max: f64, step: f64 },
+    /// Cycles through a fixed set of options.
+    Toggle { options: Vec<&'static str> },
+    /// On/off toggle.
+    Bool,
+    /// Opens a path popup on Enter.
+    Path,
+    /// Display only, no editing.
+    ReadOnly,
+}
+
+/// A single renderable row in the settings list.
+#[derive(Debug, Clone)]
+pub enum SettingsRow {
+    SectionHeader {
+        name: String,
+    },
+    Field {
+        key: SettingsKey,
+        label: &'static str,
+        field_type: SettingsFieldType,
+    },
+}
+
+impl SettingsRow {
+    pub fn is_field(&self) -> bool {
+        matches!(self, SettingsRow::Field { .. })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            SettingsRow::Field {
+                field_type: SettingsFieldType::ReadOnly,
+                ..
+            }
+        )
+    }
+}
+
+/// State for the Settings view.
+#[derive(Default)]
+pub struct SettingsState {
+    /// Index into the flat row list (including headers).
+    pub row_index: usize,
+    /// Scroll offset for the rendered list.
+    pub scroll_offset: usize,
+    /// Currently selected model name for the "Model Defaults" section.
+    pub selected_model: Option<String>,
+    /// Brief error message if a save fails.
+    pub save_error: Option<String>,
+}
+
 /// Active popup/overlay.
 pub enum Popup {
     Help,
@@ -554,6 +659,11 @@ pub enum Popup {
         message: String,
         on_confirm: ConfirmAction,
     },
+    SettingsInput {
+        key: SettingsKey,
+        input: String,
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -569,6 +679,7 @@ pub struct App {
     pub generate: GenerateState,
     pub gallery: GalleryState,
     pub models: ModelsState,
+    pub settings: SettingsState,
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
@@ -798,6 +909,13 @@ impl App {
                 filter: String::new(),
                 filtering: false,
             },
+            settings: {
+                let first_model = config.models.keys().next().cloned();
+                SettingsState {
+                    selected_model: first_model,
+                    ..Default::default()
+                }
+            },
             config,
             server_url,
             picker,
@@ -1017,7 +1135,8 @@ impl App {
                         }
                         (KeyCode::Char('1'), KeyModifiers::ALT)
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
-                        | (KeyCode::Char('3'), KeyModifiers::ALT) => {
+                        | (KeyCode::Char('3'), KeyModifiers::ALT)
+                        | (KeyCode::Char('4'), KeyModifiers::ALT) => {
                             // Fall through for view switching
                         }
                         _ => {
@@ -1243,6 +1362,20 @@ impl App {
                     }
                     _ => self.close_popup(),
                 },
+                Some(Popup::SettingsInput { key: sk, input, .. }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        let k = *sk;
+                        let val = input.trim().to_string();
+                        self.close_popup();
+                        self.settings_apply_input(k, val);
+                    }
+                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    _ => {}
+                },
                 None => {}
             }
         }
@@ -1270,8 +1403,10 @@ impl App {
                         self.active_view = View::Generate;
                     } else if x < 25 {
                         self.active_view = View::Gallery;
-                    } else {
+                    } else if x < 35 {
                         self.active_view = View::Models;
+                    } else {
+                        self.active_view = View::Settings;
                     }
                     return;
                 }
@@ -1414,14 +1549,16 @@ impl App {
                 self.active_view = match self.active_view {
                     View::Generate => View::Gallery,
                     View::Gallery => View::Models,
-                    View::Models => View::Generate,
+                    View::Models => View::Settings,
+                    View::Settings => View::Generate,
                 };
             }
             Action::ViewPrev => {
                 self.active_view = match self.active_view {
-                    View::Generate => View::Models,
+                    View::Generate => View::Settings,
                     View::Gallery => View::Generate,
                     View::Models => View::Gallery,
+                    View::Settings => View::Models,
                 };
             }
             Action::FocusNext => {
@@ -1469,6 +1606,7 @@ impl App {
                         self.models.selected -= 1;
                     }
                 }
+                View::Settings => self.settings_navigate(-1),
             },
             Action::Down => match self.active_view {
                 View::Generate => {
@@ -1501,9 +1639,22 @@ impl App {
                         self.models.selected += 1;
                     }
                 }
+                View::Settings => self.settings_navigate(1),
             },
-            Action::Increment => self.increment_param(1),
-            Action::Decrement => self.increment_param(-1),
+            Action::Increment => {
+                if self.active_view == View::Settings {
+                    self.settings_increment(1);
+                } else {
+                    self.increment_param(1);
+                }
+            }
+            Action::Decrement => {
+                if self.active_view == View::Settings {
+                    self.settings_increment(-1);
+                } else {
+                    self.increment_param(-1);
+                }
+            }
             Action::Generate => {
                 if self.active_view == View::Generate && !self.generate.generating {
                     self.start_generation();
@@ -1538,6 +1689,7 @@ impl App {
                         self.generate.focus = GenerateFocus::Prompt;
                     }
                 }
+                View::Settings => self.settings_confirm(),
             },
             Action::PullModel => {
                 if self.active_view == View::Models {
@@ -2031,6 +2183,724 @@ impl App {
             }
             // For numeric fields, Enter does nothing special (use +/-)
             _ => {}
+        }
+    }
+
+    // ── Settings view helpers ─────────────────────────────────────────
+
+    /// Build the flat list of settings rows from current config state.
+    #[allow(clippy::vec_init_then_push)]
+    pub fn build_settings_rows(&self) -> Vec<SettingsRow> {
+        let mut rows = Vec::new();
+
+        // ── General ─────────────────────────────────────────────
+        rows.push(SettingsRow::SectionHeader {
+            name: "General".into(),
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::DefaultModel,
+            label: "Model",
+            field_type: SettingsFieldType::Text,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ModelsDir,
+            label: "Models Dir",
+            field_type: SettingsFieldType::Path,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::OutputDir,
+            label: "Output Dir",
+            field_type: SettingsFieldType::Path,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ServerPort,
+            label: "Port",
+            field_type: SettingsFieldType::Number {
+                min: 1024.0,
+                max: 65535.0,
+                step: 1.0,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::DefaultWidth,
+            label: "Width",
+            field_type: SettingsFieldType::Number {
+                min: 64.0,
+                max: 4096.0,
+                step: 64.0,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::DefaultHeight,
+            label: "Height",
+            field_type: SettingsFieldType::Number {
+                min: 64.0,
+                max: 4096.0,
+                step: 64.0,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::DefaultSteps,
+            label: "Steps",
+            field_type: SettingsFieldType::Number {
+                min: 1.0,
+                max: 200.0,
+                step: 1.0,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::EmbedMetadata,
+            label: "Metadata",
+            field_type: SettingsFieldType::Bool,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::T5Variant,
+            label: "T5 Variant",
+            field_type: SettingsFieldType::Toggle {
+                options: vec!["auto", "fp16", "q8", "q6", "q5", "q4", "q3"],
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::Qwen3Variant,
+            label: "Qwen3 Var.",
+            field_type: SettingsFieldType::Toggle {
+                options: vec!["auto", "bf16", "q8", "q6", "iq4", "q3"],
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::DefaultNegativePrompt,
+            label: "Neg. Prompt",
+            field_type: SettingsFieldType::Text,
+        });
+
+        // ── Expand ──────────────────────────────────────────────
+        rows.push(SettingsRow::SectionHeader {
+            name: "Expand".into(),
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandEnabled,
+            label: "Enabled",
+            field_type: SettingsFieldType::Bool,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandBackend,
+            label: "Backend",
+            field_type: SettingsFieldType::Text,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandModel,
+            label: "Model",
+            field_type: SettingsFieldType::Text,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandApiModel,
+            label: "API Model",
+            field_type: SettingsFieldType::Text,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandTemperature,
+            label: "Temp.",
+            field_type: SettingsFieldType::Number {
+                min: 0.0,
+                max: 2.0,
+                step: 0.1,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandTopP,
+            label: "Top P",
+            field_type: SettingsFieldType::Number {
+                min: 0.0,
+                max: 1.0,
+                step: 0.05,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandMaxTokens,
+            label: "Max Tokens",
+            field_type: SettingsFieldType::Number {
+                min: 64.0,
+                max: 4096.0,
+                step: 64.0,
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::ExpandThinking,
+            label: "Thinking",
+            field_type: SettingsFieldType::Bool,
+        });
+
+        // ── Logging ─────────────────────────────────────────────
+        rows.push(SettingsRow::SectionHeader {
+            name: "Logging".into(),
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::LogLevel,
+            label: "Level",
+            field_type: SettingsFieldType::Toggle {
+                options: vec!["trace", "debug", "info", "warn", "error"],
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::LogFile,
+            label: "File Log",
+            field_type: SettingsFieldType::Bool,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::LogDir,
+            label: "Log Dir",
+            field_type: SettingsFieldType::Path,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::LogMaxDays,
+            label: "Max Days",
+            field_type: SettingsFieldType::Number {
+                min: 1.0,
+                max: 365.0,
+                step: 1.0,
+            },
+        });
+
+        // ── Model Defaults ──────────────────────────────────────
+        if !self.config.models.is_empty() {
+            let model_name = self.settings.selected_model.clone().unwrap_or_else(|| {
+                self.config
+                    .models
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_default()
+            });
+
+            rows.push(SettingsRow::SectionHeader {
+                name: format!("Model Defaults \u{2500}\u{2500} {model_name} "),
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelSelector,
+                label: "Model",
+                field_type: SettingsFieldType::Toggle {
+                    options: Vec::new(), // handled specially in cycle logic
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelSteps,
+                label: "Steps",
+                field_type: SettingsFieldType::Number {
+                    min: 1.0,
+                    max: 200.0,
+                    step: 1.0,
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelGuidance,
+                label: "Guidance",
+                field_type: SettingsFieldType::Number {
+                    min: 0.0,
+                    max: 30.0,
+                    step: 0.5,
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelWidth,
+                label: "Width",
+                field_type: SettingsFieldType::Number {
+                    min: 64.0,
+                    max: 4096.0,
+                    step: 64.0,
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelHeight,
+                label: "Height",
+                field_type: SettingsFieldType::Number {
+                    min: 64.0,
+                    max: 4096.0,
+                    step: 64.0,
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelScheduler,
+                label: "Scheduler",
+                field_type: SettingsFieldType::Toggle {
+                    options: vec!["(none)", "ddim", "euler-ancestral", "uni-pc"],
+                },
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelNegativePrompt,
+                label: "Neg. Prompt",
+                field_type: SettingsFieldType::Text,
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelLora,
+                label: "LoRA",
+                field_type: SettingsFieldType::Path,
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelLoraScale,
+                label: "LoRA Scale",
+                field_type: SettingsFieldType::Number {
+                    min: 0.0,
+                    max: 2.0,
+                    step: 0.1,
+                },
+            });
+
+            // Read-only paths
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelTransformer,
+                label: "Transformer",
+                field_type: SettingsFieldType::ReadOnly,
+            });
+            rows.push(SettingsRow::Field {
+                key: SettingsKey::ModelVae,
+                label: "VAE",
+                field_type: SettingsFieldType::ReadOnly,
+            });
+        }
+
+        rows
+    }
+
+    /// Get the display value for a settings key.
+    pub fn settings_display_value(&self, key: &SettingsKey) -> String {
+        let cfg = &self.config;
+        let model_cfg = self
+            .settings
+            .selected_model
+            .as_ref()
+            .and_then(|name| cfg.models.get(name));
+
+        match key {
+            SettingsKey::DefaultModel => cfg.default_model.clone(),
+            SettingsKey::ModelsDir => cfg.models_dir.clone(),
+            SettingsKey::OutputDir => cfg
+                .output_dir
+                .as_deref()
+                .unwrap_or("~/.mold/output")
+                .to_string(),
+            SettingsKey::ServerPort => cfg.server_port.to_string(),
+            SettingsKey::DefaultWidth => cfg.default_width.to_string(),
+            SettingsKey::DefaultHeight => cfg.default_height.to_string(),
+            SettingsKey::DefaultSteps => cfg.default_steps.to_string(),
+            SettingsKey::EmbedMetadata => if cfg.embed_metadata { "on" } else { "off" }.into(),
+            SettingsKey::T5Variant => cfg.t5_variant.as_deref().unwrap_or("auto").to_string(),
+            SettingsKey::Qwen3Variant => cfg.qwen3_variant.as_deref().unwrap_or("auto").to_string(),
+            SettingsKey::DefaultNegativePrompt => cfg
+                .default_negative_prompt
+                .as_deref()
+                .unwrap_or("(none)")
+                .to_string(),
+            // Expand
+            SettingsKey::ExpandEnabled => if cfg.expand.enabled { "on" } else { "off" }.into(),
+            SettingsKey::ExpandBackend => cfg.expand.backend.clone(),
+            SettingsKey::ExpandModel => cfg.expand.model.clone(),
+            SettingsKey::ExpandApiModel => cfg.expand.api_model.clone(),
+            SettingsKey::ExpandTemperature => format!("{:.1}", cfg.expand.temperature),
+            SettingsKey::ExpandTopP => format!("{:.2}", cfg.expand.top_p),
+            SettingsKey::ExpandMaxTokens => cfg.expand.max_tokens.to_string(),
+            SettingsKey::ExpandThinking => if cfg.expand.thinking { "on" } else { "off" }.into(),
+            // Logging
+            SettingsKey::LogLevel => cfg.logging.level.clone(),
+            SettingsKey::LogFile => if cfg.logging.file { "on" } else { "off" }.into(),
+            SettingsKey::LogDir => cfg
+                .logging
+                .dir
+                .as_deref()
+                .unwrap_or("~/.mold/logs")
+                .to_string(),
+            SettingsKey::LogMaxDays => cfg.logging.max_days.to_string(),
+            // Model defaults
+            SettingsKey::ModelSelector => self
+                .settings
+                .selected_model
+                .as_deref()
+                .unwrap_or("(none)")
+                .to_string(),
+            SettingsKey::ModelSteps => model_cfg
+                .and_then(|m| m.default_steps)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(global)".into()),
+            SettingsKey::ModelGuidance => model_cfg
+                .and_then(|m| m.default_guidance)
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "(global)".into()),
+            SettingsKey::ModelWidth => model_cfg
+                .and_then(|m| m.default_width)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(global)".into()),
+            SettingsKey::ModelHeight => model_cfg
+                .and_then(|m| m.default_height)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(global)".into()),
+            SettingsKey::ModelScheduler => model_cfg
+                .and_then(|m| m.scheduler)
+                .map(|s| format!("{s:?}").to_lowercase())
+                .unwrap_or_else(|| "(none)".into()),
+            SettingsKey::ModelNegativePrompt => model_cfg
+                .and_then(|m| m.negative_prompt.as_deref())
+                .unwrap_or("(none)")
+                .to_string(),
+            SettingsKey::ModelLora => model_cfg
+                .and_then(|m| m.lora.as_deref())
+                .map(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.to_string())
+                })
+                .unwrap_or_else(|| "(none)".into()),
+            SettingsKey::ModelLoraScale => model_cfg
+                .and_then(|m| m.lora_scale)
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "1.0".into()),
+            SettingsKey::ModelTransformer => model_cfg
+                .and_then(|m| m.transformer.as_deref())
+                .unwrap_or("(not set)")
+                .to_string(),
+            SettingsKey::ModelVae => model_cfg
+                .and_then(|m| m.vae.as_deref())
+                .unwrap_or("(not set)")
+                .to_string(),
+        }
+    }
+
+    /// Return the env var name if it overrides the given settings key.
+    pub fn settings_env_override(key: &SettingsKey) -> Option<&'static str> {
+        let var = match key {
+            SettingsKey::DefaultModel => "MOLD_DEFAULT_MODEL",
+            SettingsKey::ModelsDir => "MOLD_MODELS_DIR",
+            SettingsKey::OutputDir => "MOLD_OUTPUT_DIR",
+            SettingsKey::EmbedMetadata => "MOLD_EMBED_METADATA",
+            SettingsKey::T5Variant => "MOLD_T5_VARIANT",
+            SettingsKey::Qwen3Variant => "MOLD_QWEN3_VARIANT",
+            SettingsKey::ExpandEnabled => "MOLD_EXPAND",
+            SettingsKey::ExpandBackend => "MOLD_EXPAND_BACKEND",
+            SettingsKey::ExpandModel | SettingsKey::ExpandApiModel => "MOLD_EXPAND_MODEL",
+            SettingsKey::ExpandTemperature => "MOLD_EXPAND_TEMPERATURE",
+            SettingsKey::ExpandThinking => "MOLD_EXPAND_THINKING",
+            _ => return None,
+        };
+        if std::env::var(var).is_ok() {
+            Some(var)
+        } else {
+            None
+        }
+    }
+
+    /// Navigate up (delta=-1) or down (delta=1) in the settings list, skipping headers.
+    fn settings_navigate(&mut self, delta: i32) {
+        let rows = self.build_settings_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self.settings.row_index;
+        let len = rows.len();
+        let mut next = current;
+        loop {
+            let candidate = next as i32 + delta;
+            if candidate < 0 || candidate >= len as i32 {
+                break;
+            }
+            next = candidate as usize;
+            if rows[next].is_field() {
+                self.settings.row_index = next;
+                break;
+            }
+        }
+    }
+
+    /// Adjust the current settings field by delta (+1 or -1).
+    fn settings_increment(&mut self, delta: i32) {
+        let rows = self.build_settings_rows();
+        let row = match rows.get(self.settings.row_index) {
+            Some(r) => r,
+            None => return,
+        };
+        let (key, field_type) = match row {
+            SettingsRow::Field {
+                key, field_type, ..
+            } => (*key, field_type.clone()),
+            _ => return,
+        };
+
+        // Handle ModelSelector specially — cycles through configured models
+        if key == SettingsKey::ModelSelector {
+            self.settings_cycle_model(delta);
+            return;
+        }
+
+        match field_type {
+            SettingsFieldType::Number { min, max, step } => {
+                self.settings_adjust_number(key, delta as f64 * step, min, max);
+            }
+            SettingsFieldType::Toggle { options } => {
+                if !options.is_empty() {
+                    self.settings_cycle_toggle(key, &options, delta);
+                }
+            }
+            SettingsFieldType::Bool => {
+                self.settings_toggle_bool(key);
+            }
+            _ => {}
+        }
+    }
+
+    fn settings_adjust_number(&mut self, key: SettingsKey, delta: f64, min: f64, max: f64) {
+        let cfg = &mut self.config;
+        match key {
+            SettingsKey::ServerPort => {
+                cfg.server_port = (cfg.server_port as f64 + delta).clamp(min, max) as u16;
+            }
+            SettingsKey::DefaultWidth => {
+                cfg.default_width = (cfg.default_width as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::DefaultHeight => {
+                cfg.default_height = (cfg.default_height as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::DefaultSteps => {
+                cfg.default_steps = (cfg.default_steps as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::ExpandTemperature => {
+                cfg.expand.temperature = (cfg.expand.temperature + delta).clamp(min, max);
+            }
+            SettingsKey::ExpandTopP => {
+                cfg.expand.top_p = (cfg.expand.top_p + delta).clamp(min, max);
+            }
+            SettingsKey::ExpandMaxTokens => {
+                cfg.expand.max_tokens =
+                    (cfg.expand.max_tokens as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::LogMaxDays => {
+                cfg.logging.max_days = (cfg.logging.max_days as f64 + delta).clamp(min, max) as u32;
+            }
+            SettingsKey::ModelSteps => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        let cur = mc.default_steps.unwrap_or(self.config.default_steps) as f64;
+                        mc.default_steps = Some((cur + delta).clamp(min, max) as u32);
+                    }
+                }
+                self.save_config();
+                return;
+            }
+            SettingsKey::ModelGuidance => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        let cur = mc.default_guidance.unwrap_or(0.0);
+                        mc.default_guidance = Some((cur + delta).clamp(min, max));
+                    }
+                }
+                self.save_config();
+                return;
+            }
+            SettingsKey::ModelWidth => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        let cur = mc.default_width.unwrap_or(self.config.default_width) as f64;
+                        mc.default_width = Some((cur + delta).clamp(min, max) as u32);
+                    }
+                }
+                self.save_config();
+                return;
+            }
+            SettingsKey::ModelHeight => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        let cur = mc.default_height.unwrap_or(self.config.default_height) as f64;
+                        mc.default_height = Some((cur + delta).clamp(min, max) as u32);
+                    }
+                }
+                self.save_config();
+                return;
+            }
+            SettingsKey::ModelLoraScale => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        let cur = mc.lora_scale.unwrap_or(1.0);
+                        mc.lora_scale = Some((cur + delta).clamp(min, max));
+                    }
+                }
+                self.save_config();
+                return;
+            }
+            _ => return,
+        }
+        self.save_config();
+    }
+
+    fn settings_cycle_toggle(&mut self, key: SettingsKey, options: &[&str], delta: i32) {
+        let current = self.settings_display_value(&key);
+        let idx = options.iter().position(|&o| o == current).unwrap_or(0);
+        let next = (idx as i32 + delta).rem_euclid(options.len() as i32) as usize;
+        let value = options[next].to_string();
+
+        match key {
+            SettingsKey::T5Variant => {
+                self.config.t5_variant = if value == "auto" { None } else { Some(value) };
+            }
+            SettingsKey::Qwen3Variant => {
+                self.config.qwen3_variant = if value == "auto" { None } else { Some(value) };
+            }
+            SettingsKey::LogLevel => {
+                self.config.logging.level = value;
+            }
+            SettingsKey::ModelScheduler => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        mc.scheduler = match options[next] {
+                            "ddim" => Some(Scheduler::Ddim),
+                            "euler-ancestral" => Some(Scheduler::EulerAncestral),
+                            "uni-pc" => Some(Scheduler::UniPc),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.save_config();
+    }
+
+    fn settings_toggle_bool(&mut self, key: SettingsKey) {
+        match key {
+            SettingsKey::EmbedMetadata => self.config.embed_metadata = !self.config.embed_metadata,
+            SettingsKey::ExpandEnabled => self.config.expand.enabled = !self.config.expand.enabled,
+            SettingsKey::ExpandThinking => {
+                self.config.expand.thinking = !self.config.expand.thinking;
+            }
+            SettingsKey::LogFile => self.config.logging.file = !self.config.logging.file,
+            _ => return,
+        }
+        self.save_config();
+    }
+
+    fn settings_cycle_model(&mut self, delta: i32) {
+        let names: Vec<String> = self.config.models.keys().cloned().collect();
+        if names.is_empty() {
+            return;
+        }
+        let idx = self
+            .settings
+            .selected_model
+            .as_ref()
+            .and_then(|current| names.iter().position(|n| n == current))
+            .unwrap_or(0);
+        let next = (idx as i32 + delta).rem_euclid(names.len() as i32) as usize;
+        self.settings.selected_model = Some(names[next].clone());
+    }
+
+    /// Handle Enter on the current settings field.
+    fn settings_confirm(&mut self) {
+        let rows = self.build_settings_rows();
+        let row = match rows.get(self.settings.row_index) {
+            Some(r) => r,
+            None => return,
+        };
+        let (key, field_type) = match row {
+            SettingsRow::Field {
+                key, field_type, ..
+            } => (*key, field_type.clone()),
+            _ => return,
+        };
+
+        match field_type {
+            SettingsFieldType::Text | SettingsFieldType::Path => {
+                let label = match row {
+                    SettingsRow::Field { label, .. } => *label,
+                    _ => "",
+                };
+                let current = self.settings_display_value(&key);
+                let input = if current == "(none)" || current == "(not set)" {
+                    String::new()
+                } else {
+                    current
+                };
+                self.popup = Some(Popup::SettingsInput {
+                    key,
+                    input,
+                    label: label.to_string(),
+                });
+            }
+            SettingsFieldType::Bool => {
+                self.settings_toggle_bool(key);
+            }
+            SettingsFieldType::Toggle { ref options } => {
+                if key == SettingsKey::ModelSelector {
+                    self.settings_cycle_model(1);
+                } else if !options.is_empty() {
+                    self.settings_cycle_toggle(key, options, 1);
+                }
+            }
+            SettingsFieldType::Number { .. } => {
+                // No-op for Enter on numeric fields (use +/-)
+            }
+            SettingsFieldType::ReadOnly => {}
+        }
+    }
+
+    /// Apply a text/path popup result to the config and save.
+    fn settings_apply_input(&mut self, key: SettingsKey, value: String) {
+        let val = if value.is_empty() { None } else { Some(value) };
+        match key {
+            SettingsKey::DefaultModel => {
+                if let Some(v) = val {
+                    self.config.default_model = v;
+                }
+            }
+            SettingsKey::ModelsDir => {
+                if let Some(v) = val {
+                    self.config.models_dir = v;
+                }
+            }
+            SettingsKey::OutputDir => {
+                self.config.output_dir = val;
+            }
+            SettingsKey::DefaultNegativePrompt => {
+                self.config.default_negative_prompt = val;
+            }
+            SettingsKey::ExpandBackend => {
+                if let Some(v) = val {
+                    self.config.expand.backend = v;
+                }
+            }
+            SettingsKey::ExpandModel => {
+                if let Some(v) = val {
+                    self.config.expand.model = v;
+                }
+            }
+            SettingsKey::ExpandApiModel => {
+                if let Some(v) = val {
+                    self.config.expand.api_model = v;
+                }
+            }
+            SettingsKey::LogDir => {
+                self.config.logging.dir = val;
+            }
+            SettingsKey::ModelNegativePrompt => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        mc.negative_prompt = val;
+                    }
+                }
+            }
+            SettingsKey::ModelLora => {
+                if let Some(name) = &self.settings.selected_model {
+                    if let Some(mc) = self.config.models.get_mut(name) {
+                        mc.lora = val;
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.save_config();
+    }
+
+    /// Save config to disk, storing any error in settings state.
+    fn save_config(&mut self) {
+        if let Err(e) = self.config.save() {
+            self.settings.save_error = Some(format!("Save failed: {e}"));
+        } else {
+            self.settings.save_error = None;
         }
     }
 
@@ -3134,5 +4004,167 @@ mod tests {
             BackgroundEvent::ThumbnailsReady => {}
             _ => panic!("expected ThumbnailsReady"),
         }
+    }
+
+    // ── Settings view tests ────────────────────────────────
+
+    #[test]
+    fn settings_state_default_values() {
+        let state = SettingsState::default();
+        assert_eq!(state.row_index, 0);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.selected_model.is_none());
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn settings_row_is_field() {
+        let header = SettingsRow::SectionHeader {
+            name: "General".into(),
+        };
+        assert!(!header.is_field());
+
+        let field = SettingsRow::Field {
+            key: SettingsKey::DefaultModel,
+            label: "Model",
+            field_type: SettingsFieldType::Text,
+        };
+        assert!(field.is_field());
+    }
+
+    #[test]
+    fn settings_row_is_read_only() {
+        let field = SettingsRow::Field {
+            key: SettingsKey::ModelTransformer,
+            label: "Transformer",
+            field_type: SettingsFieldType::ReadOnly,
+        };
+        assert!(field.is_read_only());
+
+        let editable = SettingsRow::Field {
+            key: SettingsKey::DefaultWidth,
+            label: "Width",
+            field_type: SettingsFieldType::Number {
+                min: 64.0,
+                max: 4096.0,
+                step: 64.0,
+            },
+        };
+        assert!(!editable.is_read_only());
+    }
+
+    #[test]
+    fn settings_key_enum_has_all_sections() {
+        // Verify variants for each section exist
+        let _general = SettingsKey::DefaultModel;
+        let _expand = SettingsKey::ExpandEnabled;
+        let _logging = SettingsKey::LogLevel;
+        let _model = SettingsKey::ModelSteps;
+        let _read_only = SettingsKey::ModelTransformer;
+    }
+
+    #[test]
+    fn settings_display_value_global_defaults() {
+        let config = Config::load_or_default();
+        let settings = SettingsState::default();
+        // Create a minimal App-like context to test display values
+        // We test the config directly since display_value reads from config
+        assert_eq!(config.default_model, "flux2-klein");
+        assert_eq!(config.server_port, 7680);
+        assert_eq!(config.default_width, 768);
+        assert_eq!(config.default_height, 768);
+        assert_eq!(config.default_steps, 4);
+        assert!(config.embed_metadata);
+        assert_eq!(settings.row_index, 0);
+    }
+
+    #[test]
+    fn settings_env_override_returns_none_for_unset() {
+        // Most env vars won't be set in test environment
+        let result = App::settings_env_override(&SettingsKey::ServerPort);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn settings_env_override_returns_none_for_unmapped_keys() {
+        // Keys without env var mappings return None
+        assert!(App::settings_env_override(&SettingsKey::DefaultWidth).is_none());
+        assert!(App::settings_env_override(&SettingsKey::DefaultHeight).is_none());
+        assert!(App::settings_env_override(&SettingsKey::LogLevel).is_none());
+    }
+
+    #[test]
+    fn settings_field_type_variants() {
+        let text = SettingsFieldType::Text;
+        let num = SettingsFieldType::Number {
+            min: 0.0,
+            max: 100.0,
+            step: 1.0,
+        };
+        let toggle = SettingsFieldType::Toggle {
+            options: vec!["a", "b"],
+        };
+        let bool_type = SettingsFieldType::Bool;
+        let path = SettingsFieldType::Path;
+        let read_only = SettingsFieldType::ReadOnly;
+
+        // Verify the enum has all expected variants by pattern matching
+        match text {
+            SettingsFieldType::Text => {}
+            _ => panic!("unexpected variant"),
+        }
+        match num {
+            SettingsFieldType::Number { min, max, step } => {
+                assert_eq!(min, 0.0);
+                assert_eq!(max, 100.0);
+                assert_eq!(step, 1.0);
+            }
+            _ => panic!("unexpected variant"),
+        }
+        match toggle {
+            SettingsFieldType::Toggle { options } => assert_eq!(options.len(), 2),
+            _ => panic!("unexpected variant"),
+        }
+        match bool_type {
+            SettingsFieldType::Bool => {}
+            _ => panic!("unexpected variant"),
+        }
+        match path {
+            SettingsFieldType::Path => {}
+            _ => panic!("unexpected variant"),
+        }
+        match read_only {
+            SettingsFieldType::ReadOnly => {}
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn settings_input_popup_variant_exists() {
+        let popup = Popup::SettingsInput {
+            key: SettingsKey::DefaultModel,
+            input: "test".to_string(),
+            label: "Model".to_string(),
+        };
+        match popup {
+            Popup::SettingsInput { key, input, label } => {
+                assert_eq!(key, SettingsKey::DefaultModel);
+                assert_eq!(input, "test");
+                assert_eq!(label, "Model");
+            }
+            _ => panic!("expected SettingsInput"),
+        }
+    }
+
+    #[test]
+    fn view_settings_label_and_index() {
+        assert_eq!(View::Settings.label(), "Settings");
+        assert_eq!(View::Settings.index(), 3);
+    }
+
+    #[test]
+    fn view_all_includes_settings() {
+        assert_eq!(View::ALL.len(), 4);
+        assert_eq!(View::ALL[3], View::Settings);
     }
 }

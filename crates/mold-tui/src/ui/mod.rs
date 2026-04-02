@@ -5,6 +5,7 @@ pub mod models;
 pub mod param_form;
 pub mod popup;
 pub mod progress;
+pub mod settings;
 pub mod theme;
 
 use ratatui::prelude::*;
@@ -42,6 +43,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::Generate => generate::render(frame, app, layout[1]),
         View::Gallery => gallery::render(frame, app, layout[1]),
         View::Models => models::render(frame, app, layout[1]),
+        View::Settings => settings::render(frame, app, layout[1]),
     }
 
     // ── Status bar ──────────────────────────────────────────────
@@ -153,6 +155,14 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),
+            ("Esc", "Back"),
+            ("?", "Help"),
+            ("q", "Quit"),
+        ],
+        View::Settings => vec![
+            ("j/k", "Navigate"),
+            ("+/-", "Adjust"),
+            ("Enter", "Edit"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
