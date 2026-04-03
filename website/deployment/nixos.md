@@ -87,6 +87,8 @@ system user, and manages the data directory at `/var/lib/mold`.
       tokenFile = config.age.secrets.discord-token.path;
       # moldHost = "http://localhost:7680";  # defaults to main server
       cooldownSeconds = 10;
+      # allowedRoles = "artist, 1234567890";  # restrict to specific roles
+      # dailyQuota = 20;                       # max generations per user per day
       logLevel = "info";
     };
   };
@@ -116,14 +118,16 @@ system user, and manages the data directory at `/var/lib/mold`.
 
 ### Discord Bot Options
 
-| Option                    | Type    | Default                        | Description                  |
-| ------------------------- | ------- | ------------------------------ | ---------------------------- |
-| `discord.enable`          | bool    | `false`                        | Enable Discord bot service   |
-| `discord.package`         | package | `config.services.mold.package` | Package for the bot          |
-| `discord.tokenFile`       | path    | —                              | File containing bot token    |
-| `discord.moldHost`        | string  | `"http://localhost:{port}"`    | mold server URL              |
-| `discord.cooldownSeconds` | int     | `10`                           | Per-user generation cooldown |
-| `discord.logLevel`        | enum    | `"info"`                       | Bot log level                |
+| Option                    | Type    | Default                        | Description                                           |
+| ------------------------- | ------- | ------------------------------ | ----------------------------------------------------- |
+| `discord.enable`          | bool    | `false`                        | Enable Discord bot service                            |
+| `discord.package`         | package | `config.services.mold.package` | Package for the bot                                   |
+| `discord.tokenFile`       | path    | —                              | File containing bot token                             |
+| `discord.moldHost`        | string  | `"http://localhost:{port}"`    | mold server URL                                       |
+| `discord.cooldownSeconds` | int     | `10`                           | Per-user generation cooldown                          |
+| `discord.allowedRoles`    | string? | `null`                         | Comma-separated role names/IDs (`null` = all)         |
+| `discord.dailyQuota`      | int?    | `null`                         | Max generations per user per day (`null` = unlimited) |
+| `discord.logLevel`        | enum    | `"info"`                       | Bot log level                                         |
 
 ## What the Module Creates
 

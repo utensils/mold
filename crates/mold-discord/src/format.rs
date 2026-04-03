@@ -314,6 +314,41 @@ pub fn format_expand_result(
     }
 }
 
+/// Format a user's daily quota status into embed data.
+pub fn format_quota(used: u32, max: Option<u32>) -> EmbedData {
+    match max {
+        Some(max) => {
+            let remaining = max.saturating_sub(used);
+            EmbedData {
+                title: "Daily Quota".to_string(),
+                description: format!(
+                    "You have **{remaining}** of **{max}** generations remaining today."
+                ),
+                fields: vec![
+                    ("Used Today".to_string(), used.to_string(), true),
+                    ("Limit".to_string(), max.to_string(), true),
+                    ("Remaining".to_string(), remaining.to_string(), true),
+                ],
+                color: if remaining > 0 {
+                    COLOR_INFO
+                } else {
+                    COLOR_WARNING
+                },
+            }
+        }
+        None => EmbedData {
+            title: "Daily Quota".to_string(),
+            description: "No daily limit is configured. Generate freely!".to_string(),
+            fields: if used > 0 {
+                vec![("Used Today".to_string(), used.to_string(), true)]
+            } else {
+                vec![]
+            },
+            color: COLOR_INFO,
+        },
+    }
+}
+
 /// Format an error message into embed data.
 pub fn format_error(msg: &str) -> EmbedData {
     EmbedData {
@@ -784,6 +819,50 @@ mod tests {
         let embed = format_expand_result(&resp, "test", "flux");
         assert!(embed.description.chars().count() <= 4003);
         assert!(embed.description.ends_with("..."));
+    }
+
+    // --- format_quota tests ---
+
+    #[test]
+    fn quota_with_limit_and_remaining() {
+        let embed = format_quota(3, Some(10));
+        assert_eq!(embed.title, "Daily Quota");
+        assert!(embed.description.contains("**7**"));
+        assert!(embed.description.contains("**10**"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Used Today" && v == "3"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Remaining" && v == "7"));
+        assert_eq!(embed.color, COLOR_INFO);
+    }
+
+    #[test]
+    fn quota_exhausted() {
+        let embed = format_quota(10, Some(10));
+        assert!(embed.description.contains("**0**"));
+        assert_eq!(embed.color, COLOR_WARNING);
+    }
+
+    #[test]
+    fn quota_unlimited_no_usage() {
+        let embed = format_quota(0, None);
+        assert!(embed.description.contains("No daily limit"));
+        assert!(embed.fields.is_empty());
+        assert_eq!(embed.color, COLOR_INFO);
+    }
+
+    #[test]
+    fn quota_unlimited_with_usage() {
+        let embed = format_quota(5, None);
+        assert!(embed.description.contains("No daily limit"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Used Today" && v == "5"));
     }
 
     #[test]

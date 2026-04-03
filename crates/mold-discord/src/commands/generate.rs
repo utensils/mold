@@ -1,8 +1,8 @@
+use crate::checks::{self, AuthResult};
 use crate::handler;
 use crate::state::Context;
 use anyhow::Result;
 use mold_core::{GenerateRequest, OutputFormat};
-use std::time::Duration;
 
 /// Autocomplete function for model names.
 async fn autocomplete_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
@@ -122,19 +122,11 @@ pub async fn generate(
         return Ok(());
     }
 
-    // Check cooldown
+    // Check authorization (block list, roles, cooldown, quota)
     let user_id = ctx.author().id.get();
-    let cooldown = Duration::from_secs(ctx.data().config.cooldown_seconds);
-    if let Err(remaining) = ctx.data().cooldowns.check(user_id, cooldown) {
-        let secs = remaining.as_secs() + 1;
-        ctx.send(
-            poise::CreateReply::default()
-                .content(format!(
-                    "Please wait {secs} seconds before generating again."
-                ))
-                .ephemeral(true),
-        )
-        .await?;
+    if let AuthResult::Denied(msg) = checks::check_generate_auth(&ctx).await {
+        ctx.send(poise::CreateReply::default().content(msg).ephemeral(true))
+            .await?;
         return Ok(());
     }
 
@@ -165,9 +157,12 @@ pub async fn generate(
 
     match handler::run_generation(ctx, req).await {
         Ok(()) => {
+            // Quota slot was already consumed atomically in check_generate_auth
             ctx.data().cooldowns.record(user_id);
         }
         Err(e) => {
+            // Refund the quota slot consumed during auth check
+            ctx.data().quotas.refund(user_id);
             let msg = if mold_core::MoldClient::is_connection_error(&e) {
                 "Could not connect to the mold server. Is it running?".to_string()
             } else if mold_core::MoldClient::is_model_not_found(&e) {
