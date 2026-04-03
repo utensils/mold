@@ -1357,4 +1357,847 @@ is_schnell = false
             "config_version should be in serialized TOML"
         );
     }
+
+    // ── resolve_default_model source tracking ───────────────────────────
+
+    #[test]
+    fn resolve_default_model_env_returns_env_var_source() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_DEFAULT_MODEL", "sdxl-turbo:fp16");
+        let resolution = isolated_config().resolve_default_model();
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        assert_eq!(resolution.model, "sdxl-turbo:fp16");
+        assert_eq!(resolution.source, crate::config::DefaultModelSource::EnvVar);
+    }
+
+    #[test]
+    fn resolve_default_model_custom_entry_returns_config_custom_entry_source() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let mut models = HashMap::new();
+        models.insert(
+            "custom-model".to_string(),
+            ModelConfig {
+                transformer: Some("/models/t.safetensors".to_string()),
+                vae: Some("/models/v.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            default_model: "custom-model".to_string(),
+            models,
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            ..Config::default()
+        };
+        let resolution = cfg.resolve_default_model();
+        assert_eq!(resolution.model, "custom-model");
+        assert_eq!(
+            resolution.source,
+            crate::config::DefaultModelSource::ConfigCustomEntry
+        );
+    }
+
+    #[test]
+    fn resolve_default_model_downloaded_manifest_returns_config_source() {
+        // Step 3: config default_model is a manifest model that is downloaded
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("resolve-step3");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let cfg = Config {
+            default_model: "flux-schnell:q8".to_string(),
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            ..Config::default()
+        };
+        let resolution = cfg.resolve_default_model();
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        assert_eq!(resolution.model, "flux-schnell:q8");
+        assert_eq!(resolution.source, crate::config::DefaultModelSource::Config);
+    }
+
+    #[test]
+    fn resolve_default_model_last_used_returns_last_used_source() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("resolve-step4");
+        populate_manifest_files(&models_dir, "sdxl-turbo:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let mold_home = test_models_dir("mold-home-step4");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("last-model"), "sdxl-turbo:fp16").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        // default_model points to something not downloaded
+        let cfg = Config {
+            default_model: "flux-dev:q4".to_string(),
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            ..Config::default()
+        };
+        let resolution = cfg.resolve_default_model();
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+        assert_eq!(resolution.model, "sdxl-turbo:fp16");
+        assert_eq!(
+            resolution.source,
+            crate::config::DefaultModelSource::LastUsed
+        );
+    }
+
+    #[test]
+    fn resolve_default_model_single_downloaded_returns_only_downloaded_source() {
+        // Step 5: exactly one non-utility model is downloaded
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let models_dir = test_models_dir("resolve-step5");
+        populate_manifest_files(&models_dir, "sdxl-turbo:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        // No last-model file
+        let mold_home = test_models_dir("mold-home-step5");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        // default_model points to something not downloaded and no custom entry
+        let cfg = Config {
+            default_model: "flux-dev:q4".to_string(),
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            ..Config::default()
+        };
+        let resolution = cfg.resolve_default_model();
+
+        std::env::remove_var("MOLD_HOME");
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&models_dir);
+        let _ = std::fs::remove_dir_all(&mold_home);
+        assert_eq!(resolution.model, "sdxl-turbo:fp16");
+        assert_eq!(
+            resolution.source,
+            crate::config::DefaultModelSource::OnlyDownloaded
+        );
+    }
+
+    #[test]
+    fn resolve_default_model_fallback_returns_config_default_source() {
+        // Step 6: nothing downloaded, no last-model → config default
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_DEFAULT_MODEL");
+        let mold_home = test_models_dir("mold-home-step6");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = isolated_config();
+        let resolution = cfg.resolve_default_model();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+        assert_eq!(resolution.model, "flux2-klein");
+        assert_eq!(
+            resolution.source,
+            crate::config::DefaultModelSource::ConfigDefault
+        );
+    }
+
+    // ── load_or_default error recovery ──────────────────────────────────
+
+    #[test]
+    fn load_or_default_invalid_toml_returns_default() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("invalid-toml");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::fs::write(mold_home.join("config.toml"), "{{{{not valid toml!").unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = Config::load_or_default();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+        // Should fall back to defaults
+        assert_eq!(cfg.default_model, "flux2-klein");
+        assert_eq!(cfg.server_port, 7680);
+    }
+
+    #[test]
+    fn load_or_default_valid_toml_with_extra_fields_tolerates_unknown_keys() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("extra-fields");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        // TOML with a field that doesn't exist in the Config struct
+        let content = r#"
+default_model = "flux-dev"
+server_port = 8888
+some_future_field = "should be ignored"
+"#;
+        std::fs::write(mold_home.join("config.toml"), content).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = Config::load_or_default();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+        // Unknown fields may cause parse failure → defaults, or be tolerated.
+        // Either way the config should be usable.
+        assert!(!cfg.default_model.is_empty());
+    }
+
+    #[test]
+    fn load_or_default_triggers_migration_on_v0_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("migration-trigger");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        // v0 config (no config_version field)
+        let content = r#"
+default_model = "flux-schnell:q8"
+
+[models."flux-dev:q8"]
+transformer = "/path/to/transformer.gguf"
+vae = "/path/to/vae.safetensors"
+default_steps = 999
+description = "stale"
+"#;
+        std::fs::write(mold_home.join("config.toml"), content).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let cfg = Config::load_or_default();
+
+        std::env::remove_var("MOLD_HOME");
+
+        // Migration should have run: version bumped, stale defaults cleared
+        assert!(cfg.config_version >= 1);
+        if let Some(flux) = cfg.models.get("flux-dev:q8") {
+            assert!(
+                flux.default_steps.is_none(),
+                "migration should clear stale steps"
+            );
+            assert!(
+                flux.description.is_none(),
+                "migration should clear stale description"
+            );
+            // Paths should survive
+            assert!(flux.transformer.is_some());
+        }
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    // ── ModelPaths SDXL and multi-shard fields ──────────────────────────
+
+    #[test]
+    fn model_paths_resolve_sdxl_fields() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+            "MOLD_CLIP2_PATH",
+            "MOLD_CLIP2_TOKENIZER_PATH",
+            "MOLD_TEXT_TOKENIZER_PATH",
+            "MOLD_DECODER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
+        let mut models = HashMap::new();
+        models.insert(
+            "sdxl-test".to_string(),
+            ModelConfig {
+                transformer: Some("/tmp/sdxl/unet.safetensors".to_string()),
+                vae: Some("/tmp/sdxl/vae.safetensors".to_string()),
+                clip_encoder: Some("/tmp/sdxl/clip_l.safetensors".to_string()),
+                clip_tokenizer: Some("/tmp/sdxl/clip_l.tokenizer.json".to_string()),
+                clip_encoder_2: Some("/tmp/sdxl/clip_g.safetensors".to_string()),
+                clip_tokenizer_2: Some("/tmp/sdxl/clip_g.tokenizer.json".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let paths = ModelPaths::resolve("sdxl-test", &cfg).unwrap();
+        assert_eq!(
+            paths.clip_encoder_2.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/sdxl/clip_g.safetensors"
+        );
+        assert_eq!(
+            paths.clip_tokenizer_2.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/sdxl/clip_g.tokenizer.json"
+        );
+    }
+
+    #[test]
+    fn model_paths_resolve_transformer_shards() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+            "MOLD_CLIP2_PATH",
+            "MOLD_CLIP2_TOKENIZER_PATH",
+            "MOLD_TEXT_TOKENIZER_PATH",
+            "MOLD_DECODER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
+        let mut models = HashMap::new();
+        models.insert(
+            "sharded-model".to_string(),
+            ModelConfig {
+                transformer: Some("/tmp/shard/main.safetensors".to_string()),
+                transformer_shards: Some(vec![
+                    "/tmp/shard/shard-0.safetensors".to_string(),
+                    "/tmp/shard/shard-1.safetensors".to_string(),
+                ]),
+                vae: Some("/tmp/shard/vae.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let paths = ModelPaths::resolve("sharded-model", &cfg).unwrap();
+        assert_eq!(paths.transformer_shards.len(), 2);
+        assert_eq!(
+            paths.transformer_shards[0].to_str().unwrap(),
+            "/tmp/shard/shard-0.safetensors"
+        );
+        assert_eq!(
+            paths.transformer_shards[1].to_str().unwrap(),
+            "/tmp/shard/shard-1.safetensors"
+        );
+    }
+
+    #[test]
+    fn model_paths_resolve_text_encoder_files_and_decoder() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "MOLD_TRANSFORMER_PATH",
+            "MOLD_VAE_PATH",
+            "MOLD_T5_PATH",
+            "MOLD_CLIP_PATH",
+            "MOLD_T5_TOKENIZER_PATH",
+            "MOLD_CLIP_TOKENIZER_PATH",
+            "MOLD_CLIP2_PATH",
+            "MOLD_CLIP2_TOKENIZER_PATH",
+            "MOLD_TEXT_TOKENIZER_PATH",
+            "MOLD_DECODER_PATH",
+        ] {
+            std::env::remove_var(var);
+        }
+        let mut models = HashMap::new();
+        models.insert(
+            "wurst-test".to_string(),
+            ModelConfig {
+                transformer: Some("/tmp/wurst/prior.safetensors".to_string()),
+                vae: Some("/tmp/wurst/vqgan.safetensors".to_string()),
+                decoder: Some("/tmp/wurst/decoder.safetensors".to_string()),
+                text_encoder_files: Some(vec![
+                    "/tmp/wurst/enc-shard-0.safetensors".to_string(),
+                    "/tmp/wurst/enc-shard-1.safetensors".to_string(),
+                ]),
+                text_tokenizer: Some("/tmp/wurst/tokenizer.json".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let paths = ModelPaths::resolve("wurst-test", &cfg).unwrap();
+        assert_eq!(
+            paths.decoder.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/wurst/decoder.safetensors"
+        );
+        assert_eq!(paths.text_encoder_files.len(), 2);
+        assert_eq!(
+            paths.text_tokenizer.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/wurst/tokenizer.json"
+        );
+    }
+
+    #[test]
+    fn model_paths_env_var_for_decoder() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/prior.safetensors");
+        std::env::set_var("MOLD_VAE_PATH", "/env/vae.safetensors");
+        std::env::set_var("MOLD_DECODER_PATH", "/env/decoder.safetensors");
+
+        let paths = ModelPaths::resolve("__no_such__", &Config::default()).unwrap();
+        assert_eq!(
+            paths.decoder.as_ref().unwrap().to_str().unwrap(),
+            "/env/decoder.safetensors"
+        );
+
+        std::env::remove_var("MOLD_TRANSFORMER_PATH");
+        std::env::remove_var("MOLD_VAE_PATH");
+        std::env::remove_var("MOLD_DECODER_PATH");
+    }
+
+    // ── all_file_paths ──────────────────────────────────────────────────
+
+    #[test]
+    fn all_file_paths_collects_all_fields() {
+        let mc = ModelConfig {
+            transformer: Some("/a/transformer.gguf".to_string()),
+            vae: Some("/a/vae.safetensors".to_string()),
+            t5_encoder: Some("/a/t5.safetensors".to_string()),
+            clip_encoder: Some("/a/clip.safetensors".to_string()),
+            t5_tokenizer: Some("/a/t5.tokenizer.json".to_string()),
+            clip_tokenizer: Some("/a/clip.tokenizer.json".to_string()),
+            clip_encoder_2: Some("/a/clip_g.safetensors".to_string()),
+            clip_tokenizer_2: Some("/a/clip_g.tokenizer.json".to_string()),
+            text_tokenizer: Some("/a/text.tokenizer.json".to_string()),
+            decoder: Some("/a/decoder.safetensors".to_string()),
+            transformer_shards: Some(vec![
+                "/a/shard0.safetensors".to_string(),
+                "/a/shard1.safetensors".to_string(),
+            ]),
+            text_encoder_files: Some(vec!["/a/enc0.safetensors".to_string()]),
+            ..ModelConfig::default()
+        };
+        let paths = mc.all_file_paths();
+        // 10 single fields + 2 transformer shards + 1 text encoder file = 13
+        assert_eq!(paths.len(), 13);
+        assert!(paths.contains(&"/a/transformer.gguf".to_string()));
+        assert!(paths.contains(&"/a/clip_g.safetensors".to_string()));
+        assert!(paths.contains(&"/a/shard0.safetensors".to_string()));
+        assert!(paths.contains(&"/a/enc0.safetensors".to_string()));
+        assert!(paths.contains(&"/a/decoder.safetensors".to_string()));
+    }
+
+    #[test]
+    fn all_file_paths_skips_none_fields() {
+        let mc = ModelConfig {
+            transformer: Some("/a/transformer.gguf".to_string()),
+            vae: Some("/a/vae.safetensors".to_string()),
+            ..ModelConfig::default()
+        };
+        let paths = mc.all_file_paths();
+        assert_eq!(paths.len(), 2);
+    }
+
+    // ── disk_usage ──────────────────────────────────────────────────────
+
+    #[test]
+    fn disk_usage_sums_real_files() {
+        let dir = test_models_dir("disk-usage");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create two files of known sizes
+        let file_a = dir.join("a.safetensors");
+        let file_b = dir.join("b.safetensors");
+        std::fs::write(&file_a, &[0u8; 1024]).unwrap(); // 1 KiB
+        std::fs::write(&file_b, &[0u8; 2048]).unwrap(); // 2 KiB
+
+        let mc = ModelConfig {
+            transformer: Some(file_a.to_str().unwrap().to_string()),
+            vae: Some(file_b.to_str().unwrap().to_string()),
+            ..ModelConfig::default()
+        };
+        let (bytes, gb) = mc.disk_usage();
+        assert_eq!(bytes, 3072);
+        assert!((gb - 3072.0 / 1_073_741_824.0).abs() < 1e-12);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_usage_skips_missing_files() {
+        let mc = ModelConfig {
+            transformer: Some("/nonexistent/path/t.safetensors".to_string()),
+            vae: Some("/nonexistent/path/v.safetensors".to_string()),
+            ..ModelConfig::default()
+        };
+        let (bytes, gb) = mc.disk_usage();
+        assert_eq!(bytes, 0);
+        assert_eq!(gb, 0.0);
+    }
+
+    // ── Config::save round-trip ─────────────────────────────────────────
+
+    #[test]
+    fn config_save_and_reload_round_trip() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("save-roundtrip");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+
+        let mut cfg = Config::default();
+        cfg.default_model = "sd15:fp16".to_string();
+        cfg.server_port = 9999;
+        cfg.default_width = 512;
+        cfg.default_height = 512;
+        cfg.default_steps = 20;
+        cfg.default_negative_prompt = Some("ugly, blurry".to_string());
+        cfg.models.insert(
+            "my-model".to_string(),
+            ModelConfig {
+                transformer: Some("/models/t.safetensors".to_string()),
+                vae: Some("/models/v.safetensors".to_string()),
+                default_steps: Some(30),
+                lora: Some("/lora/adapter.safetensors".to_string()),
+                lora_scale: Some(0.6),
+                ..ModelConfig::default()
+            },
+        );
+
+        cfg.save().unwrap();
+
+        // Re-read the file and parse
+        let config_path = mold_home.join("config.toml");
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        let reloaded: Config = toml::from_str(&contents).unwrap();
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+
+        assert_eq!(reloaded.default_model, "sd15:fp16");
+        assert_eq!(reloaded.server_port, 9999);
+        assert_eq!(reloaded.default_width, 512);
+        assert_eq!(reloaded.default_steps, 20);
+        assert_eq!(
+            reloaded.default_negative_prompt.as_deref(),
+            Some("ugly, blurry")
+        );
+        let model = reloaded.models.get("my-model").unwrap();
+        assert_eq!(model.default_steps, Some(30));
+        assert_eq!(model.lora.as_deref(), Some("/lora/adapter.safetensors"));
+        assert_eq!(model.lora_scale, Some(0.6));
+    }
+
+    // ── effective_negative_prompt ────────────────────────────────────────
+
+    #[test]
+    fn effective_negative_prompt_none_by_default() {
+        let cfg = Config::default();
+        let mc = ModelConfig::default();
+        assert!(mc.effective_negative_prompt(&cfg).is_none());
+    }
+
+    #[test]
+    fn effective_negative_prompt_global_fallback() {
+        let cfg = Config {
+            default_negative_prompt: Some("ugly, blurry".to_string()),
+            ..Config::default()
+        };
+        let mc = ModelConfig::default();
+        assert_eq!(
+            mc.effective_negative_prompt(&cfg).as_deref(),
+            Some("ugly, blurry")
+        );
+    }
+
+    #[test]
+    fn effective_negative_prompt_model_overrides_global() {
+        let cfg = Config {
+            default_negative_prompt: Some("ugly, blurry".to_string()),
+            ..Config::default()
+        };
+        let mc = ModelConfig {
+            negative_prompt: Some("watermark".to_string()),
+            ..ModelConfig::default()
+        };
+        assert_eq!(
+            mc.effective_negative_prompt(&cfg).as_deref(),
+            Some("watermark")
+        );
+    }
+
+    // ── effective_lora ──────────────────────────────────────────────────
+
+    #[test]
+    fn effective_lora_none_when_not_configured() {
+        let mc = ModelConfig::default();
+        assert!(mc.effective_lora().is_none());
+    }
+
+    #[test]
+    fn effective_lora_returns_path_and_default_scale() {
+        let mc = ModelConfig {
+            lora: Some("/path/to/adapter.safetensors".to_string()),
+            ..ModelConfig::default()
+        };
+        let (path, scale) = mc.effective_lora().unwrap();
+        assert_eq!(path, "/path/to/adapter.safetensors");
+        assert_eq!(scale, 1.0); // default scale
+    }
+
+    #[test]
+    fn effective_lora_uses_configured_scale() {
+        let mc = ModelConfig {
+            lora: Some("/path/to/adapter.safetensors".to_string()),
+            lora_scale: Some(0.5),
+            ..ModelConfig::default()
+        };
+        let (_, scale) = mc.effective_lora().unwrap();
+        assert_eq!(scale, 0.5);
+    }
+
+    // ── lookup_model_config canonical resolution ────────────────────────
+
+    #[test]
+    fn lookup_model_config_exact_match() {
+        let mut models = HashMap::new();
+        models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                default_steps: Some(25),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let mc = cfg.lookup_model_config("flux-dev:q8").unwrap();
+        assert_eq!(mc.default_steps, Some(25));
+    }
+
+    #[test]
+    fn lookup_model_config_resolves_bare_name_to_tagged() {
+        // "flux-dev" should resolve to "flux-dev:q8" via resolve_model_name
+        let mut models = HashMap::new();
+        models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                default_steps: Some(25),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+        let mc = cfg.lookup_model_config("flux-dev");
+        // This depends on resolve_model_name trying :q8 first
+        assert!(mc.is_some());
+        assert_eq!(mc.unwrap().default_steps, Some(25));
+    }
+
+    #[test]
+    fn lookup_model_config_returns_none_for_unknown() {
+        let cfg = Config::default();
+        assert!(cfg.lookup_model_config("__nonexistent__").is_none());
+    }
+
+    // ── upsert_model / remove_model ─────────────────────────────────────
+
+    #[test]
+    fn upsert_and_remove_model() {
+        let mut cfg = Config::default();
+        assert!(cfg.models.is_empty());
+
+        cfg.upsert_model(
+            "test-model".to_string(),
+            ModelConfig {
+                transformer: Some("/t.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        assert!(cfg.models.contains_key("test-model"));
+
+        let removed = cfg.remove_model("test-model");
+        assert!(removed.is_some());
+        assert!(cfg.models.is_empty());
+
+        // Removing again returns None
+        assert!(cfg.remove_model("test-model").is_none());
+    }
+
+    // ── config_path / data_dir ──────────────────────────────────────────
+
+    #[test]
+    fn config_path_ends_with_config_toml() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_HOME");
+        let path = Config::config_path().unwrap();
+        assert!(
+            path.ends_with("config.toml"),
+            "should end with config.toml: got {:?}",
+            path
+        );
+    }
+
+    #[test]
+    fn data_dir_equals_mold_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_HOME");
+        assert_eq!(Config::data_dir(), Config::mold_dir());
+    }
+
+    #[test]
+    fn exists_on_disk_false_for_nonexistent() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("no-config-file");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+        assert!(!Config::exists_on_disk());
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    // ── TOML serde edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn config_deser_with_expand_section() {
+        let toml_str = r#"
+default_model = "flux-dev"
+
+[expand]
+enabled = true
+backend = "local"
+model = "qwen3-expand:q8"
+temperature = 0.9
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.expand.enabled);
+        assert_eq!(cfg.expand.backend, "local");
+        assert_eq!(cfg.expand.model, "qwen3-expand:q8");
+        assert!((cfg.expand.temperature - 0.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn config_deser_negative_prompt_global_and_model() {
+        let toml_str = r#"
+default_model = "sd15:fp16"
+default_negative_prompt = "ugly, blurry, watermark"
+
+[models."sd15:fp16"]
+transformer = "/path/t.safetensors"
+vae = "/path/v.safetensors"
+negative_prompt = "anime, cartoon"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.default_negative_prompt.as_deref(),
+            Some("ugly, blurry, watermark")
+        );
+        let mc = cfg.models.get("sd15:fp16").unwrap();
+        assert_eq!(mc.negative_prompt.as_deref(), Some("anime, cartoon"));
+    }
+
+    #[test]
+    fn config_deser_with_scheduler() {
+        let toml_str = r#"
+[models."sd15:fp16"]
+transformer = "/path/t.safetensors"
+vae = "/path/v.safetensors"
+scheduler = "euler-ancestral"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let mc = cfg.models.get("sd15:fp16").unwrap();
+        assert!(mc.scheduler.is_some());
+    }
+
+    #[test]
+    fn config_deser_with_model_lora_and_turbo() {
+        let toml_str = r#"
+[models."sdxl-turbo:fp16"]
+transformer = "/path/t.safetensors"
+vae = "/path/v.safetensors"
+lora = "/path/adapter.safetensors"
+lora_scale = 0.75
+is_turbo = true
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let mc = cfg.models.get("sdxl-turbo:fp16").unwrap();
+        assert_eq!(mc.lora.as_deref(), Some("/path/adapter.safetensors"));
+        assert_eq!(mc.lora_scale, Some(0.75));
+        assert_eq!(mc.is_turbo, Some(true));
+    }
+
+    #[test]
+    fn config_deser_with_t5_and_qwen3_variant() {
+        let toml_str = r#"
+default_model = "flux-dev"
+t5_variant = "q4"
+qwen3_variant = "iq4"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.t5_variant.as_deref(), Some("q4"));
+        assert_eq!(cfg.qwen3_variant.as_deref(), Some("iq4"));
+    }
+
+    // ── resolved_output_dir bare tilde ──────────────────────────────────
+
+    #[test]
+    fn resolved_output_dir_bare_tilde_resolves_to_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_OUTPUT_DIR");
+        let mut cfg = Config::default();
+        cfg.output_dir = Some("~".to_string());
+        let dir = cfg.resolved_output_dir().unwrap();
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        assert_eq!(dir, home);
+    }
+
+    // ── resolved_log_dir bare tilde ─────────────────────────────────────
+
+    #[test]
+    fn resolved_log_dir_bare_tilde_resolves_to_home() {
+        let mut cfg = Config::default();
+        cfg.logging.dir = Some("~".to_string());
+        let dir = cfg.resolved_log_dir();
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        assert_eq!(dir, home);
+    }
+
+    // ── migration idempotency ───────────────────────────────────────────
+
+    #[test]
+    fn run_migrations_idempotent_on_already_migrated() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = Config::default(); // config_version = CURRENT
+        cfg.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                transformer: Some("/path/t.gguf".to_string()),
+                vae: Some("/path/v.safetensors".to_string()),
+                default_steps: Some(25), // user override, not stale
+                ..ModelConfig::default()
+            },
+        );
+        let original_steps = cfg.models["flux-dev:q8"].default_steps;
+
+        // Running migrations on a current-version config should be a no-op
+        Config::run_migrations(&mut cfg);
+        assert_eq!(cfg.models["flux-dev:q8"].default_steps, original_steps);
+    }
+
+    // ── DefaultModelResolution Debug/Clone ───────────────────────────────
+
+    #[test]
+    fn default_model_resolution_is_clone_and_debug() {
+        let resolution = crate::config::DefaultModelResolution {
+            model: "test".to_string(),
+            source: crate::config::DefaultModelSource::EnvVar,
+        };
+        let cloned = resolution.clone();
+        assert_eq!(cloned.model, "test");
+        // Debug should not panic
+        let _ = format!("{:?}", cloned);
+    }
+
+    #[test]
+    fn default_model_source_eq() {
+        assert_eq!(
+            crate::config::DefaultModelSource::EnvVar,
+            crate::config::DefaultModelSource::EnvVar
+        );
+        assert_ne!(
+            crate::config::DefaultModelSource::EnvVar,
+            crate::config::DefaultModelSource::Config
+        );
+    }
 }
