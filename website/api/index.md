@@ -4,19 +4,23 @@ When running `mold serve`, you get a REST API for remote image generation.
 
 ## Endpoints
 
-| Method   | Path                   | Description                          |
-| -------- | ---------------------- | ------------------------------------ |
-| `POST`   | `/api/generate`        | Generate images from prompt          |
-| `POST`   | `/api/generate/stream` | Generate with SSE progress streaming |
-| `POST`   | `/api/expand`          | Expand a prompt using LLM            |
-| `GET`    | `/api/models`          | List available models                |
-| `POST`   | `/api/models/load`     | Load/swap the active model           |
-| `POST`   | `/api/models/pull`     | Pull/download a model                |
-| `DELETE` | `/api/models/unload`   | Unload model to free GPU memory      |
-| `GET`    | `/api/status`          | Server health + status               |
-| `GET`    | `/health`              | Simple 200 OK health check           |
-| `GET`    | `/api/openapi.json`    | OpenAPI spec                         |
-| `GET`    | `/api/docs`            | Interactive API docs (Scalar)        |
+| Method   | Path                           | Description                          |
+| -------- | ------------------------------ | ------------------------------------ |
+| `POST`   | `/api/generate`                | Generate images from prompt          |
+| `POST`   | `/api/generate/stream`         | Generate with SSE progress streaming |
+| `POST`   | `/api/expand`                  | Expand a prompt using LLM            |
+| `GET`    | `/api/models`                  | List available models                |
+| `POST`   | `/api/models/load`             | Load/swap the active model           |
+| `POST`   | `/api/models/pull`             | Pull/download a model                |
+| `DELETE` | `/api/models/unload`           | Unload model to free GPU memory      |
+| `GET`    | `/api/gallery`                 | List saved images                    |
+| `GET`    | `/api/gallery/image/:name`     | Fetch a saved image                  |
+| `DELETE` | `/api/gallery/image/:name`     | Delete a saved image                 |
+| `GET`    | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail             |
+| `GET`    | `/api/status`                  | Server health + status               |
+| `GET`    | `/health`                      | Simple 200 OK health check           |
+| `GET`    | `/api/openapi.json`            | OpenAPI spec                         |
+| `GET`    | `/api/docs`                    | Interactive API docs (Scalar)        |
 
 ## Authentication
 
@@ -137,7 +141,11 @@ Representative headers:
 HTTP/1.1 200 OK
 content-type: image/png
 x-mold-seed-used: 42
+x-mold-dimension-warning: dimensions adjusted from 1000x1000 to 1024x1024
 ```
+
+The `x-mold-dimension-warning` header is present when the requested dimensions
+were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
 
 ## Generate Request Shape
 

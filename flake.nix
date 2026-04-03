@@ -137,7 +137,10 @@
 
           # Features string for devshell commands: GPU + preview + discord + expand + tui
           devFeatures =
-            if gpuFeature != "" then "${gpuFeature},preview,discord,expand,tui" else "preview,discord,expand,tui";
+            if gpuFeature != "" then
+              "${gpuFeature},preview,discord,expand,tui"
+            else
+              "preview,discord,expand,tui";
 
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {

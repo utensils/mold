@@ -91,6 +91,7 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 
 | Variable                | Default | Description                                              |
 | ----------------------- | ------- | -------------------------------------------------------- |
+| `MOLD_HOME`             | auto    | Base mold directory (auto-detected from `/workspace`)    |
 | `MOLD_PORT`             | `7680`  | Server port                                              |
 | `MOLD_LOG`              | `info`  | Log level                                                |
 | `MOLD_DEFAULT_MODEL`    | —       | Default model to load                                    |
@@ -98,6 +99,7 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 | `MOLD_API_KEY`          | —       | API key for authentication (`X-Api-Key` header required) |
 | `MOLD_RATE_LIMIT`       | —       | Per-IP rate limit (e.g., `10/min`)                       |
 | `MOLD_RATE_LIMIT_BURST` | —       | Burst allowance override (defaults to 2x rate)           |
+| `HF_TOKEN`              | —       | HuggingFace token for gated model repos                  |
 
 ### Recommended GPUs
 

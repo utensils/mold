@@ -200,6 +200,12 @@ in
         default = "info";
         description = "Log level for the Discord bot.";
       };
+
+      environment = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        description = "Extra environment variables for the Discord bot.";
+      };
     };
   };
 
@@ -335,7 +341,8 @@ in
       }
       // lib.optionalAttrs (discordCfg.dailyQuota != null) {
         MOLD_DISCORD_DAILY_QUOTA = toString discordCfg.dailyQuota;
-      };
+      }
+      // discordCfg.environment;
 
       serviceConfig = {
         Type = "simple";

@@ -166,6 +166,10 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `POST` | `/api/models/load` | Load/swap the active model |
 | `POST` | `/api/models/pull` | Pull/download a model |
 | `DELETE` | `/api/models/unload` | Unload model to free GPU memory |
+| `GET` | `/api/gallery` | List saved images |
+| `GET` | `/api/gallery/image/:name` | Fetch a saved image |
+| `DELETE` | `/api/gallery/image/:name` | Delete a saved image |
+| `GET` | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
