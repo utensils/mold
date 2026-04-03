@@ -2828,6 +2828,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "tracing",
  "tui-textarea",
  "unicode-width 0.2.0",
  "ureq",
