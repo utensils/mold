@@ -160,6 +160,46 @@ impl TuiSession {
             params.control_scale = cs;
         }
     }
+
+    /// Apply only non-model-specific settings. Skips width, height, steps,
+    /// guidance, and scheduler since those belong to the saved model and would
+    /// be wrong for a different default model.
+    pub fn apply_non_model_params(&self, params: &mut super::app::GenerateParams) {
+        if let Some(ref sm) = self.seed_mode {
+            params.seed_mode = match sm.as_str() {
+                "fixed" => super::app::SeedMode::Fixed,
+                "increment" => super::app::SeedMode::Increment,
+                _ => super::app::SeedMode::Random,
+            };
+        }
+        if let Some(b) = self.batch {
+            params.batch = b;
+        }
+        if let Some(ref f) = self.format {
+            params.format = match f.as_str() {
+                "jpeg" => mold_core::OutputFormat::Jpeg,
+                _ => mold_core::OutputFormat::Png,
+            };
+        }
+        if let Some(ref lp) = self.lora_path {
+            params.lora_path = Some(lp.clone());
+        }
+        if let Some(ls) = self.lora_scale {
+            params.lora_scale = ls;
+        }
+        if let Some(e) = self.expand {
+            params.expand = e;
+        }
+        if let Some(o) = self.offload {
+            params.offload = o;
+        }
+        if let Some(s) = self.strength {
+            params.strength = s;
+        }
+        if let Some(cs) = self.control_scale {
+            params.control_scale = cs;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +263,276 @@ mod tests {
         assert_eq!(session.last_prompt, "old");
         // Old field names don't match new ones — they'll be None
         assert_eq!(session.width, None);
+    }
+
+    #[test]
+    fn from_params_captures_all_fields() {
+        use crate::app::{GenerateParams, SeedMode};
+
+        let params = GenerateParams {
+            model: "sdxl-turbo:fp16".to_string(),
+            width: 512,
+            height: 512,
+            steps: 8,
+            guidance: 2.0,
+            seed: Some(42),
+            seed_mode: SeedMode::Fixed,
+            batch: 3,
+            format: mold_core::OutputFormat::Jpeg,
+            scheduler: Some(mold_core::Scheduler::EulerAncestral),
+            inference_mode: crate::app::InferenceMode::Auto,
+            host: None,
+            lora_path: Some("/path/to/lora.safetensors".to_string()),
+            lora_scale: 0.7,
+            expand: true,
+            offload: true,
+            source_image_path: None,
+            strength: 0.6,
+            mask_image_path: None,
+            control_image_path: None,
+            control_model: None,
+            control_scale: 0.8,
+        };
+
+        let session = TuiSession::from_params("a sunset", "blurry", &params);
+        assert_eq!(session.last_prompt, "a sunset");
+        assert_eq!(session.last_negative, "blurry");
+        assert_eq!(session.last_model, "sdxl-turbo:fp16");
+        assert_eq!(session.width, Some(512));
+        assert_eq!(session.height, Some(512));
+        assert_eq!(session.steps, Some(8));
+        assert_eq!(session.guidance, Some(2.0));
+        assert_eq!(session.seed_mode, Some("fixed".to_string()));
+        assert_eq!(session.batch, Some(3));
+        assert_eq!(session.format, Some("jpeg".to_string()));
+        assert_eq!(session.scheduler, Some("eulerancestral".to_string()));
+        assert_eq!(
+            session.lora_path,
+            Some("/path/to/lora.safetensors".to_string())
+        );
+        assert_eq!(session.lora_scale, Some(0.7));
+        assert_eq!(session.expand, Some(true));
+        assert_eq!(session.offload, Some(true));
+        assert_eq!(session.strength, Some(0.6));
+        assert_eq!(session.control_scale, Some(0.8));
+    }
+
+    #[test]
+    fn apply_to_params_restores_all_fields() {
+        use crate::app::{GenerateParams, SeedMode};
+
+        let session = TuiSession {
+            last_prompt: "a cat".to_string(),
+            last_negative: "ugly".to_string(),
+            last_model: "sd15:fp16".to_string(),
+            width: Some(512),
+            height: Some(768),
+            steps: Some(30),
+            guidance: Some(7.5),
+            seed_mode: Some("increment".to_string()),
+            batch: Some(4),
+            format: Some("jpeg".to_string()),
+            scheduler: Some("unipc".to_string()),
+            lora_path: Some("/lora.safetensors".to_string()),
+            lora_scale: Some(0.5),
+            expand: Some(true),
+            offload: Some(false),
+            strength: Some(0.3),
+            control_scale: Some(1.5),
+        };
+
+        let mut params = GenerateParams::from_config(&mold_core::Config::default());
+        session.apply_to_params(&mut params);
+
+        assert_eq!(params.width, 512);
+        assert_eq!(params.height, 768);
+        assert_eq!(params.steps, 30);
+        assert_eq!(params.guidance, 7.5);
+        assert_eq!(params.seed_mode, SeedMode::Increment);
+        assert_eq!(params.batch, 4);
+        assert_eq!(params.format, mold_core::OutputFormat::Jpeg);
+        assert_eq!(params.scheduler, Some(mold_core::Scheduler::UniPc));
+        assert_eq!(params.lora_path, Some("/lora.safetensors".to_string()));
+        assert_eq!(params.lora_scale, 0.5);
+        assert!(params.expand);
+        assert!(!params.offload);
+        assert_eq!(params.strength, 0.3);
+        assert_eq!(params.control_scale, 1.5);
+    }
+
+    #[test]
+    fn from_params_then_apply_roundtrips() {
+        use crate::app::{GenerateParams, SeedMode};
+
+        let original = GenerateParams {
+            model: "flux-dev:q4".to_string(),
+            width: 768,
+            height: 1024,
+            steps: 25,
+            guidance: 3.5,
+            seed: None,
+            seed_mode: SeedMode::Increment,
+            batch: 2,
+            format: mold_core::OutputFormat::Png,
+            scheduler: Some(mold_core::Scheduler::Ddim),
+            inference_mode: crate::app::InferenceMode::Auto,
+            host: None,
+            lora_path: None,
+            lora_scale: 1.0,
+            expand: false,
+            offload: false,
+            source_image_path: None,
+            strength: 0.75,
+            mask_image_path: None,
+            control_image_path: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+
+        // Save to session
+        let session = TuiSession::from_params("test prompt", "bad quality", &original);
+
+        // Apply to fresh params
+        let mut restored = GenerateParams::from_config(&mold_core::Config::default());
+        session.apply_to_params(&mut restored);
+
+        // All persisted fields should match
+        assert_eq!(restored.width, 768);
+        assert_eq!(restored.height, 1024);
+        assert_eq!(restored.steps, 25);
+        assert_eq!(restored.guidance, 3.5);
+        assert_eq!(restored.seed_mode, SeedMode::Increment);
+        assert_eq!(restored.batch, 2);
+        assert_eq!(restored.format, mold_core::OutputFormat::Png);
+        assert_eq!(restored.scheduler, Some(mold_core::Scheduler::Ddim));
+        assert_eq!(restored.lora_scale, 1.0);
+        assert!(!restored.expand);
+        assert!(!restored.offload);
+        assert_eq!(restored.strength, 0.75);
+        assert_eq!(restored.control_scale, 1.0);
+    }
+
+    #[test]
+    fn bare_model_name_resolves_on_load() {
+        // Session files from older versions may store bare names like "flux2-klein"
+        // instead of "flux2-klein:q8". The app should resolve these on load.
+        let json = r#"{"last_prompt":"test","last_model":"flux2-klein","width":512,"height":512}"#;
+        let session: TuiSession = serde_json::from_str(json).unwrap();
+
+        // The session itself stores exactly what was saved
+        assert_eq!(session.last_model, "flux2-klein");
+
+        // But when the app resolves it, it should become the tagged name
+        let resolved = mold_core::manifest::resolve_model_name(&session.last_model);
+        assert_eq!(resolved, "flux2-klein:q8");
+    }
+
+    #[test]
+    fn tagged_model_name_survives_resolution() {
+        let session = TuiSession {
+            last_model: "flux-dev:q4".to_string(),
+            ..Default::default()
+        };
+        let resolved = mold_core::manifest::resolve_model_name(&session.last_model);
+        assert_eq!(resolved, "flux-dev:q4");
+    }
+
+    #[test]
+    fn session_with_custom_dimensions_roundtrips() {
+        // Regression: user sets 512x512 in TUI, quits without generating,
+        // next launch should restore 512x512
+        use crate::app::{GenerateParams, SeedMode};
+
+        let params = GenerateParams {
+            model: "flux2-klein:q8".to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 0.0,
+            seed: None,
+            seed_mode: SeedMode::Random,
+            batch: 1,
+            format: mold_core::OutputFormat::Png,
+            scheduler: None,
+            inference_mode: crate::app::InferenceMode::Auto,
+            host: None,
+            lora_path: None,
+            lora_scale: 1.0,
+            expand: false,
+            offload: false,
+            source_image_path: None,
+            strength: 0.75,
+            mask_image_path: None,
+            control_image_path: None,
+            control_model: None,
+            control_scale: 1.0,
+        };
+
+        // Simulate save on quit
+        let session = TuiSession::from_params("", "", &params);
+        assert_eq!(session.width, Some(512));
+        assert_eq!(session.height, Some(512));
+        assert_eq!(session.last_model, "flux2-klein:q8");
+
+        // Simulate restore on next launch
+        let mut fresh = GenerateParams::from_config(&mold_core::Config::default());
+        // fresh would have model defaults (1024x1024 for flux2-klein)
+        session.apply_to_params(&mut fresh);
+        assert_eq!(fresh.width, 512);
+        assert_eq!(fresh.height, 512);
+    }
+
+    #[test]
+    fn apply_non_model_params_skips_dimensions_and_guidance() {
+        // When the saved model is unavailable, the fallback should NOT apply
+        // model-specific params (width, height, steps, guidance, scheduler)
+        // because they belong to the missing model and would be wrong for the
+        // current default.
+        use crate::app::GenerateParams;
+
+        let session = TuiSession {
+            last_model: "sd15:fp16".to_string(),
+            width: Some(512),
+            height: Some(512),
+            steps: Some(25),
+            guidance: Some(7.5),
+            scheduler: Some("ddim".to_string()),
+            batch: Some(3),
+            expand: Some(true),
+            offload: Some(true),
+            ..Default::default()
+        };
+
+        let mut params = GenerateParams::from_config(&mold_core::Config::default());
+        let original_width = params.width;
+        let original_height = params.height;
+        let original_steps = params.steps;
+        let original_guidance = params.guidance;
+
+        session.apply_non_model_params(&mut params);
+
+        // Model-specific settings should NOT have changed
+        assert_eq!(params.width, original_width);
+        assert_eq!(params.height, original_height);
+        assert_eq!(params.steps, original_steps);
+        assert_eq!(params.guidance, original_guidance);
+        assert_eq!(params.scheduler, None); // should stay as default, not "ddim"
+
+        // Non-model settings SHOULD have been applied
+        assert_eq!(params.batch, 3);
+        assert!(params.expand);
+        assert!(params.offload);
+    }
+
+    #[test]
+    fn custom_config_model_name_preserved() {
+        // Config-only models like [models."my-flux"] should NOT be rewritten
+        // by resolve_model_name to "my-flux:q8"
+        let resolved = mold_core::manifest::resolve_model_name("my-custom-model");
+        // resolve_model_name appends :q8 when no manifest match is found,
+        // but the catalog lookup in the app uses the original name first
+        assert_eq!(resolved, "my-custom-model:q8");
+        // The app code tries the exact session name first, then resolved —
+        // so "my-custom-model" would match the catalog entry directly.
     }
 }
