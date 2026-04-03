@@ -112,7 +112,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
                     ("\u{2190}\u{2192}", "Views"),
-                    ("1/2/3", "Views"),
+                    ("1-4", "Views"),
                     ("Enter", "Edit"),
                     ("?", "Help"),
                     ("q", "Quit"),
@@ -161,7 +161,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1/2/3", "Views"),
+            ("1-4", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),

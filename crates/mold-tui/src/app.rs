@@ -1302,7 +1302,9 @@ impl App {
                         (KeyCode::Char('1'), KeyModifiers::ALT)
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
                         | (KeyCode::Char('3'), KeyModifiers::ALT)
-                        | (KeyCode::Char('4'), KeyModifiers::ALT) => {
+                        | (KeyCode::Char('4'), KeyModifiers::ALT)
+                        | (KeyCode::Left, KeyModifiers::ALT)
+                        | (KeyCode::Right, KeyModifiers::ALT) => {
                             // Fall through for view switching
                         }
                         _ => {
@@ -1563,17 +1565,20 @@ impl App {
 
                 // Tab bar clicks — switch views
                 if self.layout.tab_bar.contains((col, row).into()) {
-                    // Determine which tab was clicked based on x position
-                    let x = col - self.layout.tab_bar.x;
-                    if x < 13 {
-                        self.active_view = View::Generate;
-                    } else if x < 25 {
-                        self.active_view = View::Gallery;
-                    } else if x < 35 {
-                        self.active_view = View::Models;
-                    } else {
-                        self.active_view = View::Settings;
+                    // Determine which tab was clicked based on cumulative label widths.
+                    // Tab labels: " {i} {label} " with 1-char divider, plus block padding.
+                    let x = col.saturating_sub(self.layout.tab_bar.x + 2) as usize; // +2 for border + padding
+                    let mut offset = 0;
+                    for view in &View::ALL {
+                        let tab_width = view.label().len() + 4; // " N Label " = label + " N  "
+                        if x < offset + tab_width {
+                            self.active_view = *view;
+                            return;
+                        }
+                        offset += tab_width + 1; // +1 for divider
                     }
+                    // Click past all tabs — select last view
+                    self.active_view = View::Settings;
                     return;
                 }
 
