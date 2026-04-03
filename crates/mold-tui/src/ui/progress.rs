@@ -82,12 +82,23 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
             } else {
                 0.0
             };
-            let label = format!(
-                "{} [{}/{}]",
-                progress.download_filename,
-                format_bytes(progress.download_bytes),
-                format_bytes(progress.download_total),
-            );
+            let label = if progress.download_total_files > 0 {
+                format!(
+                    "[{}/{}] {} [{}/{}]",
+                    progress.download_file_index + 1,
+                    progress.download_total_files,
+                    progress.download_filename,
+                    format_bytes(progress.download_bytes),
+                    format_bytes(progress.download_total),
+                )
+            } else {
+                format!(
+                    "{} [{}/{}]",
+                    progress.download_filename,
+                    format_bytes(progress.download_bytes),
+                    format_bytes(progress.download_total),
+                )
+            };
             let gauge = Gauge::default()
                 .ratio(pct)
                 .label(label)

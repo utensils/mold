@@ -72,6 +72,8 @@ pub struct ProgressState {
     pub download_filename: String,
     pub download_bytes: u64,
     pub download_total: u64,
+    pub download_file_index: usize,
+    pub download_total_files: usize,
 }
 
 impl ProgressState {
@@ -87,6 +89,8 @@ impl ProgressState {
         self.download_filename.clear();
         self.download_bytes = 0;
         self.download_total = 0;
+        self.download_file_index = 0;
+        self.download_total_files = 0;
     }
 }
 
@@ -3433,11 +3437,14 @@ impl App {
                 filename,
                 bytes_downloaded,
                 bytes_total,
-                ..
+                file_index,
+                total_files,
             } => {
                 self.generate.progress.download_filename = filename;
                 self.generate.progress.download_bytes = bytes_downloaded;
                 self.generate.progress.download_total = bytes_total;
+                self.generate.progress.download_file_index = file_index;
+                self.generate.progress.download_total_files = total_files;
             }
             SseProgressEvent::DownloadDone {
                 filename,
@@ -3615,6 +3622,8 @@ mod tests {
         state.weight_loaded = 1000;
         state.download_bytes = 500;
         state.download_filename = "test.gguf".to_string();
+        state.download_file_index = 2;
+        state.download_total_files = 5;
         state.log.push(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
@@ -3625,7 +3634,36 @@ mod tests {
         assert_eq!(state.weight_loaded, 0);
         assert_eq!(state.download_bytes, 0);
         assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
         assert!(state.log.is_empty());
+    }
+
+    #[test]
+    fn progress_state_download_tracks_file_index() {
+        let mut state = ProgressState::default();
+        state.download_filename = "model.safetensors".to_string();
+        state.download_bytes = 16384;
+        state.download_total = 2_900_000_000;
+        state.download_file_index = 1;
+        state.download_total_files = 5;
+
+        assert_eq!(state.download_file_index, 1);
+        assert_eq!(state.download_total_files, 5);
+
+        // Simulate DownloadDone resetting download state
+        state.download_bytes = 0;
+        state.download_total = 0;
+        state.download_filename.clear();
+        // file_index/total_files stay until next download or clear
+        assert_eq!(state.download_file_index, 1);
+    }
+
+    #[test]
+    fn progress_state_default_has_zero_file_counters() {
+        let state = ProgressState::default();
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
     }
 
     // ── SeedMode tests ────────────────────────────────────
