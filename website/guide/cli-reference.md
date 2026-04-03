@@ -211,10 +211,10 @@ Launch the interactive terminal UI.
 mold tui [--host URL] [--local]
 ```
 
-| Flag            | Description                            |
-| --------------- | -------------------------------------- |
-| `--host <URL>`  | Server URL override                    |
-| `--local`       | Skip server, use local GPU only        |
+| Flag           | Description                     |
+| -------------- | ------------------------------- |
+| `--host <URL>` | Server URL override             |
+| `--local`      | Skip server, use local GPU only |
 
 Requires the `tui` feature flag (included in pre-built releases and Nix
 packages). See the full [TUI documentation](/guide/tui) for views, keybindings,
