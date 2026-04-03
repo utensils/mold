@@ -82,7 +82,7 @@ Environment variables take precedence over config file values.
 | Variable              | Default | Description                              |
 | --------------------- | ------- | ---------------------------------------- |
 | `MOLD_EAGER`          | —       | `1` to keep all components loaded        |
-| `MOLD_OFFLOAD`        | —       | `1` to force CPU↔GPU block streaming    |
+| `MOLD_OFFLOAD`        | —       | `1` to force CPU↔GPU block streaming     |
 | `MOLD_EMBED_METADATA` | `1`     | `0` to disable PNG metadata              |
 | `MOLD_PREVIEW`        | —       | `1` to display images inline in terminal |
 | `MOLD_T5_VARIANT`     | `auto`  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3     |
