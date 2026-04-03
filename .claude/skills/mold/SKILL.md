@@ -357,6 +357,10 @@ mold discord
 - `/expand <prompt> [model_family] [variations]` — expand a short prompt into detailed image generation prompts
 - `/models` — list available models with status
 - `/status` — show server health, GPU info, uptime
+- `/quota` — check remaining daily generation quota
+- `/admin reset-quota @user` — reset a user's daily quota (requires Manage Server)
+- `/admin block @user` — temporarily block a user from generating (requires Manage Server)
+- `/admin unblock @user` — unblock a previously blocked user (requires Manage Server)
 
 ### Environment Variables
 
@@ -365,6 +369,8 @@ mold discord
 | `MOLD_DISCORD_TOKEN` | — | Bot token (falls back to `DISCORD_TOKEN`) |
 | `MOLD_HOST` | `http://localhost:7680` | mold server URL |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown (seconds) |
+| `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs for access control (unset = all) |
+| `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited) |
 
 ### NixOS
 
