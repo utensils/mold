@@ -2113,51 +2113,48 @@ impl App {
     fn build_remove_model_message(&self, model_name: &str) -> String {
         let mut lines = vec![format!("Remove model '{model_name}'?")];
 
-        // Show disk usage if known
-        if let Some(model) = self
-            .models
-            .catalog
-            .iter()
-            .find(|m| m.info.name == model_name)
-        {
-            if let Some(bytes) = model.disk_usage_bytes {
-                lines.push(format!(
-                    "Disk space to free: ~{}",
-                    crate::ui::progress::format_bytes(bytes)
-                ));
+        // Build ref counts and classify files to compute accurate unique-only size
+        let ref_counts = crate::backend::build_ref_counts(&self.config);
+        let mut unique_bytes: u64 = 0;
+        let mut shared_warnings: Vec<String> = Vec::new();
+
+        if let Some(model_config) = self.config.models.get(model_name) {
+            for path in model_config.all_file_paths() {
+                let refs = ref_counts.get(&path).cloned().unwrap_or_default();
+                let others: Vec<String> = refs
+                    .into_iter()
+                    .filter(|n| n.as_str() != model_name)
+                    .collect();
+
+                if others.is_empty() {
+                    // Unique file — will be deleted
+                    unique_bytes += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                } else {
+                    // Shared file — kept, warn user
+                    let filename = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.clone());
+                    shared_warnings.push(format!(
+                        "  {} (shared with {})",
+                        filename,
+                        others.join(", ")
+                    ));
+                }
             }
         }
 
-        // Identify shared files
-        let ref_counts = crate::backend::build_ref_counts(&self.config);
-        if let Some(model_config) = self.config.models.get(model_name) {
-            let mut shared_warnings: Vec<String> = Vec::new();
-            for path in model_config.all_file_paths() {
-                if let Some(refs) = ref_counts.get(&path) {
-                    let others: Vec<&String> =
-                        refs.iter().filter(|n| n.as_str() != model_name).collect();
-                    if !others.is_empty() {
-                        let filename = std::path::Path::new(&path)
-                            .file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.clone());
-                        shared_warnings.push(format!(
-                            "  {} (shared with {})",
-                            filename,
-                            others
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                }
-            }
-            if !shared_warnings.is_empty() {
-                lines.push(String::new());
-                lines.push("Shared files (kept):".to_string());
-                lines.extend(shared_warnings);
-            }
+        if unique_bytes > 0 {
+            lines.push(format!(
+                "Disk space to free: ~{}",
+                crate::ui::progress::format_bytes(unique_bytes)
+            ));
+        }
+
+        if !shared_warnings.is_empty() {
+            lines.push(String::new());
+            lines.push("Shared files (kept):".to_string());
+            lines.extend(shared_warnings);
         }
 
         lines.join("\n")

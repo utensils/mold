@@ -472,11 +472,13 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
         let _ = std::fs::remove_file(blob_path);
     }
 
-    // Clean up empty model-specific directories
-    if let Some(model_cfg) = config.models.get(&model_name) {
-        if let Some(ref t) = model_cfg.transformer {
-            if let Some(parent) = std::path::Path::new(t).parent() {
-                let _ = std::fs::remove_dir(parent);
+    // Clean up empty directories left behind by deleted files.
+    // Deduplicate parent dirs to avoid redundant remove_dir attempts.
+    let mut tried_dirs = std::collections::HashSet::new();
+    for (path, _) in &unique_files {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if tried_dirs.insert(parent.to_path_buf()) {
+                let _ = std::fs::remove_dir(parent); // only succeeds if empty
             }
         }
     }
