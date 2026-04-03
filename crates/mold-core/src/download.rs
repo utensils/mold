@@ -100,6 +100,9 @@ pub enum DownloadError {
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
 
+    #[error("{0}")]
+    Other(String),
+
     #[error("IO error during file placement: {0}")]
     FilePlacement(String),
 
@@ -588,26 +591,37 @@ pub async fn pull_model_with_callback(
     let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
-    // Notify that we're checking cached files (SHA-256 verification can be slow
-    // for multi-GB files that are already on disk).
-    (callback)(DownloadProgressEvent::Status {
-        message: format!(
-            "Checking {} files for {}...",
-            manifest.files.len(),
-            manifest.name
-        ),
-    });
-
     // Pre-compute which files need downloading vs already cached.
-    // Cache the results so we don't run SHA-256 verification twice per file.
-    let file_status: Vec<bool> = manifest
-        .files
-        .iter()
-        .map(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .collect();
+    // Run in spawn_blocking because SHA-256 verification of multi-GB cached
+    // files blocks the async runtime and prevents SSE event delivery.
+    let manifest_clone = manifest.clone();
+    let skip_verify = opts.skip_verify;
+    let mdir_clone = mdir.clone();
+    let cb = callback.clone();
+    let file_status: Vec<bool> = tokio::task::spawn_blocking(move || {
+        let total = manifest_clone.files.len();
+        manifest_clone
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| {
+                cb(DownloadProgressEvent::Status {
+                    message: format!(
+                        "Verifying file [{}/{}] {}...",
+                        i + 1,
+                        total,
+                        file.hf_filename
+                    ),
+                });
+                let clean_path =
+                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
+                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| DownloadError::Other(format!("pre-scan task failed: {e}")))?;
+
     let total_bytes_to_download: u64 = manifest
         .files
         .iter()
@@ -626,8 +640,7 @@ pub async fn pull_model_with_callback(
         let clean_path = mdir.join(&clean_rel);
 
         if already_placed {
-            // Emit events for cached files so the TUI shows activity instead
-            // of a blank progress bar during the skip phase.
+            // Emit events for cached files so the TUI shows checkmarks.
             let elapsed = batch_started_at.elapsed().as_millis() as u64;
             (callback)(DownloadProgressEvent::FileStart {
                 filename: file.hf_filename.clone(),
@@ -743,23 +756,33 @@ async fn pull_model_files_only_with_callback(
 
     let mdir = models_dir();
 
-    (callback)(DownloadProgressEvent::Status {
-        message: format!(
-            "Checking {} files for {}...",
-            manifest.files.len(),
-            manifest.name
-        ),
-    });
-
-    // Pre-compute which files need downloading vs already cached.
-    let file_status: Vec<bool> = manifest
-        .files
-        .iter()
-        .map(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .collect();
+    let manifest_clone = manifest.clone();
+    let skip_verify = opts.skip_verify;
+    let mdir_clone = mdir.clone();
+    let cb = callback.clone();
+    let file_status: Vec<bool> = tokio::task::spawn_blocking(move || {
+        let total = manifest_clone.files.len();
+        manifest_clone
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| {
+                cb(DownloadProgressEvent::Status {
+                    message: format!(
+                        "Verifying file [{}/{}] {}...",
+                        i + 1,
+                        total,
+                        file.hf_filename
+                    ),
+                });
+                let clean_path =
+                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
+                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| DownloadError::Other(format!("pre-scan task failed: {e}")))?;
     let total_bytes_to_download: u64 = manifest
         .files
         .iter()
