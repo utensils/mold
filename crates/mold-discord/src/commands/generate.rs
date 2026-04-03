@@ -157,10 +157,12 @@ pub async fn generate(
 
     match handler::run_generation(ctx, req).await {
         Ok(()) => {
+            // Quota slot was already consumed atomically in check_generate_auth
             ctx.data().cooldowns.record(user_id);
-            ctx.data().quotas.record(user_id);
         }
         Err(e) => {
+            // Refund the quota slot consumed during auth check
+            ctx.data().quotas.refund(user_id);
             let msg = if mold_core::MoldClient::is_connection_error(&e) {
                 "Could not connect to the mold server. Is it running?".to_string()
             } else if mold_core::MoldClient::is_model_not_found(&e) {

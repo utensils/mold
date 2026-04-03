@@ -36,8 +36,7 @@ fn load_allowed_roles() -> AllowedRoles {
 fn load_daily_quota() -> Option<u32> {
     std::env::var("MOLD_DISCORD_DAILY_QUOTA")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .and_then(|v: u32| if v == 0 { None } else { Some(v) })
+        .and_then(|v| v.parse::<u32>().ok())
 }
 
 /// Start the Discord bot.

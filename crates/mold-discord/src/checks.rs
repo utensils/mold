@@ -50,10 +50,10 @@ pub async fn check_generate_auth(ctx: &Context<'_>) -> AuthResult {
         ));
     }
 
-    // 4. Quota
+    // 4. Quota — atomically consume a slot (refund on generation failure)
     if data
         .quotas
-        .check(user_id, data.config.daily_quota)
+        .consume(user_id, data.config.daily_quota)
         .is_none()
     {
         return AuthResult::Denied(

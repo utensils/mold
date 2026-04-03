@@ -27,24 +27,17 @@ impl QuotaTracker {
         }
     }
 
-    /// Check if the user has quota remaining.
-    /// Returns `Some(remaining)` if allowed, `None` if exhausted.
-    /// When `max_daily` is `None`, quota is unlimited and always returns `Some`.
-    pub fn check(&self, user_id: u64, max_daily: Option<u32>) -> Option<u32> {
+    /// Atomically check quota and consume one slot.
+    /// Returns `Some(remaining)` if the user had quota left (slot is now consumed),
+    /// or `None` if exhausted (nothing consumed).
+    /// When `max_daily` is `None`, quota is unlimited.
+    ///
+    /// Use `refund()` to return the slot if generation fails.
+    pub fn consume(&self, user_id: u64, max_daily: Option<u32>) -> Option<u32> {
         let max = match max_daily {
             Some(m) => m,
             None => return Some(u32::MAX),
         };
-        let used = self.usage_for_day(user_id, current_utc_day());
-        if used >= max {
-            None
-        } else {
-            Some(max - used)
-        }
-    }
-
-    /// Increment the user's generation count for today.
-    pub fn record(&self, user_id: u64) {
         let today = current_utc_day();
         let mut map = self.usage.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.entry(user_id).or_insert(DayUsage {
@@ -55,7 +48,27 @@ impl QuotaTracker {
             entry.day = today;
             entry.count = 0;
         }
+        if entry.count >= max {
+            return None;
+        }
         entry.count += 1;
+        let remaining = max - entry.count;
+        // Opportunistically prune stale entries to prevent unbounded growth
+        if map.len() > 10_000 {
+            map.retain(|_, v| v.day == today);
+        }
+        Some(remaining)
+    }
+
+    /// Return a consumed quota slot (e.g. when generation fails after consume).
+    pub fn refund(&self, user_id: u64) {
+        let today = current_utc_day();
+        let mut map = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = map.get_mut(&user_id) {
+            if entry.day == today && entry.count > 0 {
+                entry.count -= 1;
+            }
+        }
     }
 
     /// Get the number of generations the user has performed today.
@@ -115,7 +128,7 @@ impl Default for QuotaTracker {
 fn current_utc_day() -> u32 {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     (secs / 86400) as u32
 }
@@ -127,30 +140,64 @@ mod tests {
     #[test]
     fn allows_when_unlimited() {
         let tracker = QuotaTracker::new();
-        assert!(tracker.check(1, None).is_some());
-        // Even after many records, unlimited always passes
+        assert!(tracker.consume(1, None).is_some());
+        // Even after many consumes, unlimited always passes
         for _ in 0..100 {
-            tracker.record(1);
+            tracker.consume(1, None);
         }
-        assert!(tracker.check(1, None).is_some());
+        assert!(tracker.consume(1, None).is_some());
     }
 
     #[test]
     fn allows_within_quota() {
         let tracker = QuotaTracker::new();
-        tracker.record(1);
-        tracker.record(1);
-        let result = tracker.check(1, Some(5));
-        assert_eq!(result, Some(3));
+        tracker.consume(1, Some(5));
+        tracker.consume(1, Some(5));
+        let result = tracker.consume(1, Some(5));
+        assert_eq!(result, Some(2)); // 5 - 3 consumed
     }
 
     #[test]
     fn blocks_when_exhausted() {
         let tracker = QuotaTracker::new();
         for _ in 0..5 {
-            tracker.record(1);
+            tracker.consume(1, Some(5));
         }
-        assert_eq!(tracker.check(1, Some(5)), None);
+        assert_eq!(tracker.consume(1, Some(5)), None);
+    }
+
+    #[test]
+    fn consume_is_atomic() {
+        let tracker = QuotaTracker::new();
+        // Consume all 3 slots
+        assert_eq!(tracker.consume(1, Some(3)), Some(2));
+        assert_eq!(tracker.consume(1, Some(3)), Some(1));
+        assert_eq!(tracker.consume(1, Some(3)), Some(0));
+        // Now exhausted
+        assert_eq!(tracker.consume(1, Some(3)), None);
+        assert_eq!(tracker.usage(1), 3);
+    }
+
+    #[test]
+    fn refund_returns_slot() {
+        let tracker = QuotaTracker::new();
+        // Consume all 2 slots
+        tracker.consume(1, Some(2));
+        tracker.consume(1, Some(2));
+        assert_eq!(tracker.consume(1, Some(2)), None);
+        // Refund one
+        tracker.refund(1);
+        assert_eq!(tracker.usage(1), 1);
+        // Can consume again
+        assert_eq!(tracker.consume(1, Some(2)), Some(0));
+    }
+
+    #[test]
+    fn refund_does_not_underflow() {
+        let tracker = QuotaTracker::new();
+        // Refund without any consumption should be safe
+        tracker.refund(1);
+        assert_eq!(tracker.usage(1), 0);
     }
 
     #[test]
@@ -172,8 +219,8 @@ mod tests {
     #[test]
     fn reset_clears_count() {
         let tracker = QuotaTracker::new();
-        tracker.record(1);
-        tracker.record(1);
+        tracker.consume(1, Some(10));
+        tracker.consume(1, Some(10));
         assert_eq!(tracker.usage(1), 2);
         tracker.reset(1);
         assert_eq!(tracker.usage(1), 0);
@@ -183,11 +230,11 @@ mod tests {
     fn tracks_users_independently() {
         let tracker = QuotaTracker::new();
         for _ in 0..3 {
-            tracker.record(1);
+            tracker.consume(1, Some(10));
         }
         assert_eq!(tracker.usage(1), 3);
         assert_eq!(tracker.usage(2), 0);
-        assert_eq!(tracker.check(2, Some(5)), Some(5));
+        assert_eq!(tracker.consume(2, Some(5)), Some(4));
     }
 
     #[test]
@@ -199,6 +246,6 @@ mod tests {
     #[test]
     fn quota_of_zero_always_blocks() {
         let tracker = QuotaTracker::new();
-        assert_eq!(tracker.check(1, Some(0)), None);
+        assert_eq!(tracker.consume(1, Some(0)), None);
     }
 }
