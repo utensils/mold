@@ -202,8 +202,12 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         let image_widget = StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(image_widget, inner, image_state);
     } else if app.generate.generating {
-        // Show a "generating..." message
-        let msg = Paragraph::new("Generating...")
+        let status_text = if app.generate.progress.is_downloading() {
+            "Downloading model..."
+        } else {
+            "Generating..."
+        };
+        let msg = Paragraph::new(status_text)
             .style(theme.dim())
             .alignment(Alignment::Center);
         let center = Rect {

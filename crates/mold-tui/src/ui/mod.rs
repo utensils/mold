@@ -98,7 +98,12 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let shortcuts = match app.active_view {
         View::Generate => {
             if app.generate.generating {
-                vec![("", "Generating...")]
+                let status = if app.generate.progress.is_downloading() {
+                    "Downloading..."
+                } else {
+                    "Generating..."
+                };
+                vec![("", status)]
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
                     ("\u{2190}\u{2192}", "Views"),

@@ -80,6 +80,7 @@ pub struct ProgressState {
     pub download_eta_secs: Option<f64>,
     pub download_file_index: usize,
     pub download_total_files: usize,
+    pub downloading: bool,
     download_samples: VecDeque<(u64, u64)>,
 }
 
@@ -103,6 +104,7 @@ impl ProgressState {
         self.download_eta_secs = None;
         self.download_file_index = 0;
         self.download_total_files = 0;
+        self.downloading = false;
         self.download_samples.clear();
     }
 
@@ -117,7 +119,13 @@ impl ProgressState {
         self.download_eta_secs = None;
         self.download_file_index = 0;
         self.download_total_files = 0;
+        self.downloading = false;
         self.download_samples.clear();
+    }
+
+    /// Returns true if a model download is active or pending.
+    pub fn is_downloading(&self) -> bool {
+        self.downloading
     }
 
     fn clear_weight(&mut self) {
@@ -3540,6 +3548,11 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             });
         }
         SseProgressEvent::Info { message } => {
+            // Download status messages get shown as a stage spinner
+            if message.contains("pulling") || message.contains("Checking") {
+                progress.downloading = true;
+                progress.current_stage = Some(message.clone());
+            }
             progress.log.push(ProgressLogEntry {
                 message,
                 style: ProgressStyle::Info,
@@ -3579,12 +3592,9 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             file_index,
             total_files,
         } => {
-            // Clear "Preparing file" spinner when actual download starts
-            if progress
-                .current_stage
-                .as_deref()
-                .is_some_and(|s| s.starts_with("Preparing file"))
-            {
+            progress.downloading = true;
+            // Clear status spinners when actual download data arrives
+            if progress.current_stage.is_some() {
                 progress.current_stage = None;
             }
             progress.download_filename = filename;

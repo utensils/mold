@@ -34,6 +34,8 @@ pub enum DownloadProgressEvent {
         batch_bytes_total: u64,
         batch_elapsed_ms: u64,
     },
+    /// Status message (e.g. "Verifying cached files...").
+    Status { message: String },
     /// A file download completed.
     FileDone {
         filename: String,
@@ -586,48 +588,76 @@ pub async fn pull_model_with_callback(
     let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
-    // Pre-compute which files need downloading so callback indices are sequential
-    let total_to_download = manifest
+    // Notify that we're checking cached files (SHA-256 verification can be slow
+    // for multi-GB files that are already on disk).
+    (callback)(DownloadProgressEvent::Status {
+        message: format!(
+            "Checking {} files for {}...",
+            manifest.files.len(),
+            manifest.name
+        ),
+    });
+
+    // Pre-compute which files need downloading vs already cached.
+    // Cache the results so we don't run SHA-256 verification twice per file.
+    let file_status: Vec<bool> = manifest
         .files
         .iter()
-        .filter(|file| {
+        .map(|file| {
             let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+            is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
         })
-        .count();
-    let total_bytes_to_download = manifest
+        .collect();
+    let total_bytes_to_download: u64 = manifest
         .files
         .iter()
-        .filter(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .map(|file| file.size_bytes)
+        .zip(file_status.iter())
+        .filter(|(_, &placed)| !placed)
+        .map(|(file, _)| file.size_bytes)
         .sum();
-    let mut download_idx = 0;
+    let total_files_count = manifest.files.len();
     let mut completed_bytes = 0u64;
     let batch_started_at = Instant::now();
 
-    for file in &manifest.files {
+    for (file_pos, (file, &already_placed)) in
+        manifest.files.iter().zip(file_status.iter()).enumerate()
+    {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
 
-        // Skip files already at their clean path (resume after partial failure)
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if already_placed {
+            // Emit events for cached files so the TUI shows activity instead
+            // of a blank progress bar during the skip phase.
+            let elapsed = batch_started_at.elapsed().as_millis() as u64;
+            (callback)(DownloadProgressEvent::FileStart {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                size_bytes: file.size_bytes,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
+            (callback)(DownloadProgressEvent::FileDone {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
             downloads.push((file.component, clean_path));
             continue;
         }
 
         let progress = CallbackProgress::new(
             callback.clone(),
-            download_idx,
-            total_to_download,
+            file_pos,
+            total_files_count,
             completed_bytes,
             total_bytes_to_download,
             batch_started_at,
         );
-        download_idx += 1;
-
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
         hardlink_or_copy(&hf_path, &clean_path)?;
@@ -713,46 +743,70 @@ async fn pull_model_files_only_with_callback(
 
     let mdir = models_dir();
 
-    // Pre-compute which files need downloading so callback indices are sequential
-    let total_to_download = manifest
+    (callback)(DownloadProgressEvent::Status {
+        message: format!(
+            "Checking {} files for {}...",
+            manifest.files.len(),
+            manifest.name
+        ),
+    });
+
+    // Pre-compute which files need downloading vs already cached.
+    let file_status: Vec<bool> = manifest
         .files
         .iter()
-        .filter(|file| {
+        .map(|file| {
             let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+            is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
         })
-        .count();
-    let total_bytes_to_download = manifest
+        .collect();
+    let total_bytes_to_download: u64 = manifest
         .files
         .iter()
-        .filter(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .map(|file| file.size_bytes)
+        .zip(file_status.iter())
+        .filter(|(_, &placed)| !placed)
+        .map(|(file, _)| file.size_bytes)
         .sum();
-    let mut download_idx = 0;
+    let total_files_count = manifest.files.len();
     let mut completed_bytes = 0u64;
     let batch_started_at = Instant::now();
 
-    for file in &manifest.files {
+    for (file_pos, (file, &already_placed)) in
+        manifest.files.iter().zip(file_status.iter()).enumerate()
+    {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
 
-        // Skip files already at their clean path (resume after partial failure)
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if already_placed {
+            let elapsed = batch_started_at.elapsed().as_millis() as u64;
+            (callback)(DownloadProgressEvent::FileStart {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                size_bytes: file.size_bytes,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
+            (callback)(DownloadProgressEvent::FileDone {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
             continue;
         }
 
         let progress = CallbackProgress::new(
             callback.clone(),
-            download_idx,
-            total_to_download,
+            file_pos,
+            total_files_count,
             completed_bytes,
             total_bytes_to_download,
             batch_started_at,
         );
-        download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 

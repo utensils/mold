@@ -616,6 +616,9 @@ async fn pull_model_endpoint(
         let callback =
             std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
                 let sse_event = match event {
+                    mold_core::download::DownloadProgressEvent::Status { message } => {
+                        SseProgressEvent::Info { message }
+                    }
                     mold_core::download::DownloadProgressEvent::FileStart {
                         filename,
                         file_index,
