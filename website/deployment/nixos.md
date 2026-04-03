@@ -107,25 +107,25 @@ system user, and manages the data directory at `/var/lib/mold`.
 
 ### Server Options
 
-| Option         | Type        | Default             | Description                                        |
-| -------------- | ----------- | ------------------- | -------------------------------------------------- |
-| `enable`       | bool        | `false`             | Enable the mold server                             |
-| `package`      | package     | —                   | The mold package (must set explicitly)             |
-| `cudaArch`     | null/enum   | `null`              | `"ada"` or `"blackwell"` — advisory warning only   |
-| `port`         | port        | `7680`              | HTTP server port                                   |
-| `bindAddress`  | string      | `"0.0.0.0"`         | Address to bind                                    |
-| `homeDir`      | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                         |
-| `modelsDir`    | string      | `homeDir + /models` | Model storage directory                            |
-| `logLevel`     | enum        | `"info"`            | Log level (trace/debug/info/warn/error)            |
-| `corsOrigin`     | null/string | `null`              | CORS origin restriction (null = permissive)                       |
-| `openFirewall`   | bool        | `false`             | Open firewall port                                                |
-| `defaultModel`   | null/string | `null`              | Default model name                                                |
-| `outputDir`      | null/string | `null`              | Image output directory (default: `homeDir/output`)                |
-| `hfTokenFile`    | null/path   | `null`              | Path to file with HuggingFace token                               |
+| Option           | Type        | Default             | Description                                                          |
+| ---------------- | ----------- | ------------------- | -------------------------------------------------------------------- |
+| `enable`         | bool        | `false`             | Enable the mold server                                               |
+| `package`        | package     | —                   | The mold package (must set explicitly)                               |
+| `cudaArch`       | null/enum   | `null`              | `"ada"` or `"blackwell"` — advisory warning only                     |
+| `port`           | port        | `7680`              | HTTP server port                                                     |
+| `bindAddress`    | string      | `"0.0.0.0"`         | Address to bind                                                      |
+| `homeDir`        | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                           |
+| `modelsDir`      | string      | `homeDir + /models` | Model storage directory                                              |
+| `logLevel`       | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                              |
+| `corsOrigin`     | null/string | `null`              | CORS origin restriction (null = permissive)                          |
+| `openFirewall`   | bool        | `false`             | Open firewall port                                                   |
+| `defaultModel`   | null/string | `null`              | Default model name                                                   |
+| `outputDir`      | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
+| `hfTokenFile`    | null/path   | `null`              | Path to file with HuggingFace token                                  |
 | `apiKeyFile`     | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
-| `rateLimit`      | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                               |
-| `rateLimitBurst` | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                    |
-| `environment`    | attrs       | `{}`                | Extra environment variables                                       |
+| `rateLimit`      | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                  |
+| `rateLimitBurst` | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                       |
+| `environment`    | attrs       | `{}`                | Extra environment variables                                          |
 
 ### Discord Bot Options
 
