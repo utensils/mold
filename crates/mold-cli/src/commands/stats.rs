@@ -5,6 +5,7 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::manifest::known_manifests;
 use mold_core::Config;
+use serde_json::json;
 
 use crate::theme;
 use crate::ui::format_bytes;
@@ -336,42 +337,26 @@ fn print_json(data: &JsonData) {
     let output_dir = data.config.effective_output_dir();
     let log_dir = data.config.resolved_log_dir();
 
-    let models_json: Vec<String> = data
+    let models: Vec<serde_json::Value> = data
         .model_stats
         .iter()
-        .map(|m| format!("    {{ \"name\": \"{}\", \"bytes\": {} }}", m.name, m.bytes))
+        .map(|m| json!({ "name": m.name, "bytes": m.bytes }))
         .collect();
 
-    let models_dir_bytes = data.models_dir_bytes;
-    let output_bytes = data.output_bytes;
-    let output_images = data.output_images;
-    let log_bytes = data.log_bytes;
-    let hf_cache_bytes = data.hf_cache_bytes;
-    let shared_bytes = data.shared_bytes;
+    let output = json!({
+        "models_dir": models_dir.to_string_lossy(),
+        "models_dir_bytes": data.models_dir_bytes,
+        "output_dir": output_dir.to_string_lossy(),
+        "output_bytes": data.output_bytes,
+        "output_images": data.output_images,
+        "log_dir": log_dir.to_string_lossy(),
+        "log_bytes": data.log_bytes,
+        "hf_cache_bytes": data.hf_cache_bytes,
+        "shared_bytes": data.shared_bytes,
+        "models": models,
+    });
 
-    println!("{{");
-    println!(
-        "  \"models_dir\": \"{}\",",
-        models_dir.to_string_lossy().replace('"', "\\\"")
-    );
-    println!("  \"models_dir_bytes\": {models_dir_bytes},");
-    println!(
-        "  \"output_dir\": \"{}\",",
-        output_dir.to_string_lossy().replace('"', "\\\"")
-    );
-    println!("  \"output_bytes\": {output_bytes},");
-    println!("  \"output_images\": {output_images},");
-    println!(
-        "  \"log_dir\": \"{}\",",
-        log_dir.to_string_lossy().replace('"', "\\\"")
-    );
-    println!("  \"log_bytes\": {log_bytes},");
-    println!("  \"hf_cache_bytes\": {hf_cache_bytes},");
-    println!("  \"shared_bytes\": {shared_bytes},");
-    println!("  \"models\": [");
-    println!("{}", models_json.join(",\n"));
-    println!("  ]");
-    println!("}}");
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
 /// Replace home directory prefix with `~` for display.
@@ -403,19 +388,60 @@ mod tests {
     }
 
     #[test]
-    fn shared_components_label_empty_for_default_config() {
-        let config = Config::default();
+    fn shared_components_label_empty_when_no_shared_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-stats-shared-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().to_string();
         let label = shared_components_label(&config);
-        // Default models_dir likely doesn't exist in test env
-        assert!(label.is_empty() || !label.is_empty());
+        assert!(label.is_empty(), "expected empty label, got: {label}");
     }
 
     #[test]
-    fn collect_model_stats_empty_config() {
-        let config = Config::default();
+    fn shared_components_label_detects_t5_and_vae() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-stats-label-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let shared = tmp.join("shared").join("flux");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("t5xxl_fp16.safetensors"), b"x").unwrap();
+        std::fs::write(shared.join("ae.safetensors"), b"x").unwrap();
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().to_string();
+        let label = shared_components_label(&config);
+        assert!(label.contains("T5 encoder"), "expected T5, got: {label}");
+        assert!(label.contains("VAE"), "expected VAE, got: {label}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_model_stats_empty_models_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-stats-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().to_string();
         let (models, shared) = collect_model_stats(&config);
-        // May find manifest-discovered models if user has models installed
-        assert!(models.len() < 1000);
-        let _ = shared;
+        assert!(
+            models.is_empty(),
+            "expected no models, got {}",
+            models.len()
+        );
+        assert_eq!(shared, 0);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
