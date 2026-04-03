@@ -101,6 +101,9 @@ pub fn init_tracing_file_only(
         Ok(a) => a,
         Err(e) => {
             eprintln!("warning: failed to create TUI log file appender: {e}");
+            // Register a no-op subscriber so tracing macros are silently
+            // discarded rather than leaving the global subscriber unset.
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
             return LogGuard { _file_guard: None };
         }
     };

@@ -367,6 +367,11 @@ mod tests {
         store_cached_tensor(&cache, "before".to_string(), &tensor).unwrap();
 
         // Poison the mutex by panicking while holding the lock.
+        // Note: this poisons with a clean cache state. A panic mid-operation
+        // (e.g. during insert between entries.insert and order.push_back) would
+        // leave entries/order out of sync — non-fatal for a tensor cache (worst
+        // case: extra cache miss or stale entry retained), but not tested here
+        // because we can't reliably trigger a panic mid-LruCache-operation.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = cache.lock().unwrap();
             panic!("intentional poison");
@@ -378,5 +383,35 @@ mod tests {
         let restored =
             restore_cached_tensor(&cache, &"after".to_string(), &Device::Cpu, DType::F32).unwrap();
         assert!(restored.is_some());
+    }
+
+    #[test]
+    fn poisoned_cache_with_inconsistent_state_degrades_gracefully() {
+        // Simulate what happens when entries and order are out of sync
+        // (as would occur if a panic happened mid-insert).
+        let cache: Mutex<LruCache<&str, usize>> = Mutex::new(LruCache::new(4));
+
+        // Manually create an inconsistent state: entry in map but not in order.
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.entries.insert("orphan", 1);
+            // Deliberately don't add to order — simulates mid-insert panic.
+        }
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("intentional poison");
+        }));
+
+        // Recovery should work despite the inconsistency.
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        // The orphan exists in entries but not in order — get still works.
+        assert_eq!(guard.get_cloned(&"orphan"), Some(1));
+        // New inserts work normally on the recovered cache.
+        guard.insert("a", 2);
+        guard.insert("b", 3);
+        assert_eq!(guard.get_cloned(&"a"), Some(2));
+        assert_eq!(guard.get_cloned(&"b"), Some(3));
     }
 }

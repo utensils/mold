@@ -638,9 +638,11 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         // Build reference counts across all installed models
         let ref_counts = build_ref_counts(&config);
 
+        // Defensive: contains_key above makes this unreachable today, but
+        // guards against future refactors that might modify config earlier.
         let Some(model_config) = config.models.get(&canonical) else {
             eprintln!(
-                "{} {} config entry disappeared during removal",
+                "{} {} is not installed",
                 theme::prefix_error(),
                 canonical.bold()
             );
