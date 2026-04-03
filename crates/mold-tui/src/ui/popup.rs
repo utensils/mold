@@ -391,7 +391,10 @@ fn render_history_search(frame: &mut Frame, app: &mut App) {
 
 fn render_confirm(frame: &mut Frame, app: &App, message: String) {
     let theme = &app.theme;
-    let area = centered_rect(frame.area(), 40, 20);
+    // Use larger popup when message has multiple lines (e.g. model deletion details)
+    let line_count = message.lines().count();
+    let (w, h) = if line_count > 2 { (55, 35) } else { (40, 20) };
+    let area = centered_rect(frame.area(), w, h);
 
     frame.render_widget(Clear, area);
 
@@ -402,16 +405,14 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
         .title_style(theme.title_focused())
         .style(theme.popup_bg());
 
-    let text = vec![
-        Line::from(message),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("y", theme.status_key()),
-            Span::styled(" Confirm  ", Style::default().fg(theme.text)),
-            Span::styled("n", theme.status_key()),
-            Span::styled(" Cancel", Style::default().fg(theme.text)),
-        ]),
-    ];
+    let mut text: Vec<Line> = message.lines().map(|l| Line::from(l.to_string())).collect();
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("y", theme.status_key()),
+        Span::styled(" Confirm  ", Style::default().fg(theme.text)),
+        Span::styled("n", theme.status_key()),
+        Span::styled(" Cancel", Style::default().fg(theme.text)),
+    ]));
 
     let paragraph = Paragraph::new(text)
         .block(block)
