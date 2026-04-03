@@ -534,9 +534,10 @@ pub fn run(name: &str, verify: bool) -> Result<()> {
         println!();
         println!("  {}", "Local Files".bold());
         let mut has_files = false;
-        let mcfg = model_config
-            .as_ref()
-            .expect("installed models should have local file paths");
+        let Some(mcfg) = model_config.as_ref() else {
+            println!("  {}", "No local file paths found in config.".dimmed());
+            return Ok(());
+        };
         if let Some(ref p) = mcfg.transformer {
             println!("  {:<20} {}", "Transformer:".dimmed(), p);
             has_files = true;

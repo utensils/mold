@@ -638,7 +638,15 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         // Build reference counts across all installed models
         let ref_counts = build_ref_counts(&config);
 
-        let model_config = config.models.get(&canonical).unwrap();
+        let Some(model_config) = config.models.get(&canonical) else {
+            eprintln!(
+                "{} {} config entry disappeared during removal",
+                theme::prefix_error(),
+                canonical.bold()
+            );
+            any_error = true;
+            continue;
+        };
         let all_paths = model_config.all_file_paths();
 
         // Classify files as unique (only this model) or shared

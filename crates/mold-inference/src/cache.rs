@@ -184,7 +184,7 @@ where
 {
     cache
         .lock()
-        .expect("cache poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(key, CachedTensor::from_tensor(tensor)?);
     Ok(())
 }
@@ -237,7 +237,7 @@ where
 {
     cache
         .lock()
-        .expect("cache poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(key, CachedTensorPair::from_tensors(first, second)?);
     Ok(())
 }
@@ -266,7 +266,7 @@ pub(crate) fn clear_cache<K, V>(cache: &Mutex<LruCache<K, V>>)
 where
     K: Eq + Hash + Clone,
 {
-    cache.lock().expect("cache poisoned").clear();
+    cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 fn restore_or_evict<K, V, T, F>(
@@ -279,12 +279,15 @@ where
     V: Clone,
     F: FnOnce(V) -> Result<T>,
 {
-    let cached = cache.lock().expect("cache poisoned").get_cloned(key);
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_cloned(key);
     match cached {
         Some(cached) => match restore(cached) {
             Ok(value) => Ok(Some(value)),
             Err(_) => {
-                cache.lock().expect("cache poisoned").remove(key);
+                cache.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
                 Ok(None)
             }
         },
@@ -353,5 +356,27 @@ mod tests {
 
         assert!(restored.is_none());
         assert!(cache.lock().unwrap().get_cloned(&"a").is_none());
+    }
+
+    #[test]
+    fn store_cached_tensor_recovers_from_poisoned_mutex() {
+        use candle_core::{DType, Device, Tensor};
+
+        let cache: Mutex<LruCache<String, CachedTensor>> = Mutex::new(LruCache::new(4));
+        let tensor = Tensor::zeros((1, 1), DType::F32, &Device::Cpu).unwrap();
+        store_cached_tensor(&cache, "before".to_string(), &tensor).unwrap();
+
+        // Poison the mutex by panicking while holding the lock.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(cache.lock().is_err(), "mutex should be poisoned");
+
+        // Operations should recover via unwrap_or_else, not panic.
+        store_cached_tensor(&cache, "after".to_string(), &tensor).unwrap();
+        let restored =
+            restore_cached_tensor(&cache, &"after".to_string(), &Device::Cpu, DType::F32).unwrap();
+        assert!(restored.is_some());
     }
 }
