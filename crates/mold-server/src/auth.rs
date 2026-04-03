@@ -25,9 +25,14 @@ impl ApiKeySet {
     }
 
     pub fn contains(&self, candidate: &str) -> bool {
-        self.keys
-            .iter()
-            .any(|k| k.as_bytes().ct_eq(candidate.as_bytes()).into())
+        // Check ALL keys unconditionally to avoid leaking which key matched
+        // via timing side-channel (`.any()` would short-circuit on first match).
+        let candidate_bytes = candidate.as_bytes();
+        let mut found = subtle::Choice::from(0u8);
+        for k in &self.keys {
+            found |= k.as_bytes().ct_eq(candidate_bytes);
+        }
+        found.into()
     }
 }
 

@@ -115,14 +115,16 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
 
     // Build the router with middleware layers.
     // Order (outermost → innermost): CORS → Trace → RequestID → Auth → RateLimit → routes
+    // All inject + enforce layers use .layer() (not .route_layer()) so they run on
+    // ALL requests, including unmatched 404 paths — preventing auth/rate-limit bypass.
     let app = routes::create_router(state)
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .route_layer(middleware::from_fn_with_state(
+        .layer(middleware::from_fn_with_state(
             rl_config,
             rate_limit::inject_rate_limit_state,
         ))
         .layer(middleware::from_fn(auth::require_api_key))
-        .route_layer(middleware::from_fn_with_state(
+        .layer(middleware::from_fn_with_state(
             auth_state,
             auth::inject_auth_state,
         ))

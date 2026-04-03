@@ -445,8 +445,16 @@ fn build_client(api_key: Option<&str>) -> Client {
     let mut builder = Client::builder();
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(key) {
-            headers.insert("x-api-key", val);
+        match reqwest::header::HeaderValue::from_str(key) {
+            Ok(val) => {
+                headers.insert("x-api-key", val);
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: MOLD_API_KEY contains characters invalid for an HTTP header; \
+                     authentication header will not be sent"
+                );
+            }
         }
         builder = builder.default_headers(headers);
     }

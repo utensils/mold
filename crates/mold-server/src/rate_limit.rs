@@ -20,16 +20,23 @@ use tracing::warn;
 
 type IpRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
+/// Maximum number of per-IP limiter entries before eviction.
+/// At ~200 bytes per entry, 10,000 entries ≈ 2 MB — bounded and safe.
+pub(crate) const MAX_LIMITER_ENTRIES: usize = 10_000;
+
 /// Per-IP rate limiter state. Each IP gets its own limiter instance.
+/// Maps are bounded to [`MAX_LIMITER_ENTRIES`] — when full, the entire map
+/// is cleared to reclaim memory (simple but effective against OOM from
+/// IP-spoofing attacks; legitimate clients just get a fresh bucket).
 pub struct RateLimitState {
     pub generation_quota: Quota,
     pub read_quota: Quota,
-    generation_limiters: Mutex<HashMap<IpAddr, Arc<IpRateLimiter>>>,
-    read_limiters: Mutex<HashMap<IpAddr, Arc<IpRateLimiter>>>,
+    pub(crate) generation_limiters: Mutex<HashMap<IpAddr, Arc<IpRateLimiter>>>,
+    pub(crate) read_limiters: Mutex<HashMap<IpAddr, Arc<IpRateLimiter>>>,
 }
 
 impl RateLimitState {
-    fn new(generation_quota: Quota, read_quota: Quota) -> Self {
+    pub(crate) fn new(generation_quota: Quota, read_quota: Quota) -> Self {
         Self {
             generation_quota,
             read_quota,
@@ -38,8 +45,15 @@ impl RateLimitState {
         }
     }
 
-    fn get_generation_limiter(&self, ip: IpAddr) -> Arc<IpRateLimiter> {
+    pub(crate) fn get_generation_limiter(&self, ip: IpAddr) -> Arc<IpRateLimiter> {
         let mut map = self.generation_limiters.lock().unwrap();
+        if map.len() >= MAX_LIMITER_ENTRIES {
+            warn!(
+                entries = map.len(),
+                "generation rate limiter map exceeded cap, evicting all entries"
+            );
+            map.clear();
+        }
         map.entry(ip)
             .or_insert_with(|| Arc::new(RateLimiter::direct(self.generation_quota)))
             .clone()
@@ -47,6 +61,13 @@ impl RateLimitState {
 
     fn get_read_limiter(&self, ip: IpAddr) -> Arc<IpRateLimiter> {
         let mut map = self.read_limiters.lock().unwrap();
+        if map.len() >= MAX_LIMITER_ENTRIES {
+            warn!(
+                entries = map.len(),
+                "read rate limiter map exceeded cap, evicting all entries"
+            );
+            map.clear();
+        }
         map.entry(ip)
             .or_insert_with(|| Arc::new(RateLimiter::direct(self.read_quota)))
             .clone()
