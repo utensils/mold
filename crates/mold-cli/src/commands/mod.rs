@@ -1,3 +1,5 @@
+pub mod clean;
+pub(crate) mod cleanup;
 pub mod config;
 pub mod default;
 #[cfg(feature = "discord")]
@@ -11,4 +13,5 @@ pub mod pull;
 pub mod rm;
 pub mod run;
 pub mod serve;
+pub mod stats;
 pub mod unload;
