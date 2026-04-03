@@ -133,9 +133,7 @@ pub async fn auto_pull_model(
                     batch_bytes_total,
                     batch_elapsed_ms,
                 },
-                DownloadProgressEvent::Status { message } => {
-                    SseProgressEvent::Info { message }
-                }
+                DownloadProgressEvent::Status { message } => SseProgressEvent::Info { message },
             };
             let _ = tx_dl.send(BackgroundEvent::Progress(sse));
         });
