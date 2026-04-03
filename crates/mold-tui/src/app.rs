@@ -3548,15 +3548,17 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             });
         }
         SseProgressEvent::Info { message } => {
-            // Download status messages get shown as a stage spinner
+            // Download status messages go to the stage spinner only (not the log)
+            // to avoid duplicate display.
             if message.contains("pulling") || message.contains("Checking") {
                 progress.downloading = true;
-                progress.current_stage = Some(message.clone());
+                progress.current_stage = Some(message);
+            } else {
+                progress.log.push(ProgressLogEntry {
+                    message,
+                    style: ProgressStyle::Info,
+                });
             }
-            progress.log.push(ProgressLogEntry {
-                message,
-                style: ProgressStyle::Info,
-            });
         }
         SseProgressEvent::CacheHit { resource } => {
             progress.log.push(ProgressLogEntry {
