@@ -133,8 +133,7 @@ fn check_health(host: &str, port: u16) -> bool {
     else {
         return false;
     };
-    let Ok(mut stream) =
-        TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
     else {
         return false;
     };

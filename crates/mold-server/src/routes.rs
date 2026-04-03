@@ -824,10 +824,7 @@ async fn health() -> impl IntoResponse {
         (status = 403, description = "Forbidden — remote shutdown requires API key auth"),
     )
 )]
-async fn shutdown_server(
-    State(state): State<AppState>,
-    request: Request,
-) -> impl IntoResponse {
+async fn shutdown_server(State(state): State<AppState>, request: Request) -> impl IntoResponse {
     // When auth is disabled (no AuthState extension or AuthState is None),
     // restrict shutdown to loopback addresses only.
     let auth_enabled = request
