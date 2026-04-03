@@ -418,19 +418,22 @@ impl CallbackProgress {
 
 impl Progress for CallbackProgress {
     async fn init(&mut self, size: usize, filename: &str) {
-        let mut shared = self
-            .shared
-            .lock()
-            .expect("download progress mutex poisoned");
-        shared.total = size as u64;
-        shared.accumulated = 0;
-        shared.filename = filename.to_string();
-        shared.last_emit = Instant::now();
+        let (fname, total) = {
+            let mut shared = self
+                .shared
+                .lock()
+                .expect("download progress mutex poisoned");
+            shared.total = size as u64;
+            shared.accumulated = 0;
+            shared.filename = filename.to_string();
+            shared.last_emit = Instant::now();
+            (shared.filename.clone(), shared.total)
+        };
         (self.callback)(DownloadProgressEvent::FileStart {
-            filename: shared.filename.clone(),
+            filename: fname,
             file_index: self.file_index,
             total_files: self.total_files,
-            size_bytes: shared.total,
+            size_bytes: total,
             batch_bytes_downloaded: self.batch_bytes_before_current,
             batch_bytes_total: self.batch_bytes_total,
             batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
@@ -469,15 +472,18 @@ impl Progress for CallbackProgress {
     }
 
     async fn finish(&mut self) {
-        let shared = self
-            .shared
-            .lock()
-            .expect("download progress mutex poisoned");
+        let (fname, total) = {
+            let shared = self
+                .shared
+                .lock()
+                .expect("download progress mutex poisoned");
+            (shared.filename.clone(), shared.total)
+        };
         (self.callback)(DownloadProgressEvent::FileDone {
-            filename: shared.filename.clone(),
+            filename: fname,
             file_index: self.file_index,
             total_files: self.total_files,
-            batch_bytes_downloaded: self.batch_bytes_before_current + shared.total,
+            batch_bytes_downloaded: self.batch_bytes_before_current + total,
             batch_bytes_total: self.batch_bytes_total,
             batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
