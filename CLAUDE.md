@@ -251,7 +251,7 @@ mold list                       List configured and available models (with disk 
 mold stats [--json]             Show disk usage overview (models, output, logs, shared components)
 mold clean [--force] [--older-than DURATION]  Clean orphaned files, stale downloads, old output images (dry-run by default)
 mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify
-mold server start [--port N] [--bind ADDR]  Start background server daemon
+mold server start [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]  Start background server daemon
 mold server status              Show managed server status
 mold server stop                Stop the managed server
 mold unload                     Unload the current model from server to free GPU memory

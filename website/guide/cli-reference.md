@@ -270,15 +270,15 @@ Manage a background mold server daemon.
 Start the server as a detached background process.
 
 ```bash
-mold server start [--port N] [--bind ADDR] [--models-dir PATH]
+mold server start [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
 ```
 
-| Flag                  | Description                                    |
-| --------------------- | ---------------------------------------------- |
-| `--port <N>`          | Server port (default: 7680)                    |
-| `--bind <ADDR>`       | Bind address (default: 0.0.0.0)                |
-| `--models-dir <PATH>` | Override models directory                      |
-| `--log-file`          | Enable file logging (default: true)            |
+| Flag                  | Description                         |
+| --------------------- | ----------------------------------- |
+| `--port <N>`          | Server port (default: 7680)         |
+| `--bind <ADDR>`       | Bind address (default: 0.0.0.0)     |
+| `--models-dir <PATH>` | Override models directory           |
+| `--log-file`          | Enable file logging (default: true) |
 
 Writes a PID file to `~/.mold/mold-server.pid` for lifecycle tracking.
 

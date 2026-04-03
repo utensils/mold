@@ -17,7 +17,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/gallery/image/:name`     | Fetch a saved image                  |
 | `DELETE` | `/api/gallery/image/:name`     | Delete a saved image                 |
 | `GET`    | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail             |
-| `POST`   | `/api/shutdown`                | Trigger graceful server shutdown      |
+| `POST`   | `/api/shutdown`                | Trigger graceful server shutdown     |
 | `GET`    | `/api/status`                  | Server health + status               |
 | `GET`    | `/health`                      | Simple 200 OK health check           |
 | `GET`    | `/api/openapi.json`            | OpenAPI spec                         |

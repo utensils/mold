@@ -273,8 +273,18 @@ Keys use dot-notation matching the TOML structure. Boolean values accept `true`/
 ## Server Mode
 
 ```bash
-mold serve                           # Start on 0.0.0.0:7680
+mold serve                           # Start foreground server on 0.0.0.0:7680
 mold serve --port 8080               # Custom port
+
+# Daemon management (background server)
+mold server start                    # Start background server daemon
+mold server start --port 8080        # Custom port
+mold server start --bind 127.0.0.1   # Custom bind address
+mold server start --models-dir /path # Custom models directory
+mold server start --log-file         # Enable file logging
+mold server status                   # Show managed server status (PID, port, uptime, models)
+mold server stop                     # Graceful shutdown (HTTP → SIGTERM → SIGKILL)
+
 mold ps                              # Check server status
 mold unload                          # Free GPU memory
 
