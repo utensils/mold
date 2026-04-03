@@ -202,6 +202,34 @@ Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to
 clear optional string fields. Environment variable overrides are flagged in
 `list` output and warned about when using `set`.
 
+## `mold tui`
+
+Launch the interactive terminal UI.
+
+```bash
+mold tui [--host URL] [--local]
+```
+
+| Flag            | Description                            |
+| --------------- | -------------------------------------- |
+| `--host <URL>`  | Server URL override                    |
+| `--local`       | Skip server, use local GPU only        |
+
+Requires the `tui` feature flag (included in pre-built releases and Nix
+packages). See the full [TUI documentation](/guide/tui) for views, keybindings,
+and configuration.
+
+## `mold discord`
+
+Start the Discord bot (connects to a running `mold serve` via `MOLD_HOST`).
+
+```bash
+mold discord
+```
+
+Requires the `discord` feature flag. The bot can also be started alongside the
+server with `mold serve --discord`. See [Discord Bot](/api/discord) for setup.
+
 ## `mold rm`
 
 Remove downloaded models.

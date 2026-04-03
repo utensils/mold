@@ -337,14 +337,18 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 
 ## Discord Bot
 
-Mold includes an optional Discord bot (`mold-discord`) that bridges Discord slash commands to a running `mold serve` instance. The bot depends only on `mold-core` (HTTP client) — no GPU needed on the bot host.
+Mold includes an optional Discord bot that bridges Discord slash commands to a running `mold serve` instance. The bot depends only on `mold-core` (HTTP client) — no GPU needed on the bot host.
 
 ### Running
 
 ```bash
+# Run server + bot in one process
+MOLD_DISCORD_TOKEN="your-bot-token" mold serve --discord
+
+# Or run the bot separately (connects to a remote server)
 export MOLD_DISCORD_TOKEN="your-bot-token"
 export MOLD_HOST="http://gpu-host:7680"  # optional, defaults to localhost
-mold-discord
+mold discord
 ```
 
 ### Slash Commands
