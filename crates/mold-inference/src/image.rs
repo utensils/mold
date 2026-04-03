@@ -126,7 +126,7 @@ fn write_jpeg(
     write_jpeg_com_marker(&mut out, comment.as_bytes());
 
     // Inject XMP APP1 marker (read by Photoshop, Lightroom, GIMP, exiftool -xmp:all)
-    let xmp = build_xmp_packet(metadata);
+    let xmp = build_xmp_packet(metadata)?;
     write_jpeg_xmp_marker(&mut out, &xmp);
 
     // Append rest of JPEG data (everything after SOI)
@@ -159,7 +159,7 @@ fn write_jpeg_com_marker(out: &mut Vec<u8>, data: &[u8]) {
 }
 
 /// Build an XMP packet containing generation metadata as RDF/XML.
-fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
+fn build_xmp_packet(metadata: &OutputMetadata) -> Result<Vec<u8>> {
     use std::fmt::Write;
     let mut xmp = String::with_capacity(1024);
     xmp.push_str(r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#);
@@ -206,7 +206,7 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
         "<mold:version>{}</mold:version>",
         xml_escape(&metadata.version)
     );
-    let json = serde_json::to_string(metadata).expect("metadata already serialized in COM marker");
+    let json = serde_json::to_string(metadata)?;
     let _ = write!(
         xmp,
         "<mold:parameters>{}</mold:parameters>",
@@ -214,7 +214,7 @@ fn build_xmp_packet(metadata: &OutputMetadata) -> Vec<u8> {
     );
     xmp.push_str("</rdf:Description></rdf:RDF></x:xmpmeta>");
     xmp.push_str(r#"<?xpacket end="w"?>"#);
-    xmp.into_bytes()
+    Ok(xmp.into_bytes())
 }
 
 /// Write a JPEG APP1 marker with the standard XMP namespace prefix.
@@ -599,6 +599,18 @@ mod tests {
             xmp.contains("<mold:scheduler>euler-ancestral</mold:scheduler>"),
             "scheduler should be present"
         );
+    }
+
+    #[test]
+    fn test_build_xmp_packet_returns_ok() {
+        let metadata = test_metadata();
+        let xmp = build_xmp_packet(&metadata);
+        assert!(
+            xmp.is_ok(),
+            "build_xmp_packet should not fail for valid metadata"
+        );
+        let xmp_str = String::from_utf8(xmp.unwrap()).unwrap();
+        assert!(xmp_str.contains("mold:parameters"));
     }
 
     #[test]
