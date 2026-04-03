@@ -180,7 +180,7 @@ fn render_log(frame: &mut Frame, theme: &Theme, log: &[ProgressLogEntry], area: 
     frame.render_widget(paragraph, area);
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1}G", bytes as f64 / 1_073_741_824.0)
     } else if bytes >= 1_048_576 {

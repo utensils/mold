@@ -357,3 +357,192 @@ fn build_request(
         lora,
     }
 }
+
+/// Build a map of file_path -> list of model names that reference it.
+pub(crate) fn build_ref_counts(
+    config: &mold_core::Config,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut refs: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (model_name, model_config) in &config.models {
+        for path in model_config.all_file_paths() {
+            refs.entry(path).or_default().push(model_name.clone());
+        }
+    }
+    refs
+}
+
+/// Collect hf-hub cache blob paths for a model's unique files so we can delete them
+/// to actually reclaim disk space (clean paths are hardlinked from blobs).
+fn collect_hf_cache_blob_paths(
+    model_name: &str,
+    unique_clean_paths: &[(String, u64)],
+) -> Vec<std::path::PathBuf> {
+    use mold_core::manifest::{find_manifest, storage_path};
+
+    let manifest = match find_manifest(model_name) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    let config = mold_core::Config::load_or_default();
+    let models_dir = config.resolved_models_dir();
+    let cache_dir = models_dir.join(".hf-cache");
+    if !cache_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let unique_set: std::collections::HashSet<String> =
+        unique_clean_paths.iter().map(|(p, _)| p.clone()).collect();
+
+    let mut blobs = Vec::new();
+
+    for file in &manifest.files {
+        let clean_path = models_dir
+            .join(storage_path(manifest, file))
+            .to_string_lossy()
+            .to_string();
+        if !unique_set.contains(&clean_path) {
+            continue;
+        }
+
+        let repo_dir_name = format!("models--{}", file.hf_repo.replace('/', "--"));
+        let repo_dir = cache_dir.join(&repo_dir_name);
+        if !repo_dir.is_dir() {
+            continue;
+        }
+
+        let snapshots_dir = repo_dir.join("snapshots");
+        if !snapshots_dir.is_dir() {
+            continue;
+        }
+
+        if let Ok(revisions) = std::fs::read_dir(&snapshots_dir) {
+            for rev in revisions.flatten() {
+                let snap_file = rev.path().join(&file.hf_filename);
+                if snap_file.symlink_metadata().is_ok() {
+                    if let Ok(blob) = snap_file.canonicalize() {
+                        blobs.push(blob);
+                    }
+                    blobs.push(snap_file);
+                }
+            }
+        }
+    }
+
+    blobs
+}
+
+/// Remove a model's files and config entry. Runs on a blocking thread.
+pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEvent>) {
+    let mut config = mold_core::Config::load_or_default();
+
+    if !config.models.contains_key(&model_name) {
+        let _ = tx.send(BackgroundEvent::ModelRemoveFailed(format!(
+            "Model '{}' is not installed",
+            model_name
+        )));
+        return;
+    }
+
+    // Build reference counts to identify shared vs unique files
+    let ref_counts = build_ref_counts(&config);
+    let model_config = config.models.get(&model_name).unwrap();
+    let all_paths = model_config.all_file_paths();
+
+    let mut unique_files: Vec<(String, u64)> = Vec::new();
+
+    for path in &all_paths {
+        let refs = ref_counts.get(path).cloned().unwrap_or_default();
+        let other_refs: Vec<String> = refs.into_iter().filter(|n| n != &model_name).collect();
+        if other_refs.is_empty() {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            unique_files.push((path.clone(), size));
+        }
+    }
+
+    // Delete unique files
+    let hf_cache_blobs = collect_hf_cache_blob_paths(&model_name, &unique_files);
+
+    for (path, _) in &unique_files {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Delete hf-cache blobs (where actual disk space lives due to hardlinks)
+    for blob_path in &hf_cache_blobs {
+        let _ = std::fs::remove_file(blob_path);
+    }
+
+    // Clean up empty model-specific directories
+    if let Some(model_cfg) = config.models.get(&model_name) {
+        if let Some(ref t) = model_cfg.transformer {
+            if let Some(parent) = std::path::Path::new(t).parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+
+    // Remove from config
+    config.remove_model(&model_name);
+    mold_core::download::remove_pulling_marker(&model_name);
+
+    // Reassign default model if needed
+    if config.default_model == model_name {
+        let new_default = config
+            .models
+            .keys()
+            .min()
+            .cloned()
+            .unwrap_or_else(|| "flux2-klein".to_string());
+        config.default_model = new_default;
+    }
+
+    if let Err(e) = config.save() {
+        let _ = tx.send(BackgroundEvent::ModelRemoveFailed(format!(
+            "Removed files but failed to save config: {e}"
+        )));
+        return;
+    }
+
+    let _ = tx.send(BackgroundEvent::ModelRemoveComplete(model_name));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_ref_counts_tracks_shared_files() {
+        let mut config = mold_core::Config::default();
+
+        let mut model_a = mold_core::ModelConfig::default();
+        model_a.transformer = Some("/models/a/transformer.safetensors".to_string());
+        model_a.vae = Some("/models/shared/vae.safetensors".to_string());
+
+        let mut model_b = mold_core::ModelConfig::default();
+        model_b.transformer = Some("/models/b/transformer.safetensors".to_string());
+        model_b.vae = Some("/models/shared/vae.safetensors".to_string());
+
+        config.models.insert("model-a".to_string(), model_a);
+        config.models.insert("model-b".to_string(), model_b);
+
+        let refs = build_ref_counts(&config);
+
+        // Unique files should have exactly one reference
+        let a_refs = refs.get("/models/a/transformer.safetensors").unwrap();
+        assert_eq!(a_refs.len(), 1);
+        assert!(a_refs.contains(&"model-a".to_string()));
+
+        // Shared files should have both models
+        let vae_refs = refs.get("/models/shared/vae.safetensors").unwrap();
+        assert_eq!(vae_refs.len(), 2);
+        assert!(vae_refs.contains(&"model-a".to_string()));
+        assert!(vae_refs.contains(&"model-b".to_string()));
+    }
+
+    #[test]
+    fn build_ref_counts_empty_config() {
+        let config = mold_core::Config::default();
+        let refs = build_ref_counts(&config);
+        assert!(refs.is_empty());
+    }
+}

@@ -37,6 +37,10 @@ pub enum BackgroundEvent {
     },
     /// Remote server health check failed.
     ServerUnreachable(String),
+    /// Model removal completed successfully.
+    ModelRemoveComplete(String),
+    /// Model removal failed.
+    ModelRemoveFailed(String),
 }
 
 /// A single entry in the progress log.
@@ -1850,6 +1854,34 @@ impl App {
             Action::OpenFile => {
                 self.open_gallery_file();
             }
+            Action::RemoveModel => {
+                if self.active_view == View::Models {
+                    if let Some(model) = self.models.catalog.get(self.models.selected) {
+                        if !model.downloaded {
+                            return;
+                        }
+                        let name = model.info.name.clone();
+
+                        // Block removal during active generation or pull
+                        if self.generate.generating && self.generate.params.model == name {
+                            self.generate.error_message =
+                                Some("Cannot remove a model while generating".to_string());
+                            return;
+                        }
+                        if mold_core::download::has_pulling_marker(&name) {
+                            self.generate.error_message =
+                                Some("Cannot remove a model while it is being pulled".to_string());
+                            return;
+                        }
+
+                        let message = self.build_remove_model_message(&name);
+                        self.popup = Some(Popup::Confirm {
+                            message,
+                            on_confirm: ConfirmAction::RemoveModel(name),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2076,14 +2108,73 @@ impl App {
         }
     }
 
+    /// Build a multi-line confirmation message for model removal showing
+    /// disk space to be freed and any shared-file warnings.
+    fn build_remove_model_message(&self, model_name: &str) -> String {
+        let mut lines = vec![format!("Remove model '{model_name}'?")];
+
+        // Show disk usage if known
+        if let Some(model) = self
+            .models
+            .catalog
+            .iter()
+            .find(|m| m.info.name == model_name)
+        {
+            if let Some(bytes) = model.disk_usage_bytes {
+                lines.push(format!(
+                    "Disk space to free: ~{}",
+                    crate::ui::progress::format_bytes(bytes)
+                ));
+            }
+        }
+
+        // Identify shared files
+        let ref_counts = crate::backend::build_ref_counts(&self.config);
+        if let Some(model_config) = self.config.models.get(model_name) {
+            let mut shared_warnings: Vec<String> = Vec::new();
+            for path in model_config.all_file_paths() {
+                if let Some(refs) = ref_counts.get(&path) {
+                    let others: Vec<&String> =
+                        refs.iter().filter(|n| n.as_str() != model_name).collect();
+                    if !others.is_empty() {
+                        let filename = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone());
+                        shared_warnings.push(format!(
+                            "  {} (shared with {})",
+                            filename,
+                            others
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+            if !shared_warnings.is_empty() {
+                lines.push(String::new());
+                lines.push("Shared files (kept):".to_string());
+                lines.extend(shared_warnings);
+            }
+        }
+
+        lines.join("\n")
+    }
+
     /// Dispatch a confirmed popup action.
     fn handle_confirm_action(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteGalleryImage => {
                 self.delete_selected_gallery_image();
             }
-            ConfirmAction::RemoveModel(_name) => {
-                // TODO: implement model removal
+            ConfirmAction::RemoveModel(name) => {
+                let tx = self.bg_tx.clone();
+                let model_name = name.clone();
+                self.tokio_handle.spawn_blocking(move || {
+                    crate::backend::remove_model(model_name, tx);
+                });
             }
         }
     }
@@ -3271,6 +3362,27 @@ impl App {
                     // Refresh the catalog
                     self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
                 }
+                BackgroundEvent::ModelRemoveComplete(model) => {
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: format!("Removed model: {model}"),
+                        style: ProgressStyle::Done,
+                    });
+                    // Refresh config and catalog
+                    self.config = Config::load_or_default();
+                    self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+                    // Clamp selected index
+                    if !self.models.catalog.is_empty()
+                        && self.models.selected >= self.models.catalog.len()
+                    {
+                        self.models.selected = self.models.catalog.len() - 1;
+                    }
+                }
+                BackgroundEvent::ModelRemoveFailed(msg) => {
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: format!("Remove failed: {msg}"),
+                        style: ProgressStyle::Error,
+                    });
+                }
             }
         }
     }
@@ -3659,13 +3771,21 @@ mod tests {
             Action::PanLeft,
             Action::PanRight,
             Action::FilterModels,
-            Action::RemoveModel,
             Action::ExpandPrompt,
             Action::SaveImage,
             Action::CompareModels,
         ];
         // Compile-time check that these variants exist
         for action in &unimplemented {
+            assert_ne!(*action, Action::Quit);
+        }
+    }
+
+    #[test]
+    fn model_actions_are_implemented() {
+        // These model actions should exist and NOT be in the unimplemented list
+        let implemented = vec![Action::PullModel, Action::RemoveModel, Action::UnloadModel];
+        for action in &implemented {
             assert_ne!(*action, Action::Quit);
         }
     }
