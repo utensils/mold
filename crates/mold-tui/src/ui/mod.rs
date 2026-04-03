@@ -71,6 +71,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let version = format!("mold {} ", mold_core::build_info::version_string());
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()
@@ -81,6 +82,10 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
+                )
+                .title_top(
+                    Line::from(Span::styled(version, Style::default().fg(theme.text_dim)))
+                        .right_aligned(),
                 )
                 .style(Style::default().bg(theme.tab_bg))
                 .padding(Padding::horizontal(1)),
