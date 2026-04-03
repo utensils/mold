@@ -86,7 +86,7 @@
           commonArgs = {
             inherit src;
             pname = "mold";
-            version = "0.4.0";
+            version = "0.4.1";
             strictDeps = true;
 
             # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
