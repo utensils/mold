@@ -133,7 +133,8 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         .layer(cors);
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
-    info!(%addr, "starting mold server");
+    let version = mold_core::build_info::version_string();
+    info!(%addr, %version, "starting mold server");
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(
