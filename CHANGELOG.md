@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-02
+
+### Added
+
+- **Interactive Terminal UI**: full-featured TUI with Generate, Gallery, Models, and Settings views — built on ratatui with Kitty/Sixel/iTerm2/halfblock image preview ([#133](https://github.com/utensils/mold/pull/133), [#134](https://github.com/utensils/mold/pull/134))
+- **TUI Gallery**: thumbnail grid with cached 256x256 previews, detail view with metadata, edit/regenerate/delete actions ([#134](https://github.com/utensils/mold/pull/134))
+- **Settings editor**: `mold config` subcommands (`list`, `get`, `set`, `path`, `edit`) for managing config.toml from the CLI, plus a TUI Settings view for interactive editing ([#136](https://github.com/utensils/mold/pull/136))
+- **Prompt history**: persisted across sessions with fuzzy search and Up/Down recall ([#133](https://github.com/utensils/mold/pull/133))
+- **Session persistence**: TUI saves and restores all generation parameters across launches ([#133](https://github.com/utensils/mold/pull/133))
+- **Auto-start server**: TUI automatically starts a background `mold serve` process, killed on exit ([#133](https://github.com/utensils/mold/pull/133))
+- **File logging**: `--log-file` flag and `[logging]` config section for rotated log files in `~/.mold/logs/` ([#133](https://github.com/utensils/mold/pull/133))
+- **Config migrations**: automatic migration from legacy config locations and formats ([#133](https://github.com/utensils/mold/pull/133))
+- **LoRA fingerprint caching**: skip redundant transformer rebuilds when the same LoRA is reused across requests ([#131](https://github.com/utensils/mold/pull/131))
+- **LoRA delta caching**: `LoraDeltaCache` caches pre-computed `B @ A * scale` delta tensors on CPU across transformer rebuilds ([#131](https://github.com/utensils/mold/pull/131))
+- **Shared tokenizer pool**: cross-engine `SharedPool` caches T5 and CLIP tokenizers via `Arc<Tokenizer>`, saving ~100-150ms on model switches ([#131](https://github.com/utensils/mold/pull/131))
+
+### Fixed
+
+- **MPS memory guards**: prevent OOM on low-RAM Apple Silicon by checking available memory before allocation ([#134](https://github.com/utensils/mold/pull/134))
+- **Test race condition**: eliminate flaky `queued_stream_receives_position_event` test ([#132](https://github.com/utensils/mold/pull/132))
+
+### Changed
+
+- Multi-model cache enhanced with `ModelResidency` states (Gpu, Parked, Unloaded) for smarter VRAM management ([#131](https://github.com/utensils/mold/pull/131))
+- Documentation synced across website, README, CLAUDE.md, and SKILL.md — TUI, `mold config`, `[logging]` section, and Discord bot command references
+
 ## [0.3.1] - 2026-04-01
 
 ### Fixed

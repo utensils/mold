@@ -54,6 +54,12 @@ temperature = 0.7
 # [expand.families.flux]
 # word_limit = 200
 # style_notes = "Rich natural language descriptions."
+
+[logging]
+# level = "info"              # Log level (overridden by MOLD_LOG env var)
+# file = false                # Enable file logging to ~/.mold/logs/
+# dir = "~/.mold/logs"        # Custom log directory
+# max_days = 7                # Days to retain rotated log files
 ```
 
 ## Environment Variables

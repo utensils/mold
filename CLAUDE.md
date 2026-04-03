@@ -237,7 +237,9 @@ mold config get <KEY> [--raw]      Get a config value
 mold config set <KEY> <VALUE>      Set a config value
 mold config path                   Show config file path
 mold config edit                   Open config in $EDITOR
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
+mold tui [--host URL] [--local]     Launch interactive terminal UI (requires `tui` feature)
+mold discord                       Start Discord bot (requires `discord` feature)
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file] [--log-format json|text] [--discord]
 mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
 mold rm <MODELS...> [--force]  Remove downloaded models
 mold list                       List configured and available models (with disk usage)
