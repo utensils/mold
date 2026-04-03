@@ -203,7 +203,7 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_stateful_widget(image_widget, inner, image_state);
     } else if app.generate.generating {
         let status_text = if app.generate.progress.is_downloading() {
-            "Downloading model..."
+            app.generate.progress.download_status_text()
         } else {
             "Generating..."
         };

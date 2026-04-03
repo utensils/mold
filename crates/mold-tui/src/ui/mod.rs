@@ -104,7 +104,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         View::Generate => {
             if app.generate.generating {
                 let status = if app.generate.progress.is_downloading() {
-                    "Downloading..."
+                    app.generate.progress.download_status_text()
                 } else {
                     "Generating..."
                 };

@@ -10,15 +10,42 @@ fn pid_file_path() -> Option<PathBuf> {
     mold_core::Config::mold_dir().map(|d| d.join("mold-server.pid"))
 }
 
+/// Managed server metadata from PID file.
+struct ManagedServer {
+    pid: u32,
+    port: u16,
+    bind: String,
+}
+
+impl ManagedServer {
+    /// The address to use for health/status probes.
+    fn probe_host(&self) -> &str {
+        // 0.0.0.0 and :: bind to all interfaces — probe via loopback
+        match self.bind.as_str() {
+            "0.0.0.0" | "::" | "" => "127.0.0.1",
+            other => other,
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}:{}", self.probe_host(), self.port)
+    }
+}
+
 /// Read and validate PID file. Returns None if missing, malformed, or stale.
-fn read_pid_file() -> Option<(u32, u16)> {
+fn read_pid_file() -> Option<ManagedServer> {
     let path = pid_file_path()?;
     let contents = std::fs::read_to_string(&path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let pid = val.get("pid")?.as_u64()? as u32;
     let port = val.get("port")?.as_u64()? as u16;
+    let bind = val
+        .get("bind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0.0")
+        .to_string();
     if process_alive(pid) {
-        Some((pid, port))
+        Some(ManagedServer { pid, port, bind })
     } else {
         // Stale PID file — clean up
         let _ = std::fs::remove_file(&path);
@@ -26,7 +53,7 @@ fn read_pid_file() -> Option<(u32, u16)> {
     }
 }
 
-fn write_pid_file(pid: u32, port: u16) -> Result<()> {
+fn write_pid_file(pid: u32, port: u16, bind: &str) -> Result<()> {
     let path = match pid_file_path() {
         Some(p) => p,
         None => anyhow::bail!("cannot determine mold home directory"),
@@ -37,6 +64,7 @@ fn write_pid_file(pid: u32, port: u16) -> Result<()> {
     let json = serde_json::json!({
         "pid": pid,
         "port": port,
+        "bind": bind,
     });
     let data = serde_json::to_string_pretty(&json)?;
     // Atomic write: write to .tmp, rename
@@ -67,10 +95,10 @@ pub fn process_alive(_pid: u32) -> bool {
 }
 
 /// Check server health via TCP connect + HTTP GET.
-fn check_health(port: u16) -> bool {
+fn check_health(host: &str, port: u16) -> bool {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let Ok(mut stream) =
         TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_secs(2))
     else {
@@ -79,7 +107,7 @@ fn check_health(port: u16) -> bool {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .ok();
-    let req = format!("GET /health HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n");
+    let req = format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -107,10 +135,10 @@ pub async fn run_start(
     log_file: bool,
 ) -> Result<()> {
     // Check for existing managed server
-    if let Some((pid, existing_port)) = read_pid_file() {
+    if let Some(srv) = read_pid_file() {
         eprintln!(
             "Server already running (PID {} on port {})",
-            pid, existing_port
+            srv.pid, srv.port
         );
         std::process::exit(1);
     }
@@ -148,7 +176,7 @@ pub async fn run_start(
         .map_err(|e| anyhow::anyhow!("failed to start server: {e}"))?;
     let pid = child.id();
 
-    write_pid_file(pid, port)?;
+    write_pid_file(pid, port, bind)?;
 
     eprint!("Starting server (PID {pid}) on port {port}...");
 
@@ -164,7 +192,11 @@ pub async fn run_start(
                  Check logs at ~/.mold/logs/"
             );
         }
-        if check_health(port) {
+        let probe = match bind {
+            "0.0.0.0" | "::" | "" => "127.0.0.1",
+            other => other,
+        };
+        if check_health(probe, port) {
             healthy = true;
             break;
         }
@@ -188,13 +220,13 @@ pub async fn run_start(
 
 pub async fn run_status() -> Result<()> {
     match read_pid_file() {
-        Some((pid, port)) => {
-            let client = mold_core::MoldClient::new(&format!("http://localhost:{port}"));
+        Some(srv) => {
+            let client = mold_core::MoldClient::new(&srv.base_url());
             match client.server_status().await {
                 Ok(status) => {
-                    eprintln!("Server running (PID {pid})");
+                    eprintln!("Server running (PID {})", srv.pid);
                     eprintln!("  Version: {}", status.version);
-                    eprintln!("  Port:    {port}");
+                    eprintln!("  Port:    {}", srv.port);
                     eprintln!("  Uptime:  {}s", status.uptime_secs);
                     eprintln!(
                         "  Models:  {}",
@@ -214,7 +246,8 @@ pub async fn run_status() -> Result<()> {
                 }
                 Err(_) => {
                     eprintln!(
-                        "Server process running (PID {pid}) but not responding on port {port}"
+                        "Server process running (PID {}) but not responding on port {}",
+                        srv.pid, srv.port
                     );
                 }
             }
@@ -244,18 +277,19 @@ pub async fn run_status() -> Result<()> {
 }
 
 pub async fn run_stop() -> Result<()> {
-    let (pid, port) = match read_pid_file() {
-        Some(pf) => pf,
+    let srv = match read_pid_file() {
+        Some(s) => s,
         None => {
             eprintln!("No managed server running");
             std::process::exit(1);
         }
     };
+    let pid = srv.pid;
 
     eprint!("Stopping server (PID {pid})...");
 
     // Try graceful HTTP shutdown first
-    let client = mold_core::MoldClient::new(&format!("http://localhost:{port}"));
+    let client = mold_core::MoldClient::new(&srv.base_url());
     let http_ok = tokio::time::timeout(std::time::Duration::from_secs(5), client.shutdown_server())
         .await
         .map(|r| r.is_ok())
@@ -336,6 +370,6 @@ mod tests {
     #[test]
     fn check_health_no_server() {
         // Port 1 should never have a server
-        assert!(!check_health(1));
+        assert!(!check_health("127.0.0.1", 1));
     }
 }

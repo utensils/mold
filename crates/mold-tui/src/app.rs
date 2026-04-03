@@ -123,9 +123,26 @@ impl ProgressState {
         self.download_samples.clear();
     }
 
-    /// Returns true if a model download is active or pending.
+    /// Returns true if a model download or verification is active.
     pub fn is_downloading(&self) -> bool {
         self.downloading
+    }
+
+    /// Human-readable status for the bottom bar during pull.
+    pub fn download_status_text(&self) -> &str {
+        if self.download_batch_total > 0 {
+            "Downloading..."
+        } else if self
+            .current_stage
+            .as_deref()
+            .is_some_and(|s| s.contains("Verifying"))
+        {
+            "Verifying..."
+        } else if self.downloading {
+            "Preparing..."
+        } else {
+            "Downloading..."
+        }
     }
 
     fn clear_weight(&mut self) {
@@ -3355,6 +3372,7 @@ impl App {
                         );
                         self.gallery.thumbnail_states.insert(0, None);
                         self.gallery.thumb_dimensions.insert(0, None);
+                        self.gallery.thumb_fixed_cache.insert(0, None);
 
                         // Generate thumbnail in background
                         self.tokio_handle.spawn(async move {
@@ -3554,8 +3572,17 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             // Download status messages go to the stage spinner only (not the log)
             // to avoid duplicate display.
             if message.contains("pulling") || message.contains("Checking") {
+                // These are status-only messages — show as spinner, not log
                 progress.downloading = true;
                 progress.current_stage = Some(message);
+            } else if message.contains("Verifying") {
+                // Verification messages: show as spinner AND log entry
+                progress.downloading = true;
+                progress.current_stage = Some(message.clone());
+                progress.log.push(ProgressLogEntry {
+                    message,
+                    style: ProgressStyle::Info,
+                });
             } else {
                 progress.log.push(ProgressLogEntry {
                     message,
