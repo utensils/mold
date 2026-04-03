@@ -6,6 +6,7 @@ use mold_core::{
 use rand::Rng;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
@@ -72,8 +73,15 @@ pub struct ProgressState {
     pub download_filename: String,
     pub download_bytes: u64,
     pub download_total: u64,
+    pub download_batch_bytes: u64,
+    pub download_batch_total: u64,
+    pub download_batch_elapsed_ms: u64,
+    pub download_rate_bps: Option<f64>,
+    pub download_eta_secs: Option<f64>,
     pub download_file_index: usize,
     pub download_total_files: usize,
+    pub downloading: bool,
+    download_samples: VecDeque<(u64, u64)>,
 }
 
 impl ProgressState {
@@ -89,8 +97,108 @@ impl ProgressState {
         self.download_filename.clear();
         self.download_bytes = 0;
         self.download_total = 0;
+        self.download_batch_bytes = 0;
+        self.download_batch_total = 0;
+        self.download_batch_elapsed_ms = 0;
+        self.download_rate_bps = None;
+        self.download_eta_secs = None;
         self.download_file_index = 0;
         self.download_total_files = 0;
+        self.downloading = false;
+        self.download_samples.clear();
+    }
+
+    fn clear_download(&mut self) {
+        self.download_filename.clear();
+        self.download_bytes = 0;
+        self.download_total = 0;
+        self.download_batch_bytes = 0;
+        self.download_batch_total = 0;
+        self.download_batch_elapsed_ms = 0;
+        self.download_rate_bps = None;
+        self.download_eta_secs = None;
+        self.download_file_index = 0;
+        self.download_total_files = 0;
+        self.downloading = false;
+        self.download_samples.clear();
+    }
+
+    /// Returns true if a model download or verification is active.
+    pub fn is_downloading(&self) -> bool {
+        self.downloading
+    }
+
+    /// Human-readable status for the bottom bar during pull.
+    pub fn download_status_text(&self) -> &str {
+        if self.download_batch_total > 0 {
+            "Downloading..."
+        } else if self
+            .current_stage
+            .as_deref()
+            .is_some_and(|s| s.contains("Verifying"))
+        {
+            "Verifying..."
+        } else if self.downloading {
+            "Preparing..."
+        } else {
+            "Downloading..."
+        }
+    }
+
+    fn clear_weight(&mut self) {
+        self.weight_loaded = 0;
+        self.weight_total = 0;
+        self.weight_component.clear();
+    }
+
+    fn record_download_sample(&mut self, elapsed_ms: u64, position: u64) {
+        const MAX_SAMPLES: usize = 8;
+        const MIN_SAMPLE_WINDOW_MS: u64 = 1_000;
+
+        if self
+            .download_samples
+            .back()
+            .is_some_and(|(last_elapsed_ms, _)| *last_elapsed_ms == elapsed_ms)
+        {
+            let _ = self.download_samples.pop_back();
+        }
+        self.download_samples.push_back((elapsed_ms, position));
+        while self.download_samples.len() > MAX_SAMPLES {
+            self.download_samples.pop_front();
+        }
+
+        if self.download_samples.len() < 2 {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        let (t_old_ms, b_old) = self
+            .download_samples
+            .front()
+            .expect("sample window is non-empty");
+        let (t_new_ms, b_new) = self
+            .download_samples
+            .back()
+            .expect("sample window is non-empty");
+        let dt_ms = t_new_ms.saturating_sub(*t_old_ms);
+        if dt_ms < MIN_SAMPLE_WINDOW_MS {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        let dt = dt_ms as f64 / 1_000.0;
+        let rate = b_new.saturating_sub(*b_old) as f64 / dt;
+        if rate < 1.0 {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        self.download_rate_bps = Some(rate);
+        self.download_eta_secs =
+            Some(self.download_batch_total.saturating_sub(position) as f64 / rate);
     }
 }
 
@@ -504,6 +612,9 @@ pub struct GalleryState {
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
     /// Actual thumbnail pixel dimensions (width, height), populated when loaded.
     pub thumb_dimensions: Vec<Option<(u32, u32)>>,
+    /// Cached fixed-protocol renders for centered grid thumbnails.
+    /// Populated lazily on first render, keyed by (thumb_area width, height).
+    pub thumb_fixed_cache: Vec<Option<(u16, u16, ratatui_image::protocol::Protocol)>>,
     /// Number of columns in the grid (computed from terminal width).
     pub grid_cols: usize,
     /// Scroll offset in rows for the grid view.
@@ -783,13 +894,15 @@ impl App {
         } else {
             // No explicit server — try to detect or auto-start one
             if check_server_health(&local_url) {
-                // Server already running
+                // Server already running — connect but don't manage its lifecycle
+                tracing::info!(%local_url, "connected to existing server");
                 (Some(local_url.clone()), InferenceMode::Auto)
             } else {
                 // Try to start a background server
                 match start_background_server(port) {
                     Some(mut child) => {
                         if wait_for_server_health(&local_url, 8) {
+                            tracing::info!(pid = child.id(), "started background server");
                             server_process = Some(child);
                             (Some(local_url.clone()), InferenceMode::Auto)
                         } else {
@@ -932,6 +1045,7 @@ impl App {
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
                 thumb_dimensions: Vec::new(),
+                thumb_fixed_cache: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
@@ -995,6 +1109,7 @@ impl App {
         self.save_session();
 
         if let Some(ref mut child) = self.server_process {
+            tracing::info!(pid = child.id(), "stopping background server");
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -1187,7 +1302,9 @@ impl App {
                         (KeyCode::Char('1'), KeyModifiers::ALT)
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
                         | (KeyCode::Char('3'), KeyModifiers::ALT)
-                        | (KeyCode::Char('4'), KeyModifiers::ALT) => {
+                        | (KeyCode::Char('4'), KeyModifiers::ALT)
+                        | (KeyCode::Left, KeyModifiers::ALT)
+                        | (KeyCode::Right, KeyModifiers::ALT) => {
                             // Fall through for view switching
                         }
                         _ => {
@@ -1448,17 +1565,20 @@ impl App {
 
                 // Tab bar clicks — switch views
                 if self.layout.tab_bar.contains((col, row).into()) {
-                    // Determine which tab was clicked based on x position
-                    let x = col - self.layout.tab_bar.x;
-                    if x < 13 {
-                        self.active_view = View::Generate;
-                    } else if x < 25 {
-                        self.active_view = View::Gallery;
-                    } else if x < 35 {
-                        self.active_view = View::Models;
-                    } else {
-                        self.active_view = View::Settings;
+                    // Determine which tab was clicked based on cumulative label widths.
+                    // Tab labels: " {i} {label} " with 1-char divider, plus block padding.
+                    let x = col.saturating_sub(self.layout.tab_bar.x + 2) as usize; // +2 for border + padding
+                    let mut offset = 0;
+                    for view in &View::ALL {
+                        let tab_width = view.label().len() + 4; // " N Label " = label + " N  "
+                        if x < offset + tab_width {
+                            self.active_view = *view;
+                            return;
+                        }
+                        offset += tab_width + 1; // +1 for divider
                     }
+                    // Click past all tabs — select last view
+                    self.active_view = View::Settings;
                     return;
                 }
 
@@ -2107,6 +2227,9 @@ impl App {
         }
         if idx < self.gallery.thumb_dimensions.len() {
             self.gallery.thumb_dimensions.remove(idx);
+        }
+        if idx < self.gallery.thumb_fixed_cache.len() {
+            self.gallery.thumb_fixed_cache.remove(idx);
         }
 
         // Adjust selection
@@ -3254,6 +3377,7 @@ impl App {
                         );
                         self.gallery.thumbnail_states.insert(0, None);
                         self.gallery.thumb_dimensions.insert(0, None);
+                        self.gallery.thumb_fixed_cache.insert(0, None);
 
                         // Generate thumbnail in background
                         self.tokio_handle.spawn(async move {
@@ -3272,6 +3396,7 @@ impl App {
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.thumbnail_states = vec![None; entries.len()];
                     self.gallery.thumb_dimensions = vec![None; entries.len()];
+                    self.gallery.thumb_fixed_cache = vec![None; entries.len()];
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
                     self.gallery.selected = 0;
@@ -3360,6 +3485,7 @@ impl App {
                     let len = self.gallery.entries.len();
                     self.gallery.thumbnail_states = vec![None; len];
                     self.gallery.thumb_dimensions = vec![None; len];
+                    self.gallery.thumb_fixed_cache = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.server_url = Some(url.clone());
@@ -3423,91 +3549,149 @@ impl App {
     }
 
     fn handle_progress(&mut self, event: SseProgressEvent) {
-        match event {
-            SseProgressEvent::StageStart { name } => {
-                self.generate.progress.current_stage = Some(name);
-                // Reset weight progress on new stage
-                self.generate.progress.weight_loaded = 0;
-                self.generate.progress.weight_total = 0;
-            }
-            SseProgressEvent::StageDone { name, elapsed_ms } => {
-                self.generate.progress.current_stage = None;
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
-                    style: ProgressStyle::Done,
+        let refresh_catalog = reduce_progress_state(&mut self.generate.progress, event);
+        if refresh_catalog {
+            // Refresh config and catalog after pull
+            self.config = Config::load_or_default();
+            self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+        }
+    }
+}
+
+fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) -> bool {
+    match event {
+        SseProgressEvent::StageStart { name } => {
+            progress.current_stage = Some(name);
+            // Reset transient bars when the stream moves into a new phase.
+            progress.clear_download();
+            progress.clear_weight();
+        }
+        SseProgressEvent::StageDone { name, elapsed_ms } => {
+            progress.current_stage = None;
+            progress.log.push(ProgressLogEntry {
+                message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
+                style: ProgressStyle::Done,
+            });
+        }
+        SseProgressEvent::Info { message } => {
+            // Download status messages go to the stage spinner only (not the log)
+            // to avoid duplicate display.
+            if message.contains("pulling") || message.contains("Checking") {
+                // These are status-only messages — show as spinner, not log
+                progress.downloading = true;
+                progress.current_stage = Some(message);
+            } else if message.contains("Verifying") {
+                // Verification messages: show as spinner AND log entry
+                progress.downloading = true;
+                progress.current_stage = Some(message.clone());
+                progress.log.push(ProgressLogEntry {
+                    message,
+                    style: ProgressStyle::Info,
                 });
-            }
-            SseProgressEvent::Info { message } => {
-                self.generate.progress.log.push(ProgressLogEntry {
+            } else {
+                progress.log.push(ProgressLogEntry {
                     message,
                     style: ProgressStyle::Info,
                 });
             }
-            SseProgressEvent::CacheHit { resource } => {
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("{resource} [cache hit]"),
-                    style: ProgressStyle::Done,
-                });
+        }
+        SseProgressEvent::CacheHit { resource } => {
+            progress.log.push(ProgressLogEntry {
+                message: format!("{resource} [cache hit]"),
+                style: ProgressStyle::Done,
+            });
+        }
+        SseProgressEvent::DenoiseStep {
+            step,
+            total,
+            elapsed_ms,
+        } => {
+            progress.denoise_step = step;
+            progress.denoise_total = total;
+            progress.denoise_elapsed_ms = elapsed_ms;
+        }
+        SseProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component,
+        } => {
+            progress.weight_loaded = bytes_loaded;
+            progress.weight_total = bytes_total;
+            progress.weight_component = component;
+        }
+        SseProgressEvent::DownloadProgress {
+            filename,
+            bytes_downloaded,
+            bytes_total,
+            batch_bytes_downloaded,
+            batch_bytes_total,
+            batch_elapsed_ms,
+            file_index,
+            total_files,
+        } => {
+            progress.downloading = true;
+            // Clear status spinners when actual download data arrives
+            if progress.current_stage.is_some() {
+                progress.current_stage = None;
             }
-            SseProgressEvent::DenoiseStep {
-                step,
-                total,
-                elapsed_ms,
-            } => {
-                self.generate.progress.denoise_step = step;
-                self.generate.progress.denoise_total = total;
-                self.generate.progress.denoise_elapsed_ms = elapsed_ms;
-            }
-            SseProgressEvent::WeightLoad {
-                bytes_loaded,
-                bytes_total,
-                component,
-            } => {
-                self.generate.progress.weight_loaded = bytes_loaded;
-                self.generate.progress.weight_total = bytes_total;
-                self.generate.progress.weight_component = component;
-            }
-            SseProgressEvent::DownloadProgress {
-                filename,
-                bytes_downloaded,
-                bytes_total,
-                file_index,
-                total_files,
-            } => {
-                self.generate.progress.download_filename = filename;
-                self.generate.progress.download_bytes = bytes_downloaded;
-                self.generate.progress.download_total = bytes_total;
-                self.generate.progress.download_file_index = file_index;
-                self.generate.progress.download_total_files = total_files;
-            }
-            SseProgressEvent::DownloadDone {
-                filename,
-                file_index,
-                total_files,
-            } => {
-                self.generate.progress.download_bytes = 0;
-                self.generate.progress.download_total = 0;
-                self.generate.progress.download_filename.clear();
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("[{}/{}] {filename}", file_index + 1, total_files),
-                    style: ProgressStyle::Done,
-                });
-            }
-            SseProgressEvent::PullComplete { model } => {
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("Pull complete: {model}"),
-                    style: ProgressStyle::Done,
-                });
-                // Refresh config and catalog after pull
-                self.config = Config::load_or_default();
-                self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
-            }
-            SseProgressEvent::Queued { position } => {
-                self.generate.progress.current_stage =
-                    Some(format!("Queued (position {position})"));
+            progress.download_filename = filename;
+            progress.download_bytes = bytes_downloaded;
+            progress.download_total = bytes_total;
+            progress.download_batch_bytes = batch_bytes_downloaded;
+            progress.download_batch_total = batch_bytes_total;
+            progress.download_batch_elapsed_ms = batch_elapsed_ms;
+            progress.record_download_sample(batch_elapsed_ms, batch_bytes_downloaded);
+            progress.download_file_index = file_index;
+            if total_files > 0 {
+                progress.download_total_files = total_files;
             }
         }
+        SseProgressEvent::DownloadDone {
+            filename,
+            file_index,
+            total_files,
+            batch_bytes_downloaded,
+            batch_bytes_total,
+            batch_elapsed_ms,
+        } => {
+            progress.log.push(ProgressLogEntry {
+                message: format!("[{}/{}] {filename}", file_index + 1, total_files),
+                style: ProgressStyle::Done,
+            });
+            if file_index + 1 < total_files {
+                // More files to go — keep batch progress visible and show
+                // a spinner while hf-hub validates the next file's cache.
+                progress.download_filename.clear();
+                progress.download_bytes = 0;
+                progress.download_total = 0;
+                progress.download_batch_bytes = batch_bytes_downloaded;
+                progress.download_batch_total = batch_bytes_total;
+                progress.download_batch_elapsed_ms = batch_elapsed_ms;
+                progress.download_file_index = file_index + 1;
+                // Keep total_files and rate/eta for continuity
+                progress.current_stage = Some(format!(
+                    "Preparing file [{}/{}]...",
+                    file_index + 2,
+                    total_files
+                ));
+            } else {
+                // Last file done — clear everything (PullComplete follows shortly)
+                progress.clear_download();
+            }
+        }
+        SseProgressEvent::PullComplete { model } => {
+            progress.clear_download();
+            progress.log.push(ProgressLogEntry {
+                message: format!("Pull complete: {model}"),
+                style: ProgressStyle::Done,
+            });
+            return true;
+        }
+        SseProgressEvent::Queued { position } => {
+            progress.current_stage = Some(format!("Queued (position {position})"));
+        }
     }
+    false
 }
 
 #[cfg(test)]
@@ -3650,14 +3834,19 @@ mod tests {
 
     #[test]
     fn progress_state_clear_resets_all() {
-        let mut state = ProgressState::default();
-        state.denoise_step = 10;
-        state.denoise_total = 20;
-        state.weight_loaded = 1000;
-        state.download_bytes = 500;
-        state.download_filename = "test.gguf".to_string();
-        state.download_file_index = 2;
-        state.download_total_files = 5;
+        let mut state = ProgressState {
+            denoise_step: 10,
+            denoise_total: 20,
+            weight_loaded: 1000,
+            download_filename: "test.gguf".to_string(),
+            download_bytes: 500,
+            download_batch_bytes: 750,
+            download_batch_total: 1500,
+            download_batch_elapsed_ms: 250,
+            download_file_index: 2,
+            download_total_files: 5,
+            ..Default::default()
+        };
         state.log.push(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
@@ -3667,6 +3856,9 @@ mod tests {
         assert_eq!(state.denoise_total, 0);
         assert_eq!(state.weight_loaded, 0);
         assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
         assert!(state.download_filename.is_empty());
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
@@ -3675,12 +3867,14 @@ mod tests {
 
     #[test]
     fn progress_state_download_tracks_file_index() {
-        let mut state = ProgressState::default();
-        state.download_filename = "model.safetensors".to_string();
-        state.download_bytes = 16384;
-        state.download_total = 2_900_000_000;
-        state.download_file_index = 1;
-        state.download_total_files = 5;
+        let mut state = ProgressState {
+            download_filename: "model.safetensors".to_string(),
+            download_bytes: 16_384,
+            download_total: 2_900_000_000,
+            download_file_index: 1,
+            download_total_files: 5,
+            ..Default::default()
+        };
 
         assert_eq!(state.download_file_index, 1);
         assert_eq!(state.download_total_files, 5);
@@ -3698,6 +3892,176 @@ mod tests {
         let state = ProgressState::default();
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn download_progress_preserves_total_file_count_across_chunk_updates() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "text_encoder_2/model.safetensors".to_string(),
+                bytes_downloaded: 0,
+                bytes_total: 2_600_000_000,
+                batch_bytes_downloaded: 3_000_000_000,
+                batch_bytes_total: 8_800_000_000,
+                batch_elapsed_ms: 60_000,
+                file_index: 2,
+                total_files: 6,
+            },
+        );
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "text_encoder_2/model.safetensors".to_string(),
+                bytes_downloaded: 16_384,
+                bytes_total: 2_600_000_000,
+                batch_bytes_downloaded: 3_000_016_384,
+                batch_bytes_total: 8_800_000_000,
+                batch_elapsed_ms: 60_100,
+                file_index: 2,
+                total_files: 0,
+            },
+        );
+
+        assert_eq!(state.download_filename, "text_encoder_2/model.safetensors");
+        assert_eq!(state.download_bytes, 16_384);
+        assert_eq!(state.download_total, 2_600_000_000);
+        assert_eq!(state.download_batch_bytes, 3_000_016_384);
+        assert_eq!(state.download_batch_total, 8_800_000_000);
+        assert_eq!(state.download_batch_elapsed_ms, 60_100);
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
+        assert_eq!(state.download_file_index, 2);
+        assert_eq!(state.download_total_files, 6);
+    }
+
+    #[test]
+    fn download_rate_and_eta_require_multiple_samples() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 128,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 128,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 100,
+                file_index: 0,
+                total_files: 2,
+            },
+        );
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 256,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 256,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 300,
+                file_index: 0,
+                total_files: 0,
+            },
+        );
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 1_024,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 1_536,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 1_300,
+                file_index: 0,
+                total_files: 0,
+            },
+        );
+        assert!(state.download_rate_bps.is_some());
+        assert!(state.download_eta_secs.is_some());
+    }
+
+    #[test]
+    fn stage_start_clears_stale_download_bar_from_previous_pull() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "vae/model.safetensors".to_string(),
+                bytes_downloaded: 512,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 2048,
+                batch_bytes_total: 8192,
+                batch_elapsed_ms: 500,
+                file_index: 0,
+                total_files: 3,
+            },
+        );
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::StageStart {
+                name: "Loading model".to_string(),
+            },
+        );
+
+        assert_eq!(state.current_stage.as_deref(), Some("Loading model"));
+        assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_total, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn pull_complete_clears_active_download_bar() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "diffusion_pytorch_model.safetensors".to_string(),
+                bytes_downloaded: 2048,
+                bytes_total: 4096,
+                batch_bytes_downloaded: 2048,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 250,
+                file_index: 0,
+                total_files: 1,
+            },
+        );
+
+        let refresh_catalog = reduce_progress_state(
+            &mut state,
+            SseProgressEvent::PullComplete {
+                model: "flux2-klein:q8".to_string(),
+            },
+        );
+
+        assert!(refresh_catalog);
+        assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_total, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
+        assert_eq!(state.download_total_files, 0);
+        assert!(state
+            .log
+            .iter()
+            .any(|entry| entry.message == "Pull complete: flux2-klein:q8"));
     }
 
     // ── SeedMode tests ────────────────────────────────────
@@ -3718,9 +4082,7 @@ mod tests {
 
     #[test]
     fn seed_mode_random_generates_value() {
-        let seed = SeedMode::Random.resolve(None);
-        // Just verify it returns something (can't test exact value)
-        assert!(seed > 0 || seed == 0); // always true, but exercises the code
+        let _ = SeedMode::Random.resolve(None);
     }
 
     #[test]
@@ -4179,6 +4541,7 @@ mod tests {
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
             thumb_dimensions: Vec::new(),
+            thumb_fixed_cache: Vec::new(),
             grid_cols: 3,
             grid_scroll: 0,
         };
@@ -4190,7 +4553,7 @@ mod tests {
     #[test]
     fn gallery_thumbnail_states_sync_with_entries() {
         // thumbnail_states should have same length as entries
-        let entries = vec![make_test_entry(), make_test_entry()];
+        let entries = [make_test_entry(), make_test_entry()];
         let thumb_states: Vec<Option<StatefulProtocol>> = vec![None; entries.len()];
         assert_eq!(thumb_states.len(), entries.len());
     }
@@ -4247,7 +4610,7 @@ mod tests {
         let visible = ParamField::visible_fields(&caps, params.inference_mode);
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
 
-        let app = App {
+        App {
             active_view: View::Settings,
             generate: GenerateState {
                 prompt: TextArea::default(),
@@ -4275,6 +4638,7 @@ mod tests {
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
                 thumb_dimensions: Vec::new(),
+                thumb_fixed_cache: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
@@ -4303,8 +4667,7 @@ mod tests {
             history: crate::history::PromptHistory::load(),
             layout: LayoutAreas::default(),
             server_process: None,
-        };
-        app
+        }
     }
 
     /// Helper: find the row_index for a given SettingsKey.

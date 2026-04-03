@@ -71,6 +71,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let version = format!("mold {} ", mold_core::build_info::version_string());
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()
@@ -81,6 +82,10 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
+                )
+                .title_top(
+                    Line::from(Span::styled(version, Style::default().fg(theme.text_dim)))
+                        .right_aligned(),
                 )
                 .style(Style::default().bg(theme.tab_bg))
                 .padding(Padding::horizontal(1)),
@@ -98,11 +103,16 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let shortcuts = match app.active_view {
         View::Generate => {
             if app.generate.generating {
-                vec![("", "Generating...")]
+                let status = if app.generate.progress.is_downloading() {
+                    app.generate.progress.download_status_text()
+                } else {
+                    "Generating..."
+                };
+                vec![("", status)]
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
-                    ("\u{2190}\u{2192}", "Views"),
-                    ("1/2/3", "Views"),
+                    ("1-4", "Views"),
+                    ("Alt+\u{2190}\u{2192}", "Views"),
                     ("Enter", "Edit"),
                     ("?", "Help"),
                     ("q", "Quit"),
@@ -151,7 +161,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1/2/3", "Views"),
+            ("1-4", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),

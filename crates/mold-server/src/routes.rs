@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -145,6 +145,7 @@ pub fn create_router(state: AppState) -> Router {
             get(get_gallery_thumbnail),
         )
         .route("/api/status", get(server_status))
+        .route("/api/shutdown", post(shutdown_server))
         .route("/health", get(health))
         .with_state(state)
         .route("/api/openapi.json", get(openapi_json))
@@ -616,38 +617,59 @@ async fn pull_model_endpoint(
         let callback =
             std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
                 let sse_event = match event {
+                    mold_core::download::DownloadProgressEvent::Status { message } => {
+                        SseProgressEvent::Info { message }
+                    }
                     mold_core::download::DownloadProgressEvent::FileStart {
                         filename,
                         file_index,
                         total_files,
                         size_bytes,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     } => SseProgressEvent::DownloadProgress {
                         filename,
                         file_index,
                         total_files,
                         bytes_downloaded: 0,
                         bytes_total: size_bytes,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     },
                     mold_core::download::DownloadProgressEvent::FileProgress {
                         filename,
                         file_index,
                         bytes_downloaded,
                         bytes_total,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     } => SseProgressEvent::DownloadProgress {
                         filename,
                         file_index,
                         total_files: 0,
                         bytes_downloaded,
                         bytes_total,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     },
                     mold_core::download::DownloadProgressEvent::FileDone {
                         filename,
                         file_index,
                         total_files,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     } => SseProgressEvent::DownloadDone {
                         filename,
                         file_index,
                         total_files,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms,
                     },
                 };
                 let _ = progress_tx.send(SseMessage::Progress(sse_event));
@@ -784,6 +806,51 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/shutdown ─────────────────────────────────────────────────────────────
+
+/// Trigger graceful server shutdown.
+///
+/// When API key auth is enabled, the auth middleware protects this endpoint.
+/// When auth is disabled, only requests from loopback addresses (127.0.0.1, ::1)
+/// are accepted to prevent remote shutdown.
+#[utoipa::path(
+    post,
+    path = "/api/shutdown",
+    tag = "server",
+    responses(
+        (status = 200, description = "Shutdown initiated"),
+        (status = 403, description = "Forbidden — remote shutdown requires API key auth"),
+    )
+)]
+async fn shutdown_server(State(state): State<AppState>, request: Request) -> impl IntoResponse {
+    // When auth is disabled (no AuthState extension or AuthState is None),
+    // restrict shutdown to loopback addresses only.
+    let auth_enabled = request
+        .extensions()
+        .get::<crate::auth::AuthState>()
+        .is_some_and(|s| s.is_some());
+
+    if !auth_enabled {
+        let is_loopback = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().is_loopback())
+            .unwrap_or(false);
+        if !is_loopback {
+            return (
+                StatusCode::FORBIDDEN,
+                "shutdown requires API key auth or localhost access\n",
+            );
+        }
+    }
+
+    tracing::info!("shutdown requested via API");
+    if let Some(tx) = state.shutdown_tx.lock().await.take() {
+        let _ = tx.send(());
+    }
+    (StatusCode::OK, "shutdown initiated\n")
 }
 
 // ── /api/gallery ──────────────────────────────────────────────────────────────

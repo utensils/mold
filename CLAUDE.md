@@ -170,6 +170,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/gallery/image/:name` | Fetch a saved image |
 | `DELETE` | `/api/gallery/image/:name` | Delete a saved image |
 | `GET` | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail |
+| `POST` | `/api/shutdown` | Trigger graceful server shutdown |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
@@ -250,6 +251,9 @@ mold list                       List configured and available models (with disk 
 mold stats [--json]             Show disk usage overview (models, output, logs, shared components)
 mold clean [--force] [--older-than DURATION]  Clean orphaned files, stale downloads, old output images (dry-run by default)
 mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify
+mold server start [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]  Start background server daemon
+mold server status              Show managed server status
+mold server stop                Stop the managed server
 mold unload                     Unload the current model from server to free GPU memory
 mold ps                         Show server status + loaded models
 mold version                    Show version
@@ -397,6 +401,7 @@ magick /tmp/mold-cropped.png /tmp/mold-mask.png \
 
 - **Keep `.claude/skills/mold/SKILL.md` in sync** — This skill file is used by OpenClaw, ClawdBot, and other AI agents. Update it whenever models, CLI flags, env vars, or features change.
 - **Keep `website/` docs in sync** — Update the VitePress docs site when models, CLI flags, env vars, API endpoints, or deployment options change.
+- **Preserve centered gallery thumbnails in the TUI** — `crates/mold-tui/src/ui/gallery.rs` must keep using the fixed-protocol thumbnail path for the gallery grid. Do not switch grid thumbnails back to pure `StatefulImage` rendering for Kitty/Sixel/iTerm2 terminals; that reintroduces top-left-padded thumbnails instead of properly centered, aspect-correct ones. Keep the gallery thumbnail regression tests passing when touching this code.
 
 ## Key Design Decisions
 

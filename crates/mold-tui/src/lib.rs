@@ -51,6 +51,8 @@ pub async fn run_tui(host: Option<String>, local: bool) -> Result<()> {
     }));
 
     // Create the app and run
+    let version = mold_core::build_info::version_string();
+    tracing::info!(%version, "starting mold tui");
     let mut app = App::new(host, local, picker)?;
     let result = run_event_loop(&mut terminal, &mut app).await;
 

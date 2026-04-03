@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{Image, Resize, StatefulImage};
 
 use crate::app::{App, GalleryViewMode};
 
@@ -206,15 +206,53 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
             }
         }
 
-        if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            // Center using cached thumbnail dimensions — no disk I/O in the render path.
-            let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-            let font_size = app.picker.font_size();
-            let centered =
-                centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
-            let image_widget = StatefulImage::default();
-            frame.render_stateful_widget(image_widget, centered, state);
+        if app.gallery.thumbnail_states[idx].is_some() {
+            // Use a cached fixed protocol for centered grid thumbnails.
+            // Stateful protocols pad from top-left on Kitty/Sixel/iTerm2,
+            // which regresses visible centering. The fixed protocol is
+            // created once per thumbnail and reused across render frames.
+            let cache_valid = app
+                .gallery
+                .thumb_fixed_cache
+                .get(idx)
+                .and_then(|c| c.as_ref())
+                .is_some_and(|(w, h, _)| *w == thumb_area.width && *h == thumb_area.height);
+
+            if !cache_valid {
+                let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+                if let Ok(img) = image::open(&thumb_path) {
+                    if let Ok(protocol) =
+                        app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
+                    {
+                        // Grow cache if needed
+                        while app.gallery.thumb_fixed_cache.len() <= idx {
+                            app.gallery.thumb_fixed_cache.push(None);
+                        }
+                        app.gallery.thumb_fixed_cache[idx] =
+                            Some((thumb_area.width, thumb_area.height, protocol));
+                    }
+                }
+            }
+
+            if let Some((_, _, ref mut protocol)) = app
+                .gallery
+                .thumb_fixed_cache
+                .get_mut(idx)
+                .and_then(|c| c.as_mut())
+            {
+                let fitted = protocol.area();
+                let centered = center_rect(thumb_area, fitted.width, fitted.height);
+                frame.render_widget(Image::new(protocol), centered);
+            } else if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
+                // Fallback to stateful rendering if fixed protocol unavailable
+                let (iw, ih) = app.gallery.thumb_dimensions[idx]
+                    .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
+                let font_size = app.picker.font_size();
+                let centered =
+                    centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
+                let image_widget = StatefulImage::default();
+                frame.render_stateful_widget(image_widget, centered, state);
+            }
         }
     }
 
@@ -241,10 +279,36 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{center_rect, centered_thumb_rect};
+    use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
+    use crate::app::{App, GalleryEntry};
+    use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::layout::Rect;
+    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui_image::picker::Picker;
     use ratatui_image::picker::ProtocolType;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
+        mold_core::OutputMetadata {
+            prompt: "test prompt".to_string(),
+            negative_prompt: None,
+            original_prompt: None,
+            model: "flux2-klein:q8".to_string(),
+            seed: 1,
+            steps: 4,
+            guidance: 0.0,
+            width,
+            height,
+            strength: None,
+            scheduler: None,
+            lora: None,
+            lora_scale: None,
+            version: "test".to_string(),
+        }
+    }
 
     #[test]
     fn centers_portrait_thumbnails_for_halfblocks() {
@@ -272,6 +336,70 @@ mod tests {
         let rect = center_rect(area, 10, 6);
 
         assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
+
+    #[test]
+    fn gallery_grid_kitty_thumbnails_encode_to_full_thumb_box() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut app = App::new(None, true, picker).unwrap();
+
+        let img =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(512, 1024, Rgba([255, 0, 0, 255])));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let entry_path = PathBuf::from(format!("gallery-center-test-{unique}.png"));
+        let thumb_path = crate::thumbnails::thumbnail_path(&entry_path);
+        if let Some(parent) = thumb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        img.save(&thumb_path).unwrap();
+
+        app.gallery.entries = vec![GalleryEntry {
+            path: entry_path.clone(),
+            metadata: test_metadata(512, 1024),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        }];
+        app.gallery.thumbnail_states = vec![Some(app.picker.new_resize_protocol(img.clone()))];
+        app.gallery.thumb_dimensions = vec![Some((512, 1024))];
+
+        let backend = TestBackend::new(CELL_W, CELL_H);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_grid_cell(frame, &mut app, Rect::new(0, 0, CELL_W, CELL_H), 0, true);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let transmit_cell = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol().contains("_Gq=2"))
+            .expect("expected kitty image transmit sequence in buffer");
+
+        // The fixed-protocol gallery path must encode against the full 22x10
+        // thumbnail box, then center that fitted rect at placement time. If a
+        // later edit switches this back to the stateful path, this width will
+        // shrink to the already-fitted rect and the visible top-left bias
+        // returns in real terminals.
+        assert!(
+            transmit_cell.symbol().contains("s=176,v=160"),
+            "expected kitty payload sized to full thumb box, got: {}",
+            transmit_cell.symbol()
+        );
+
+        std::fs::remove_file(&thumb_path).ok();
     }
 }
 

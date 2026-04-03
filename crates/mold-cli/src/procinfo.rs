@@ -20,6 +20,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "expand",
     "version",
     "completions",
+    "server",
 ];
 
 /// A detected mold process (deduplicated — threads are counted, not listed).

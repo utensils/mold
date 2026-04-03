@@ -54,6 +54,7 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
             total_files,
             bytes_downloaded,
             bytes_total,
+            ..
         } => {
             let pct = if *bytes_total > 0 {
                 (*bytes_downloaded as f64 / *bytes_total as f64 * 100.0) as u64
@@ -69,6 +70,7 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
             filename,
             file_index,
             total_files,
+            ..
         } => {
             format!("Downloaded {filename} [{}/{total_files}]", file_index + 1)
         }
@@ -445,6 +447,9 @@ mod tests {
             total_files: 3,
             bytes_downloaded: 500_000_000,
             bytes_total: 1_000_000_000,
+            batch_bytes_downloaded: 500_000_000,
+            batch_bytes_total: 3_000_000_000,
+            batch_elapsed_ms: 10_000,
         };
         let text = format_progress(&event);
         assert!(text.contains("model.safetensors"));
@@ -458,6 +463,9 @@ mod tests {
             filename: "model.safetensors".to_string(),
             file_index: 1,
             total_files: 3,
+            batch_bytes_downloaded: 2_000_000_000,
+            batch_bytes_total: 3_000_000_000,
+            batch_elapsed_ms: 20_000,
         };
         let text = format_progress(&event);
         assert!(text.contains("Downloaded"));

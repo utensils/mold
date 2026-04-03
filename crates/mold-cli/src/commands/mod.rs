@@ -13,5 +13,6 @@ pub mod pull;
 pub mod rm;
 pub mod run;
 pub mod serve;
+pub mod server;
 pub mod stats;
 pub mod unload;

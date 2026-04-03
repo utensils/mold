@@ -619,9 +619,10 @@ impl Config {
                 source: DefaultModelSource::OnlyDownloaded,
             };
         }
-        // 6. Config default (will auto-pull)
+        // 6. Config default (will auto-pull) — resolve bare names like
+        //    "flux2-klein" → "flux2-klein:q8" so the TUI/CLI show the real tag.
         DefaultModelResolution {
-            model: configured.clone(),
+            model: crate::manifest::resolve_model_name(configured),
             source: DefaultModelSource::ConfigDefault,
         }
     }

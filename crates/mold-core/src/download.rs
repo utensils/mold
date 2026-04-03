@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use console::Term;
@@ -20,6 +20,9 @@ pub enum DownloadProgressEvent {
         file_index: usize,
         total_files: usize,
         size_bytes: u64,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
     /// Bytes downloaded for the current file.
     FileProgress {
@@ -27,12 +30,20 @@ pub enum DownloadProgressEvent {
         file_index: usize,
         bytes_downloaded: u64,
         bytes_total: u64,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
+    /// Status message (e.g. "Verifying cached files...").
+    Status { message: String },
     /// A file download completed.
     FileDone {
         filename: String,
         file_index: usize,
         total_files: usize,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
 }
 
@@ -88,6 +99,9 @@ pub enum DownloadError {
 
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
+
+    #[error("{0}")]
+    Other(String),
 
     #[error("IO error during file placement: {0}")]
     FilePlacement(String),
@@ -363,6 +377,13 @@ struct CallbackProgress {
     callback: DownloadProgressCallback,
     file_index: usize,
     total_files: usize,
+    batch_bytes_before_current: u64,
+    batch_bytes_total: u64,
+    batch_started_at: Instant,
+    shared: Arc<Mutex<CallbackProgressState>>,
+}
+
+struct CallbackProgressState {
     accumulated: u64,
     total: u64,
     filename: String,
@@ -370,52 +391,101 @@ struct CallbackProgress {
 }
 
 impl CallbackProgress {
-    fn new(callback: DownloadProgressCallback, file_index: usize, total_files: usize) -> Self {
+    fn new(
+        callback: DownloadProgressCallback,
+        file_index: usize,
+        total_files: usize,
+        batch_bytes_before_current: u64,
+        batch_bytes_total: u64,
+        batch_started_at: Instant,
+    ) -> Self {
         Self {
             callback,
             file_index,
             total_files,
-            accumulated: 0,
-            total: 0,
-            filename: String::new(),
-            last_emit: Instant::now(),
+            batch_bytes_before_current,
+            batch_bytes_total,
+            batch_started_at,
+            shared: Arc::new(Mutex::new(CallbackProgressState {
+                accumulated: 0,
+                total: 0,
+                filename: String::new(),
+                last_emit: Instant::now(),
+            })),
         }
     }
 }
 
 impl Progress for CallbackProgress {
     async fn init(&mut self, size: usize, filename: &str) {
-        self.total = size as u64;
-        self.accumulated = 0;
-        self.filename = filename.to_string();
+        let (fname, total) = {
+            let mut shared = self
+                .shared
+                .lock()
+                .expect("download progress mutex poisoned");
+            shared.total = size as u64;
+            shared.accumulated = 0;
+            shared.filename = filename.to_string();
+            shared.last_emit = Instant::now();
+            (shared.filename.clone(), shared.total)
+        };
         (self.callback)(DownloadProgressEvent::FileStart {
-            filename: self.filename.clone(),
+            filename: fname,
             file_index: self.file_index,
             total_files: self.total_files,
-            size_bytes: self.total,
+            size_bytes: total,
+            batch_bytes_downloaded: self.batch_bytes_before_current,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
     }
 
     async fn update(&mut self, size: usize) {
-        self.accumulated += size as u64;
-        // Throttle to ~4 events/sec
+        let mut shared = self
+            .shared
+            .lock()
+            .expect("download progress mutex poisoned");
+        shared.accumulated += size as u64;
+
         let now = Instant::now();
-        if now.duration_since(self.last_emit).as_millis() >= 250 || self.accumulated >= self.total {
-            self.last_emit = now;
-            (self.callback)(DownloadProgressEvent::FileProgress {
-                filename: self.filename.clone(),
-                file_index: self.file_index,
-                bytes_downloaded: self.accumulated,
-                bytes_total: self.total,
-            });
+        let should_emit = now.duration_since(shared.last_emit).as_millis() >= 250
+            || shared.accumulated >= shared.total;
+        if !should_emit {
+            return;
         }
+
+        shared.last_emit = now;
+        let filename = shared.filename.clone();
+        let accumulated = shared.accumulated;
+        let total = shared.total;
+        drop(shared);
+
+        (self.callback)(DownloadProgressEvent::FileProgress {
+            filename,
+            file_index: self.file_index,
+            bytes_downloaded: accumulated,
+            bytes_total: total,
+            batch_bytes_downloaded: self.batch_bytes_before_current + accumulated,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
+        });
     }
 
     async fn finish(&mut self) {
+        let (fname, total) = {
+            let shared = self
+                .shared
+                .lock()
+                .expect("download progress mutex poisoned");
+            (shared.filename.clone(), shared.total)
+        };
         (self.callback)(DownloadProgressEvent::FileDone {
-            filename: self.filename.clone(),
+            filename: fname,
             file_index: self.file_index,
             total_files: self.total_files,
+            batch_bytes_downloaded: self.batch_bytes_before_current + total,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
     }
 }
@@ -527,30 +597,86 @@ pub async fn pull_model_with_callback(
     let mdir = models_dir();
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
-    // Pre-compute which files need downloading so callback indices are sequential
-    let total_to_download = manifest
+    // Pre-compute which files need downloading vs already cached.
+    // Run in spawn_blocking because SHA-256 verification of multi-GB cached
+    // files blocks the async runtime and prevents SSE event delivery.
+    let manifest_clone = manifest.clone();
+    let skip_verify = opts.skip_verify;
+    let mdir_clone = mdir.clone();
+    let cb = callback.clone();
+    let file_status: Vec<bool> = tokio::task::spawn_blocking(move || {
+        let total = manifest_clone.files.len();
+        manifest_clone
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| {
+                cb(DownloadProgressEvent::Status {
+                    message: format!(
+                        "Verifying file [{}/{}] {}...",
+                        i + 1,
+                        total,
+                        file.hf_filename
+                    ),
+                });
+                let clean_path =
+                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
+                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| DownloadError::Other(format!("pre-scan task failed: {e}")))?;
+
+    let total_bytes_to_download: u64 = manifest
         .files
         .iter()
-        .filter(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .count();
-    let mut download_idx = 0;
+        .zip(file_status.iter())
+        .filter(|(_, &placed)| !placed)
+        .map(|(file, _)| file.size_bytes)
+        .sum();
+    let total_files_count = manifest.files.len();
+    let mut completed_bytes = 0u64;
+    let batch_started_at = Instant::now();
 
-    for file in &manifest.files {
+    for (file_pos, (file, &already_placed)) in
+        manifest.files.iter().zip(file_status.iter()).enumerate()
+    {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
 
-        // Skip files already at their clean path (resume after partial failure)
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if already_placed {
+            // Emit events for cached files so the TUI shows checkmarks.
+            let elapsed = batch_started_at.elapsed().as_millis() as u64;
+            (callback)(DownloadProgressEvent::FileStart {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                size_bytes: file.size_bytes,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
+            (callback)(DownloadProgressEvent::FileDone {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
             downloads.push((file.component, clean_path));
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
-        download_idx += 1;
-
+        let progress = CallbackProgress::new(
+            callback.clone(),
+            file_pos,
+            total_files_count,
+            completed_bytes,
+            total_bytes_to_download,
+            batch_started_at,
+        );
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
         hardlink_or_copy(&hf_path, &clean_path)?;
@@ -558,6 +684,7 @@ pub async fn pull_model_with_callback(
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
 
         downloads.push((file.component, clean_path));
+        completed_bytes += file.size_bytes;
     }
 
     remove_pulling_marker(&manifest.name);
@@ -635,34 +762,87 @@ async fn pull_model_files_only_with_callback(
 
     let mdir = models_dir();
 
-    // Pre-compute which files need downloading so callback indices are sequential
-    let total_to_download = manifest
+    let manifest_clone = manifest.clone();
+    let skip_verify = opts.skip_verify;
+    let mdir_clone = mdir.clone();
+    let cb = callback.clone();
+    let file_status: Vec<bool> = tokio::task::spawn_blocking(move || {
+        let total = manifest_clone.files.len();
+        manifest_clone
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| {
+                cb(DownloadProgressEvent::Status {
+                    message: format!(
+                        "Verifying file [{}/{}] {}...",
+                        i + 1,
+                        total,
+                        file.hf_filename
+                    ),
+                });
+                let clean_path =
+                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
+                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| DownloadError::Other(format!("pre-scan task failed: {e}")))?;
+    let total_bytes_to_download: u64 = manifest
         .files
         .iter()
-        .filter(|file| {
-            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
-            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
-        })
-        .count();
-    let mut download_idx = 0;
+        .zip(file_status.iter())
+        .filter(|(_, &placed)| !placed)
+        .map(|(file, _)| file.size_bytes)
+        .sum();
+    let total_files_count = manifest.files.len();
+    let mut completed_bytes = 0u64;
+    let batch_started_at = Instant::now();
 
-    for file in &manifest.files {
+    for (file_pos, (file, &already_placed)) in
+        manifest.files.iter().zip(file_status.iter()).enumerate()
+    {
         let clean_rel = crate::manifest::storage_path(manifest, file);
         let clean_path = mdir.join(&clean_rel);
 
-        // Skip files already at their clean path (resume after partial failure)
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if already_placed {
+            let elapsed = batch_started_at.elapsed().as_millis() as u64;
+            (callback)(DownloadProgressEvent::FileStart {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                size_bytes: file.size_bytes,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
+            (callback)(DownloadProgressEvent::FileDone {
+                filename: file.hf_filename.clone(),
+                file_index: file_pos,
+                total_files: total_files_count,
+                batch_bytes_downloaded: completed_bytes,
+                batch_bytes_total: total_bytes_to_download,
+                batch_elapsed_ms: elapsed,
+            });
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
-        download_idx += 1;
+        let progress = CallbackProgress::new(
+            callback.clone(),
+            file_pos,
+            total_files_count,
+            completed_bytes,
+            total_bytes_to_download,
+            batch_started_at,
+        );
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
 
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+        completed_bytes += file.size_bytes;
     }
 
     remove_pulling_marker(&manifest.name);
@@ -932,6 +1112,38 @@ mod tests {
         // max_len < 8 returns unchanged to avoid degenerate "..." output
         let name = "something.safetensors";
         assert_eq!(truncate_filename(name, 5), name);
+    }
+
+    #[tokio::test]
+    async fn callback_progress_clones_share_accumulated_bytes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_cb = events.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |event| {
+            events_for_cb
+                .lock()
+                .expect("events mutex poisoned")
+                .push(event);
+        });
+
+        let mut progress = CallbackProgress::new(callback, 1, 3, 1_000, 10_000, Instant::now());
+        progress.init(1_024, "weights.safetensors").await;
+
+        let mut chunk_a = progress.clone();
+        let mut chunk_b = progress.clone();
+        chunk_a.update(512).await;
+        chunk_b.update(512).await;
+        progress.finish().await;
+
+        let events = events.lock().expect("events mutex poisoned");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DownloadProgressEvent::FileProgress {
+                bytes_downloaded: 1_024,
+                bytes_total: 1_024,
+                batch_bytes_downloaded: 2_024,
+                ..
+            }
+        )));
     }
 
     #[test]

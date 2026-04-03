@@ -438,12 +438,18 @@ pub enum SseProgressEvent {
         total_files: usize,
         bytes_downloaded: u64,
         bytes_total: u64,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
     /// A single file download completed.
     DownloadDone {
         filename: String,
         file_index: usize,
         total_files: usize,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
     /// All downloads complete for a model pull.
     PullComplete {
@@ -918,6 +924,35 @@ mod tests {
             SseProgressEvent::WeightLoad {
                 bytes_loaded: 5_000_000,
                 bytes_total: 10_000_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sse_progress_download_roundtrip() {
+        let event = SseProgressEvent::DownloadProgress {
+            filename: "text_encoder_2/model.safetensors".to_string(),
+            file_index: 1,
+            total_files: 5,
+            bytes_downloaded: 16_384,
+            bytes_total: 2_600_000_000,
+            batch_bytes_downloaded: 3_100_000_000,
+            batch_bytes_total: 8_800_000_000,
+            batch_elapsed_ms: 42_000,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"download_progress""#));
+        assert!(json.contains(r#""batch_bytes_total":8800000000"#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::DownloadProgress {
+                file_index: 1,
+                total_files: 5,
+                bytes_downloaded: 16_384,
+                batch_bytes_total: 8_800_000_000,
+                batch_elapsed_ms: 42_000,
                 ..
             }
         ));

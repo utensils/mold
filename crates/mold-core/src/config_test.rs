@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use crate::config::{Config, ModelConfig, ModelPaths};
     use crate::manifest::{find_manifest, storage_path};
     use crate::test_support::ENV_LOCK;
@@ -676,7 +678,8 @@ is_schnell = false
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         let cfg = isolated_config();
-        assert_eq!(cfg.resolved_default_model(), "flux2-klein");
+        // Bare name gets resolved to flux2-klein:q8 via manifest resolution
+        assert_eq!(cfg.resolved_default_model(), "flux2-klein:q8");
     }
 
     #[test]
@@ -694,8 +697,8 @@ is_schnell = false
         std::env::set_var("MOLD_DEFAULT_MODEL", "");
         let result = isolated_config().resolved_default_model();
         std::env::remove_var("MOLD_DEFAULT_MODEL");
-        // Empty env should fall through to config value
-        assert_eq!(result, "flux2-klein");
+        // Empty env should fall through to config value (resolved bare name)
+        assert_eq!(result, "flux2-klein:q8");
     }
 
     #[test]
@@ -1498,7 +1501,8 @@ is_schnell = false
 
         std::env::remove_var("MOLD_HOME");
         let _ = std::fs::remove_dir_all(&mold_home);
-        assert_eq!(resolution.model, "flux2-klein");
+        // Bare name resolved via manifest
+        assert_eq!(resolution.model, "flux2-klein:q8");
         assert_eq!(
             resolution.source,
             crate::config::DefaultModelSource::ConfigDefault
@@ -1798,8 +1802,8 @@ description = "stale"
         // Create two files of known sizes
         let file_a = dir.join("a.safetensors");
         let file_b = dir.join("b.safetensors");
-        std::fs::write(&file_a, &[0u8; 1024]).unwrap(); // 1 KiB
-        std::fs::write(&file_b, &[0u8; 2048]).unwrap(); // 2 KiB
+        std::fs::write(&file_a, [0u8; 1024]).unwrap(); // 1 KiB
+        std::fs::write(&file_b, [0u8; 2048]).unwrap(); // 2 KiB
 
         let mc = ModelConfig {
             transformer: Some(file_a.to_str().unwrap().to_string()),

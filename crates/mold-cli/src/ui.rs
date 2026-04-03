@@ -311,6 +311,7 @@ pub(crate) async fn render_progress(
                 bytes_downloaded,
                 bytes_total,
                 total_files,
+                ..
             } => {
                 let multi = download_multi.get_or_insert_with(|| {
                     pb.disable_steady_tick();

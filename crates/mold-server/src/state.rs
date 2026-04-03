@@ -106,6 +106,8 @@ pub struct AppState {
     pub queue: QueueHandle,
     /// Shared tokenizer pool for cross-engine caching.
     pub shared_pool: Arc<std::sync::Mutex<SharedPool>>,
+    /// Shutdown trigger for graceful shutdown via `/api/shutdown` endpoint.
+    pub shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -133,6 +135,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -148,6 +151,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -174,6 +178,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -203,6 +208,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         };
         (state, rx)
     }

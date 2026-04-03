@@ -261,6 +261,36 @@ Detects stale `.pulling` markers from interrupted downloads, orphaned shared
 files not referenced by any model, hf-cache transient files, and output images
 older than the specified age.
 
+## `mold server`
+
+Manage a background mold server daemon.
+
+### `mold server start`
+
+Start the server as a detached background process.
+
+```bash
+mold server start [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]
+```
+
+| Flag                  | Description                         |
+| --------------------- | ----------------------------------- |
+| `--port <N>`          | Server port (default: 7680)         |
+| `--bind <ADDR>`       | Bind address (default: 0.0.0.0)     |
+| `--models-dir <PATH>` | Override models directory           |
+| `--log-file`          | Enable file logging (default: true) |
+
+Writes a PID file to `~/.mold/mold-server.pid` for lifecycle tracking.
+
+### `mold server status`
+
+Show the status of the managed server (PID, port, version, uptime, models, GPU).
+
+### `mold server stop`
+
+Gracefully stop the managed server. Tries HTTP shutdown first, falls back to
+SIGTERM, then SIGKILL.
+
 ## `mold rm`
 
 Remove downloaded models.

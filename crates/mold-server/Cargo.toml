@@ -24,8 +24,8 @@ expand = ["mold-inference/expand"]
 
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.4.1" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.4.1" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.5.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.5.0" }
 anyhow = "1"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }
