@@ -145,6 +145,7 @@ pub fn create_router(state: AppState) -> Router {
             get(get_gallery_thumbnail),
         )
         .route("/api/status", get(server_status))
+        .route("/api/shutdown", post(shutdown_server))
         .route("/health", get(health))
         .with_state(state)
         .route("/api/openapi.json", get(openapi_json))
@@ -805,6 +806,25 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/shutdown ─────────────────────────────────────────────────────────────
+
+/// Trigger graceful server shutdown. Protected by auth middleware when API key is set.
+#[utoipa::path(
+    post,
+    path = "/api/shutdown",
+    tag = "server",
+    responses(
+        (status = 200, description = "Shutdown initiated"),
+    )
+)]
+async fn shutdown_server(State(state): State<AppState>) -> impl IntoResponse {
+    tracing::info!("shutdown requested via API");
+    if let Some(tx) = state.shutdown_tx.lock().await.take() {
+        let _ = tx.send(());
+    }
+    (StatusCode::OK, "shutdown initiated\n")
 }
 
 // ── /api/gallery ──────────────────────────────────────────────────────────────

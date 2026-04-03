@@ -81,6 +81,33 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum ServerAction {
+    /// Start the server as a background daemon
+    #[command(after_long_help = "\
+Examples:
+  mold server start                Start on default port 7680
+  mold server start --port 8080    Custom port")]
+    Start {
+        /// Server port
+        #[arg(long, env = "MOLD_PORT", default_value_t = 7680)]
+        port: u16,
+        /// Bind address
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+        /// Override the models directory for this process
+        #[arg(long, env = "MOLD_MODELS_DIR")]
+        models_dir: Option<String>,
+        /// Enable rotated file logging to ~/.mold/logs/
+        #[arg(long, default_value_t = true)]
+        log_file: bool,
+    },
+    /// Show status of the managed server
+    Status,
+    /// Stop the managed server
+    Stop,
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -268,6 +295,18 @@ environment before starting mold serve.")]
         #[cfg(feature = "discord")]
         #[arg(long)]
         discord: bool,
+    },
+
+    /// Manage a background mold server daemon (start, stop, status)
+    #[command(after_long_help = "\
+Examples:
+  mold server start              Start background server on port 7680
+  mold server start --port 8080  Custom port
+  mold server status             Check if server is running
+  mold server stop               Stop the server")]
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -766,6 +805,22 @@ async fn run() -> anyhow::Result<()> {
 
             commands::serve::run(port, &bind, models_dir, discord_enabled).await?;
         }
+        Commands::Server { action } => match action {
+            ServerAction::Start {
+                port,
+                bind,
+                models_dir,
+                log_file,
+            } => {
+                commands::server::run_start(port, &bind, models_dir, log_file).await?;
+            }
+            ServerAction::Status => {
+                commands::server::run_status().await?;
+            }
+            ServerAction::Stop => {
+                commands::server::run_stop().await?;
+            }
+        },
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };
             commands::pull::run(&model, &opts).await?;

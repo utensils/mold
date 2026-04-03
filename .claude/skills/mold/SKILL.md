@@ -25,7 +25,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `info`, `ps`, `rm`, `unload`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images

@@ -117,6 +117,26 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     // Order (outermost → innermost): CORS → Trace → RequestID → Auth → RateLimit → routes
     // All inject + enforce layers use .layer() (not .route_layer()) so they run on
     // ALL requests, including unmatched 404 paths — preventing auth/rate-limit bypass.
+    // Set up graceful shutdown: fires on SIGTERM or POST /api/shutdown.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *state.shutdown_tx.lock().await = Some(shutdown_tx);
+
+    #[cfg(unix)]
+    {
+        let sigterm_state = state.clone();
+        tokio::spawn(async move {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+                tracing::info!("received SIGTERM, initiating graceful shutdown");
+                if let Some(tx) = sigterm_state.shutdown_tx.lock().await.take() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+    }
+
     let app = routes::create_router(state)
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn_with_state(
@@ -141,6 +161,10 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(async {
+        let _ = shutdown_rx.await;
+        tracing::info!("shutting down");
+    })
     .await?;
 
     Ok(())

@@ -170,6 +170,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/gallery/image/:name` | Fetch a saved image |
 | `DELETE` | `/api/gallery/image/:name` | Delete a saved image |
 | `GET` | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail |
+| `POST` | `/api/shutdown` | Trigger graceful server shutdown |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
@@ -250,6 +251,9 @@ mold list                       List configured and available models (with disk 
 mold stats [--json]             Show disk usage overview (models, output, logs, shared components)
 mold clean [--force] [--older-than DURATION]  Clean orphaned files, stale downloads, old output images (dry-run by default)
 mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify
+mold server start [--port N] [--bind ADDR]  Start background server daemon
+mold server status              Show managed server status
+mold server stop                Stop the managed server
 mold unload                     Unload the current model from server to free GPU memory
 mold ps                         Show server status + loaded models
 mold version                    Show version

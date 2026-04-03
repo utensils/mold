@@ -246,6 +246,16 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Request graceful server shutdown.
+    pub async fn shutdown_server(&self) -> Result<()> {
+        self.client
+            .post(format!("{}/api/shutdown", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Pull a model via SSE streaming, receiving download progress events.
     ///
     /// Sends `Accept: text/event-stream` to request SSE from the server.
