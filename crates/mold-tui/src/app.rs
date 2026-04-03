@@ -877,13 +877,15 @@ impl App {
         } else {
             // No explicit server — try to detect or auto-start one
             if check_server_health(&local_url) {
-                // Server already running
+                // Server already running — connect but don't manage its lifecycle
+                tracing::info!(%local_url, "connected to existing server");
                 (Some(local_url.clone()), InferenceMode::Auto)
             } else {
                 // Try to start a background server
                 match start_background_server(port) {
                     Some(mut child) => {
                         if wait_for_server_health(&local_url, 8) {
+                            tracing::info!(pid = child.id(), "started background server");
                             server_process = Some(child);
                             (Some(local_url.clone()), InferenceMode::Auto)
                         } else {
@@ -1090,6 +1092,7 @@ impl App {
         self.save_session();
 
         if let Some(ref mut child) = self.server_process {
+            tracing::info!(pid = child.id(), "stopping background server");
             let _ = child.kill();
             let _ = child.wait();
         }
