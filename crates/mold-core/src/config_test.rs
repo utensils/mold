@@ -678,7 +678,8 @@ is_schnell = false
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_DEFAULT_MODEL");
         let cfg = isolated_config();
-        assert_eq!(cfg.resolved_default_model(), "flux2-klein");
+        // Bare name gets resolved to flux2-klein:q8 via manifest resolution
+        assert_eq!(cfg.resolved_default_model(), "flux2-klein:q8");
     }
 
     #[test]
@@ -696,8 +697,8 @@ is_schnell = false
         std::env::set_var("MOLD_DEFAULT_MODEL", "");
         let result = isolated_config().resolved_default_model();
         std::env::remove_var("MOLD_DEFAULT_MODEL");
-        // Empty env should fall through to config value
-        assert_eq!(result, "flux2-klein");
+        // Empty env should fall through to config value (resolved bare name)
+        assert_eq!(result, "flux2-klein:q8");
     }
 
     #[test]
@@ -1500,7 +1501,8 @@ is_schnell = false
 
         std::env::remove_var("MOLD_HOME");
         let _ = std::fs::remove_dir_all(&mold_home);
-        assert_eq!(resolution.model, "flux2-klein");
+        // Bare name resolved via manifest
+        assert_eq!(resolution.model, "flux2-klein:q8");
         assert_eq!(
             resolution.source,
             crate::config::DefaultModelSource::ConfigDefault
