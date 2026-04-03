@@ -81,15 +81,14 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         return Action::Unfocus;
     }
 
-    // Navigation mode: number keys switch views, arrows cycle, Enter focuses prompt
+    // Navigation mode: number keys switch views, Enter focuses prompt
+    // View cycling uses Alt+Left/Right (handled globally above)
     if app.generate.focus == GenerateFocus::Navigation {
         return match key.code {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Char('4') => Action::SwitchView(View::Settings),
-            KeyCode::Right | KeyCode::Char('l') => Action::ViewNext,
-            KeyCode::Left | KeyCode::Char('h') => Action::ViewPrev,
             KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
@@ -171,8 +170,6 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('u') => Action::UnloadModel,
         KeyCode::Char('/') => Action::FilterModels,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Left => Action::ViewPrev,
-        KeyCode::Right => Action::ViewNext,
         KeyCode::Esc => Action::SwitchView(View::Generate),
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
