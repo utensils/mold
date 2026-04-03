@@ -179,9 +179,9 @@ Main binary. Feature flags `cuda` and `metal` forward through `mold-server` → 
 
 ### mold-discord
 
-Discord bot library using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/expand`, `/models`, and `/status` slash commands. Consumed by `mold-cli` behind the `discord` feature flag — invoked via `mold discord` (standalone bot) or `mold serve --discord` (server + bot in one process).
+Discord bot library using **poise 0.6 + serenity 0.12**. Depends only on `mold-core` (no GPU features). Connects to a running `mold serve` via `MoldClient` HTTP/SSE API. Provides `/generate`, `/expand`, `/models`, `/status`, `/quota`, and `/admin` slash commands. Consumed by `mold-cli` behind the `discord` feature flag — invoked via `mold discord` (standalone bot) or `mold serve --discord` (server + bot in one process).
 
-Key modules: `commands/` (slash command handlers — `generate`, `expand`, `models`, `status`), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions including `format_expand_result()`), `cooldown.rs` (per-user rate limiting), `state.rs` (shared bot state).
+Key modules: `commands/` (slash command handlers — `generate`, `expand`, `models`, `status`, `quota`, `admin`), `handler.rs` (SSE streaming orchestration), `format.rs` (pure formatting functions including `format_expand_result()` and `format_quota()`), `cooldown.rs` (per-user rate limiting), `quota.rs` (per-user daily quota tracking), `access.rs` (role-based access control and block list), `checks.rs` (shared authorization checks), `state.rs` (shared bot state).
 
 Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 
@@ -291,6 +291,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_EXPAND_BATCH_PROMPT` | — | Custom batch-variation system prompt template (placeholders: `{N}`, `{WORD_LIMIT}`, `{MODEL_NOTES}`) |
 | `MOLD_DISCORD_TOKEN` | — | Discord bot token (preferred; falls back to `DISCORD_TOKEN`) |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
+| `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs that can use generation commands (unset = all allowed) |
+| `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 

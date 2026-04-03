@@ -156,6 +156,20 @@ in
         description = "Per-user cooldown between generation requests, in seconds.";
       };
 
+      allowedRoles = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Comma-separated Discord role names or IDs that can use generation commands. Null means unrestricted (all users can generate).";
+        example = "artist, 1234567890";
+      };
+
+      dailyQuota = lib.mkOption {
+        type = lib.types.nullOr lib.types.int;
+        default = null;
+        description = "Maximum generations per user per UTC day. Null means unlimited.";
+        example = 20;
+      };
+
       logLevel = lib.mkOption {
         type = lib.types.enum [
           "trace"
@@ -284,6 +298,12 @@ in
         MOLD_HOST = discordCfg.moldHost;
         MOLD_DISCORD_COOLDOWN = toString discordCfg.cooldownSeconds;
         MOLD_LOG = discordCfg.logLevel;
+      }
+      // lib.optionalAttrs (discordCfg.allowedRoles != null) {
+        MOLD_DISCORD_ALLOWED_ROLES = discordCfg.allowedRoles;
+      }
+      // lib.optionalAttrs (discordCfg.dailyQuota != null) {
+        MOLD_DISCORD_DAILY_QUOTA = toString discordCfg.dailyQuota;
       };
 
       serviceConfig = {

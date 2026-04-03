@@ -1,3 +1,4 @@
+use crate::checks::{self, AuthResult};
 use crate::format;
 use crate::handler;
 use crate::state::Context;
@@ -14,6 +15,13 @@ pub async fn expand(
     #[description = "Number of prompt variations (1-5, capped for Discord embeds)"]
     variations: Option<usize>,
 ) -> Result<()> {
+    // Check access (block list + roles, no quota for expand)
+    if let AuthResult::Denied(msg) = checks::check_access_only(&ctx).await {
+        ctx.send(poise::CreateReply::default().content(msg).ephemeral(true))
+            .await?;
+        return Ok(());
+    }
+
     if prompt.trim().is_empty() {
         ctx.send(
             poise::CreateReply::default()

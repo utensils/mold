@@ -1,4 +1,6 @@
+use crate::access::{AllowedRoles, BlockList};
 use crate::cooldown::CooldownTracker;
+use crate::quota::QuotaTracker;
 use mold_core::{ModelInfoExtended, MoldClient};
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -8,6 +10,10 @@ use tokio::sync::RwLock;
 pub struct BotConfig {
     /// Per-user cooldown between generation requests, in seconds.
     pub cooldown_seconds: u64,
+    /// Role-based access control. When unrestricted, all users can generate.
+    pub allowed_roles: AllowedRoles,
+    /// Maximum generations per user per UTC day. `None` = unlimited.
+    pub daily_quota: Option<u32>,
 }
 
 /// Shared state accessible to all poise commands.
@@ -15,6 +21,8 @@ pub struct BotState {
     pub client: MoldClient,
     pub config: BotConfig,
     pub cooldowns: CooldownTracker,
+    pub quotas: QuotaTracker,
+    pub block_list: BlockList,
     pub model_cache: RwLock<(Instant, Vec<ModelInfoExtended>)>,
 }
 
@@ -36,6 +44,8 @@ impl BotState {
             client,
             config,
             cooldowns: CooldownTracker::new(),
+            quotas: QuotaTracker::new(),
+            block_list: BlockList::new(),
             model_cache: RwLock::new((Instant::now() - std::time::Duration::from_secs(60), vec![])),
         }
     }

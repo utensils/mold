@@ -593,6 +593,8 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | `MOLD_DISCORD_TOKEN` | — | Discord bot token (required; falls back to `DISCORD_TOKEN`) |
 | `MOLD_HOST` | `http://localhost:7680` | mold server URL |
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown in seconds |
+| `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs for access control (unset = all allowed) |
+| `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited) |
 
 <details>
 <summary>NixOS deployment</summary>
