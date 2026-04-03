@@ -200,11 +200,9 @@ curl -N http://localhost:7680/api/generate/stream \
 The final `complete` event matches the `GenerateResponse` JSON shape used by the
 server internally.
 
-<!-- prettier-ignore-start -->
 ::: tip RunPod Note
 RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
 :::
-<!-- prettier-ignore-end -->
 
 ## `/api/status`
 

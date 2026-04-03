@@ -46,13 +46,11 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | `MOLD_DISCORD_ALLOWED_ROLES` | —                       | Comma-separated role names/IDs for access control (unset = all)         |
 | `MOLD_DISCORD_DAILY_QUOTA`   | —                       | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
 
-<!-- prettier-ignore-start -->
 ::: info Block List
 The `/admin block` command stores blocks in memory. Blocks clear when the bot
 restarts. For permanent restrictions, use role-based access via
 `MOLD_DISCORD_ALLOWED_ROLES`.
 :::
-<!-- prettier-ignore-end -->
 
 ## NixOS
 

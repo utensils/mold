@@ -109,11 +109,9 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 | L40S      | 48 GB | $0.40 | Full BF16 FLUX without offload |
 | A100 80GB | 80 GB | $0.79 | Maximum headroom               |
 
-<!-- prettier-ignore-start -->
 ::: tip Proxy Timeout
 RunPod's Cloudflare proxy has a 100-second timeout. Use the SSE streaming endpoint (`/api/generate/stream`) for long generations.
 :::
-<!-- prettier-ignore-end -->
 
 ## Image Details
 
