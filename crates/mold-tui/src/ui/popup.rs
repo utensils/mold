@@ -12,6 +12,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
+        Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         None => {}
     }
 }
@@ -101,6 +102,17 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  r                  Remove model"),
         Line::from("  u                  Unload from GPU"),
         Line::from("  /                  Filter by name"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Settings View",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  j/k                Navigate settings"),
+        Line::from("  +/- or Left/Right  Adjust value"),
+        Line::from("  Enter              Edit text field / toggle"),
+        Line::from("  Esc                Return to Generate"),
     ];
 
     let paragraph = Paragraph::new(help_text)
@@ -406,4 +418,57 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
         .alignment(Alignment::Center);
 
     frame.render_widget(paragraph, area);
+}
+
+fn render_settings_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 55, 15);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::SettingsInput { input, label, .. }) = &app.popup {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(format!(" {label} "))
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 3 {
+            return;
+        }
+
+        let hint = Paragraph::new("Enter value (empty to clear)").style(theme.dim());
+        frame.render_widget(hint, Rect { height: 1, ..inner });
+
+        // Input field with cursor
+        let display = format!("{input}\u{2588}");
+        let input_line = Paragraph::new(display).style(Style::default().fg(theme.text));
+        frame.render_widget(
+            input_line,
+            Rect {
+                y: inner.y + 2,
+                height: 1,
+                ..inner
+            },
+        );
+
+        let actions = Line::from(vec![
+            Span::styled("Enter", theme.status_key()),
+            Span::styled(" Confirm  ", Style::default().fg(theme.text)),
+            Span::styled("Esc", theme.status_key()),
+            Span::styled(" Cancel", Style::default().fg(theme.text)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(actions),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(1),
+                height: 1,
+                ..inner
+            },
+        );
+    }
 }

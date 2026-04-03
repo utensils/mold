@@ -83,12 +83,13 @@ pub enum Action {
     None,
 }
 
-/// The three top-level views.
+/// The four top-level views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Generate,
     Gallery,
     Models,
+    Settings,
 }
 
 impl View {
@@ -97,6 +98,7 @@ impl View {
             View::Generate => "Generate",
             View::Gallery => "Gallery",
             View::Models => "Models",
+            View::Settings => "Settings",
         }
     }
 
@@ -105,8 +107,9 @@ impl View {
             View::Generate => 0,
             View::Gallery => 1,
             View::Models => 2,
+            View::Settings => 3,
         }
     }
 
-    pub const ALL: [View; 3] = [View::Generate, View::Gallery, View::Models];
+    pub const ALL: [View; 4] = [View::Generate, View::Gallery, View::Models, View::Settings];
 }

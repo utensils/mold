@@ -73,16 +73,17 @@ file = true
 
 ## Views
 
-The TUI has three main views, shown as tabs at the top of the screen:
+The TUI has four main views, shown as tabs at the top of the screen:
 
 | View     | Purpose                                         |
 | -------- | ----------------------------------------------- |
 | Generate | Write prompts, tune parameters, generate images |
 | Gallery  | Browse generated images with preview            |
 | Models   | View installed and available models             |
+| Settings | View and edit all config.toml settings          |
 
-Switch views with **Esc** then **1**/**2**/**3**, arrow keys, or click the tabs.
-**Alt+1**/**Alt+2**/**Alt+3** works from anywhere.
+Switch views with **Esc** then **1**/**2**/**3**/**4**, arrow keys, or click the
+tabs. **Alt+1**/**Alt+2**/**Alt+3**/**Alt+4** works from anywhere.
 
 ## Generate View
 
@@ -204,6 +205,41 @@ See all installed and available models with family, size, defaults, and status.
 | u     | Unload the active model (GPU) |
 | Esc   | Back to Generate              |
 
+## Settings View
+
+Edit all `config.toml` settings without leaving the TUI. Settings are organized
+into four sections: **General**, **Expand**, **Logging**, and **Model
+Defaults**.
+
+Changes persist immediately to `config.toml` on each edit.
+
+| Key        | Action                                       |
+| ---------- | -------------------------------------------- |
+| j/k        | Navigate settings                            |
+| +/- or L/R | Adjust numeric or cycle toggle values        |
+| Enter      | Edit text/path field (opens popup) or toggle |
+| Esc        | Back to Generate                             |
+
+### Field Types
+
+- **Numeric** (port, width, steps, etc.) — adjust with +/- keys
+- **Boolean** (metadata, expand enabled, etc.) — toggle with Enter or +/-
+- **Toggle** (T5 variant, log level, scheduler) — cycle with +/- or Enter
+- **Text/Path** (model name, directories, prompts) — Enter opens edit popup
+- **Read-only** (model file paths) — displayed dimmed, not editable
+
+Environment variable overrides are shown with an **(env)** indicator in yellow.
+Per-model defaults show resolved values from the manifest (not raw config `None`
+values), so you always see the effective runtime value.
+
+### Model Defaults
+
+The Model Defaults section shows settings for a specific model. Use
+**Left/Right** on the Model selector row to cycle through configured models.
+Editable fields include steps, guidance, dimensions, scheduler, negative prompt,
+LoRA path, and LoRA scale. File paths (transformer, VAE) are read-only since
+they are managed by `mold pull`.
+
 ## Navigation
 
 Press **Esc** to enter navigation mode, where number keys and arrows switch
@@ -211,17 +247,17 @@ views.
 
 ### Global Shortcuts
 
-| Key           | Action                            |
-| ------------- | --------------------------------- |
-| Esc           | Unfocus / navigation mode         |
-| 1 / 2 / 3     | Switch views (in navigation mode) |
-| Left / Right  | Cycle views (in navigation mode)  |
-| Alt+1 / 2 / 3 | Switch views (from anywhere)      |
-| Tab           | Cycle focus to next panel         |
-| Shift+Tab     | Cycle focus to previous panel     |
-| Ctrl+C        | Quit                              |
-| q             | Quit (when not in a text field)   |
-| ?             | Show help overlay                 |
+| Key               | Action                            |
+| ----------------- | --------------------------------- |
+| Esc               | Unfocus / navigation mode         |
+| 1 / 2 / 3 / 4     | Switch views (in navigation mode) |
+| Left / Right      | Cycle views (in navigation mode)  |
+| Alt+1 / 2 / 3 / 4 | Switch views (from anywhere)      |
+| Tab               | Cycle focus to next panel         |
+| Shift+Tab         | Cycle focus to previous panel     |
+| Ctrl+C            | Quit                              |
+| q                 | Quit (when not in a text field)   |
+| ?                 | Show help overlay                 |
 
 ### Generate Shortcuts
 

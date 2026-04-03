@@ -48,6 +48,37 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// List all configuration values
+    List {
+        /// Output as JSON object
+        #[arg(long)]
+        json: bool,
+    },
+    /// Get a configuration value by key
+    Get {
+        /// Config key (e.g. server_port, expand.backend, models.flux-dev:q4.default_steps)
+        #[arg(add = ArgValueCandidates::new(commands::config::complete_config_key))]
+        key: String,
+        /// Output raw value only (no decoration), for scripting
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Set a configuration value
+    Set {
+        /// Config key (e.g. server_port, expand.backend)
+        #[arg(add = ArgValueCandidates::new(commands::config::complete_config_key))]
+        key: String,
+        /// Value to set (use "none" to clear optional fields)
+        value: String,
+    },
+    /// Show the config file path
+    Path,
+    /// Open config file in $EDITOR
+    Edit,
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -318,6 +349,26 @@ The MOLD_DEFAULT_MODEL env var takes precedence over the config file.")]
         /// Model name to set as default (e.g. flux-dev:q4). Omit to show current default.
         #[arg(add = ArgValueCandidates::new(commands::default::complete_model_name))]
         model: Option<String>,
+    },
+
+    /// View and edit configuration settings
+    ///
+    /// Get, set, and list all config.toml settings using dot-notation keys.
+    #[command(after_long_help = "\
+Examples:
+  mold config list                                  Show all settings
+  mold config get server_port                       Get a single value
+  mold config get server_port --raw                 Raw value for scripting
+  mold config set server_port 8080                  Set a value
+  mold config set expand.enabled true               Nested key
+  mold config set output_dir none                   Clear optional field
+  mold config set models.flux-dev:q4.default_steps 30   Per-model setting
+  mold config list --json                           Machine-readable output
+  mold config path                                  Config file location
+  mold config edit                                  Open in $EDITOR")]
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 
     /// Preview LLM prompt expansion without generating images
@@ -700,6 +751,13 @@ async fn run() -> anyhow::Result<()> {
         Commands::Default { model } => {
             commands::default::run(model.as_deref())?;
         }
+        Commands::Config { action } => match action {
+            ConfigAction::List { json } => commands::config::run_list(json)?,
+            ConfigAction::Get { key, raw } => commands::config::run_get(&key, raw)?,
+            ConfigAction::Set { key, value } => commands::config::run_set(&key, &value)?,
+            ConfigAction::Path => commands::config::run_path()?,
+            ConfigAction::Edit => commands::config::run_edit()?,
+        },
         Commands::Unload => {
             commands::unload::run().await?;
         }
