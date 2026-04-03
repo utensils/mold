@@ -276,6 +276,9 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_DEVICE` | — | Override device placement for text encoders |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
 | `MOLD_OUTPUT_DIR` | `~/.mold/output` | Directory to save generated images (set empty to disable) |
+| `MOLD_API_KEY` | — | API key for server auth (single key, comma-separated, or `@/path/to/keys.txt`); client sends `X-Api-Key` header |
+| `MOLD_RATE_LIMIT` | — | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`); read endpoints get 10x |
+| `MOLD_RATE_LIMIT_BURST` | `2x rate` | Burst allowance for rate limiting (defaults to 2x rate, capped at 100) |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
 | `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
 | `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |

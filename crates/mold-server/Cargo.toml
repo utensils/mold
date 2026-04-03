@@ -45,3 +45,6 @@ sha2 = "0.10"
 walkdir = "2"
 png = "0.18"
 image = "0.25"
+governor = { version = "0.8", features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
+subtle = "2"
