@@ -20,6 +20,9 @@ pub enum DownloadProgressEvent {
         file_index: usize,
         total_files: usize,
         size_bytes: u64,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
     /// Bytes downloaded for the current file.
     FileProgress {
@@ -27,12 +30,18 @@ pub enum DownloadProgressEvent {
         file_index: usize,
         bytes_downloaded: u64,
         bytes_total: u64,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
     /// A file download completed.
     FileDone {
         filename: String,
         file_index: usize,
         total_files: usize,
+        batch_bytes_downloaded: u64,
+        batch_bytes_total: u64,
+        batch_elapsed_ms: u64,
     },
 }
 
@@ -363,6 +372,9 @@ struct CallbackProgress {
     callback: DownloadProgressCallback,
     file_index: usize,
     total_files: usize,
+    batch_bytes_before_current: u64,
+    batch_bytes_total: u64,
+    batch_started_at: Instant,
     accumulated: u64,
     total: u64,
     filename: String,
@@ -370,11 +382,21 @@ struct CallbackProgress {
 }
 
 impl CallbackProgress {
-    fn new(callback: DownloadProgressCallback, file_index: usize, total_files: usize) -> Self {
+    fn new(
+        callback: DownloadProgressCallback,
+        file_index: usize,
+        total_files: usize,
+        batch_bytes_before_current: u64,
+        batch_bytes_total: u64,
+        batch_started_at: Instant,
+    ) -> Self {
         Self {
             callback,
             file_index,
             total_files,
+            batch_bytes_before_current,
+            batch_bytes_total,
+            batch_started_at,
             accumulated: 0,
             total: 0,
             filename: String::new(),
@@ -393,6 +415,9 @@ impl Progress for CallbackProgress {
             file_index: self.file_index,
             total_files: self.total_files,
             size_bytes: self.total,
+            batch_bytes_downloaded: self.batch_bytes_before_current,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
     }
 
@@ -407,6 +432,9 @@ impl Progress for CallbackProgress {
                 file_index: self.file_index,
                 bytes_downloaded: self.accumulated,
                 bytes_total: self.total,
+                batch_bytes_downloaded: self.batch_bytes_before_current + self.accumulated,
+                batch_bytes_total: self.batch_bytes_total,
+                batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
             });
         }
     }
@@ -416,6 +444,9 @@ impl Progress for CallbackProgress {
             filename: self.filename.clone(),
             file_index: self.file_index,
             total_files: self.total_files,
+            batch_bytes_downloaded: self.batch_bytes_before_current + self.total,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
     }
 }
@@ -536,7 +567,18 @@ pub async fn pull_model_with_callback(
             !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
         })
         .count();
+    let total_bytes_to_download = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .map(|file| file.size_bytes)
+        .sum();
     let mut download_idx = 0;
+    let mut completed_bytes = 0u64;
+    let batch_started_at = Instant::now();
 
     for file in &manifest.files {
         let clean_rel = crate::manifest::storage_path(manifest, file);
@@ -548,7 +590,14 @@ pub async fn pull_model_with_callback(
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        let progress = CallbackProgress::new(
+            callback.clone(),
+            download_idx,
+            total_to_download,
+            completed_bytes,
+            total_bytes_to_download,
+            batch_started_at,
+        );
         download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
@@ -558,6 +607,7 @@ pub async fn pull_model_with_callback(
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
 
         downloads.push((file.component, clean_path));
+        completed_bytes += file.size_bytes;
     }
 
     remove_pulling_marker(&manifest.name);
@@ -644,7 +694,18 @@ async fn pull_model_files_only_with_callback(
             !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
         })
         .count();
+    let total_bytes_to_download = manifest
+        .files
+        .iter()
+        .filter(|file| {
+            let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
+            !is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify)
+        })
+        .map(|file| file.size_bytes)
+        .sum();
     let mut download_idx = 0;
+    let mut completed_bytes = 0u64;
+    let batch_started_at = Instant::now();
 
     for file in &manifest.files {
         let clean_rel = crate::manifest::storage_path(manifest, file);
@@ -655,7 +716,14 @@ async fn pull_model_files_only_with_callback(
             continue;
         }
 
-        let progress = CallbackProgress::new(callback.clone(), download_idx, total_to_download);
+        let progress = CallbackProgress::new(
+            callback.clone(),
+            download_idx,
+            total_to_download,
+            completed_bytes,
+            total_bytes_to_download,
+            batch_started_at,
+        );
         download_idx += 1;
 
         let hf_path = download_file(&api, file, progress, &manifest.name).await?;
@@ -663,6 +731,7 @@ async fn pull_model_files_only_with_callback(
         hardlink_or_copy(&hf_path, &clean_path)?;
 
         verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+        completed_bytes += file.size_bytes;
     }
 
     remove_pulling_marker(&manifest.name);

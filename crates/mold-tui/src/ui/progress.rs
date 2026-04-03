@@ -77,26 +77,46 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
         }
 
         if has_download && bar_area.height > 0 {
-            let pct = if progress.download_total > 0 {
-                (progress.download_bytes as f64 / progress.download_total as f64).min(1.0)
+            let pct = if progress.download_batch_total > 0 {
+                (progress.download_batch_bytes as f64 / progress.download_batch_total as f64)
+                    .min(1.0)
             } else {
                 0.0
             };
+            let rate =
+                if progress.download_batch_elapsed_ms > 0 && progress.download_batch_bytes > 0 {
+                    progress.download_batch_bytes as f64
+                        / (progress.download_batch_elapsed_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+            let eta = if rate > 0.0 && progress.download_batch_total > progress.download_batch_bytes
+            {
+                let remaining =
+                    (progress.download_batch_total - progress.download_batch_bytes) as f64;
+                format_eta((remaining / rate).ceil() as u64)
+            } else {
+                "--".to_string()
+            };
             let label = if progress.download_total_files > 0 {
                 format!(
-                    "[{}/{}] {} [{}/{}]",
+                    "[{}/{}] {} [{}/{} total, {}/s, eta {}]",
                     progress.download_file_index + 1,
                     progress.download_total_files,
                     progress.download_filename,
-                    format_bytes(progress.download_bytes),
-                    format_bytes(progress.download_total),
+                    format_bytes(progress.download_batch_bytes),
+                    format_bytes(progress.download_batch_total),
+                    format_bytes(rate as u64),
+                    eta,
                 )
             } else {
                 format!(
-                    "{} [{}/{}]",
+                    "{} [{}/{} total, {}/s, eta {}]",
                     progress.download_filename,
-                    format_bytes(progress.download_bytes),
-                    format_bytes(progress.download_total),
+                    format_bytes(progress.download_batch_bytes),
+                    format_bytes(progress.download_batch_total),
+                    format_bytes(rate as u64),
+                    eta,
                 )
             };
             let gauge = Gauge::default()
@@ -203,6 +223,14 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
+pub(crate) fn format_eta(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60),
+    }
+}
+
 fn spinner_frame() -> char {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -213,4 +241,16 @@ fn spinner_frame() -> char {
         '\u{2800}',
     ];
     frames[(ms / 100 % frames.len() as u128) as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_eta_short_values() {
+        assert_eq!(format_eta(7), "7s");
+        assert_eq!(format_eta(65), "1m05s");
+        assert_eq!(format_eta(3665), "1h01m");
+    }
 }

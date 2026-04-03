@@ -267,6 +267,7 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
     use crate::app::{App, GalleryEntry};

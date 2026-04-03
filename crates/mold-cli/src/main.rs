@@ -2,6 +2,8 @@ mod commands;
 mod control;
 mod output;
 mod procinfo;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod ui;
 

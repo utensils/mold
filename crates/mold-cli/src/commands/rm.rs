@@ -321,6 +321,8 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use mold_core::ModelConfig;
 

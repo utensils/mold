@@ -818,6 +818,7 @@ pub fn complete_config_key() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use std::collections::HashMap;
 
     fn test_config() -> Config {
@@ -1288,6 +1289,7 @@ mod tests {
 
     #[test]
     fn set_persists_to_disk() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "mold-config-test-{}-{}",
             std::process::id(),
@@ -1305,8 +1307,9 @@ mod tests {
         set_value(&mut config, "server_port", "9999").unwrap();
         config.save().unwrap();
 
-        let reloaded = Config::load_or_default();
-        assert_eq!(reloaded.server_port, 9999);
+        let config_path = tmp.join("config.toml");
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("server_port = 9999"));
 
         // Cleanup
         match prev_home {

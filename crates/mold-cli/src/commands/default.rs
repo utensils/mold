@@ -116,6 +116,7 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use std::collections::HashMap;
 
     fn empty_config() -> Config {
@@ -205,6 +206,7 @@ mod tests {
 
     #[test]
     fn set_default_with_tempdir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Test the full set_default flow by redirecting MOLD_HOME to a temp dir.
         let tmp = std::env::temp_dir().join(format!(
             "mold-default-test-{}-{}",
@@ -225,9 +227,10 @@ mod tests {
         let result = set_default("flux-dev:q4", &config);
         assert!(result.is_ok());
 
-        // Verify the config was written.
-        let reloaded = Config::load_or_default();
-        assert_eq!(reloaded.default_model, "flux-dev:q4");
+        // Verify the config file was written to the redirected MOLD_HOME.
+        let config_path = tmp.join("config.toml");
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains(r#"default_model = "flux-dev:q4""#));
 
         // Cleanup.
         match prev_home {

@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use crate::config::{Config, ModelConfig, ModelPaths};
     use crate::manifest::{find_manifest, storage_path};
     use crate::test_support::ENV_LOCK;
@@ -1798,8 +1800,8 @@ description = "stale"
         // Create two files of known sizes
         let file_a = dir.join("a.safetensors");
         let file_b = dir.join("b.safetensors");
-        std::fs::write(&file_a, &[0u8; 1024]).unwrap(); // 1 KiB
-        std::fs::write(&file_b, &[0u8; 2048]).unwrap(); // 2 KiB
+        std::fs::write(&file_a, [0u8; 1024]).unwrap(); // 1 KiB
+        std::fs::write(&file_b, [0u8; 2048]).unwrap(); // 2 KiB
 
         let mc = ModelConfig {
             transformer: Some(file_a.to_str().unwrap().to_string()),

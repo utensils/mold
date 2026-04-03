@@ -86,35 +86,52 @@ pub async fn auto_pull_model(
                     filename,
                     file_index,
                     total_files,
-                    size_bytes: _,
-                } => SseProgressEvent::Info {
-                    message: format!(
-                        "[{}/{}] Downloading {}",
-                        file_index + 1,
-                        total_files,
-                        filename
-                    ),
+                    size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                } => SseProgressEvent::DownloadProgress {
+                    filename,
+                    file_index,
+                    total_files,
+                    bytes_downloaded: 0,
+                    bytes_total: size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
                 },
                 DownloadProgressEvent::FileProgress {
                     filename,
                     file_index,
                     bytes_downloaded,
                     bytes_total,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
                 } => SseProgressEvent::DownloadProgress {
                     filename,
                     file_index,
                     total_files: 0, // not available here but okay
                     bytes_downloaded,
                     bytes_total,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
                 },
                 DownloadProgressEvent::FileDone {
                     filename,
                     file_index,
                     total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
                 } => SseProgressEvent::DownloadDone {
                     filename,
                     file_index,
                     total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
                 },
             };
             let _ = tx_dl.send(BackgroundEvent::Progress(sse));
@@ -516,13 +533,17 @@ mod tests {
     fn build_ref_counts_tracks_shared_files() {
         let mut config = mold_core::Config::default();
 
-        let mut model_a = mold_core::ModelConfig::default();
-        model_a.transformer = Some("/models/a/transformer.safetensors".to_string());
-        model_a.vae = Some("/models/shared/vae.safetensors".to_string());
+        let model_a = mold_core::ModelConfig {
+            transformer: Some("/models/a/transformer.safetensors".to_string()),
+            vae: Some("/models/shared/vae.safetensors".to_string()),
+            ..Default::default()
+        };
 
-        let mut model_b = mold_core::ModelConfig::default();
-        model_b.transformer = Some("/models/b/transformer.safetensors".to_string());
-        model_b.vae = Some("/models/shared/vae.safetensors".to_string());
+        let model_b = mold_core::ModelConfig {
+            transformer: Some("/models/b/transformer.safetensors".to_string()),
+            vae: Some("/models/shared/vae.safetensors".to_string()),
+            ..Default::default()
+        };
 
         config.models.insert("model-a".to_string(), model_a);
         config.models.insert("model-b".to_string(), model_b);

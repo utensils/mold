@@ -72,6 +72,9 @@ pub struct ProgressState {
     pub download_filename: String,
     pub download_bytes: u64,
     pub download_total: u64,
+    pub download_batch_bytes: u64,
+    pub download_batch_total: u64,
+    pub download_batch_elapsed_ms: u64,
     pub download_file_index: usize,
     pub download_total_files: usize,
 }
@@ -89,8 +92,28 @@ impl ProgressState {
         self.download_filename.clear();
         self.download_bytes = 0;
         self.download_total = 0;
+        self.download_batch_bytes = 0;
+        self.download_batch_total = 0;
+        self.download_batch_elapsed_ms = 0;
         self.download_file_index = 0;
         self.download_total_files = 0;
+    }
+
+    fn clear_download(&mut self) {
+        self.download_filename.clear();
+        self.download_bytes = 0;
+        self.download_total = 0;
+        self.download_batch_bytes = 0;
+        self.download_batch_total = 0;
+        self.download_batch_elapsed_ms = 0;
+        self.download_file_index = 0;
+        self.download_total_files = 0;
+    }
+
+    fn clear_weight(&mut self) {
+        self.weight_loaded = 0;
+        self.weight_total = 0;
+        self.weight_component.clear();
     }
 }
 
@@ -3423,91 +3446,106 @@ impl App {
     }
 
     fn handle_progress(&mut self, event: SseProgressEvent) {
-        match event {
-            SseProgressEvent::StageStart { name } => {
-                self.generate.progress.current_stage = Some(name);
-                // Reset weight progress on new stage
-                self.generate.progress.weight_loaded = 0;
-                self.generate.progress.weight_total = 0;
-            }
-            SseProgressEvent::StageDone { name, elapsed_ms } => {
-                self.generate.progress.current_stage = None;
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
-                    style: ProgressStyle::Done,
-                });
-            }
-            SseProgressEvent::Info { message } => {
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message,
-                    style: ProgressStyle::Info,
-                });
-            }
-            SseProgressEvent::CacheHit { resource } => {
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("{resource} [cache hit]"),
-                    style: ProgressStyle::Done,
-                });
-            }
-            SseProgressEvent::DenoiseStep {
-                step,
-                total,
-                elapsed_ms,
-            } => {
-                self.generate.progress.denoise_step = step;
-                self.generate.progress.denoise_total = total;
-                self.generate.progress.denoise_elapsed_ms = elapsed_ms;
-            }
-            SseProgressEvent::WeightLoad {
-                bytes_loaded,
-                bytes_total,
-                component,
-            } => {
-                self.generate.progress.weight_loaded = bytes_loaded;
-                self.generate.progress.weight_total = bytes_total;
-                self.generate.progress.weight_component = component;
-            }
-            SseProgressEvent::DownloadProgress {
-                filename,
-                bytes_downloaded,
-                bytes_total,
-                file_index,
-                total_files,
-            } => {
-                self.generate.progress.download_filename = filename;
-                self.generate.progress.download_bytes = bytes_downloaded;
-                self.generate.progress.download_total = bytes_total;
-                self.generate.progress.download_file_index = file_index;
-                self.generate.progress.download_total_files = total_files;
-            }
-            SseProgressEvent::DownloadDone {
-                filename,
-                file_index,
-                total_files,
-            } => {
-                self.generate.progress.download_bytes = 0;
-                self.generate.progress.download_total = 0;
-                self.generate.progress.download_filename.clear();
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("[{}/{}] {filename}", file_index + 1, total_files),
-                    style: ProgressStyle::Done,
-                });
-            }
-            SseProgressEvent::PullComplete { model } => {
-                self.generate.progress.log.push(ProgressLogEntry {
-                    message: format!("Pull complete: {model}"),
-                    style: ProgressStyle::Done,
-                });
-                // Refresh config and catalog after pull
-                self.config = Config::load_or_default();
-                self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
-            }
-            SseProgressEvent::Queued { position } => {
-                self.generate.progress.current_stage =
-                    Some(format!("Queued (position {position})"));
-            }
+        let refresh_catalog = reduce_progress_state(&mut self.generate.progress, event);
+        if refresh_catalog {
+            // Refresh config and catalog after pull
+            self.config = Config::load_or_default();
+            self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
         }
     }
+}
+
+fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) -> bool {
+    match event {
+        SseProgressEvent::StageStart { name } => {
+            progress.current_stage = Some(name);
+            // Reset transient bars when the stream moves into a new phase.
+            progress.clear_download();
+            progress.clear_weight();
+        }
+        SseProgressEvent::StageDone { name, elapsed_ms } => {
+            progress.current_stage = None;
+            progress.log.push(ProgressLogEntry {
+                message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
+                style: ProgressStyle::Done,
+            });
+        }
+        SseProgressEvent::Info { message } => {
+            progress.log.push(ProgressLogEntry {
+                message,
+                style: ProgressStyle::Info,
+            });
+        }
+        SseProgressEvent::CacheHit { resource } => {
+            progress.log.push(ProgressLogEntry {
+                message: format!("{resource} [cache hit]"),
+                style: ProgressStyle::Done,
+            });
+        }
+        SseProgressEvent::DenoiseStep {
+            step,
+            total,
+            elapsed_ms,
+        } => {
+            progress.denoise_step = step;
+            progress.denoise_total = total;
+            progress.denoise_elapsed_ms = elapsed_ms;
+        }
+        SseProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component,
+        } => {
+            progress.weight_loaded = bytes_loaded;
+            progress.weight_total = bytes_total;
+            progress.weight_component = component;
+        }
+        SseProgressEvent::DownloadProgress {
+            filename,
+            bytes_downloaded,
+            bytes_total,
+            batch_bytes_downloaded,
+            batch_bytes_total,
+            batch_elapsed_ms,
+            file_index,
+            total_files,
+        } => {
+            progress.download_filename = filename;
+            progress.download_bytes = bytes_downloaded;
+            progress.download_total = bytes_total;
+            progress.download_batch_bytes = batch_bytes_downloaded;
+            progress.download_batch_total = batch_bytes_total;
+            progress.download_batch_elapsed_ms = batch_elapsed_ms;
+            progress.download_file_index = file_index;
+            if total_files > 0 {
+                progress.download_total_files = total_files;
+            }
+        }
+        SseProgressEvent::DownloadDone {
+            filename,
+            file_index,
+            total_files,
+            ..
+        } => {
+            progress.clear_download();
+            progress.log.push(ProgressLogEntry {
+                message: format!("[{}/{}] {filename}", file_index + 1, total_files),
+                style: ProgressStyle::Done,
+            });
+        }
+        SseProgressEvent::PullComplete { model } => {
+            progress.clear_download();
+            progress.log.push(ProgressLogEntry {
+                message: format!("Pull complete: {model}"),
+                style: ProgressStyle::Done,
+            });
+            return true;
+        }
+        SseProgressEvent::Queued { position } => {
+            progress.current_stage = Some(format!("Queued (position {position})"));
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3650,14 +3688,19 @@ mod tests {
 
     #[test]
     fn progress_state_clear_resets_all() {
-        let mut state = ProgressState::default();
-        state.denoise_step = 10;
-        state.denoise_total = 20;
-        state.weight_loaded = 1000;
-        state.download_bytes = 500;
-        state.download_filename = "test.gguf".to_string();
-        state.download_file_index = 2;
-        state.download_total_files = 5;
+        let mut state = ProgressState {
+            denoise_step: 10,
+            denoise_total: 20,
+            weight_loaded: 1000,
+            download_filename: "test.gguf".to_string(),
+            download_bytes: 500,
+            download_batch_bytes: 750,
+            download_batch_total: 1500,
+            download_batch_elapsed_ms: 250,
+            download_file_index: 2,
+            download_total_files: 5,
+            ..Default::default()
+        };
         state.log.push(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
@@ -3667,6 +3710,9 @@ mod tests {
         assert_eq!(state.denoise_total, 0);
         assert_eq!(state.weight_loaded, 0);
         assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
         assert!(state.download_filename.is_empty());
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
@@ -3675,12 +3721,14 @@ mod tests {
 
     #[test]
     fn progress_state_download_tracks_file_index() {
-        let mut state = ProgressState::default();
-        state.download_filename = "model.safetensors".to_string();
-        state.download_bytes = 16384;
-        state.download_total = 2_900_000_000;
-        state.download_file_index = 1;
-        state.download_total_files = 5;
+        let mut state = ProgressState {
+            download_filename: "model.safetensors".to_string(),
+            download_bytes: 16_384,
+            download_total: 2_900_000_000,
+            download_file_index: 1,
+            download_total_files: 5,
+            ..Default::default()
+        };
 
         assert_eq!(state.download_file_index, 1);
         assert_eq!(state.download_total_files, 5);
@@ -3698,6 +3746,121 @@ mod tests {
         let state = ProgressState::default();
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn download_progress_preserves_total_file_count_across_chunk_updates() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "text_encoder_2/model.safetensors".to_string(),
+                bytes_downloaded: 0,
+                bytes_total: 2_600_000_000,
+                batch_bytes_downloaded: 3_000_000_000,
+                batch_bytes_total: 8_800_000_000,
+                batch_elapsed_ms: 60_000,
+                file_index: 2,
+                total_files: 6,
+            },
+        );
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "text_encoder_2/model.safetensors".to_string(),
+                bytes_downloaded: 16_384,
+                bytes_total: 2_600_000_000,
+                batch_bytes_downloaded: 3_000_016_384,
+                batch_bytes_total: 8_800_000_000,
+                batch_elapsed_ms: 60_100,
+                file_index: 2,
+                total_files: 0,
+            },
+        );
+
+        assert_eq!(state.download_filename, "text_encoder_2/model.safetensors");
+        assert_eq!(state.download_bytes, 16_384);
+        assert_eq!(state.download_total, 2_600_000_000);
+        assert_eq!(state.download_batch_bytes, 3_000_016_384);
+        assert_eq!(state.download_batch_total, 8_800_000_000);
+        assert_eq!(state.download_batch_elapsed_ms, 60_100);
+        assert_eq!(state.download_file_index, 2);
+        assert_eq!(state.download_total_files, 6);
+    }
+
+    #[test]
+    fn stage_start_clears_stale_download_bar_from_previous_pull() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "vae/model.safetensors".to_string(),
+                bytes_downloaded: 512,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 2048,
+                batch_bytes_total: 8192,
+                batch_elapsed_ms: 500,
+                file_index: 0,
+                total_files: 3,
+            },
+        );
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::StageStart {
+                name: "Loading model".to_string(),
+            },
+        );
+
+        assert_eq!(state.current_stage.as_deref(), Some("Loading model"));
+        assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_total, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn pull_complete_clears_active_download_bar() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "diffusion_pytorch_model.safetensors".to_string(),
+                bytes_downloaded: 2048,
+                bytes_total: 4096,
+                batch_bytes_downloaded: 2048,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 250,
+                file_index: 0,
+                total_files: 1,
+            },
+        );
+
+        let refresh_catalog = reduce_progress_state(
+            &mut state,
+            SseProgressEvent::PullComplete {
+                model: "flux2-klein:q8".to_string(),
+            },
+        );
+
+        assert!(refresh_catalog);
+        assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_bytes, 0);
+        assert_eq!(state.download_total, 0);
+        assert_eq!(state.download_batch_bytes, 0);
+        assert_eq!(state.download_batch_total, 0);
+        assert_eq!(state.download_batch_elapsed_ms, 0);
+        assert_eq!(state.download_total_files, 0);
+        assert!(state
+            .log
+            .iter()
+            .any(|entry| entry.message == "Pull complete: flux2-klein:q8"));
     }
 
     // ── SeedMode tests ────────────────────────────────────
@@ -3718,9 +3881,7 @@ mod tests {
 
     #[test]
     fn seed_mode_random_generates_value() {
-        let seed = SeedMode::Random.resolve(None);
-        // Just verify it returns something (can't test exact value)
-        assert!(seed > 0 || seed == 0); // always true, but exercises the code
+        let _ = SeedMode::Random.resolve(None);
     }
 
     #[test]
@@ -4190,7 +4351,7 @@ mod tests {
     #[test]
     fn gallery_thumbnail_states_sync_with_entries() {
         // thumbnail_states should have same length as entries
-        let entries = vec![make_test_entry(), make_test_entry()];
+        let entries = [make_test_entry(), make_test_entry()];
         let thumb_states: Vec<Option<StatefulProtocol>> = vec![None; entries.len()];
         assert_eq!(thumb_states.len(), entries.len());
     }
@@ -4247,7 +4408,7 @@ mod tests {
         let visible = ParamField::visible_fields(&caps, params.inference_mode);
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
 
-        let app = App {
+        App {
             active_view: View::Settings,
             generate: GenerateState {
                 prompt: TextArea::default(),
@@ -4303,8 +4464,7 @@ mod tests {
             history: crate::history::PromptHistory::load(),
             layout: LayoutAreas::default(),
             server_process: None,
-        };
-        app
+        }
     }
 
     /// Helper: find the row_index for a given SettingsKey.
@@ -4386,7 +4546,7 @@ mod tests {
         let app = make_settings_test_app();
         assert_eq!(
             app.settings_display_value(&SettingsKey::DefaultModel),
-            "flux2-klein"
+            "flux2-klein:q8"
         );
         assert_eq!(app.settings_display_value(&SettingsKey::ServerPort), "7680");
         assert_eq!(
@@ -4918,7 +5078,7 @@ mod tests {
         assert!(matches!(app.popup, Some(Popup::SettingsInput { .. })));
         if let Some(Popup::SettingsInput { key, input, .. }) = &app.popup {
             assert_eq!(*key, SettingsKey::DefaultModel);
-            assert_eq!(input, "flux2-klein");
+            assert_eq!(input, "flux2-klein:q8");
         }
     }
 

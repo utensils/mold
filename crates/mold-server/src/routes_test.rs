@@ -474,6 +474,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn list_models_reports_server_disk_and_remaining_download_bytes() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("remote-catalog");
@@ -754,6 +755,7 @@ mod tests {
     // ── /api/generate — known but not downloaded model returns 404 ───────────
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn generate_known_model_not_downloaded_returns_404() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("generate-not-downloaded");
@@ -914,6 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn stream_known_model_not_downloaded_returns_404() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("stream-not-downloaded");
