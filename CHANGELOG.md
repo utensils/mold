@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-03
+
+### Added
+
+- **API key authentication**: opt-in `MOLD_API_KEY` with single key, comma-separated, or `@/path/to/keys.txt` file reference; exempt `/health` and `/api/docs` ([#150](https://github.com/utensils/mold/pull/150))
+- **Per-IP rate limiting**: `MOLD_RATE_LIMIT` with separate generation and read tiers (10x), `Retry-After` headers, configurable burst via `MOLD_RATE_LIMIT_BURST` ([#150](https://github.com/utensils/mold/pull/150))
+- **Request ID correlation**: `X-Request-ID` header on all responses, preserved from client or auto-generated UUID v4 ([#150](https://github.com/utensils/mold/pull/150))
+- **`mold stats` command**: disk usage overview for models, output, logs, and shared components with `--json` output ([#151](https://github.com/utensils/mold/pull/151))
+- **`mold clean` command**: clean orphaned files, stale `.pulling` markers, hf-cache transient files, and old output images; dry-run by default with `--force` and `--older-than` flags ([#151](https://github.com/utensils/mold/pull/151))
+- **Discord role-based access**: `MOLD_DISCORD_ALLOWED_ROLES` for comma-separated role names/IDs, with friendly denial messages ([#149](https://github.com/utensils/mold/pull/149))
+- **Discord per-user daily quotas**: `MOLD_DISCORD_DAILY_QUOTA` with midnight UTC reset, `/quota` command, and `/admin reset-quota` / `/admin block` / `/admin unblock` commands ([#149](https://github.com/utensils/mold/pull/149))
+- **TUI model deletion**: delete models from the TUI with confirmation dialog, disk space preview, and shared-file warnings ([#148](https://github.com/utensils/mold/pull/148))
+- **NixOS module**: `discord.environment` option for arbitrary bot env vars, `logToFile`/`logDir`/`logRetentionDays` server options ([#152](https://github.com/utensils/mold/pull/152))
+
+### Fixed
+
+- **Server production panics**: replaced `.unwrap()` and `.expect()` calls with proper error propagation in model_manager, logging, image metadata, cache mutex locks, and CLI commands ([#146](https://github.com/utensils/mold/pull/146))
+- **TUI session persistence**: settings now saved on quit (not just after generation), bare model names resolved correctly on restore, and fallback path no longer applies wrong model-specific params ([#153](https://github.com/utensils/mold/pull/153))
+- **TUI download progress**: progress bar now shows file counter `[2/5]` during model pulls ([#153](https://github.com/utensils/mold/pull/153))
+- **VitePress container rendering**: prettier no longer collapses `:::` callout markers; set `proseWrap: "preserve"` for markdown files ([#152](https://github.com/utensils/mold/pull/152))
+
+### Changed
+
+- **README trimmed**: reduced from 718 to ~190 lines; detailed content moved to the documentation website ([#152](https://github.com/utensils/mold/pull/152))
+- Documentation synced across website, CLAUDE.md, SKILL.md — added `mold stats`/`mold clean` to CLI reference, gallery API endpoints, Discord bot features, NixOS module options, Docker env vars ([#152](https://github.com/utensils/mold/pull/152))
+- Comprehensive config.rs test coverage (843 lines of tests for config loading, migrations, path resolution) ([#147](https://github.com/utensils/mold/pull/147))
+
 ## [0.4.1] - 2026-04-02
 
 ### Fixed
@@ -175,6 +202,9 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server) | Axum HTTP inference server |
 
+[0.5.0]: https://github.com/utensils/mold/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/utensils/mold/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/utensils/mold/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/utensils/mold/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/utensils/mold/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/utensils/mold/compare/v0.1.0...v0.2.0
