@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use console::Term;
@@ -375,6 +375,10 @@ struct CallbackProgress {
     batch_bytes_before_current: u64,
     batch_bytes_total: u64,
     batch_started_at: Instant,
+    shared: Arc<Mutex<CallbackProgressState>>,
+}
+
+struct CallbackProgressState {
     accumulated: u64,
     total: u64,
     filename: String,
@@ -397,24 +401,31 @@ impl CallbackProgress {
             batch_bytes_before_current,
             batch_bytes_total,
             batch_started_at,
-            accumulated: 0,
-            total: 0,
-            filename: String::new(),
-            last_emit: Instant::now(),
+            shared: Arc::new(Mutex::new(CallbackProgressState {
+                accumulated: 0,
+                total: 0,
+                filename: String::new(),
+                last_emit: Instant::now(),
+            })),
         }
     }
 }
 
 impl Progress for CallbackProgress {
     async fn init(&mut self, size: usize, filename: &str) {
-        self.total = size as u64;
-        self.accumulated = 0;
-        self.filename = filename.to_string();
+        let mut shared = self
+            .shared
+            .lock()
+            .expect("download progress mutex poisoned");
+        shared.total = size as u64;
+        shared.accumulated = 0;
+        shared.filename = filename.to_string();
+        shared.last_emit = Instant::now();
         (self.callback)(DownloadProgressEvent::FileStart {
-            filename: self.filename.clone(),
+            filename: shared.filename.clone(),
             file_index: self.file_index,
             total_files: self.total_files,
-            size_bytes: self.total,
+            size_bytes: shared.total,
             batch_bytes_downloaded: self.batch_bytes_before_current,
             batch_bytes_total: self.batch_bytes_total,
             batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
@@ -422,29 +433,46 @@ impl Progress for CallbackProgress {
     }
 
     async fn update(&mut self, size: usize) {
-        self.accumulated += size as u64;
-        // Throttle to ~4 events/sec
+        let mut shared = self
+            .shared
+            .lock()
+            .expect("download progress mutex poisoned");
+        shared.accumulated += size as u64;
+
         let now = Instant::now();
-        if now.duration_since(self.last_emit).as_millis() >= 250 || self.accumulated >= self.total {
-            self.last_emit = now;
-            (self.callback)(DownloadProgressEvent::FileProgress {
-                filename: self.filename.clone(),
-                file_index: self.file_index,
-                bytes_downloaded: self.accumulated,
-                bytes_total: self.total,
-                batch_bytes_downloaded: self.batch_bytes_before_current + self.accumulated,
-                batch_bytes_total: self.batch_bytes_total,
-                batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
-            });
+        let should_emit = now.duration_since(shared.last_emit).as_millis() >= 250
+            || shared.accumulated >= shared.total;
+        if !should_emit {
+            return;
         }
+
+        shared.last_emit = now;
+        let filename = shared.filename.clone();
+        let accumulated = shared.accumulated;
+        let total = shared.total;
+        drop(shared);
+
+        (self.callback)(DownloadProgressEvent::FileProgress {
+            filename,
+            file_index: self.file_index,
+            bytes_downloaded: accumulated,
+            bytes_total: total,
+            batch_bytes_downloaded: self.batch_bytes_before_current + accumulated,
+            batch_bytes_total: self.batch_bytes_total,
+            batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
+        });
     }
 
     async fn finish(&mut self) {
+        let shared = self
+            .shared
+            .lock()
+            .expect("download progress mutex poisoned");
         (self.callback)(DownloadProgressEvent::FileDone {
-            filename: self.filename.clone(),
+            filename: shared.filename.clone(),
             file_index: self.file_index,
             total_files: self.total_files,
-            batch_bytes_downloaded: self.batch_bytes_before_current + self.total,
+            batch_bytes_downloaded: self.batch_bytes_before_current + shared.total,
             batch_bytes_total: self.batch_bytes_total,
             batch_elapsed_ms: self.batch_started_at.elapsed().as_millis() as u64,
         });
@@ -1001,6 +1029,38 @@ mod tests {
         // max_len < 8 returns unchanged to avoid degenerate "..." output
         let name = "something.safetensors";
         assert_eq!(truncate_filename(name, 5), name);
+    }
+
+    #[tokio::test]
+    async fn callback_progress_clones_share_accumulated_bytes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_cb = events.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |event| {
+            events_for_cb
+                .lock()
+                .expect("events mutex poisoned")
+                .push(event);
+        });
+
+        let mut progress = CallbackProgress::new(callback, 1, 3, 1_000, 10_000, Instant::now());
+        progress.init(1_024, "weights.safetensors").await;
+
+        let mut chunk_a = progress.clone();
+        let mut chunk_b = progress.clone();
+        chunk_a.update(512).await;
+        chunk_b.update(512).await;
+        progress.finish().await;
+
+        let events = events.lock().expect("events mutex poisoned");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DownloadProgressEvent::FileProgress {
+                bytes_downloaded: 1_024,
+                bytes_total: 1_024,
+                batch_bytes_downloaded: 2_024,
+                ..
+            }
+        )));
     }
 
     #[test]

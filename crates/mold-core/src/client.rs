@@ -193,24 +193,8 @@ impl MoldClient {
         while let Some(chunk) = resp.chunk().await? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-            // Process complete SSE events (delimited by double newline)
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_text = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
-                let mut event_type = String::new();
-                let mut data = String::new();
-                for line in event_text.lines() {
-                    if line.starts_with(':') {
-                        continue; // SSE comment (keep-alive ping)
-                    }
-                    if let Some(t) = line.strip_prefix("event:") {
-                        event_type = t.trim().to_string();
-                    } else if let Some(d) = line.strip_prefix("data:") {
-                        data = d.trim().to_string();
-                    }
-                }
-
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (event_type, data) = parse_sse_event(&event_text);
                 match event_type.as_str() {
                     "progress" => {
                         if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
@@ -305,23 +289,8 @@ impl MoldClient {
         while let Some(chunk) = resp.chunk().await? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_text = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
-                let mut event_type = String::new();
-                let mut data = String::new();
-                for line in event_text.lines() {
-                    if line.starts_with(':') {
-                        continue;
-                    }
-                    if let Some(t) = line.strip_prefix("event:") {
-                        event_type = t.trim().to_string();
-                    } else if let Some(d) = line.strip_prefix("data:") {
-                        data = d.trim().to_string();
-                    }
-                }
-
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (event_type, data) = parse_sse_event(&event_text);
                 match event_type.as_str() {
                     "progress" => {
                         if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
@@ -438,6 +407,33 @@ impl MoldClient {
             .await?;
         Ok(resp)
     }
+}
+
+fn next_sse_event(buffer: &mut String) -> Option<String> {
+    for separator in ["\r\n\r\n", "\n\n"] {
+        if let Some(pos) = buffer.find(separator) {
+            let event_text = buffer[..pos].to_string();
+            *buffer = buffer[pos + separator.len()..].to_string();
+            return Some(event_text);
+        }
+    }
+    None
+}
+
+fn parse_sse_event(event_text: &str) -> (String, String) {
+    let mut event_type = String::new();
+    let mut data_lines = Vec::new();
+    for line in event_text.lines() {
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(t) = line.strip_prefix("event:") {
+            event_type = t.trim().to_string();
+        } else if let Some(d) = line.strip_prefix("data:") {
+            data_lines.push(d.trim().to_string());
+        }
+    }
+    (event_type, data_lines.join("\n"))
 }
 
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
@@ -615,5 +611,21 @@ mod tests {
     fn test_is_connection_error_via_mold_error() {
         let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
         assert!(MoldClient::is_connection_error(&err));
+    }
+
+    #[test]
+    fn parse_sse_event_joins_multiline_data() {
+        let (event_type, data) =
+            parse_sse_event("event: progress\ndata: {\"a\":1}\ndata: {\"b\":2}");
+        assert_eq!(event_type, "progress");
+        assert_eq!(data, "{\"a\":1}\n{\"b\":2}");
+    }
+
+    #[test]
+    fn next_sse_event_supports_crlf_delimiters() {
+        let mut buffer = "event: progress\r\ndata: {\"ok\":true}\r\n\r\nrest".to_string();
+        let event = next_sse_event(&mut buffer).expect("expected one event");
+        assert!(event.contains("event: progress"));
+        assert_eq!(buffer, "rest");
     }
 }

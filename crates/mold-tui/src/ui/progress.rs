@@ -83,40 +83,34 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
             } else {
                 0.0
             };
-            let rate =
-                if progress.download_batch_elapsed_ms > 0 && progress.download_batch_bytes > 0 {
-                    progress.download_batch_bytes as f64
-                        / (progress.download_batch_elapsed_ms as f64 / 1000.0)
-                } else {
-                    0.0
-                };
-            let eta = if rate > 0.0 && progress.download_batch_total > progress.download_batch_bytes
+            let transfer = if let (Some(rate), Some(eta_secs)) =
+                (progress.download_rate_bps, progress.download_eta_secs)
             {
-                let remaining =
-                    (progress.download_batch_total - progress.download_batch_bytes) as f64;
-                format_eta((remaining / rate).ceil() as u64)
+                format!(
+                    ", {}/s, eta {}",
+                    format_bytes_binary(rate),
+                    format_eta(eta_secs.ceil() as u64)
+                )
             } else {
-                "--".to_string()
+                String::new()
             };
             let label = if progress.download_total_files > 0 {
                 format!(
-                    "[{}/{}] {} [{}/{} total, {}/s, eta {}]",
+                    "[{}/{}] {} [{}/{} total{}]",
                     progress.download_file_index + 1,
                     progress.download_total_files,
                     progress.download_filename,
                     format_bytes(progress.download_batch_bytes),
                     format_bytes(progress.download_batch_total),
-                    format_bytes(rate as u64),
-                    eta,
+                    transfer,
                 )
             } else {
                 format!(
-                    "{} [{}/{} total, {}/s, eta {}]",
+                    "{} [{}/{} total{}]",
                     progress.download_filename,
                     format_bytes(progress.download_batch_bytes),
                     format_bytes(progress.download_batch_total),
-                    format_bytes(rate as u64),
-                    eta,
+                    transfer,
                 )
             };
             let gauge = Gauge::default()
@@ -231,6 +225,18 @@ pub(crate) fn format_eta(seconds: u64) -> String {
     }
 }
 
+fn format_bytes_binary(bytes: f64) -> String {
+    if bytes >= 1_073_741_824.0 {
+        format!("{:.2}GiB", bytes / 1_073_741_824.0)
+    } else if bytes >= 1_048_576.0 {
+        format!("{:.2}MiB", bytes / 1_048_576.0)
+    } else if bytes >= 1024.0 {
+        format!("{:.2}KiB", bytes / 1024.0)
+    } else {
+        format!("{:.0}B", bytes)
+    }
+}
+
 fn spinner_frame() -> char {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -252,5 +258,12 @@ mod tests {
         assert_eq!(format_eta(7), "7s");
         assert_eq!(format_eta(65), "1m05s");
         assert_eq!(format_eta(3665), "1h01m");
+    }
+
+    #[test]
+    fn format_bytes_binary_uses_cli_style_units() {
+        assert_eq!(format_bytes_binary(512.0), "512B");
+        assert_eq!(format_bytes_binary(2_048.0), "2.00KiB");
+        assert_eq!(format_bytes_binary(3.5 * 1_048_576.0), "3.50MiB");
     }
 }

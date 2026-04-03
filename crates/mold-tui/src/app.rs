@@ -6,6 +6,7 @@ use mold_core::{
 use rand::Rng;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
@@ -75,8 +76,11 @@ pub struct ProgressState {
     pub download_batch_bytes: u64,
     pub download_batch_total: u64,
     pub download_batch_elapsed_ms: u64,
+    pub download_rate_bps: Option<f64>,
+    pub download_eta_secs: Option<f64>,
     pub download_file_index: usize,
     pub download_total_files: usize,
+    download_samples: VecDeque<(u64, u64)>,
 }
 
 impl ProgressState {
@@ -95,8 +99,11 @@ impl ProgressState {
         self.download_batch_bytes = 0;
         self.download_batch_total = 0;
         self.download_batch_elapsed_ms = 0;
+        self.download_rate_bps = None;
+        self.download_eta_secs = None;
         self.download_file_index = 0;
         self.download_total_files = 0;
+        self.download_samples.clear();
     }
 
     fn clear_download(&mut self) {
@@ -106,14 +113,67 @@ impl ProgressState {
         self.download_batch_bytes = 0;
         self.download_batch_total = 0;
         self.download_batch_elapsed_ms = 0;
+        self.download_rate_bps = None;
+        self.download_eta_secs = None;
         self.download_file_index = 0;
         self.download_total_files = 0;
+        self.download_samples.clear();
     }
 
     fn clear_weight(&mut self) {
         self.weight_loaded = 0;
         self.weight_total = 0;
         self.weight_component.clear();
+    }
+
+    fn record_download_sample(&mut self, elapsed_ms: u64, position: u64) {
+        const MAX_SAMPLES: usize = 8;
+        const MIN_SAMPLE_WINDOW_MS: u64 = 1_000;
+
+        if self
+            .download_samples
+            .back()
+            .is_some_and(|(last_elapsed_ms, _)| *last_elapsed_ms == elapsed_ms)
+        {
+            let _ = self.download_samples.pop_back();
+        }
+        self.download_samples.push_back((elapsed_ms, position));
+        while self.download_samples.len() > MAX_SAMPLES {
+            self.download_samples.pop_front();
+        }
+
+        if self.download_samples.len() < 2 {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        let (t_old_ms, b_old) = self
+            .download_samples
+            .front()
+            .expect("sample window is non-empty");
+        let (t_new_ms, b_new) = self
+            .download_samples
+            .back()
+            .expect("sample window is non-empty");
+        let dt_ms = t_new_ms.saturating_sub(*t_old_ms);
+        if dt_ms < MIN_SAMPLE_WINDOW_MS {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        let dt = dt_ms as f64 / 1_000.0;
+        let rate = b_new.saturating_sub(*b_old) as f64 / dt;
+        if rate < 1.0 {
+            self.download_rate_bps = None;
+            self.download_eta_secs = None;
+            return;
+        }
+
+        self.download_rate_bps = Some(rate);
+        self.download_eta_secs =
+            Some(self.download_batch_total.saturating_sub(position) as f64 / rate);
     }
 }
 
@@ -3516,6 +3576,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             progress.download_batch_bytes = batch_bytes_downloaded;
             progress.download_batch_total = batch_bytes_total;
             progress.download_batch_elapsed_ms = batch_elapsed_ms;
+            progress.record_download_sample(batch_elapsed_ms, batch_bytes_downloaded);
             progress.download_file_index = file_index;
             if total_files > 0 {
                 progress.download_total_files = total_files;
@@ -3785,8 +3846,63 @@ mod tests {
         assert_eq!(state.download_batch_bytes, 3_000_016_384);
         assert_eq!(state.download_batch_total, 8_800_000_000);
         assert_eq!(state.download_batch_elapsed_ms, 60_100);
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
         assert_eq!(state.download_file_index, 2);
         assert_eq!(state.download_total_files, 6);
+    }
+
+    #[test]
+    fn download_rate_and_eta_require_multiple_samples() {
+        let mut state = ProgressState::default();
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 128,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 128,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 100,
+                file_index: 0,
+                total_files: 2,
+            },
+        );
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 256,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 256,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 300,
+                file_index: 0,
+                total_files: 0,
+            },
+        );
+        assert!(state.download_rate_bps.is_none());
+        assert!(state.download_eta_secs.is_none());
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.safetensors".to_string(),
+                bytes_downloaded: 1_024,
+                bytes_total: 1024,
+                batch_bytes_downloaded: 1_536,
+                batch_bytes_total: 4096,
+                batch_elapsed_ms: 1_300,
+                file_index: 0,
+                total_files: 0,
+            },
+        );
+        assert!(state.download_rate_bps.is_some());
+        assert!(state.download_eta_secs.is_some());
     }
 
     #[test]
