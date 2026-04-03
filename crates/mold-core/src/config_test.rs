@@ -1542,9 +1542,10 @@ some_future_field = "should be ignored"
 
         std::env::remove_var("MOLD_HOME");
         let _ = std::fs::remove_dir_all(&mold_home);
-        // Unknown fields may cause parse failure → defaults, or be tolerated.
-        // Either way the config should be usable.
-        assert!(!cfg.default_model.is_empty());
+        // serde(deny_unknown_fields) is not set, so unknown keys are silently ignored
+        // and the known fields must be parsed correctly (not fall back to defaults).
+        assert_eq!(cfg.default_model, "flux-dev");
+        assert_eq!(cfg.server_port, 8888);
     }
 
     #[test]
@@ -2157,7 +2158,6 @@ qwen3_variant = "iq4"
 
     #[test]
     fn run_migrations_idempotent_on_already_migrated() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = Config::default(); // config_version = CURRENT
         cfg.models.insert(
             "flux-dev:q8".to_string(),
