@@ -587,6 +587,9 @@ pub struct GalleryState {
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
     /// Actual thumbnail pixel dimensions (width, height), populated when loaded.
     pub thumb_dimensions: Vec<Option<(u32, u32)>>,
+    /// Cached fixed-protocol renders for centered grid thumbnails.
+    /// Populated lazily on first render, keyed by (thumb_area width, height).
+    pub thumb_fixed_cache: Vec<Option<(u16, u16, ratatui_image::protocol::Protocol)>>,
     /// Number of columns in the grid (computed from terminal width).
     pub grid_cols: usize,
     /// Scroll offset in rows for the grid view.
@@ -1015,6 +1018,7 @@ impl App {
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
                 thumb_dimensions: Vec::new(),
+                thumb_fixed_cache: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
@@ -2191,6 +2195,9 @@ impl App {
         if idx < self.gallery.thumb_dimensions.len() {
             self.gallery.thumb_dimensions.remove(idx);
         }
+        if idx < self.gallery.thumb_fixed_cache.len() {
+            self.gallery.thumb_fixed_cache.remove(idx);
+        }
 
         // Adjust selection
         if !self.gallery.entries.is_empty() {
@@ -3355,6 +3362,7 @@ impl App {
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.thumbnail_states = vec![None; entries.len()];
                     self.gallery.thumb_dimensions = vec![None; entries.len()];
+                    self.gallery.thumb_fixed_cache = vec![None; entries.len()];
                     self.gallery.entries = entries;
                     self.gallery.scanning = false;
                     self.gallery.selected = 0;
@@ -3443,6 +3451,7 @@ impl App {
                     let len = self.gallery.entries.len();
                     self.gallery.thumbnail_states = vec![None; len];
                     self.gallery.thumb_dimensions = vec![None; len];
+                    self.gallery.thumb_fixed_cache = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.server_url = Some(url.clone());
@@ -3570,6 +3579,14 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             file_index,
             total_files,
         } => {
+            // Clear "Preparing file" spinner when actual download starts
+            if progress
+                .current_stage
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Preparing file"))
+            {
+                progress.current_stage = None;
+            }
             progress.download_filename = filename;
             progress.download_bytes = bytes_downloaded;
             progress.download_total = bytes_total;
@@ -3586,13 +3603,34 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             filename,
             file_index,
             total_files,
-            ..
+            batch_bytes_downloaded,
+            batch_bytes_total,
+            batch_elapsed_ms,
         } => {
-            progress.clear_download();
             progress.log.push(ProgressLogEntry {
                 message: format!("[{}/{}] {filename}", file_index + 1, total_files),
                 style: ProgressStyle::Done,
             });
+            if file_index + 1 < total_files {
+                // More files to go — keep batch progress visible and show
+                // a spinner while hf-hub validates the next file's cache.
+                progress.download_filename.clear();
+                progress.download_bytes = 0;
+                progress.download_total = 0;
+                progress.download_batch_bytes = batch_bytes_downloaded;
+                progress.download_batch_total = batch_bytes_total;
+                progress.download_batch_elapsed_ms = batch_elapsed_ms;
+                progress.download_file_index = file_index + 1;
+                // Keep total_files and rate/eta for continuity
+                progress.current_stage = Some(format!(
+                    "Preparing file [{}/{}]...",
+                    file_index + 2,
+                    total_files
+                ));
+            } else {
+                // Last file done — clear everything (PullComplete follows shortly)
+                progress.clear_download();
+            }
         }
         SseProgressEvent::PullComplete { model } => {
             progress.clear_download();
@@ -4456,6 +4494,7 @@ mod tests {
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
             thumb_dimensions: Vec::new(),
+            thumb_fixed_cache: Vec::new(),
             grid_cols: 3,
             grid_scroll: 0,
         };
@@ -4552,6 +4591,7 @@ mod tests {
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
                 thumb_dimensions: Vec::new(),
+                thumb_fixed_cache: Vec::new(),
                 grid_cols: 3,
                 grid_scroll: 0,
             },
