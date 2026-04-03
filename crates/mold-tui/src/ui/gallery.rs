@@ -206,33 +206,45 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
             }
         }
 
-        if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
-            if let Ok(img) = image::open(&thumb_path) {
-                // Important: use a fixed protocol for grid thumbnails. Stateful
-                // protocols pad resized images from the top-left for Kitty/
-                // Sixel/iTerm2, which regresses visible centering in the grid.
-                if let Ok(mut protocol) =
-                    app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
-                {
-                    let fitted = protocol.area();
-                    let centered = center_rect(thumb_area, fitted.width, fitted.height);
-                    frame.render_widget(Image::new(&mut protocol), centered);
-                } else {
-                    let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                        .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-                    let font_size = app.picker.font_size();
-                    let centered = centered_thumb_rect(
-                        thumb_area,
-                        iw,
-                        ih,
-                        font_size,
-                        app.picker.protocol_type(),
-                    );
-                    let image_widget = StatefulImage::default();
-                    frame.render_stateful_widget(image_widget, centered, state);
+        if app.gallery.thumbnail_states[idx].is_some() {
+            // Use a cached fixed protocol for centered grid thumbnails.
+            // Stateful protocols pad from top-left on Kitty/Sixel/iTerm2,
+            // which regresses visible centering. The fixed protocol is
+            // created once per thumbnail and reused across render frames.
+            let cache_valid = app
+                .gallery
+                .thumb_fixed_cache
+                .get(idx)
+                .and_then(|c| c.as_ref())
+                .is_some_and(|(w, h, _)| *w == thumb_area.width && *h == thumb_area.height);
+
+            if !cache_valid {
+                let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
+                if let Ok(img) = image::open(&thumb_path) {
+                    if let Ok(protocol) =
+                        app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
+                    {
+                        // Grow cache if needed
+                        while app.gallery.thumb_fixed_cache.len() <= idx {
+                            app.gallery.thumb_fixed_cache.push(None);
+                        }
+                        app.gallery.thumb_fixed_cache[idx] =
+                            Some((thumb_area.width, thumb_area.height, protocol));
+                    }
                 }
-            } else {
+            }
+
+            if let Some((_, _, ref mut protocol)) = app
+                .gallery
+                .thumb_fixed_cache
+                .get_mut(idx)
+                .and_then(|c| c.as_mut())
+            {
+                let fitted = protocol.area();
+                let centered = center_rect(thumb_area, fitted.width, fitted.height);
+                frame.render_widget(Image::new(protocol), centered);
+            } else if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
+                // Fallback to stateful rendering if fixed protocol unavailable
                 let (iw, ih) = app.gallery.thumb_dimensions[idx]
                     .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
                 let font_size = app.picker.font_size();
