@@ -72,6 +72,8 @@ pub struct ProgressState {
     pub download_filename: String,
     pub download_bytes: u64,
     pub download_total: u64,
+    pub download_file_index: usize,
+    pub download_total_files: usize,
 }
 
 impl ProgressState {
@@ -87,6 +89,8 @@ impl ProgressState {
         self.download_filename.clear();
         self.download_bytes = 0;
         self.download_total = 0;
+        self.download_file_index = 0;
+        self.download_total_files = 0;
     }
 }
 
@@ -836,12 +840,28 @@ impl App {
         let session = crate::session::TuiSession::load();
 
         // Restore all settings from session.
-        // Check both local downloads and the catalog (which includes remote models).
-        let model_in_catalog = catalog.iter().any(|m| m.name == session.last_model);
-        if !session.last_model.is_empty()
-            && (config.manifest_model_is_downloaded(&session.last_model) || model_in_catalog)
-        {
-            params.model = session.last_model.clone();
+        // Try the saved model name as-is first (handles config-only custom models
+        // like [models."my-flux"]), then try resolving bare manifest names
+        // (e.g. "flux2-klein" → "flux2-klein:q8").
+        let model_found = if !session.last_model.is_empty() {
+            let exact_in_catalog = catalog.iter().any(|m| m.name == session.last_model);
+            if config.manifest_model_is_downloaded(&session.last_model) || exact_in_catalog {
+                Some(session.last_model.clone())
+            } else {
+                let resolved = mold_core::manifest::resolve_model_name(&session.last_model);
+                let resolved_in_catalog = catalog.iter().any(|m| m.name == resolved);
+                if config.manifest_model_is_downloaded(&resolved) || resolved_in_catalog {
+                    Some(resolved)
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(model_name) = model_found {
+            params.model = model_name;
             // Apply all saved params (width, height, steps, guidance, batch, etc.)
             session.apply_to_params(&mut params);
             // Re-derive capabilities for the restored model
@@ -849,6 +869,11 @@ impl App {
             let caps = capabilities_for_family(&fam);
             visible_fields = ParamField::visible_fields(&caps, initial_mode);
             capabilities = caps;
+        } else {
+            // Model not found — only apply non-model-specific settings.
+            // Skip width/height/steps/guidance/scheduler since they belong to
+            // the missing model and would be wrong for the current default.
+            session.apply_non_model_params(&mut params);
         }
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
@@ -966,11 +991,29 @@ impl App {
 
     /// Clean up resources on quit (kills background server if we spawned it).
     pub fn shutdown(&mut self) {
+        // Save current session so settings persist even without generating
+        self.save_session();
+
         if let Some(ref mut child) = self.server_process {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.server_process = None;
+    }
+
+    /// Persist current prompt, negative prompt, model, and all params to session file.
+    pub fn save_session(&self) {
+        let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
+        let neg_text = self
+            .generate
+            .negative_prompt
+            .lines()
+            .join("\n")
+            .trim()
+            .to_string();
+        let session =
+            crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params);
+        session.save();
     }
 
     pub fn update_model(&mut self, model_name: &str) {
@@ -3144,12 +3187,7 @@ impl App {
                     });
 
                     // Save session state
-                    let session = crate::session::TuiSession::from_params(
-                        &prompt_text,
-                        &neg_text,
-                        &self.generate.params,
-                    );
-                    session.save();
+                    self.save_session();
                     Config::write_last_model(&self.generate.params.model);
 
                     // Push to prompt history
@@ -3433,11 +3471,14 @@ impl App {
                 filename,
                 bytes_downloaded,
                 bytes_total,
-                ..
+                file_index,
+                total_files,
             } => {
                 self.generate.progress.download_filename = filename;
                 self.generate.progress.download_bytes = bytes_downloaded;
                 self.generate.progress.download_total = bytes_total;
+                self.generate.progress.download_file_index = file_index;
+                self.generate.progress.download_total_files = total_files;
             }
             SseProgressEvent::DownloadDone {
                 filename,
@@ -3615,6 +3656,8 @@ mod tests {
         state.weight_loaded = 1000;
         state.download_bytes = 500;
         state.download_filename = "test.gguf".to_string();
+        state.download_file_index = 2;
+        state.download_total_files = 5;
         state.log.push(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
@@ -3625,7 +3668,36 @@ mod tests {
         assert_eq!(state.weight_loaded, 0);
         assert_eq!(state.download_bytes, 0);
         assert!(state.download_filename.is_empty());
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
         assert!(state.log.is_empty());
+    }
+
+    #[test]
+    fn progress_state_download_tracks_file_index() {
+        let mut state = ProgressState::default();
+        state.download_filename = "model.safetensors".to_string();
+        state.download_bytes = 16384;
+        state.download_total = 2_900_000_000;
+        state.download_file_index = 1;
+        state.download_total_files = 5;
+
+        assert_eq!(state.download_file_index, 1);
+        assert_eq!(state.download_total_files, 5);
+
+        // Simulate DownloadDone resetting download state
+        state.download_bytes = 0;
+        state.download_total = 0;
+        state.download_filename.clear();
+        // file_index/total_files stay until next download or clear
+        assert_eq!(state.download_file_index, 1);
+    }
+
+    #[test]
+    fn progress_state_default_has_zero_file_counters() {
+        let state = ProgressState::default();
+        assert_eq!(state.download_file_index, 0);
+        assert_eq!(state.download_total_files, 0);
     }
 
     // ── SeedMode tests ────────────────────────────────────
