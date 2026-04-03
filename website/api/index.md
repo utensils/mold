@@ -18,12 +18,67 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/openapi.json`    | OpenAPI spec                         |
 | `GET`    | `/api/docs`            | Interactive API docs (Scalar)        |
 
+## Authentication
+
+When `MOLD_API_KEY` is set, all API requests (except `/health`, `/api/docs`, and `/api/openapi.json`) must include an `X-Api-Key` header:
+
+```bash
+curl -H "X-Api-Key: your-secret-key" http://localhost:7680/api/status
+```
+
+Without the header (or with an invalid key), the server returns `401 Unauthorized`:
+
+```json
+{"error": "missing X-Api-Key header", "code": "UNAUTHORIZED"}
+```
+
+The `MOLD_API_KEY` variable supports multiple formats:
+- **Single key**: `MOLD_API_KEY=my-secret`
+- **Multiple keys**: `MOLD_API_KEY=key1,key2,key3`
+- **File reference**: `MOLD_API_KEY=@/path/to/keys.txt` (one key per line, `#` comments supported)
+
+When `MOLD_API_KEY` is unset, no authentication is required (backward compatible).
+
+The `mold` CLI reads `MOLD_API_KEY` from the environment and sends the header automatically.
+
+## Rate Limiting
+
+When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
+
+- **Generation tier** (configured rate): `/api/generate`, `/api/generate/stream`, `/api/expand`, `/api/models/load`, `/api/models/pull`, `/api/models/unload`
+- **Read tier** (10x the configured rate): `/api/models`, `/api/status`, `/api/gallery/*`
+
+Health and docs endpoints are exempt from rate limiting.
+
+Example: `MOLD_RATE_LIMIT=10/min` allows 10 generation requests per minute per IP, and 100 read requests per minute per IP.
+
+Supported period formats: `sec` (or `s`), `min` (or `m`), `hour` (or `h`).
+
+Override burst size with `MOLD_RATE_LIMIT_BURST` (defaults to 2x the rate, capped at 100).
+
+When rate limited, the server returns `429 Too Many Requests` with a `Retry-After` header:
+
+```json
+{"error": "rate limit exceeded", "code": "RATE_LIMITED"}
+```
+
+## Request IDs
+
+Every response includes an `X-Request-ID` header for correlation. If the client sends one, it is preserved; otherwise the server generates a UUID v4.
+
 ## Quick Examples
 
 ```bash
 # Generate an image
 curl -X POST http://localhost:7680/api/generate \
   -H "Content-Type: application/json" \
+  -d '{"prompt": "a glowing robot"}' \
+  -o robot.png
+
+# Generate with API key authentication
+curl -X POST http://localhost:7680/api/generate \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your-secret-key" \
   -d '{"prompt": "a glowing robot"}' \
   -o robot.png
 

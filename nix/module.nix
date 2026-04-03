@@ -95,6 +95,25 @@ in
       description = "Restrict CORS to a specific origin. Null means permissive.";
     };
 
+    apiKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Path to a file containing the API key(s) for authentication (e.g. an agenix secret). Loaded at service start. When set, all API requests require an X-Api-Key header.";
+    };
+
+    rateLimit = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Per-IP rate limit for generation endpoints (e.g. '10/min', '5/sec', '100/hour'). Read endpoints get 10x the limit. Null disables rate limiting.";
+      example = "10/min";
+    };
+
+    rateLimitBurst = lib.mkOption {
+      type = lib.types.nullOr lib.types.int;
+      default = null;
+      description = "Override burst allowance for rate limiting. Defaults to 2x the rate limit when null.";
+    };
+
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -234,6 +253,12 @@ in
       // lib.optionalAttrs (cfg.defaultModel != null) {
         MOLD_DEFAULT_MODEL = cfg.defaultModel;
       }
+      // lib.optionalAttrs (cfg.rateLimit != null) {
+        MOLD_RATE_LIMIT = cfg.rateLimit;
+      }
+      // lib.optionalAttrs (cfg.rateLimitBurst != null) {
+        MOLD_RATE_LIMIT_BURST = toString cfg.rateLimitBurst;
+      }
       // cfg.environment;
 
       serviceConfig = {
@@ -241,9 +266,15 @@ in
         User = "mold";
         Group = "mold";
         UMask = "0002";
-        ExecStartPre = lib.optionals (cfg.hfTokenFile != null) [
+        ExecStartPre = lib.optionals (cfg.hfTokenFile != null || cfg.apiKeyFile != null) [
           "+${pkgs.writeShellScript "mold-env" ''
-            echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" > /run/mold/env
+            : > /run/mold/env
+            ${lib.optionalString (cfg.hfTokenFile != null) ''
+              echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" >> /run/mold/env
+            ''}
+            ${lib.optionalString (cfg.apiKeyFile != null) ''
+              echo "MOLD_API_KEY=@${cfg.apiKeyFile}" >> /run/mold/env
+            ''}
             chown mold:mold /run/mold/env
             chmod 600 /run/mold/env
           ''}"
@@ -256,7 +287,7 @@ in
         # StateDirectory and CacheDirectory omitted — homeDir is created
         # by tmpfiles.rules and may not be under /var/lib/.
       }
-      // lib.optionalAttrs (cfg.hfTokenFile != null) {
+      // lib.optionalAttrs (cfg.hfTokenFile != null || cfg.apiKeyFile != null) {
         EnvironmentFile = "-/run/mold/env";
       }
       // {

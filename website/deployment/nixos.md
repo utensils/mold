@@ -74,6 +74,14 @@ system user, and manages the data directory at `/var/lib/mold`.
     # Points to a file containing the token (e.g. agenix secret)
     hfTokenFile = config.age.secrets.hf-token.path;
 
+    # API key authentication — file with one key per line (e.g. agenix secret)
+    # When set, all API requests require an X-Api-Key header
+    # apiKeyFile = config.age.secrets.mold-api-key.path;
+
+    # Rate limiting — per-IP, generation endpoints at configured rate, reads at 10x
+    # rateLimit = "10/min";
+    # rateLimitBurst = 20;
+
     # Extra environment variables
     environment = {
       MOLD_EAGER = "1";        # keep all components loaded
@@ -109,12 +117,15 @@ system user, and manages the data directory at `/var/lib/mold`.
 | `homeDir`      | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                         |
 | `modelsDir`    | string      | `homeDir + /models` | Model storage directory                            |
 | `logLevel`     | enum        | `"info"`            | Log level (trace/debug/info/warn/error)            |
-| `corsOrigin`   | null/string | `null`              | CORS origin restriction (null = permissive)        |
-| `openFirewall` | bool        | `false`             | Open firewall port                                 |
-| `defaultModel` | null/string | `null`              | Default model name                                 |
-| `outputDir`    | null/string | `null`              | Image output directory (default: `homeDir/output`) |
-| `hfTokenFile`  | null/path   | `null`              | Path to file with HuggingFace token                |
-| `environment`  | attrs       | `{}`                | Extra environment variables                        |
+| `corsOrigin`     | null/string | `null`              | CORS origin restriction (null = permissive)                       |
+| `openFirewall`   | bool        | `false`             | Open firewall port                                                |
+| `defaultModel`   | null/string | `null`              | Default model name                                                |
+| `outputDir`      | null/string | `null`              | Image output directory (default: `homeDir/output`)                |
+| `hfTokenFile`    | null/path   | `null`              | Path to file with HuggingFace token                               |
+| `apiKeyFile`     | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
+| `rateLimit`      | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                               |
+| `rateLimitBurst` | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                    |
+| `environment`    | attrs       | `{}`                | Extra environment variables                                       |
 
 ### Discord Bot Options
 

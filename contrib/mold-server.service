@@ -12,9 +12,14 @@ RestartSec=5
 # Environment — override via EnvironmentFile or drop-in
 Environment=MOLD_LOG=info
 Environment=MOLD_PORT=7680
-# For secrets (HF_TOKEN), use EnvironmentFile instead of inline Environment:
+# For secrets (HF_TOKEN, MOLD_API_KEY), use EnvironmentFile instead of inline Environment:
 # EnvironmentFile=-/etc/mold/mold.env
-# Then set HF_TOKEN=hf_... in /etc/mold/mold.env (chmod 600)
+# Then set HF_TOKEN=hf_... and MOLD_API_KEY=... in /etc/mold/mold.env (chmod 600)
+#
+# Optional authentication and rate limiting:
+# Environment=MOLD_API_KEY=your-secret-key
+# Environment=MOLD_RATE_LIMIT=10/min
+# Environment=MOLD_RATE_LIMIT_BURST=20
 
 # NixOS: CUDA driver access
 # Environment=LD_LIBRARY_PATH=/run/opengl-driver/lib

@@ -411,6 +411,9 @@ Key environment variables (highest precedence, override config file):
 | `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
 | `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
+| `MOLD_API_KEY` | — | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
+| `MOLD_RATE_LIMIT` | — | Per-IP rate limit for generation endpoints (e.g., `10/min`) |
+| `MOLD_RATE_LIMIT_BURST` | `2x rate` | Burst allowance for rate limiting |
 | `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin |
 | `MOLD_TEXT_TOKENIZER_PATH` | — | Override generic text tokenizer path (Qwen/Z-Image families) |
 | `MOLD_DECODER_PATH` | — | Override decoder weights path (Wuerstchen) |
