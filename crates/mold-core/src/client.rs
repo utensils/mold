@@ -14,16 +14,31 @@ pub struct MoldClient {
 
 impl MoldClient {
     pub fn new(base_url: &str) -> Self {
+        let client = build_client(None);
         Self {
             base_url: normalize_host(base_url),
-            client: Client::new(),
+            client,
+        }
+    }
+
+    /// Create a client with an explicit API key for authentication.
+    pub fn with_api_key(base_url: &str, api_key: String) -> Self {
+        let client = build_client(Some(&api_key));
+        Self {
+            base_url: normalize_host(base_url),
+            client,
         }
     }
 
     pub fn from_env() -> Self {
         let base_url =
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
-        Self::new(&base_url)
+        let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
+        let client = build_client(api_key.as_deref());
+        Self {
+            base_url: normalize_host(&base_url),
+            client,
+        }
     }
 
     /// Generate an image. Returns raw image bytes (PNG or JPEG).
@@ -423,6 +438,27 @@ impl MoldClient {
             .await?;
         Ok(resp)
     }
+}
+
+/// Build a reqwest Client, optionally with a default `X-Api-Key` header.
+fn build_client(api_key: Option<&str>) -> Client {
+    let mut builder = Client::builder();
+    if let Some(key) = api_key {
+        let mut headers = reqwest::header::HeaderMap::new();
+        match reqwest::header::HeaderValue::from_str(key) {
+            Ok(val) => {
+                headers.insert("x-api-key", val);
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: MOLD_API_KEY contains characters invalid for an HTTP header; \
+                     authentication header will not be sent"
+                );
+            }
+        }
+        builder = builder.default_headers(headers);
+    }
+    builder.build().unwrap_or_else(|_| Client::new())
 }
 
 /// Normalize a host string into a full URL.

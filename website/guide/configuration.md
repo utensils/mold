@@ -103,10 +103,13 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable           | Default          | Description                                   |
-| ------------------ | ---------------- | --------------------------------------------- |
-| `MOLD_OUTPUT_DIR`  | `~/.mold/output` | Image output directory (set empty to disable) |
-| `MOLD_CORS_ORIGIN` | —                | Restrict CORS to specific origin              |
+| Variable                | Default          | Description                                                                       |
+| ----------------------- | ---------------- | --------------------------------------------------------------------------------- |
+| `MOLD_OUTPUT_DIR`       | `~/.mold/output` | Image output directory (set empty to disable)                                     |
+| `MOLD_CORS_ORIGIN`      | —                | Restrict CORS to specific origin                                                  |
+| `MOLD_API_KEY`          | —                | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`) |
+| `MOLD_RATE_LIMIT`       | —                | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)  |
+| `MOLD_RATE_LIMIT_BURST` | —                | Burst allowance override (defaults to 2x rate, capped at 100)                     |
 
 ### Auth
 

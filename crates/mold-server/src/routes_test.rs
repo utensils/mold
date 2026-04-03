@@ -8,6 +8,7 @@ mod tests {
     use mold_inference::progress::ProgressCallback;
     use mold_inference::InferenceEngine;
     use sha2::{Digest, Sha256};
+    use std::net::IpAddr;
     use std::path::PathBuf;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1463,5 +1464,301 @@ mod tests {
             "snapshot should reflect the loaded model"
         );
         assert!(snapshot.is_loaded, "snapshot should show model as loaded");
+    }
+
+    // ── Auth & Rate Limiting integration tests ──────────────────────────────
+
+    /// Build a router with auth middleware applied (mirrors lib.rs wiring).
+    /// Uses .layer() (not .route_layer()) for inject so auth runs on ALL requests
+    /// including unmatched 404 paths — preventing auth bypass.
+    fn app_with_auth(auth_state: crate::auth::AuthState) -> axum::Router {
+        let app = app_empty();
+        app.layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                crate::auth::inject_auth_state,
+            ))
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_missing_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNAUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_invalid_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("x-api-key", "wrong-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_allows_valid_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_health_exempt() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_docs_exempt() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/docs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_openapi_exempt() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_when_none() {
+        let app = app_with_auth(None);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Should succeed without any API key
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_supports_multiple_keys() {
+        let keys =
+            std::collections::HashSet::from(["key-alpha".to_string(), "key-beta".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        // First key works
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("x-api-key", "key-alpha")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Second key works
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .header("x-api-key", "key-beta")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn request_id_generated() {
+        let app = app_empty().layer(axum::middleware::from_fn(
+            crate::request_id::request_id_middleware,
+        ));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn request_id_preserved() {
+        let app = app_empty().layer(axum::middleware::from_fn(
+            crate::request_id::request_id_middleware,
+        ));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("x-request-id", "my-id-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("x-request-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "my-id-123"
+        );
+    }
+
+    #[test]
+    fn rate_limit_parse_specs() {
+        use crate::rate_limit::RouteTier;
+        use axum::http::Method;
+
+        // Generation tier
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/generate", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+
+        // Read tier
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/status", &Method::GET),
+            Some(RouteTier::Read)
+        );
+
+        // Exempt
+        assert_eq!(
+            crate::rate_limit::classify_route("/health", &Method::GET),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_enforced_on_unmatched_404_paths() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        // Request to non-existent path without API key should get 401, not 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unmatched paths must still require auth"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_map_bounded() {
+        use crate::rate_limit::MAX_LIMITER_ENTRIES;
+
+        let quota = governor::Quota::per_second(std::num::NonZeroU32::new(10).unwrap())
+            .allow_burst(std::num::NonZeroU32::new(10).unwrap());
+        let state = crate::rate_limit::RateLimitState::new(quota, quota);
+
+        // Fill the map to the cap
+        for i in 0..MAX_LIMITER_ENTRIES {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from((i as u32).to_be_bytes()));
+            state.get_generation_limiter(ip);
+        }
+
+        // Next insertion should trigger eviction (map cleared + new entry)
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(255, 255, 255, 255));
+        state.get_generation_limiter(ip);
+
+        // Map should be small again (just the one new entry)
+        let map = state.generation_limiters.lock().unwrap();
+        assert!(map.len() <= 1, "map should be evicted, got {}", map.len());
     }
 }

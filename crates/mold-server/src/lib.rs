@@ -1,7 +1,10 @@
+pub mod auth;
 pub mod logging;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
+pub mod rate_limit;
+pub mod request_id;
 pub mod routes;
 pub mod state;
 
@@ -9,6 +12,7 @@ pub mod state;
 mod routes_test;
 
 use anyhow::Result;
+use axum::middleware;
 use mold_core::{Config, ModelPaths};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -103,9 +107,28 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         }
     }
 
+    // Load optional auth and rate-limit configuration from env vars.
+    let auth_state = auth::load_api_keys()?;
+    let rl_config = rate_limit::load_rate_limit_config()?;
+
     let cors = build_cors_layer()?;
 
+    // Build the router with middleware layers.
+    // Order (outermost → innermost): CORS → Trace → RequestID → Auth → RateLimit → routes
+    // All inject + enforce layers use .layer() (not .route_layer()) so they run on
+    // ALL requests, including unmatched 404 paths — preventing auth/rate-limit bypass.
     let app = routes::create_router(state)
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            rl_config,
+            rate_limit::inject_rate_limit_state,
+        ))
+        .layer(middleware::from_fn(auth::require_api_key))
+        .layer(middleware::from_fn_with_state(
+            auth_state,
+            auth::inject_auth_state,
+        ))
+        .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
@@ -113,7 +136,11 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     info!(%addr, "starting mold server");
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -132,9 +159,11 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::Method::DELETE,
                 ])
                 .allow_headers(tower_http::cors::Any)
-                .expose_headers([axum::http::header::HeaderName::from_static(
-                    "x-mold-seed-used",
-                )])
+                .expose_headers([
+                    axum::http::header::HeaderName::from_static("x-mold-seed-used"),
+                    axum::http::header::HeaderName::from_static("x-request-id"),
+                    axum::http::header::HeaderName::from_static("retry-after"),
+                ])
         }
         _ => CorsLayer::permissive(),
     };
