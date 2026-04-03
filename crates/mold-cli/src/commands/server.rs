@@ -23,12 +23,23 @@ impl ManagedServer {
         // 0.0.0.0 and :: bind to all interfaces — probe via loopback
         match self.bind.as_str() {
             "0.0.0.0" | "::" | "" => "127.0.0.1",
+            "::1" => "::1",
             other => other,
         }
     }
 
+    /// Format host for use in socket addresses — wraps IPv6 in brackets.
+    fn socket_host(&self) -> String {
+        let host = self.probe_host();
+        if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        }
+    }
+
     fn base_url(&self) -> String {
-        format!("http://{}:{}", self.probe_host(), self.port)
+        format!("http://{}:{}", self.socket_host(), self.port)
     }
 }
 
@@ -44,10 +55,10 @@ fn read_pid_file() -> Option<ManagedServer> {
         .and_then(|v| v.as_str())
         .unwrap_or("0.0.0.0")
         .to_string();
-    if process_alive(pid) {
+    if process_alive(pid) && is_mold_serve_process(pid) {
         Some(ManagedServer { pid, port, bind })
     } else {
-        // Stale PID file — clean up
+        // Stale PID file or PID reused by unrelated process — clean up
         let _ = std::fs::remove_file(&path);
         None
     }
@@ -94,20 +105,48 @@ pub fn process_alive(_pid: u32) -> bool {
     sys.process(Pid::from_u32(_pid)).is_some()
 }
 
+/// Check if a PID belongs to a mold serve process (not a reused PID).
+fn is_mold_serve_process(pid: u32) -> bool {
+    let procs = procinfo::find_mold_processes();
+    procs
+        .iter()
+        .any(|p| p.pid == pid && p.subcommand == "serve")
+}
+
 /// Check server health via TCP connect + HTTP GET.
 fn check_health(host: &str, port: u16) -> bool {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let addr = format!("{host}:{port}");
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    // Wrap IPv6 hosts in brackets for socket address parsing
+    let addr_str = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let Ok(addr) = addr_str
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next())
+        .ok()
+        .flatten()
+        .ok_or(())
+    else {
+        return false;
+    };
     let Ok(mut stream) =
-        TcpStream::connect_timeout(&addr.parse().unwrap(), std::time::Duration::from_secs(2))
+        TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
     else {
         return false;
     };
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .ok();
-    let req = format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n");
+    let host_header = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let req = format!("GET /health HTTP/1.0\r\nHost: {host_header}\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -194,6 +233,7 @@ pub async fn run_start(
         }
         let probe = match bind {
             "0.0.0.0" | "::" | "" => "127.0.0.1",
+            "::1" => "::1",
             other => other,
         };
         if check_health(probe, port) {
@@ -371,5 +411,67 @@ mod tests {
     fn check_health_no_server() {
         // Port 1 should never have a server
         assert!(!check_health("127.0.0.1", 1));
+    }
+
+    #[test]
+    fn check_health_ipv6_no_server() {
+        // IPv6 loopback on port 1 should not panic
+        assert!(!check_health("::1", 1));
+    }
+
+    #[test]
+    fn managed_server_probe_host_ipv4_wildcard() {
+        let srv = ManagedServer {
+            pid: 1,
+            port: 7680,
+            bind: "0.0.0.0".to_string(),
+        };
+        assert_eq!(srv.probe_host(), "127.0.0.1");
+    }
+
+    #[test]
+    fn managed_server_probe_host_ipv6_wildcard() {
+        let srv = ManagedServer {
+            pid: 1,
+            port: 7680,
+            bind: "::".to_string(),
+        };
+        assert_eq!(srv.probe_host(), "127.0.0.1");
+    }
+
+    #[test]
+    fn managed_server_probe_host_ipv6_loopback() {
+        let srv = ManagedServer {
+            pid: 1,
+            port: 7680,
+            bind: "::1".to_string(),
+        };
+        assert_eq!(srv.probe_host(), "::1");
+    }
+
+    #[test]
+    fn managed_server_base_url_ipv6() {
+        let srv = ManagedServer {
+            pid: 1,
+            port: 7680,
+            bind: "::1".to_string(),
+        };
+        assert_eq!(srv.base_url(), "http://[::1]:7680");
+    }
+
+    #[test]
+    fn managed_server_base_url_ipv4() {
+        let srv = ManagedServer {
+            pid: 1,
+            port: 8080,
+            bind: "192.168.1.10".to_string(),
+        };
+        assert_eq!(srv.base_url(), "http://192.168.1.10:8080");
+    }
+
+    #[test]
+    fn is_mold_serve_process_bogus_pid() {
+        // A non-existent PID should not be a mold serve process
+        assert!(!is_mold_serve_process(999_999_999));
     }
 }

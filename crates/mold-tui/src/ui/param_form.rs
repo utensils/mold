@@ -59,7 +59,16 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
         }
 
         let label = format!("{:<10}", field.label());
-        let value = state.params.display_value(field);
+        let value = if *field == ParamField::SeedValue && state.params.seed.is_none() {
+            if let Some(last) = state.last_seed {
+                // In random mode, show the last seed used from generation
+                format!("{last} (last)")
+            } else {
+                state.params.display_value(field)
+            }
+        } else {
+            state.params.display_value(field)
+        };
 
         let (label_style, value_style) = if is_selected {
             (theme.param_selected(), theme.param_selected())

@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -810,16 +810,45 @@ async fn health() -> impl IntoResponse {
 
 // ── /api/shutdown ─────────────────────────────────────────────────────────────
 
-/// Trigger graceful server shutdown. Protected by auth middleware when API key is set.
+/// Trigger graceful server shutdown.
+///
+/// When API key auth is enabled, the auth middleware protects this endpoint.
+/// When auth is disabled, only requests from loopback addresses (127.0.0.1, ::1)
+/// are accepted to prevent remote shutdown.
 #[utoipa::path(
     post,
     path = "/api/shutdown",
     tag = "server",
     responses(
         (status = 200, description = "Shutdown initiated"),
+        (status = 403, description = "Forbidden — remote shutdown requires API key auth"),
     )
 )]
-async fn shutdown_server(State(state): State<AppState>) -> impl IntoResponse {
+async fn shutdown_server(
+    State(state): State<AppState>,
+    request: Request,
+) -> impl IntoResponse {
+    // When auth is disabled (no AuthState extension or AuthState is None),
+    // restrict shutdown to loopback addresses only.
+    let auth_enabled = request
+        .extensions()
+        .get::<crate::auth::AuthState>()
+        .is_some_and(|s| s.is_some());
+
+    if !auth_enabled {
+        let is_loopback = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().is_loopback())
+            .unwrap_or(false);
+        if !is_loopback {
+            return (
+                StatusCode::FORBIDDEN,
+                "shutdown requires API key auth or localhost access\n",
+            );
+        }
+    }
+
     tracing::info!("shutdown requested via API");
     if let Some(tx) = state.shutdown_tx.lock().await.take() {
         let _ = tx.send(());
