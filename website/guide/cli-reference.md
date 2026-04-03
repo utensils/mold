@@ -69,7 +69,7 @@ mold expand <PROMPT> [OPTIONS]
 Start the HTTP inference server.
 
 ```bash
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text] [--discord]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text] [--log-file] [--discord]
 ```
 
 | Flag                  | Description                                                       |
@@ -78,6 +78,7 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text]
 | `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                               |
 | `--models-dir <PATH>` | Override the models directory for this process                    |
 | `--log-format <FMT>`  | `json` or `text`; defaults to `json` for production-friendly logs |
+| `--log-file`          | Enable rotated file logging to `~/.mold/logs/`                    |
 | `--discord`           | Also starts the built-in Discord bot in the same process          |
 
 `--discord` is only available when the binary was built with the `discord`
