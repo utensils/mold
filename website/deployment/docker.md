@@ -91,6 +91,7 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 
 | Variable                | Default | Description                                              |
 | ----------------------- | ------- | -------------------------------------------------------- |
+| `MOLD_HOME`             | auto    | Base mold directory (auto-detected from `/workspace`)    |
 | `MOLD_PORT`             | `7680`  | Server port                                              |
 | `MOLD_LOG`              | `info`  | Log level                                                |
 | `MOLD_DEFAULT_MODEL`    | —       | Default model to load                                    |
@@ -98,6 +99,7 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 | `MOLD_API_KEY`          | —       | API key for authentication (`X-Api-Key` header required) |
 | `MOLD_RATE_LIMIT`       | —       | Per-IP rate limit (e.g., `10/min`)                       |
 | `MOLD_RATE_LIMIT_BURST` | —       | Burst allowance override (defaults to 2x rate)           |
+| `HF_TOKEN`              | —       | HuggingFace token for gated model repos                  |
 
 ### Recommended GPUs
 
@@ -107,11 +109,9 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 | L40S      | 48 GB | $0.40 | Full BF16 FLUX without offload |
 | A100 80GB | 80 GB | $0.79 | Maximum headroom               |
 
-<!-- prettier-ignore-start -->
 ::: tip Proxy Timeout
 RunPod's Cloudflare proxy has a 100-second timeout. Use the SSE streaming endpoint (`/api/generate/stream`) for long generations.
 :::
-<!-- prettier-ignore-end -->
 
 ## Image Details
 

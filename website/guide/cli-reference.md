@@ -231,6 +231,36 @@ mold discord
 Requires the `discord` feature flag. The bot can also be started alongside the
 server with `mold serve --discord`. See [Discord Bot](/api/discord) for setup.
 
+## `mold stats`
+
+Show disk usage overview for models, output, logs, and shared components.
+
+```bash
+mold stats [--json]
+```
+
+| Flag     | Description             |
+| -------- | ----------------------- |
+| `--json` | Machine-readable output |
+
+## `mold clean`
+
+Clean up orphaned files, stale downloads, and old output images. Dry-run by
+default — shows what would be removed without deleting anything.
+
+```bash
+mold clean [--force] [--older-than DURATION]
+```
+
+| Flag                      | Description                                          |
+| ------------------------- | ---------------------------------------------------- |
+| `--force`                 | Actually delete files (default is dry-run)           |
+| `--older-than <DURATION>` | Include output images older than this (e.g. 30d, 7d) |
+
+Detects stale `.pulling` markers from interrupted downloads, orphaned shared
+files not referenced by any model, hf-cache transient files, and output images
+older than the specified age.
+
 ## `mold rm`
 
 Remove downloaded models.

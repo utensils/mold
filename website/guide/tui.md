@@ -8,11 +8,9 @@ Built on [ratatui](https://ratatui.rs) with Kitty graphics protocol support for
 pixel-perfect image preview in terminals like Ghostty, kitty, and WezTerm. Falls
 back to halfblock rendering in other terminals.
 
-<!-- prettier-ignore-start -->
 ::: warning Beta
 The TUI is under active development. Core generation, model management, gallery, and image preview work well. Some features (prompt expansion, theme customization) are planned but not yet implemented.
 :::
-<!-- prettier-ignore-end -->
 
 ![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
 
@@ -27,11 +25,9 @@ Type a prompt, press **Enter**, and watch the progress panel as your image
 generates. The result appears in the Preview panel and is saved to
 `~/.mold/output/`.
 
-<!-- prettier-ignore-start -->
 ::: tip
 The `tui` feature must be compiled in. Pre-built releases and the Nix package include it by default. If building from source, add `--features tui` to your build command.
 :::
-<!-- prettier-ignore-end -->
 
 ## Auto-Start Server
 

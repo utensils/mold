@@ -37,8 +37,7 @@ features:
   - icon:
       src: /icons/rust.svg
     title: Linux NVIDIA + macOS Metal
-    details:
-      Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
+    details: Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
       Silicon on macOS via Metal. No Python, no libtorch, no ONNX.
   - icon:
       src: /icons/server.svg

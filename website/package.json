@@ -22,6 +22,14 @@
     "singleQuote": true,
     "trailingComma": "es5",
     "proseWrap": "always",
-    "printWidth": 80
+    "printWidth": 80,
+    "overrides": [
+      {
+        "files": "**/*.md",
+        "options": {
+          "proseWrap": "preserve"
+        }
+      }
+    ]
   }
 }

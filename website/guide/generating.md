@@ -92,11 +92,9 @@ mold run flux-dev:bf16 "anime style" --lora style.safetensors --lora-scale 0.7
 mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 ```
 
-<!-- prettier-ignore-start -->
 ::: tip LoRA requirements
 FLUX models only (BF16 or GGUF quantized). Requires `.safetensors` format with diffusers-format keys. BF16 models on 24GB cards auto-use block-level offloading.
 :::
-<!-- prettier-ignore-end -->
 
 ## Inline Preview
 
