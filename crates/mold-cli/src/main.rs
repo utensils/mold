@@ -317,6 +317,43 @@ Files shared between models (e.g. VAE, CLIP) are kept until no model references 
     #[command(alias = "ls")]
     List,
 
+    /// Show disk usage overview for models, output, logs, and shared components
+    #[command(after_long_help = "\
+Examples:
+  mold stats               Show disk usage summary
+  mold stats --json        Machine-readable output")]
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clean up orphaned files, stale downloads, and old output images
+    ///
+    /// Dry-run by default — shows what would be removed without deleting anything.
+    /// Use --force to actually delete files.
+    #[command(after_long_help = "\
+Examples:
+  mold clean                          Dry-run: show what would be cleaned
+  mold clean --force                  Actually delete orphaned/stale files
+  mold clean --older-than 30d         Include output images older than 30 days
+  mold clean --older-than 7d --force  Delete old output images
+
+Detects:
+  - Stale .pulling markers from interrupted downloads (>6 hours old)
+  - Orphaned shared files not referenced by any installed model
+  - hf-cache transient files (locks, partial downloads, dangling symlinks)
+  - Output images older than the specified age (with --older-than)")]
+    Clean {
+        /// Actually delete files (default is dry-run)
+        #[arg(long)]
+        force: bool,
+
+        /// Clean output images older than this duration (e.g. 30d, 7d, 24h, 12h)
+        #[arg(long, value_name = "DURATION")]
+        older_than: Option<String>,
+    },
+
     /// Show detailed model information, or installation overview when no model is given
     #[command(after_long_help = "\
 Examples:
@@ -736,6 +773,12 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::List => {
             commands::list::run().await?;
+        }
+        Commands::Stats { json } => {
+            commands::stats::run(json)?;
+        }
+        Commands::Clean { force, older_than } => {
+            commands::clean::run(force, older_than.as_deref())?;
         }
         Commands::Info { model, verify } => {
             if let Some(model) = model {
@@ -1261,6 +1304,76 @@ mod tests {
                 assert!(verify);
             }
             _ => panic!("expected Info"),
+        }
+    }
+
+    // ── stats tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_parses() {
+        let cli = parse(&["stats"]);
+        match cli.command {
+            Commands::Stats { json } => assert!(!json),
+            _ => panic!("expected Stats"),
+        }
+    }
+
+    #[test]
+    fn stats_json_flag() {
+        let cli = parse(&["stats", "--json"]);
+        match cli.command {
+            Commands::Stats { json } => assert!(json),
+            _ => panic!("expected Stats"),
+        }
+    }
+
+    // ── clean tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_parses() {
+        let cli = parse(&["clean"]);
+        match cli.command {
+            Commands::Clean { force, older_than } => {
+                assert!(!force);
+                assert!(older_than.is_none());
+            }
+            _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn clean_force_flag() {
+        let cli = parse(&["clean", "--force"]);
+        match cli.command {
+            Commands::Clean { force, older_than } => {
+                assert!(force);
+                assert!(older_than.is_none());
+            }
+            _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn clean_older_than_flag() {
+        let cli = parse(&["clean", "--older-than", "30d"]);
+        match cli.command {
+            Commands::Clean { force, older_than } => {
+                assert!(!force);
+                assert_eq!(older_than.as_deref(), Some("30d"));
+            }
+            _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn clean_older_than_and_force() {
+        let cli = parse(&["clean", "--older-than", "7d", "--force"]);
+        match cli.command {
+            Commands::Clean { force, older_than } => {
+                assert!(force);
+                assert_eq!(older_than.as_deref(), Some("7d"));
+            }
+            _ => panic!("expected Clean"),
         }
     }
 }
