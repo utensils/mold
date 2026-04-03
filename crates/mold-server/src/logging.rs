@@ -26,12 +26,24 @@ pub fn init_tracing(
     if file_enabled {
         let _ = std::fs::create_dir_all(&log_dir);
         cleanup_old_logs(&log_dir, config.max_days);
-        let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        let appender = match tracing_appender::rolling::RollingFileAppender::builder()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .filename_prefix("mold-server")
             .filename_suffix("log")
             .build(&log_dir)
-            .expect("failed to create log file appender");
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("warning: failed to create log file appender: {e}");
+                eprintln!("warning: file logging disabled, continuing with stderr only");
+                let filter = make_filter(&filter_str, default_level);
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .init();
+                return LogGuard { _file_guard: None };
+            }
+        };
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
         file_guard = Some(guard);
 
@@ -80,12 +92,21 @@ pub fn init_tracing_file_only(
 
     let _ = std::fs::create_dir_all(&log_dir);
     cleanup_old_logs(&log_dir, config.max_days);
-    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+    let appender = match tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("mold-tui")
         .filename_suffix("log")
         .build(&log_dir)
-        .expect("failed to create log file appender");
+    {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("warning: failed to create TUI log file appender: {e}");
+            // Register a no-op subscriber so tracing macros are silently
+            // discarded rather than leaving the global subscriber unset.
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+            return LogGuard { _file_guard: None };
+        }
+    };
     let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     let filter = make_filter(&filter_str, default_level);

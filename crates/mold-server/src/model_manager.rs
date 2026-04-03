@@ -194,7 +194,9 @@ pub(crate) async fn ensure_model_ready(
             }
 
             // Take the engine out of cache to load in spawn_blocking.
-            let mut engine = cache.remove(model_name).unwrap();
+            let mut engine = cache.remove(model_name).ok_or_else(|| {
+                ApiError::internal(format!("cache race: model '{model_name}' vanished"))
+            })?;
             drop(cache);
 
             if let Some(callback) = progress.clone() {
