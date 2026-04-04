@@ -5011,7 +5011,9 @@ mod tests {
     /// Config mutations are tested in-memory; save_config() may fail
     /// (save_error is set) but that's fine for mutation tests.
     fn make_settings_test_app() -> App {
-        let mut config = Config::load_or_default();
+        let mut config = Config::default();
+        // Pin default model so the test doesn't depend on downloaded models
+        config.default_model = "flux2-klein:q8".to_string();
         // Insert a test model so the Model Defaults section appears
         config.models.insert(
             "test-model:q8".to_string(),
