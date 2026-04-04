@@ -491,7 +491,7 @@ async fn upscale(
     let upscaler_cache = state.upscaler_cache.clone();
     let resp =
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
-            let mut cache = upscaler_cache.lock().unwrap();
+            let mut cache = upscaler_cache.lock().unwrap_or_else(|e| e.into_inner());
 
             // Reuse cached engine if same model
             let needs_new = cache

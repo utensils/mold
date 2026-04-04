@@ -2243,7 +2243,10 @@ impl App {
             }
             Action::Cancel => {
                 if self.active_view == View::Gallery && self.upscale_in_progress {
-                    // Cancel in-progress upscale
+                    // Cancel in-progress upscale. abort() cancels the outer async
+                    // task so no UpscaleComplete event is sent, but the inner
+                    // spawn_blocking thread (GPU inference) runs to completion —
+                    // Tokio blocking threads have no cooperative cancellation.
                     if let Some(handle) = self.upscale_task.take() {
                         handle.abort();
                     }
