@@ -29,6 +29,7 @@ and VRAM requirements — including both image and video generation.
 | `sdxl-turbo:fp16`  | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
 | `sd15:fp16`        | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
 | `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
+| `ltx-video:bf16`   | BF16    | ~12 GB       | Slow, 40 steps     | Video (25 frames @ 24fps)    |
 
 If you are close to your card limit, start with a smaller quantization or use
 `--offload`. Full BF16 FLUX can run on 24 GB cards, but offloading may kick in
@@ -93,6 +94,7 @@ mold pull flux-dev:q4
 | [Z-Image](/models/z-image)       | 1024x1024         | Qwen3 encoder, 3D RoPE         |
 | [Wuerstchen](/models/wuerstchen) | 1024x1024         | 3-stage cascade, 42x compress  |
 | [Qwen-Image](/models/qwen-image) | 1024x1024         | Qwen2.5-VL, flow-matching, CFG |
+| [LTX Video](/models/ltx-video)   | 768x512           | T5-XXL, DiT, 3D causal VAE     |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.

@@ -25,6 +25,7 @@ features today?
 | Flux.2 Klein  | Not yet | Not yet    |
 | Wuerstchen v2 | Not yet | Not yet    |
 | Qwen-Image    | Not yet | Not yet    |
+| LTX Video     | Not yet | Not yet    |
 
 ## Control and Adapters
 
@@ -38,6 +39,7 @@ features today?
 | Flux.2 Klein  | No         | No   |
 | Wuerstchen v2 | No         | No   |
 | Qwen-Image    | No         | No   |
+| LTX Video     | No         | No   |
 
 ## Prompt Conditioning
 
@@ -51,6 +53,17 @@ features today?
 | Flux.2 Klein  | No               | No                 |
 | Wuerstchen v2 | Yes              | No                 |
 | Qwen-Image    | Yes              | No                 |
+| LTX Video     | No               | No                 |
+
+## Video Generation
+
+| Family        | txt2vid | img2vid |
+| ------------- | ------- | ------- |
+| LTX Video     | Yes     | Not yet |
+| All others    | No      | No      |
+
+Video output is encoded as animated GIF. Frame count must be 8n+1 (9, 17, 25,
+33, ...). Dimensions must be multiples of 32.
 
 ## Notes
 
