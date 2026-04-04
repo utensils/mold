@@ -177,7 +177,7 @@ impl Flux2Engine {
             Ok((
                 Flux2TransformerWrapper::Quantized(
                     super::quantized_transformer::QuantizedFlux2Transformer::new(
-                        cfg, gguf_vb, gpu_dtype, device,
+                        cfg, gguf_vb, device,
                     )?,
                 ),
                 "Loading Flux.2 transformer (GPU, GGUF)",

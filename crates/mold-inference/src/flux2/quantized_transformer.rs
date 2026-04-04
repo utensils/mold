@@ -424,12 +424,7 @@ pub(crate) struct QuantizedFlux2Transformer {
 impl QuantizedFlux2Transformer {
     /// Load from a GGUF VarBuilder. Weights stay quantized; only norm tensors
     /// are dequantized to F32.
-    pub fn new(
-        cfg: &Flux2Config,
-        vb: VarBuilder,
-        _gpu_dtype: DType,
-        device: &Device,
-    ) -> Result<Self> {
+    pub fn new(cfg: &Flux2Config, vb: VarBuilder, device: &Device) -> Result<Self> {
         let h_sz = cfg.hidden_size;
         let img_in = quantized_nn::linear_no_bias(cfg.in_channels, h_sz, vb.pp("img_in"))?;
         let txt_in = quantized_nn::linear_no_bias(cfg.context_in_dim, h_sz, vb.pp("txt_in"))?;
