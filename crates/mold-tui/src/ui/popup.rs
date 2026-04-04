@@ -140,12 +140,16 @@ fn build_model_item<'a>(
     width: u16,
 ) -> ListItem<'a> {
     let manifest = mold_core::manifest::find_manifest(name);
-    let downloaded = config.manifest_model_is_downloaded(name);
+    let resolved = mold_core::manifest::resolve_model_name(name);
+    // Model is available if it's in the config or manifest says it's downloaded
+    let downloaded =
+        config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
     let is_default = default_model.is_some_and(|d| d == name);
 
-    let marker = if is_selected { "\u{25b8} " } else { "  " };
+    // Use a fixed-width 2-column marker for consistent alignment
+    let marker = if is_selected { "> " } else { "  " };
 
-    // Size display
+    // Size display (right-aligned, fixed 7-char width)
     let size_str = manifest
         .map(|m| {
             let bytes = m.model_size_bytes();
@@ -159,29 +163,34 @@ fn build_model_item<'a>(
 
     // Status tag
     let status = if is_default && downloaded {
-        " default "
+        "default"
     } else if is_default && !downloaded {
-        " default \u{00b7} pull "
+        "default | pull"
     } else if show_download_status && !downloaded {
-        " pull "
+        "pull"
+    } else if show_download_status && downloaded {
+        "ready"
     } else {
         ""
     };
 
-    // Build first line with right-aligned size and status
-    let name_display = name.to_string();
-    let left = format!("{marker}{name_display}");
+    // Build first line: marker + name left-aligned, size + status right-aligned
+    // Use fixed-width columns so alignment is consistent across all rows
+    let left = format!("{marker}{name}");
     let right = if status.is_empty() {
-        size_str.clone()
+        format!("{size_str:>7}")
     } else {
-        format!("{size_str}  {status}")
+        format!("{size_str:>7}  {status}")
     };
-    let padding = (width as usize).saturating_sub(left.len() + right.len());
+    let used = left.len() + right.len();
+    let padding = (width as usize).saturating_sub(used);
     let pad = " ".repeat(padding);
 
     let name_style = Style::default().fg(theme.text);
     let size_style = Style::default().fg(theme.text_dim);
-    let status_style = if is_default {
+    let status_style = if status == "ready" {
+        Style::default().fg(Color::Green)
+    } else if is_default {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -192,7 +201,7 @@ fn build_model_item<'a>(
     let line1 = Line::from(vec![
         Span::styled(left, name_style),
         Span::styled(pad, name_style),
-        Span::styled(size_str, size_style),
+        Span::styled(format!("{size_str:>7}"), size_style),
         if !status.is_empty() {
             Span::styled(format!("  {status}"), status_style)
         } else {
