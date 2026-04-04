@@ -1201,11 +1201,28 @@ impl App {
                 tile_size: None,
             };
 
-            // Try server first
+            // Try server first — use SSE streaming for tile progress
             if let Some(ref url) = server_url {
                 let client = mold_core::MoldClient::new(url);
-                match client.upscale(&req).await {
-                    Ok(resp) => {
+
+                // Stream progress events from SSE to the TUI
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
+                let tx_sse = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = progress_rx.recv().await {
+                        if let mold_core::SseProgressEvent::DenoiseStep { step, total, .. } = &event
+                        {
+                            let _ = tx_sse.send(BackgroundEvent::UpscaleProgress {
+                                tile: *step,
+                                total: *total,
+                            });
+                        }
+                    }
+                });
+
+                match client.upscale_stream(&req, progress_tx).await {
+                    Ok(Some(resp)) => {
                         let _ = tx.send(BackgroundEvent::UpscaleComplete {
                             image_data: resp.image.data,
                             source_path,
@@ -1216,6 +1233,30 @@ impl App {
                             upscale_time_ms: resp.upscale_time_ms,
                         });
                         return;
+                    }
+                    Ok(None) => {
+                        // Server doesn't support streaming upscale, fall back to non-streaming
+                        match client.upscale(&req).await {
+                            Ok(resp) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleComplete {
+                                    image_data: resp.image.data,
+                                    source_path,
+                                    model: resp.model,
+                                    scale_factor: resp.scale_factor,
+                                    original_width: resp.original_width,
+                                    original_height: resp.original_height,
+                                    upscale_time_ms: resp.upscale_time_ms,
+                                });
+                                return;
+                            }
+                            Err(e) if mold_core::MoldClient::is_connection_error(&e) => {}
+                            Err(e) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleFailed(format!(
+                                    "Server error: {e}"
+                                )));
+                                return;
+                            }
+                        }
                     }
                     Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
                         // Fall through to local

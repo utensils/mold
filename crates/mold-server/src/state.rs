@@ -33,6 +33,7 @@ pub struct ActiveGenerationSnapshot {
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
     Complete(mold_core::SseCompleteEvent),
+    UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }
 
