@@ -555,6 +555,19 @@ pub struct SseCompleteEvent {
     pub model: String,
 }
 
+/// SSE event emitted when an upscale request completes.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseUpscaleCompleteEvent {
+    /// Base64-encoded upscaled image data.
+    pub image: String,
+    pub format: OutputFormat,
+    pub model: String,
+    pub scale_factor: u32,
+    pub original_width: u32,
+    pub original_height: u32,
+    pub upscale_time_ms: u64,
+}
+
 /// Error event sent when generation fails during SSE streaming.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseErrorEvent {

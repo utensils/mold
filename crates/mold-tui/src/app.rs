@@ -42,6 +42,20 @@ pub enum BackgroundEvent {
     ModelRemoveComplete(String),
     /// Model removal failed.
     ModelRemoveFailed(String),
+    /// Upscale tile progress update.
+    UpscaleProgress { tile: usize, total: usize },
+    /// Upscale completed successfully.
+    UpscaleComplete {
+        image_data: Vec<u8>,
+        source_path: std::path::PathBuf,
+        model: String,
+        scale_factor: u32,
+        original_width: u32,
+        original_height: u32,
+        upscale_time_ms: u64,
+    },
+    /// Upscale failed.
+    UpscaleFailed(String),
 }
 
 /// A single entry in the progress log.
@@ -792,6 +806,12 @@ pub enum Popup {
     Info {
         message: String,
     },
+    /// Upscaler model selector (all known upscaler models, auto-pulls on select).
+    UpscaleModelSelector {
+        filter: String,
+        selected: usize,
+        filtered: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -823,6 +843,12 @@ pub struct App {
     pub layout: LayoutAreas,
     /// Background server process spawned by the TUI (killed on quit).
     pub server_process: Option<std::process::Child>,
+    /// Whether an upscale job is currently running.
+    pub upscale_in_progress: bool,
+    /// Handle to the background upscale task (for cancellation).
+    pub upscale_task: Option<tokio::task::JoinHandle<()>>,
+    /// Current tile progress for in-flight upscale (current, total).
+    pub upscale_tile_progress: Option<(usize, usize)>,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -1083,6 +1109,9 @@ impl App {
             history,
             layout: LayoutAreas::default(),
             server_process,
+            upscale_in_progress: false,
+            upscale_task: None,
+            upscale_tile_progress: None,
         });
 
         // Spawn background gallery scan
@@ -1108,6 +1137,212 @@ impl App {
             };
             let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
         });
+    }
+
+    /// Spawn a background upscale job for the currently selected gallery image.
+    fn spawn_upscale(&mut self, model_name: String) {
+        let entry = match self.gallery.entries.get(self.gallery.selected) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+
+        self.upscale_in_progress = true;
+        self.upscale_tile_progress = None;
+
+        // Switch to grid view to avoid image protocol conflicts with progress overlay
+        if self.gallery.view_mode == GalleryViewMode::Detail {
+            self.gallery.view_mode = GalleryViewMode::Grid;
+            self.gallery.preview_image = None;
+            self.gallery.image_state = None;
+        }
+
+        let tx = self.bg_tx.clone();
+        let server_url = self.server_url.clone();
+        let config = self.config.clone();
+        let source_path = entry.path.clone();
+
+        let handle = self.tokio_handle.spawn(async move {
+            // Read image bytes
+            let image_bytes = if let Some(ref url) = entry.server_url {
+                let filename = entry.filename();
+                match crate::gallery_scan::fetch_and_cache_image(url, &filename).await {
+                    Some(cached_path) => match tokio::fs::read(&cached_path).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            let _ = tx.send(BackgroundEvent::UpscaleFailed(format!(
+                                "Failed to read cached image: {e}"
+                            )));
+                            return;
+                        }
+                    },
+                    None => {
+                        let _ = tx.send(BackgroundEvent::UpscaleFailed(
+                            "Failed to fetch image from server".into(),
+                        ));
+                        return;
+                    }
+                }
+            } else {
+                match tokio::fs::read(&entry.path).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        let _ = tx.send(BackgroundEvent::UpscaleFailed(format!(
+                            "Failed to read image: {e}"
+                        )));
+                        return;
+                    }
+                }
+            };
+
+            let req = mold_core::UpscaleRequest {
+                model: model_name.clone(),
+                image: image_bytes,
+                output_format: mold_core::OutputFormat::Png,
+                tile_size: None,
+            };
+
+            // Try server first — use SSE streaming for tile progress
+            if let Some(ref url) = server_url {
+                let client = mold_core::MoldClient::new(url);
+
+                // Stream progress events from SSE to the TUI
+                let (progress_tx, mut progress_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
+                let tx_sse = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = progress_rx.recv().await {
+                        if let mold_core::SseProgressEvent::DenoiseStep { step, total, .. } = &event
+                        {
+                            let _ = tx_sse.send(BackgroundEvent::UpscaleProgress {
+                                tile: *step,
+                                total: *total,
+                            });
+                        }
+                    }
+                });
+
+                match client.upscale_stream(&req, progress_tx).await {
+                    Ok(Some(resp)) => {
+                        let _ = tx.send(BackgroundEvent::UpscaleComplete {
+                            image_data: resp.image.data,
+                            source_path,
+                            model: resp.model,
+                            scale_factor: resp.scale_factor,
+                            original_width: resp.original_width,
+                            original_height: resp.original_height,
+                            upscale_time_ms: resp.upscale_time_ms,
+                        });
+                        return;
+                    }
+                    Ok(None) => {
+                        // Server doesn't support streaming upscale, fall back to non-streaming
+                        match client.upscale(&req).await {
+                            Ok(resp) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleComplete {
+                                    image_data: resp.image.data,
+                                    source_path,
+                                    model: resp.model,
+                                    scale_factor: resp.scale_factor,
+                                    original_width: resp.original_width,
+                                    original_height: resp.original_height,
+                                    upscale_time_ms: resp.upscale_time_ms,
+                                });
+                                return;
+                            }
+                            Err(e) if mold_core::MoldClient::is_connection_error(&e) => {}
+                            Err(e) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleFailed(format!(
+                                    "Server error: {e}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) if mold_core::MoldClient::is_connection_error(&e) => {
+                        // Fall through to local
+                    }
+                    Err(e) => {
+                        let _ =
+                            tx.send(BackgroundEvent::UpscaleFailed(format!("Server error: {e}")));
+                        return;
+                    }
+                }
+            }
+
+            // Local fallback — auto-pull if not downloaded, then upscale
+            let resolved = mold_core::manifest::resolve_model_name(&model_name);
+            let mut config = config;
+            if config
+                .models
+                .get(&resolved)
+                .and_then(|c| c.transformer.as_ref())
+                .is_none()
+            {
+                // Model not configured — auto-pull with progress bars
+                match crate::backend::auto_pull_model(&resolved, &tx).await {
+                    Ok(updated_config) => {
+                        config = updated_config;
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(BackgroundEvent::UpscaleFailed(msg));
+                        return;
+                    }
+                }
+            }
+
+            let model_name_local = resolved;
+            let tx_progress = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let weights_path = config
+                    .models
+                    .get(&model_name_local)
+                    .and_then(|c| c.transformer.as_ref())
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Upscaler model '{}' not configured", model_name_local)
+                    })?;
+
+                let mut engine = mold_inference::create_upscale_engine(
+                    model_name_local.clone(),
+                    weights_path,
+                    mold_inference::LoadStrategy::Eager,
+                )?;
+
+                engine.set_on_progress(Box::new(move |event| {
+                    if let mold_inference::ProgressEvent::DenoiseStep { step, total, .. } = event {
+                        let _ = tx_progress
+                            .send(BackgroundEvent::UpscaleProgress { tile: step, total });
+                    }
+                }));
+
+                engine.upscale(&req)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(resp)) => {
+                    let _ = tx.send(BackgroundEvent::UpscaleComplete {
+                        image_data: resp.image.data,
+                        source_path,
+                        model: resp.model,
+                        scale_factor: resp.scale_factor,
+                        original_width: resp.original_width,
+                        original_height: resp.original_height,
+                        upscale_time_ms: resp.upscale_time_ms,
+                    });
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(BackgroundEvent::UpscaleFailed(format!("{e}")));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundEvent::UpscaleFailed(format!(
+                        "Task panicked: {e}"
+                    )));
+                }
+            }
+        });
+
+        self.upscale_task = Some(handle);
     }
 
     /// Clean up resources on quit (kills background server if we spawned it).
@@ -1397,6 +1632,38 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::UpscaleModelSelector {
+                    filter,
+                    selected,
+                    filtered,
+                }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        if let Some(model) = filtered.get(*selected).cloned() {
+                            self.close_popup();
+                            self.spawn_upscale(model);
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if *selected + 1 < filtered.len() {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        filter.push(c);
+                        self.update_upscale_model_filter();
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        self.update_upscale_model_filter();
+                    }
+                    _ => {}
+                },
                 Some(Popup::HostInput { input }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -1667,7 +1934,8 @@ impl App {
             MouseEventKind::ScrollUp => {
                 // If popup is open, scroll within the popup
                 match &mut self.popup {
-                    Some(Popup::ModelSelector { selected, .. }) => {
+                    Some(Popup::ModelSelector { selected, .. })
+                    | Some(Popup::UpscaleModelSelector { selected, .. }) => {
                         if *selected > 0 {
                             *selected -= 1;
                         }
@@ -1682,6 +1950,9 @@ impl App {
             }
             MouseEventKind::ScrollDown => match &mut self.popup {
                 Some(Popup::ModelSelector {
+                    selected, filtered, ..
+                })
+                | Some(Popup::UpscaleModelSelector {
                     selected, filtered, ..
                 }) => {
                     if *selected + 1 < filtered.len() {
@@ -1698,6 +1969,48 @@ impl App {
                 _ => self.dispatch_action(Action::Down),
             },
             _ => {}
+        }
+    }
+
+    /// Return names of all known upscaler models (downloaded or not).
+    fn available_upscaler_models(&self) -> Vec<String> {
+        let mut models: Vec<String> = mold_core::manifest::known_manifests()
+            .iter()
+            .filter(|m| m.is_upscaler())
+            .map(|m| m.name.clone())
+            .collect();
+        // Sort: downloaded first, then undownloaded
+        let config = &self.config;
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        models
+    }
+
+    fn update_upscale_model_filter(&mut self) {
+        // Collect available models first to avoid conflicting borrows with self.popup
+        let all = self.available_upscaler_models();
+        if let Some(Popup::UpscaleModelSelector {
+            filter,
+            selected,
+            filtered,
+        }) = &mut self.popup
+        {
+            let query = filter.to_lowercase();
+            *filtered = all
+                .into_iter()
+                .filter(|name| name.to_lowercase().contains(&query))
+                .collect();
+            if *selected >= filtered.len() {
+                *selected = filtered.len().saturating_sub(1);
+            }
         }
     }
 
@@ -1929,7 +2242,21 @@ impl App {
                 self.popup = Some(Popup::Help);
             }
             Action::Cancel => {
-                if self.active_view == View::Gallery
+                if self.active_view == View::Gallery && self.upscale_in_progress {
+                    // Cancel in-progress upscale. abort() cancels the outer async
+                    // task so no UpscaleComplete event is sent, but the inner
+                    // spawn_blocking thread (GPU inference) runs to completion —
+                    // Tokio blocking threads have no cooperative cancellation.
+                    if let Some(handle) = self.upscale_task.take() {
+                        handle.abort();
+                    }
+                    self.upscale_in_progress = false;
+                    self.upscale_tile_progress = None;
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: "Upscale cancelled".into(),
+                        style: ProgressStyle::Warning,
+                    });
+                } else if self.active_view == View::Gallery
                     && self.gallery.view_mode == GalleryViewMode::Detail
                 {
                     self.gallery.view_mode = GalleryViewMode::Grid;
@@ -2029,16 +2356,16 @@ impl App {
                 self.open_gallery_file();
             }
             Action::UpscaleImage => {
-                if self.active_view == View::Gallery {
-                    if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
-                        self.popup = Some(Popup::Info {
-                            message: format!(
-                                "Upscale '{}' — use CLI: mold upscale {}",
-                                entry.filename(),
-                                entry.path.display()
-                            ),
-                        });
-                    }
+                if self.active_view == View::Gallery
+                    && !self.upscale_in_progress
+                    && self.gallery.entries.get(self.gallery.selected).is_some()
+                {
+                    let models = self.available_upscaler_models();
+                    self.popup = Some(Popup::UpscaleModelSelector {
+                        filter: String::new(),
+                        selected: 0,
+                        filtered: models,
+                    });
                 }
             }
             Action::RemoveModel => {
@@ -2367,11 +2694,23 @@ impl App {
     }
 
     fn open_model_selector(&mut self) {
-        let all_models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        let mut models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        // Sort: downloaded first, then undownloaded (preserving order within each group)
+        let config = &self.config;
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
         self.popup = Some(Popup::ModelSelector {
             filter: String::new(),
             selected: 0,
-            filtered: all_models,
+            filtered: models,
         });
     }
 
@@ -3578,6 +3917,136 @@ impl App {
                         style: ProgressStyle::Error,
                     });
                 }
+                BackgroundEvent::UpscaleProgress { tile, total } => {
+                    self.upscale_tile_progress = Some((tile, total));
+                }
+                BackgroundEvent::UpscaleComplete {
+                    image_data,
+                    source_path,
+                    model,
+                    scale_factor,
+                    original_width,
+                    original_height,
+                    upscale_time_ms,
+                } => {
+                    self.upscale_in_progress = false;
+                    self.upscale_task = None;
+                    self.upscale_tile_progress = None;
+
+                    let upscaled_w = original_width * scale_factor;
+                    let upscaled_h = original_height * scale_factor;
+
+                    // Save upscaled image to output directory
+                    let output_dir = if self.config.is_output_disabled() {
+                        None
+                    } else {
+                        let dir = self.config.effective_output_dir();
+                        let _ = std::fs::create_dir_all(&dir);
+                        Some(dir)
+                    };
+
+                    let stem = source_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let filename = format!("{stem}_upscaled_{scale_factor}x.png");
+
+                    let saved_path = if let Some(ref dir) = output_dir {
+                        let path = dir.join(&filename);
+                        if let Err(e) = std::fs::write(&path, &image_data) {
+                            self.generate.error_message =
+                                Some(format!("Failed to save upscaled image: {e}"));
+                            return;
+                        }
+                        path
+                    } else {
+                        // No output dir — nowhere to save
+                        self.generate.progress.log.push(ProgressLogEntry {
+                            message: format!(
+                                "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s) — output dir disabled",
+                                upscale_time_ms as f64 / 1000.0
+                            ),
+                            style: ProgressStyle::Warning,
+                        });
+                        return;
+                    };
+
+                    self.generate.progress.log.push(ProgressLogEntry {
+                        message: format!(
+                            "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s)",
+                            upscale_time_ms as f64 / 1000.0
+                        ),
+                        style: ProgressStyle::Done,
+                    });
+
+                    // Insert new gallery entry at position 0
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    // Carry over source metadata where applicable
+                    let source_meta = self
+                        .gallery
+                        .entries
+                        .iter()
+                        .find(|e| e.path == source_path)
+                        .map(|e| e.metadata.clone());
+
+                    let meta = mold_core::OutputMetadata {
+                        prompt: source_meta
+                            .as_ref()
+                            .map(|m| m.prompt.clone())
+                            .unwrap_or_default(),
+                        negative_prompt: source_meta
+                            .as_ref()
+                            .and_then(|m| m.negative_prompt.clone()),
+                        original_prompt: source_meta
+                            .as_ref()
+                            .and_then(|m| m.original_prompt.clone()),
+                        model,
+                        seed: source_meta.as_ref().map(|m| m.seed).unwrap_or(0),
+                        steps: source_meta.as_ref().map(|m| m.steps).unwrap_or(0),
+                        guidance: source_meta.as_ref().map(|m| m.guidance).unwrap_or(0.0),
+                        width: upscaled_w,
+                        height: upscaled_h,
+                        strength: None,
+                        scheduler: source_meta.as_ref().and_then(|m| m.scheduler),
+                        lora: source_meta.as_ref().and_then(|m| m.lora.clone()),
+                        lora_scale: source_meta.as_ref().and_then(|m| m.lora_scale),
+                        version: mold_core::build_info::VERSION.to_string(),
+                    };
+
+                    self.gallery.entries.insert(
+                        0,
+                        GalleryEntry {
+                            path: saved_path.clone(),
+                            metadata: meta,
+                            generation_time_ms: Some(upscale_time_ms),
+                            timestamp: ts,
+                            server_url: None,
+                        },
+                    );
+                    self.gallery.thumbnail_states.insert(0, None);
+                    self.gallery.thumb_dimensions.insert(0, None);
+                    self.gallery.thumb_fixed_cache.insert(0, None);
+                    self.gallery.selected = 0;
+
+                    // Generate thumbnail in background
+                    self.tokio_handle.spawn(async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::thumbnails::generate_thumbnail(&saved_path).ok();
+                        })
+                        .await
+                        .ok();
+                    });
+                }
+                BackgroundEvent::UpscaleFailed(msg) => {
+                    self.upscale_in_progress = false;
+                    self.upscale_task = None;
+                    self.upscale_tile_progress = None;
+                    self.generate.error_message = Some(format!("Upscale failed: {msg}"));
+                }
             }
         }
     }
@@ -4618,7 +5087,9 @@ mod tests {
     /// Config mutations are tested in-memory; save_config() may fail
     /// (save_error is set) but that's fine for mutation tests.
     fn make_settings_test_app() -> App {
-        let mut config = Config::load_or_default();
+        let mut config = Config::default();
+        // Pin default model so the test doesn't depend on downloaded models
+        config.default_model = "flux2-klein:q8".to_string();
         // Insert a test model so the Model Defaults section appears
         config.models.insert(
             "test-model:q8".to_string(),
@@ -4702,6 +5173,9 @@ mod tests {
             history: crate::history::PromptHistory::load(),
             layout: LayoutAreas::default(),
             server_process: None,
+            upscale_in_progress: false,
+            upscale_task: None,
+            upscale_tile_progress: None,
         }
     }
 
@@ -5521,5 +5995,180 @@ mod tests {
         gen.batch_remaining = gen.params.batch;
         assert_eq!(gen.batch_remaining, 4);
         assert!(gen.generating);
+    }
+
+    #[test]
+    fn available_upscaler_models_returns_all_known() {
+        // All known upscaler models should be listed (downloaded or not)
+        let models: Vec<String> = mold_core::manifest::known_manifests()
+            .iter()
+            .filter(|m| m.is_upscaler())
+            .map(|m| m.name.clone())
+            .collect();
+        // There should be 7 upscaler models in the manifest
+        assert_eq!(models.len(), 7);
+        assert!(models.iter().all(|n| !n.is_empty()));
+    }
+
+    #[test]
+    fn upscale_model_selector_popup_variant() {
+        let popup = Popup::UpscaleModelSelector {
+            filter: String::new(),
+            selected: 0,
+            filtered: vec![
+                "real-esrgan-x4plus:fp16".into(),
+                "real-esrgan-x2:fp16".into(),
+            ],
+        };
+        // Verify the variant can be pattern-matched and fields accessed
+        if let Popup::UpscaleModelSelector {
+            filter,
+            selected,
+            filtered,
+        } = &popup
+        {
+            assert!(filter.is_empty());
+            assert_eq!(*selected, 0);
+            assert_eq!(filtered.len(), 2);
+        } else {
+            panic!("expected UpscaleModelSelector");
+        }
+    }
+
+    #[test]
+    fn upscale_background_event_variants() {
+        // Verify the new BackgroundEvent variants can be constructed
+        let progress = BackgroundEvent::UpscaleProgress { tile: 3, total: 9 };
+        if let BackgroundEvent::UpscaleProgress { tile, total } = progress {
+            assert_eq!(tile, 3);
+            assert_eq!(total, 9);
+        } else {
+            panic!("expected UpscaleProgress");
+        }
+
+        let complete = BackgroundEvent::UpscaleComplete {
+            image_data: vec![0u8; 100],
+            source_path: std::path::PathBuf::from("/tmp/test.png"),
+            model: "real-esrgan-x4plus:fp16".into(),
+            scale_factor: 4,
+            original_width: 512,
+            original_height: 512,
+            upscale_time_ms: 1500,
+        };
+        if let BackgroundEvent::UpscaleComplete {
+            scale_factor,
+            original_width,
+            original_height,
+            ..
+        } = complete
+        {
+            assert_eq!(scale_factor, 4);
+            assert_eq!(original_width, 512);
+            assert_eq!(original_height, 512);
+        } else {
+            panic!("expected UpscaleComplete");
+        }
+
+        let failed = BackgroundEvent::UpscaleFailed("OOM".into());
+        if let BackgroundEvent::UpscaleFailed(msg) = failed {
+            assert_eq!(msg, "OOM");
+        } else {
+            panic!("expected UpscaleFailed");
+        }
+    }
+
+    #[test]
+    fn upscale_model_filter_narrows_list() {
+        let all = vec![
+            "real-esrgan-x4plus:fp16".to_string(),
+            "real-esrgan-x2:fp16".to_string(),
+            "realesrgan-anime:fp16".to_string(),
+        ];
+        let query = "x4".to_lowercase();
+        let filtered: Vec<String> = all
+            .into_iter()
+            .filter(|name| name.to_lowercase().contains(&query))
+            .collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "real-esrgan-x4plus:fp16");
+    }
+
+    #[test]
+    fn upscale_model_filter_empty_returns_all() {
+        let all = vec![
+            "real-esrgan-x4plus:fp16".to_string(),
+            "real-esrgan-x2:fp16".to_string(),
+        ];
+        let query = "".to_lowercase();
+        let filtered: Vec<String> = all
+            .into_iter()
+            .filter(|name| name.to_lowercase().contains(&query))
+            .collect();
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn model_list_sorts_downloaded_first() {
+        // Simulate the sorting logic used by open_model_selector / available_upscaler_models
+        let config = Config::default();
+        let mut models = vec![
+            "not-downloaded-model:q8".to_string(),
+            "also-not-downloaded:fp16".to_string(),
+        ];
+        // With empty config, none are "downloaded" — order should be preserved
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        assert_eq!(models[0], "not-downloaded-model:q8");
+        assert_eq!(models[1], "also-not-downloaded:fp16");
+    }
+
+    #[test]
+    fn model_list_downloaded_sorts_before_undownloaded() {
+        let mut config = Config::default();
+        // Mark one model as "downloaded" by adding it to config.models
+        config.models.insert(
+            "second-model:fp16".to_string(),
+            mold_core::config::ModelConfig {
+                transformer: Some("/fake/path.safetensors".into()),
+                ..Default::default()
+            },
+        );
+
+        let mut models = vec![
+            "first-model:q8".to_string(),
+            "second-model:fp16".to_string(),
+            "third-model:q4".to_string(),
+        ];
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        // "second-model:fp16" is downloaded, so it should be first
+        assert_eq!(models[0], "second-model:fp16");
+        // The other two remain in their original relative order
+        assert_eq!(models[1], "first-model:q8");
+        assert_eq!(models[2], "third-model:q4");
+    }
+
+    #[test]
+    fn default_model_resolution_for_selector() {
+        let config = Config::default();
+        let default = mold_core::manifest::resolve_model_name(&config.resolved_default_model());
+        // Default should resolve to a known model name
+        assert!(!default.is_empty());
     }
 }

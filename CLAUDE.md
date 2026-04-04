@@ -170,13 +170,15 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/gallery/image/:name` | Fetch a saved image |
 | `DELETE` | `/api/gallery/image/:name` | Delete a saved image |
 | `GET` | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail |
+| `POST` | `/api/upscale` | Upscale image with Real-ESRGAN |
+| `POST` | `/api/upscale/stream` | Upscale with SSE tile progress streaming |
 | `POST` | `/api/shutdown` | Trigger graceful server shutdown |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
 | `GET` | `/api/docs` | Interactive API docs (Scalar) |
 
-State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching.
+State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching and `upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>` for reusing loaded upscaler models across requests.
 
 ### mold-cli
 

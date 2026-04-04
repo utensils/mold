@@ -17,6 +17,8 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/gallery/image/:name`     | Fetch a saved image                  |
 | `DELETE` | `/api/gallery/image/:name`     | Delete a saved image                 |
 | `GET`    | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail             |
+| `POST`   | `/api/upscale`                 | Upscale image with Real-ESRGAN       |
+| `POST`   | `/api/upscale/stream`          | Upscale with SSE tile progress       |
 | `POST`   | `/api/shutdown`                | Trigger graceful server shutdown     |
 | `GET`    | `/api/status`                  | Server health + status               |
 | `GET`    | `/health`                      | Simple 200 OK health check           |
