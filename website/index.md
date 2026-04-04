@@ -155,4 +155,12 @@ at night, neon signs, steam from woks, bustling crowd"_
 on floating islands above clouds, magical waterfalls, ethereal glow"_
 
 </figure>
+<figure>
+
+![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
+
+**flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy
+ocean wave, dramatic lightning, hyperrealistic macro photography"_
+
+</figure>
 </div>
