@@ -215,6 +215,20 @@ impl LtxVideoEngine {
         let attention_mask =
             Tensor::ones((1, prompt_seq_len), DType::F32, &device)?.to_dtype(dtype)?;
 
+        // Encode empty prompt for CFG (classifier-free guidance)
+        let guidance = req.guidance;
+        let do_cfg = guidance > 1.0;
+        let (uncond_embeds, uncond_mask) = if do_cfg {
+            progress.stage_start("Encoding negative prompt (CFG)");
+            let ue = t5.encode("", &device, dtype)?;
+            let ue_seq = ue.dim(1)?;
+            let um = Tensor::ones((1, ue_seq), DType::F32, &device)?.to_dtype(dtype)?;
+            progress.stage_done("Encoding negative prompt (CFG)", encode_start.elapsed());
+            (Some(ue), Some(um))
+        } else {
+            (None, None)
+        };
+
         // Drop T5 to free VRAM
         drop(t5);
         device.synchronize()?;
@@ -323,6 +337,9 @@ impl LtxVideoEngine {
         let timesteps: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
         let total_steps = timesteps.len();
 
+        // Build video coordinates for 3D RoPE (critical for proper positional encoding)
+        let video_coords = build_video_coords(1, latent_f, latent_h, latent_w, fps, &device)?;
+
         // ---------------------------------------------------------------
         // Step 3: Denoising loop
         // ---------------------------------------------------------------
@@ -338,17 +355,50 @@ impl LtxVideoEngine {
             let timestep_t = Tensor::full(t, (b,), &device)?.to_dtype(dtype)?;
             let latents_input = latents.to_dtype(dtype)?;
 
-            // Transformer forward pass
-            let noise_pred = transformer.forward(
-                &latents_input,
-                &prompt_embeds,
-                &timestep_t,
-                Some(&attention_mask),
-                latent_f,
-                latent_h,
-                latent_w,
-                None,
-            )?;
+            // Transformer forward pass (with optional CFG)
+            let noise_pred = if do_cfg {
+                // Unconditional pass
+                let uncond_pred = transformer.forward(
+                    &latents_input,
+                    uncond_embeds.as_ref().unwrap(),
+                    &timestep_t,
+                    uncond_mask.as_ref().map(|m| m as &Tensor),
+                    latent_f,
+                    latent_h,
+                    latent_w,
+                    None,
+                    Some(&video_coords),
+                )?;
+                // Conditional pass
+                let cond_pred = transformer.forward(
+                    &latents_input,
+                    &prompt_embeds,
+                    &timestep_t,
+                    Some(&attention_mask),
+                    latent_f,
+                    latent_h,
+                    latent_w,
+                    None,
+                    Some(&video_coords),
+                )?;
+                // CFG: uncond + guidance * (cond - uncond)
+                let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                let diff = (&cond_f32 - &uncond_f32)?;
+                (&uncond_f32 + diff * guidance)?
+            } else {
+                transformer.forward(
+                    &latents_input,
+                    &prompt_embeds,
+                    &timestep_t,
+                    Some(&attention_mask),
+                    latent_f,
+                    latent_h,
+                    latent_w,
+                    None,
+                    Some(&video_coords),
+                )?
+            };
 
             // Debug: track per-step stats
             {
