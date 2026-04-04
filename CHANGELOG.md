@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Image upscaling**: `mold upscale <image>` command for AI-powered super-resolution using Real-ESRGAN models (RRDBNet and SRVGGNetCompact architectures), with 2x and 4x scale factors
 - **Upscaler models**: 7 Real-ESRGAN variants from HuggingFace — `real-esrgan-x4plus:fp16/fp32`, `real-esrgan-x2plus:fp16/fp32`, `real-esrgan-x4plus-anime:fp16/fp32`, `real-esrgan-anime-v3:fp32`
 - **Tiled upscaling**: memory-efficient processing of large images via overlapping tiles with feathered blending, configurable tile size (`--tile-size`)
-- **`POST /api/upscale`**: server endpoint for image upscaling, classified under generation rate limit tier
+- **`POST /api/upscale`**: server endpoint for image upscaling, classified under generation rate limit tier; upscaler engine cached in `AppState` for reuse
 - **`--preview` on upscale**: display upscaled image inline in terminal after completion
 - **`--upscale` on `mold run`**: flag to chain upscaling after generation (wired, pipeline integration pending)
-- **TUI gallery upscale**: `u` keybinding on selected gallery image (grid and detail views)
+- **TUI gallery upscale**: press `u` on any gallery image to open a model selector popup, choose an upscaler model, and upscale in the background with a progress bar showing tile-by-tile progress. Upscaled image is saved to the output directory and inserted into the gallery. Esc cancels in-progress upscales. Models auto-download on first use with progress bars ([#170](https://github.com/utensils/mold/issues/170))
+- **`POST /api/upscale/stream`**: SSE streaming endpoint for upscale requests, streaming tile-by-tile `DenoiseStep` progress events and a final `SseUpscaleCompleteEvent` with the upscaled image
+- **Server upscaler engine caching**: `AppState` holds a single cached upscaler engine slot, reused across `/api/upscale` requests for the same model. Cleared on `DELETE /api/models/unload`
+- **Rich model selector popups**: both generation and upscaler model selectors show two-line entries with model name, size, description, download status (green `✓ ready` or dim `(download)`), and yellow `★` on the default model. Downloaded models sorted first, matching `mold list` behavior
 - **Architecture auto-detection**: upscaler model architecture (RRDBNet vs SRVGGNetCompact) inferred from safetensors tensor names at load time
 - **Shell completions**: tab-completion for upscaler model names on `mold upscale --model`
 - **Upscaler documentation**: `website/guide/upscaling.md` guide and `website/models/upscalers.md` model reference
