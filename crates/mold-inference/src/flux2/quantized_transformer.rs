@@ -70,10 +70,18 @@ struct MlpEmbedder {
 }
 
 impl MlpEmbedder {
-    fn new(vb: &VarBuilder, prefix: &str) -> Result<Self> {
+    fn new(in_sz: usize, h_sz: usize, vb: &VarBuilder, prefix: &str) -> Result<Self> {
         Ok(Self {
-            in_layer: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{prefix}.in_layer")))?,
-            out_layer: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{prefix}.out_layer")))?,
+            in_layer: quantized_nn::linear_no_bias(
+                in_sz,
+                h_sz,
+                vb.pp(format!("{prefix}.in_layer")),
+            )?,
+            out_layer: quantized_nn::linear_no_bias(
+                h_sz,
+                h_sz,
+                vb.pp(format!("{prefix}.out_layer")),
+            )?,
         })
     }
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -106,9 +114,9 @@ struct Modulation1 {
 }
 
 impl Modulation1 {
-    fn new(vb: &VarBuilder, name: &str) -> Result<Self> {
+    fn new(h_sz: usize, vb: &VarBuilder, name: &str) -> Result<Self> {
         Ok(Self {
-            lin: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{name}.lin")))?,
+            lin: quantized_nn::linear_no_bias(h_sz, 3 * h_sz, vb.pp(format!("{name}.lin")))?,
         })
     }
     fn forward(&self, vec_: &Tensor) -> Result<ModulationOut> {
@@ -128,9 +136,9 @@ struct Modulation2 {
 }
 
 impl Modulation2 {
-    fn new(vb: &VarBuilder, name: &str) -> Result<Self> {
+    fn new(h_sz: usize, vb: &VarBuilder, name: &str) -> Result<Self> {
         Ok(Self {
-            lin: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{name}.lin")))?,
+            lin: quantized_nn::linear_no_bias(h_sz, 6 * h_sz, vb.pp(format!("{name}.lin")))?,
         })
     }
     fn forward(&self, vec_: &Tensor) -> Result<(ModulationOut, ModulationOut)> {
@@ -184,8 +192,8 @@ impl QDoubleStreamBlock {
         let p = |suffix: &str| format!("{prefix}.{suffix}");
 
         Ok(Self {
-            img_qkv: quantized_nn::linear_no_bias(0, 0, vb.pp(p("img_attn.qkv")))?,
-            img_proj: quantized_nn::linear_no_bias(0, 0, vb.pp(p("img_attn.proj")))?,
+            img_qkv: quantized_nn::linear_no_bias(h_sz, 3 * h_sz, vb.pp(p("img_attn.qkv")))?,
+            img_proj: quantized_nn::linear_no_bias(h_sz, h_sz, vb.pp(p("img_attn.proj")))?,
             img_q_norm: RmsNorm::new(
                 dequant_tensor(vb, &p("img_attn.norm.query_norm.scale"), device)?,
                 1e-6,
@@ -195,11 +203,11 @@ impl QDoubleStreamBlock {
                 1e-6,
             ),
             img_norm1: make_layer_norm(h_sz, device)?,
-            img_mlp_in: quantized_nn::linear_no_bias(0, 0, vb.pp(p("img_mlp.0")))?,
-            img_mlp_out: quantized_nn::linear_no_bias(0, 0, vb.pp(p("img_mlp.2")))?,
+            img_mlp_in: quantized_nn::linear_no_bias(h_sz, 2 * mlp_sz, vb.pp(p("img_mlp.0")))?,
+            img_mlp_out: quantized_nn::linear_no_bias(mlp_sz, h_sz, vb.pp(p("img_mlp.2")))?,
             img_norm2: make_layer_norm(h_sz, device)?,
-            txt_qkv: quantized_nn::linear_no_bias(0, 0, vb.pp(p("txt_attn.qkv")))?,
-            txt_proj: quantized_nn::linear_no_bias(0, 0, vb.pp(p("txt_attn.proj")))?,
+            txt_qkv: quantized_nn::linear_no_bias(h_sz, 3 * h_sz, vb.pp(p("txt_attn.qkv")))?,
+            txt_proj: quantized_nn::linear_no_bias(h_sz, h_sz, vb.pp(p("txt_attn.proj")))?,
             txt_q_norm: RmsNorm::new(
                 dequant_tensor(vb, &p("txt_attn.norm.query_norm.scale"), device)?,
                 1e-6,
@@ -209,8 +217,8 @@ impl QDoubleStreamBlock {
                 1e-6,
             ),
             txt_norm1: make_layer_norm(h_sz, device)?,
-            txt_mlp_in: quantized_nn::linear_no_bias(0, 0, vb.pp(p("txt_mlp.0")))?,
-            txt_mlp_out: quantized_nn::linear_no_bias(0, 0, vb.pp(p("txt_mlp.2")))?,
+            txt_mlp_in: quantized_nn::linear_no_bias(h_sz, 2 * mlp_sz, vb.pp(p("txt_mlp.0")))?,
+            txt_mlp_out: quantized_nn::linear_no_bias(mlp_sz, h_sz, vb.pp(p("txt_mlp.2")))?,
             txt_norm2: make_layer_norm(h_sz, device)?,
             num_heads: cfg.num_heads,
             mlp_sz,
@@ -313,8 +321,16 @@ impl QSingleStreamBlock {
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
 
         Ok(Self {
-            linear1: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{prefix}.linear1")))?,
-            linear2: quantized_nn::linear_no_bias(0, 0, vb.pp(format!("{prefix}.linear2")))?,
+            linear1: quantized_nn::linear_no_bias(
+                h_sz,
+                3 * h_sz + 2 * mlp_sz,
+                vb.pp(format!("{prefix}.linear1")),
+            )?,
+            linear2: quantized_nn::linear_no_bias(
+                h_sz + mlp_sz,
+                h_sz,
+                vb.pp(format!("{prefix}.linear2")),
+            )?,
             norm_q: RmsNorm::new(
                 dequant_tensor(vb, &format!("{prefix}.norm.query_norm.scale"), device)?,
                 1e-6,
@@ -360,13 +376,13 @@ struct QLastLayer {
 }
 
 impl QLastLayer {
-    fn new(vb: &VarBuilder, h_sz: usize, device: &Device) -> Result<Self> {
+    fn new(vb: &VarBuilder, h_sz: usize, out_channels: usize, device: &Device) -> Result<Self> {
         Ok(Self {
             norm_final: make_layer_norm(h_sz, device)?,
-            linear: quantized_nn::linear_no_bias(0, 0, vb.pp("final_layer.linear"))?,
+            linear: quantized_nn::linear_no_bias(h_sz, out_channels, vb.pp("final_layer.linear"))?,
             ada_ln_modulation: quantized_nn::linear_no_bias(
-                0,
-                0,
+                h_sz,
+                2 * h_sz,
                 vb.pp("final_layer.adaLN_modulation.1"),
             )?,
         })
@@ -414,13 +430,14 @@ impl QuantizedFlux2Transformer {
         _gpu_dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        let img_in = quantized_nn::linear_no_bias(0, 0, vb.pp("img_in"))?;
-        let txt_in = quantized_nn::linear_no_bias(0, 0, vb.pp("txt_in"))?;
-        let time_in = MlpEmbedder::new(&vb, "time_in")?;
+        let h_sz = cfg.hidden_size;
+        let img_in = quantized_nn::linear_no_bias(cfg.in_channels, h_sz, vb.pp("img_in"))?;
+        let txt_in = quantized_nn::linear_no_bias(cfg.context_in_dim, h_sz, vb.pp("txt_in"))?;
+        let time_in = MlpEmbedder::new(256, h_sz, &vb, "time_in")?;
 
-        let double_mod_img = Modulation2::new(&vb, "double_stream_modulation_img")?;
-        let double_mod_txt = Modulation2::new(&vb, "double_stream_modulation_txt")?;
-        let single_mod = Modulation1::new(&vb, "single_stream_modulation")?;
+        let double_mod_img = Modulation2::new(h_sz, &vb, "double_stream_modulation_img")?;
+        let double_mod_txt = Modulation2::new(h_sz, &vb, "double_stream_modulation_txt")?;
+        let single_mod = Modulation1::new(h_sz, &vb, "single_stream_modulation")?;
 
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         for i in 0..cfg.depth {
@@ -442,7 +459,7 @@ impl QuantizedFlux2Transformer {
             )?);
         }
 
-        let final_layer = QLastLayer::new(&vb, cfg.hidden_size, device)?;
+        let final_layer = QLastLayer::new(&vb, h_sz, cfg.in_channels, device)?;
         let pe_embedder = EmbedNd::new(cfg.theta, cfg.axes_dim.to_vec());
 
         Ok(Self {
