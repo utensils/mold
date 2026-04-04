@@ -165,6 +165,7 @@ impl UpscaleEngine for UpscalerEngine {
         self.progress
             .stage_done("Upscaling", upscale_start.elapsed());
         self.progress.stage_start("Encoding output");
+        let encode_start = Instant::now();
 
         // Convert output tensor to image bytes
         let output = output.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
@@ -201,7 +202,7 @@ impl UpscaleEngine for UpscalerEngine {
         };
 
         self.progress
-            .stage_done("Encoding output", upscale_start.elapsed());
+            .stage_done("Encoding output", encode_start.elapsed());
 
         let upscale_time_ms = start.elapsed().as_millis() as u64;
 
@@ -248,14 +249,22 @@ impl UpscaleEngine for UpscalerEngine {
         };
 
         // Read tensor names from safetensors header for architecture detection.
-        // We do this before loading via VarBuilder since VarBuilder doesn't expose
-        // a way to enumerate tensor names.
+        // Only reads the 8-byte length prefix + JSON header, not the full file
+        // (avoids a 64MB heap allocation for FP32 models before mmap).
         let tensor_names = {
-            let data = std::fs::read(&self.weights_path)?;
-            let st = safetensors::SafeTensors::deserialize(&data)?;
-            st.names()
-                .into_iter()
-                .map(|s| s.to_string())
+            use std::io::Read as _;
+            let mut f = std::fs::File::open(&self.weights_path)?;
+            let mut len_buf = [0u8; 8];
+            f.read_exact(&mut len_buf)?;
+            let header_len = u64::from_le_bytes(len_buf) as usize;
+            let mut header_buf = vec![0u8; header_len];
+            f.read_exact(&mut header_buf)?;
+            let header: std::collections::HashMap<String, serde_json::Value> =
+                serde_json::from_slice(&header_buf)?;
+            header
+                .keys()
+                .filter(|k| *k != "__metadata__")
+                .cloned()
                 .collect::<Vec<_>>()
         };
         let name_refs: Vec<&str> = tensor_names.iter().map(|s| s.as_str()).collect();
