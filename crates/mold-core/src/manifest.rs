@@ -1926,14 +1926,12 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
-        // NOTE: Klein-9B uses a larger Qwen3 encoder (hidden_size=4096) than
-        // Klein-4B (hidden_size=2560). Klein-9B is marked alpha until the encoder
-        // supports both architectures.
+        // Klein-9B uses Qwen3-8B (hidden_size=4096) vs Klein-4B's Qwen3-4B (2560).
         ModelManifest {
             name: "flux2-klein-9b:bf16".to_string(),
             family: "flux2".to_string(),
             description:
-                "Flux.2 Klein-9B BF16 (alpha) — 9B param distilled, sub-second generation on RTX 4090"
+                "Flux.2 Klein-9B BF16 — 9B param distilled, sub-second generation on RTX 4090"
                     .to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
@@ -1970,7 +1968,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q8".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q8 GGUF (alpha) — best quantized quality".to_string(),
+            description: "Flux.2 Klein-9B Q8 GGUF — best quantized quality".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {
@@ -1996,7 +1994,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q6".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q6 GGUF (alpha) — good quality/size trade-off".to_string(),
+            description: "Flux.2 Klein-9B Q6 GGUF — good quality/size trade-off".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {
@@ -2022,7 +2020,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "flux2-klein-9b:q4".to_string(),
             family: "flux2".to_string(),
-            description: "Flux.2 Klein-9B Q4 GGUF (alpha) — smallest footprint".to_string(),
+            description: "Flux.2 Klein-9B Q4 GGUF — smallest footprint".to_string(),
             files: {
                 let mut files = shared_flux2_9b_files();
                 files.push(ModelFile {
@@ -2566,6 +2564,9 @@ pub const T5_FP16_SIZE: u64 = 9_787_841_024;
 /// BF16 Qwen3-4B text encoder size in bytes (3 safetensors shards).
 pub const QWEN3_FP16_SIZE: u64 = 8_044_982_000;
 
+/// BF16 Qwen3-8B text encoder size in bytes (4 safetensors shards, Klein-9B).
+pub const QWEN3_8B_FP16_SIZE: u64 = 16_388_044_384;
+
 // ── Quantized T5 variant registry ────────────────────────────────────────────
 
 /// A quantized T5 encoder variant available from HuggingFace.
@@ -2661,9 +2662,47 @@ pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
     VARIANTS
 }
 
-/// Find a Qwen3 variant by tag (e.g. "q8", "q6", "iq4", "q3").
+/// Find a Qwen3-4B variant by tag (e.g. "q8", "q6", "iq4", "q3").
 pub fn find_qwen3_variant(tag: &str) -> Option<&'static Qwen3Variant> {
     known_qwen3_variants().iter().find(|v| v.tag == tag)
+}
+
+// ── Quantized Qwen3-8B variant registry ─────────────────────────────────────
+
+/// Known Qwen3-8B quantized variants (for Klein-9B), sorted largest → smallest.
+pub fn known_qwen3_8b_variants() -> &'static [Qwen3Variant] {
+    static VARIANTS: &[Qwen3Variant] = &[
+        Qwen3Variant {
+            tag: "q8",
+            hf_repo: "unsloth/Qwen3-8B-GGUF",
+            hf_filename: "Qwen3-8B-Q8_0.gguf",
+            size_bytes: 8_709_519_168,
+        },
+        Qwen3Variant {
+            tag: "q6",
+            hf_repo: "unsloth/Qwen3-8B-GGUF",
+            hf_filename: "Qwen3-8B-Q6_K.gguf",
+            size_bytes: 6_725_900_096,
+        },
+        Qwen3Variant {
+            tag: "iq4",
+            hf_repo: "unsloth/Qwen3-8B-GGUF",
+            hf_filename: "Qwen3-8B-IQ4_XS.gguf",
+            size_bytes: 4_581_287_744,
+        },
+        Qwen3Variant {
+            tag: "q3",
+            hf_repo: "unsloth/Qwen3-8B-GGUF",
+            hf_filename: "Qwen3-8B-Q3_K_M.gguf",
+            size_bytes: 4_124_161_856,
+        },
+    ];
+    VARIANTS
+}
+
+/// Find a Qwen3-8B variant by tag (e.g. "q8", "q6", "iq4", "q3").
+pub fn find_qwen3_8b_variant(tag: &str) -> Option<&'static Qwen3Variant> {
+    known_qwen3_8b_variants().iter().find(|v| v.tag == tag)
 }
 
 /// Total size of all files in the manifest in bytes.
@@ -3717,6 +3756,73 @@ mod tests {
         }
     }
 
+    // --- Qwen3-8B variant registry tests ---
+
+    #[test]
+    fn qwen3_8b_variants_sorted_largest_first() {
+        let variants = known_qwen3_8b_variants();
+        for w in variants.windows(2) {
+            assert!(
+                w[0].size_bytes >= w[1].size_bytes,
+                "{} ({}) should be >= {} ({})",
+                w[0].tag,
+                w[0].size_bytes,
+                w[1].tag,
+                w[1].size_bytes,
+            );
+        }
+    }
+
+    #[test]
+    fn find_qwen3_8b_variant_by_tag() {
+        assert_eq!(find_qwen3_8b_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_qwen3_8b_variant("q6").unwrap().tag, "q6");
+        assert_eq!(find_qwen3_8b_variant("iq4").unwrap().tag, "iq4");
+        assert_eq!(find_qwen3_8b_variant("q3").unwrap().tag, "q3");
+        assert!(find_qwen3_8b_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn qwen3_8b_variants_all_gguf() {
+        for v in known_qwen3_8b_variants() {
+            assert!(
+                v.hf_filename.ends_with(".gguf"),
+                "{} should be a GGUF file",
+                v.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_8b_fp16_larger_than_all_quantized() {
+        for v in known_qwen3_8b_variants() {
+            assert!(
+                QWEN3_8B_FP16_SIZE > v.size_bytes,
+                "8B FP16 should be larger than {}",
+                v.tag
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_8b_larger_than_4b() {
+        // Every 8B variant should be larger than the corresponding 4B variant
+        let variants_4b = known_qwen3_variants();
+        let variants_8b = known_qwen3_8b_variants();
+        for v8 in variants_8b {
+            if let Some(v4) = variants_4b.iter().find(|v| v.tag == v8.tag) {
+                assert!(
+                    v8.size_bytes > v4.size_bytes,
+                    "8B {} ({}) should be larger than 4B {} ({})",
+                    v8.tag,
+                    v8.size_bytes,
+                    v4.tag,
+                    v4.size_bytes,
+                );
+            }
+        }
+    }
+
     #[test]
     fn zimage_defaults() {
         for manifest in known_manifests() {
@@ -4156,31 +4262,14 @@ mod tests {
     }
 
     #[test]
-    fn only_klein_9b_models_are_alpha() {
+    fn no_models_are_alpha() {
         for manifest in known_manifests() {
             let desc = &manifest.description;
-            let is_alpha = desc.contains("(alpha)") || desc.contains("[alpha]");
-            if is_alpha {
-                assert!(
-                    manifest.name.contains("klein-9b"),
-                    "non-Klein-9B model '{}' is marked alpha: {desc}",
-                    manifest.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_klein_9b_models_are_alpha() {
-        for manifest in known_manifests() {
-            if manifest.name.contains("klein-9b") {
-                assert!(
-                    manifest.description.contains("(alpha)"),
-                    "Klein-9B model '{}' should be marked alpha but description is: {}",
-                    manifest.name,
-                    manifest.description
-                );
-            }
+            assert!(
+                !desc.contains("(alpha)") && !desc.contains("[alpha]"),
+                "model '{}' is still marked alpha: {desc}",
+                manifest.name
+            );
         }
     }
 

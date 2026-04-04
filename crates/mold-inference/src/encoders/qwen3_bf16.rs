@@ -1,13 +1,17 @@
-//! Native BF16 Qwen3-4B encoder for safetensors weights.
+//! Native BF16 Qwen3 encoder for safetensors weights.
+//!
+//! Supports both Qwen3-4B (hidden_size=2560, used by Klein-4B and Z-Image) and
+//! Qwen3-8B (hidden_size=4096, used by Klein-9B) via `Qwen3BF16Config`.
 //!
 //! Provides `forward_with_layers()` for multi-layer hidden state extraction,
-//! required by Flux.2 Klein (layers 9, 18, 27 → 7680-dim stacked embeddings).
+//! required by Flux.2 Klein (layers 9, 18, 27 → stacked embeddings).
 //!
 //! This replaces the upstream `ZImageTextEncoder` which only returns the
 //! penultimate layer and has no multi-layer extraction support.
 //!
-//! Architecture: 36 layers, 32 Q heads, 8 KV heads (GQA 4:1), 2560 hidden,
-//! 128 head_dim, SwiGLU MLP (9728 intermediate), RoPE theta=1e6, RMSNorm eps=1e-6.
+//! Shared architecture (both 4B and 8B): 36 layers, 32 Q heads, 8 KV heads
+//! (GQA 4:1), 128 head_dim, RoPE theta=1e6, RMSNorm eps=1e-6.
+//! Differs: hidden_size (2560 vs 4096), intermediate_size (9728 vs 12288).
 //!
 //! HuggingFace safetensors weight names:
 //! - `model.embed_tokens.weight`
@@ -21,19 +25,44 @@ use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::VarBuilder;
 
-// ── Architecture constants ──────────────────────────────────────────────────
+// ── Architecture constants (shared between Qwen3-4B and Qwen3-8B) ──────────
 
 const NUM_HIDDEN_LAYERS: usize = 36;
 const NUM_ATTENTION_HEADS: usize = 32;
 const NUM_KV_HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
-const HIDDEN_SIZE: usize = 2560;
-const INTERMEDIATE_SIZE: usize = 9728;
 const ROPE_THETA: f64 = 1_000_000.0;
 const RMS_NORM_EPS: f64 = 1e-6;
 const VOCAB_SIZE: usize = 151936;
 const MAX_POSITION_EMBEDDINGS: usize = 40960;
 const KV_REPEAT: usize = NUM_ATTENTION_HEADS / NUM_KV_HEADS; // 4
+
+// ── Per-model-size configuration ────────────────────────────────────────────
+
+/// Configuration for the two dimensions that differ between Qwen3-4B and Qwen3-8B.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Qwen3BF16Config {
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+}
+
+impl Qwen3BF16Config {
+    /// Qwen3-4B: used by Flux.2 Klein-4B and Z-Image.
+    pub fn qwen3_4b() -> Self {
+        Self {
+            hidden_size: 2560,
+            intermediate_size: 9728,
+        }
+    }
+
+    /// Qwen3-8B: used by Flux.2 Klein-9B.
+    pub fn qwen3_8b() -> Self {
+        Self {
+            hidden_size: 4096,
+            intermediate_size: 12288,
+        }
+    }
+}
 
 // ── Rotary Embedding ────────────────────────────────────────────────────────
 
@@ -113,17 +142,17 @@ struct SwiGluMlp {
 }
 
 impl SwiGluMlp {
-    fn new(vb: VarBuilder) -> Result<Self> {
+    fn new(hidden_size: usize, intermediate_size: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             gate_proj: candle_nn::linear_no_bias(
-                HIDDEN_SIZE,
-                INTERMEDIATE_SIZE,
+                hidden_size,
+                intermediate_size,
                 vb.pp("gate_proj"),
             )?,
-            up_proj: candle_nn::linear_no_bias(HIDDEN_SIZE, INTERMEDIATE_SIZE, vb.pp("up_proj"))?,
+            up_proj: candle_nn::linear_no_bias(hidden_size, intermediate_size, vb.pp("up_proj"))?,
             down_proj: candle_nn::linear_no_bias(
-                INTERMEDIATE_SIZE,
-                HIDDEN_SIZE,
+                intermediate_size,
+                hidden_size,
                 vb.pp("down_proj"),
             )?,
         })
@@ -149,19 +178,23 @@ struct Attention {
 }
 
 impl Attention {
-    fn new(rotary_emb: std::sync::Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        hidden_size: usize,
+        rotary_emb: std::sync::Arc<RotaryEmbedding>,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let q_proj = candle_nn::linear_no_bias(
-            HIDDEN_SIZE,
+            hidden_size,
             NUM_ATTENTION_HEADS * HEAD_DIM,
             vb.pp("q_proj"),
         )?;
         let k_proj =
-            candle_nn::linear_no_bias(HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM, vb.pp("k_proj"))?;
+            candle_nn::linear_no_bias(hidden_size, NUM_KV_HEADS * HEAD_DIM, vb.pp("k_proj"))?;
         let v_proj =
-            candle_nn::linear_no_bias(HIDDEN_SIZE, NUM_KV_HEADS * HEAD_DIM, vb.pp("v_proj"))?;
+            candle_nn::linear_no_bias(hidden_size, NUM_KV_HEADS * HEAD_DIM, vb.pp("v_proj"))?;
         let o_proj = candle_nn::linear_no_bias(
             NUM_ATTENTION_HEADS * HEAD_DIM,
-            HIDDEN_SIZE,
+            hidden_size,
             vb.pp("o_proj"),
         )?;
         let q_norm = RmsNorm::new(HEAD_DIM, RMS_NORM_EPS, vb.pp("q_norm"))?;
@@ -234,12 +267,20 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(rotary_emb: std::sync::Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
-        let self_attn = Attention::new(rotary_emb, vb.pp("self_attn"))?;
-        let mlp = SwiGluMlp::new(vb.pp("mlp"))?;
-        let input_layernorm = RmsNorm::new(HIDDEN_SIZE, RMS_NORM_EPS, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm =
-            RmsNorm::new(HIDDEN_SIZE, RMS_NORM_EPS, vb.pp("post_attention_layernorm"))?;
+    fn new(
+        cfg: &Qwen3BF16Config,
+        rotary_emb: std::sync::Arc<RotaryEmbedding>,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let self_attn = Attention::new(cfg.hidden_size, rotary_emb, vb.pp("self_attn"))?;
+        let mlp = SwiGluMlp::new(cfg.hidden_size, cfg.intermediate_size, vb.pp("mlp"))?;
+        let input_layernorm =
+            RmsNorm::new(cfg.hidden_size, RMS_NORM_EPS, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm = RmsNorm::new(
+            cfg.hidden_size,
+            RMS_NORM_EPS,
+            vb.pp("post_attention_layernorm"),
+        )?;
         Ok(Self {
             self_attn,
             mlp,
@@ -260,7 +301,10 @@ impl DecoderLayer {
 
 // ── Bf16Qwen3Encoder ───────────────────────────────────────────────────────
 
-/// Native BF16 Qwen3-4B encoder with multi-layer hidden state extraction.
+/// Native BF16 Qwen3 encoder with multi-layer hidden state extraction.
+///
+/// Supports both Qwen3-4B (hidden_size=2560) and Qwen3-8B (hidden_size=4096)
+/// via `Qwen3BF16Config`.
 pub(crate) struct Bf16Qwen3Encoder {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
@@ -270,20 +314,20 @@ pub(crate) struct Bf16Qwen3Encoder {
 
 impl Bf16Qwen3Encoder {
     /// Load from HuggingFace safetensors files.
-    pub fn load(vb: VarBuilder) -> Result<Self> {
+    pub fn load(cfg: &Qwen3BF16Config, vb: VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         let dtype = vb.dtype();
         let vb_model = vb.pp("model");
 
         let embed_tokens =
-            candle_nn::embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_model.pp("embed_tokens"))?;
+            candle_nn::embedding(VOCAB_SIZE, cfg.hidden_size, vb_model.pp("embed_tokens"))?;
 
         let rotary_emb = std::sync::Arc::new(RotaryEmbedding::new(dtype, &device)?);
 
         let vb_layers = vb_model.pp("layers");
         let mut layers = Vec::with_capacity(NUM_HIDDEN_LAYERS);
         for i in 0..NUM_HIDDEN_LAYERS {
-            layers.push(DecoderLayer::new(rotary_emb.clone(), vb_layers.pp(i))?);
+            layers.push(DecoderLayer::new(cfg, rotary_emb.clone(), vb_layers.pp(i))?);
         }
 
         Ok(Self {

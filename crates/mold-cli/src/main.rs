@@ -613,12 +613,18 @@ async fn main() {
             || msg.contains("exceeds available VRAM")
             || msg.contains("Failed to create metal resource");
         if is_oom {
-            // Don't show misleading CUDA errors on Metal — replace with a clean message
+            // Show platform-appropriate message instead of raw candle error.
+            // On macOS: candle wraps Metal failures as CUDA_ERROR_OUT_OF_MEMORY.
+            // On Linux/CUDA: show "CUDA out of memory" for actual CUDA OOM.
             let is_metal_oom = cfg!(target_os = "macos")
                 && (msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
                     || msg.contains("Failed to create metal resource"));
+            let is_cuda_oom =
+                cfg!(not(target_os = "macos")) && msg.contains("CUDA_ERROR_OUT_OF_MEMORY");
             if is_metal_oom {
                 eprintln!("{} Metal out of memory", theme::prefix_error());
+            } else if is_cuda_oom {
+                eprintln!("{} CUDA out of memory", theme::prefix_error());
             } else {
                 eprintln!("{} {display}", theme::prefix_error());
             }
