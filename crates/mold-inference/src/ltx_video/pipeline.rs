@@ -42,6 +42,7 @@ const PATCH_SIZE_T: usize = 1;
 // Loaded state
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct LoadedLtxVideo {
     transformer: Option<LtxVideoTransformer3DModel>,
     vae: Option<AutoencoderKLLtxVideo>,
@@ -53,6 +54,7 @@ struct LoadedLtxVideo {
 // Engine
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub struct LtxVideoEngine {
     base: EngineBase<LoadedLtxVideo>,
     t5_variant: Option<String>,
@@ -157,7 +159,7 @@ impl LtxVideoEngine {
         num_frames: u32,
         fps: u32,
         steps: u32,
-        guidance: f64,
+        _guidance: f64,
         width: u32,
         height: u32,
         latent_h: usize,
@@ -286,7 +288,7 @@ impl LtxVideoEngine {
         let timesteps: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
 
         // Build video coordinates for RoPE
-        let video_coords = build_video_coords(
+        let _video_coords = build_video_coords(
             1,
             latent_f,
             latent_h,

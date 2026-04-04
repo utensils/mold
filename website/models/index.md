@@ -1,7 +1,7 @@
 # Models
 
-mold supports 8 model families spanning different architectures, quality levels,
-and VRAM requirements.
+mold supports 9 model families spanning different architectures, quality levels,
+and VRAM requirements — including both image and video generation.
 
 ## Choosing a Model
 
@@ -13,6 +13,7 @@ and VRAM requirements.
 | Classic ecosystem | `sd15:fp16` or `dreamshaper-v8` | Huge model library, ControlNet |
 | Fast + great      | `z-image-turbo:q8`              | 9 steps, excellent quality     |
 | SDXL              | `sdxl-turbo:fp16`               | 4 steps, 1024x1024             |
+| **Video**         | `ltx-video-0.9.5:bf16`         | Text-to-video, 24fps, GIF out  |
 
 ## VRAM Guide
 
