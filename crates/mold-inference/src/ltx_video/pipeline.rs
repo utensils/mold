@@ -239,9 +239,16 @@ impl LtxVideoEngine {
         progress.stage_start("Loading LTX Video transformer");
         let xformer_start = Instant::now();
 
-        let transformer_path = &paths.transformer;
-        let is_gguf = transformer_path
-            .extension()
+        // Load transformer — supports sharded safetensors (diffusers format) or single file
+        let transformer_files: Vec<std::path::PathBuf> = if !paths.transformer_shards.is_empty() {
+            paths.transformer_shards.clone()
+        } else {
+            vec![paths.transformer.clone()]
+        };
+
+        let is_gguf = transformer_files
+            .first()
+            .and_then(|p| p.extension())
             .is_some_and(|e| e == "gguf");
 
         if is_gguf {
@@ -249,49 +256,10 @@ impl LtxVideoEngine {
         }
 
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[transformer_path.clone()],
-                dtype,
-                &device,
-            )?
+            VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, &device)?
         };
-        // Official LTX Video weights use "model.diffusion_model." prefix and
-        // different key names than our diffusers-style candle model.
-        // rename_f maps queried names → stored names in the safetensors file.
-        let vb = vb.rename_f(|queried: &str| {
-            // Our code queries: "proj_in.weight"
-            // File stores:     "model.diffusion_model.patchify_proj.weight"
-            let remapped = queried
-                .replace("proj_in", "patchify_proj")
-                .replace("time_embed", "adaln_single")
-                .replace("norm_q", "q_norm")
-                .replace("norm_k", "k_norm");
-            format!("model.diffusion_model.{remapped}")
-        });
-        // Debug: verify a weight tensor loaded correctly
-        {
-            let test = vb.get_unchecked_dtype(
-                "transformer_blocks.0.scale_shift_table",
-                dtype,
-            )?;
-            let test_f32 = test.to_dtype(DType::F32)?;
-            let mean = test_f32.mean_all()?.to_scalar::<f32>()?;
-            let std_val = test_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
-            progress.info(&format!(
-                "Debug: block0.scale_shift_table shape={:?}, mean={:.6}, rms={:.6}",
-                test.dims(), mean, std_val
-            ));
-        }
-
-        // Debug: test proj_in weight
-        match vb.get_unchecked_dtype("proj_in.weight", dtype) {
-            Ok(w) => {
-                let rms = w.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
-                progress.info(&format!("Debug proj_in.weight: shape={:?}, rms={:.4}", w.dims(), rms));
-            }
-            Err(e) => progress.info(&format!("Debug proj_in.weight ERROR: {}", e)),
-        }
-
+        // Diffusers-format weights use the same key names as our candle model
+        // (proj_in, time_embed, norm_q, norm_k, etc.) — no remapping needed.
         let config = LtxVideoTransformer3DModelConfig::default();
         let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());

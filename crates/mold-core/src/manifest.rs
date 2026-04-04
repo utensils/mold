@@ -2915,11 +2915,20 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         description: "LTX Video 0.9.5 2B BF16 — text-to-video, 24fps, flow-matching"
             .to_string(),
         files: vec![
+            // Diffusers-format transformer (2 shards) — keys match candle model directly
             ModelFile {
                 hf_repo: "Lightricks/LTX-Video".to_string(),
-                hf_filename: "ltx-video-2b-v0.9.5.safetensors".to_string(),
-                component: ModelComponent::Transformer,
-                size_bytes: 9_520_271_208,
+                hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors".to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes: 4_940_691_048,
+                gated: false,
+                sha256: None,
+            },
+            ModelFile {
+                hf_repo: "Lightricks/LTX-Video".to_string(),
+                hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors".to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes: 2_749_648_664,
                 gated: false,
                 sha256: None,
             },
