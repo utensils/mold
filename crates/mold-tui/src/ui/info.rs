@@ -208,7 +208,7 @@ mod tests {
             let max = width as usize - 2;
             let boundary = desc.floor_char_boundary(max);
             let truncated = format!("{}..", &desc[..boundary]);
-            assert!(truncated.len() <= width as usize + 2); // +2 for ".."
+            assert!(truncated.len() <= width as usize);
             assert!(truncated.ends_with(".."));
         }
     }
