@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::{
-    sampling::{FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig},
+    sampling::{FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType},
     transformer::{LtxVideoTransformer3DModel, LtxVideoTransformer3DModelConfig},
     vae::{AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig},
 };
@@ -255,6 +255,21 @@ impl LtxVideoEngine {
                 .replace("norm_k", "k_norm");
             format!("model.diffusion_model.{remapped}")
         });
+        // Debug: verify a weight tensor loaded correctly
+        {
+            let test = vb.get_unchecked_dtype(
+                "transformer_blocks.0.scale_shift_table",
+                dtype,
+            )?;
+            let test_f32 = test.to_dtype(DType::F32)?;
+            let mean = test_f32.mean_all()?.to_scalar::<f32>()?;
+            let std_val = test_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+            progress.info(&format!(
+                "Debug: block0.scale_shift_table shape={:?}, mean={:.6}, rms={:.6}",
+                test.dims(), mean, std_val
+            ));
+        }
+
         let config = LtxVideoTransformer3DModelConfig::default();
         let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());
@@ -270,24 +285,23 @@ impl LtxVideoEngine {
         // Pack latents: [B,C,F,H,W] → [B,S,D]
         let latents = pack_latents(&noise, PATCH_SIZE, PATCH_SIZE_T)?;
 
-        // Build scheduler and timestep schedule
+        // Build scheduler matching the candle-video pipeline
         let scheduler_config = FlowMatchEulerDiscreteSchedulerConfig {
             num_train_timesteps: 1000,
             shift: 1.0,
             use_dynamic_shifting: false,
             base_shift: Some(0.95),
             max_shift: Some(2.05),
-            base_image_seq_len: Some(256),
+            base_image_seq_len: Some(1024),
             max_image_seq_len: Some(4096),
             shift_terminal: Some(0.1),
+            time_shift_type: TimeShiftType::Exponential,
             ..Default::default()
         };
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_config)?;
 
-        // Calculate mu for dynamic shift
-        let mu = calculate_shift(video_seq_len, 256, 4096, 0.95, 2.05);
-
-        // Generate sigma schedule
+        // Calculate mu and set timesteps with the sigma schedule
+        let mu = calculate_shift(video_seq_len, 1024, 4096, 0.95, 2.05);
         let sigmas: Vec<f32> = linspace(1.0, 1.0 / steps as f32, steps as usize);
         scheduler.set_timesteps(
             Some(steps as usize),
@@ -298,16 +312,7 @@ impl LtxVideoEngine {
         )?;
 
         let timesteps: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
-
-        // Build video coordinates for RoPE
-        let _video_coords = build_video_coords(
-            1,
-            latent_f,
-            latent_h,
-            latent_w,
-            fps,
-            &device,
-        )?;
+        let total_steps = timesteps.len();
 
         // ---------------------------------------------------------------
         // Step 3: Denoising loop
@@ -316,7 +321,6 @@ impl LtxVideoEngine {
         let denoise_start = Instant::now();
 
         let mut latents = latents;
-        let total_steps = timesteps.len();
 
         for (step, &t) in timesteps.iter().enumerate() {
             let step_start = Instant::now();
@@ -334,15 +338,25 @@ impl LtxVideoEngine {
                 latent_f,
                 latent_h,
                 latent_w,
-                None, // rope_interpolation_scale
+                None,
             )?;
+
+            // Debug first step
+            if step == 0 {
+                let v_f32 = noise_pred.to_dtype(DType::F32)?;
+                let v_mean = v_f32.mean_all()?.to_scalar::<f32>()?;
+                let v_rms = v_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+                progress.info(&format!(
+                    "Step 0: t={:.1}, v_mean={:.4}, v_rms={:.4}", t, v_mean, v_rms
+                ));
+            }
 
             // Euler step via scheduler
             let step_out = scheduler.step(
                 &noise_pred.to_dtype(DType::F32)?,
                 t,
                 &latents,
-                None, // no per-token timesteps
+                None,
             )?;
             latents = step_out.prev_sample;
 
@@ -351,6 +365,17 @@ impl LtxVideoEngine {
                 total: total_steps,
                 elapsed: step_start.elapsed(),
             });
+        }
+
+        // Debug: log sigma schedule and latent stats
+        {
+            let first_5: Vec<f32> = sigmas.iter().take(5).copied().collect();
+            let last_3: Vec<f32> = sigmas.iter().rev().take(3).rev().copied().collect();
+            progress.info(&format!("Sigmas: {:?}...{:?} (mu={:.3})", first_5, last_3, mu));
+            let l_f32 = latents.to_dtype(DType::F32)?;
+            let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
+            let var = l_f32.var_keepdim(candle_core::D::Minus1)?.mean_all()?.to_scalar::<f32>()?;
+            progress.info(&format!("Denoised latents: mean={:.4}, var={:.4}", mean, var));
         }
 
         progress.stage_done("Denoising", denoise_start.elapsed());
@@ -402,6 +427,14 @@ impl LtxVideoEngine {
         let latents_mean = vae.latents_mean();
         let latents_std = vae.latents_std();
         latents = denormalize_latents(&latents, latents_mean, latents_std, scaling_factor)?;
+
+        // Debug: latent stats after denormalization
+        {
+            let l_f32 = latents.to_dtype(DType::F32)?;
+            let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
+            let var = l_f32.var_keepdim(candle_core::D::Minus1)?.mean_all()?.to_scalar::<f32>()?;
+            progress.info(&format!("Denormalized latents: mean={:.4}, var={:.4}", mean, var));
+        }
 
         latents = latents.to_dtype(dtype)?;
         let (_dec_output, video) = vae.decode(&latents, None, false, false)?;
