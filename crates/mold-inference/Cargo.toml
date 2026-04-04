@@ -24,6 +24,7 @@ anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.4" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.4" }
 candle-transformers = { package = "candle-transformers-mold", version = "0.9.4" }
+gif = "0.13"
 image = "0.25"
 png = "0.18"
 rand = "0.8"

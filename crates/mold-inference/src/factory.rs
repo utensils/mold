@@ -10,6 +10,7 @@ use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
 use crate::shared_pool::SharedPool;
+use crate::ltx_video::LtxVideoEngine;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
@@ -141,6 +142,18 @@ pub fn create_engine_with_pool(
             paths,
             load_strategy,
         ))),
+        "ltx-video" | "ltx_video" => {
+            let t5_variant = std::env::var("MOLD_T5_VARIANT")
+                .ok()
+                .or_else(|| config.t5_variant.clone());
+            Ok(Box::new(LtxVideoEngine::new(
+                model_name,
+                paths,
+                t5_variant,
+                load_strategy,
+                shared_pool,
+            )))
+        }
         "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
             model_name,
             paths,
