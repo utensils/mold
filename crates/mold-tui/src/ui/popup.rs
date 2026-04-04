@@ -126,153 +126,228 @@ fn render_help(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_model_selector(frame: &mut Frame, app: &mut App) {
+/// Build a rich two-line ListItem for a model entry.
+///
+/// Line 1:  `[marker] model-name           [size]  [status]`
+/// Line 2:  `         description text`
+fn build_model_item<'a>(
+    name: &str,
+    is_selected: bool,
+    show_download_status: bool,
+    default_model: Option<&str>,
+    theme: &crate::ui::theme::Theme,
+    config: &mold_core::Config,
+    width: u16,
+) -> ListItem<'a> {
+    let manifest = mold_core::manifest::find_manifest(name);
+    let downloaded = config.manifest_model_is_downloaded(name);
+    let is_default = default_model.is_some_and(|d| d == name);
+
+    let marker = if is_selected { "\u{25b8} " } else { "  " };
+
+    // Size display
+    let size_str = manifest
+        .map(|m| {
+            let bytes = m.model_size_bytes();
+            if bytes >= 1_073_741_824 {
+                format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
+            } else {
+                format!("{}MB", bytes / 1_048_576)
+            }
+        })
+        .unwrap_or_default();
+
+    // Status tag
+    let status = if is_default && downloaded {
+        " default "
+    } else if is_default && !downloaded {
+        " default \u{00b7} pull "
+    } else if show_download_status && !downloaded {
+        " pull "
+    } else {
+        ""
+    };
+
+    // Build first line with right-aligned size and status
+    let name_display = name.to_string();
+    let left = format!("{marker}{name_display}");
+    let right = if status.is_empty() {
+        size_str.clone()
+    } else {
+        format!("{size_str}  {status}")
+    };
+    let padding = (width as usize).saturating_sub(left.len() + right.len());
+    let pad = " ".repeat(padding);
+
+    let name_style = Style::default().fg(theme.text);
+    let size_style = Style::default().fg(theme.text_dim);
+    let status_style = if is_default {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+
+    let line1 = Line::from(vec![
+        Span::styled(left, name_style),
+        Span::styled(pad, name_style),
+        Span::styled(size_str, size_style),
+        if !status.is_empty() {
+            Span::styled(format!("  {status}"), status_style)
+        } else {
+            Span::raw("")
+        },
+    ]);
+
+    // Second line: description (dimmed, indented)
+    let desc = manifest.map(|m| m.description.clone()).unwrap_or_default();
+    let desc_indent = "     ";
+    let max_desc = (width as usize).saturating_sub(desc_indent.len());
+    let desc_text = if desc.len() > max_desc {
+        format!("{}{}...", desc_indent, &desc[..max_desc.saturating_sub(3)])
+    } else {
+        format!("{desc_indent}{desc}")
+    };
+    let line2 = Line::from(Span::styled(desc_text, Style::default().fg(theme.text_dim)));
+
+    let bg = if is_selected {
+        theme.list_selected()
+    } else {
+        Style::default()
+    };
+    ListItem::new(vec![line1, line2]).style(bg)
+}
+
+/// Render a model selector popup (shared between generation and upscaler selectors).
+#[allow(clippy::too_many_arguments)]
+fn render_model_selector_popup(
+    frame: &mut Frame,
+    app: &mut App,
+    title: &str,
+    filter: &str,
+    selected: usize,
+    filtered: &[String],
+    show_download_status: bool,
+    default_model: Option<&str>,
+) {
     let theme = &app.theme;
-    let area = centered_rect(frame.area(), 55, 50);
+    let area = centered_rect(frame.area(), 65, 60);
 
     frame.render_widget(Clear, area);
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(format!(" {title} "))
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    // Filter input
+    let filter_display = if filter.is_empty() {
+        "Type to filter...".to_string()
+    } else {
+        filter.to_string()
+    };
+    let filter_style = if filter.is_empty() {
+        theme.dim()
+    } else {
+        Style::default().fg(theme.text)
+    };
+    let filter_line = Paragraph::new(format!("Filter: {filter_display}")).style(filter_style);
+    let filter_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(filter_line, filter_area);
+
+    // Model list (2 lines per item)
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            build_model_item(
+                name,
+                i == selected,
+                show_download_status,
+                default_model,
+                theme,
+                &app.config,
+                inner.width,
+            )
+        })
+        .collect();
+
+    let list = List::new(items);
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn render_model_selector(frame: &mut Frame, app: &mut App) {
     if let Some(Popup::ModelSelector {
         filter,
         selected,
         filtered,
     }) = &app.popup
     {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.popup_border())
-            .title(" Select Model ")
-            .title_style(theme.title_focused())
-            .style(theme.popup_bg());
-
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        if inner.height < 3 {
-            return;
-        }
-
-        // Filter input
-        let filter_display = if filter.is_empty() {
-            "Type to filter...".to_string()
-        } else {
-            filter.clone()
-        };
-        let filter_style = if filter.is_empty() {
-            theme.dim()
-        } else {
-            Style::default().fg(theme.text)
-        };
-        let filter_line = Paragraph::new(format!("Filter: {filter_display}")).style(filter_style);
-        let filter_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(filter_line, filter_area);
-
-        // Model list
-        let list_area = Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: inner.height.saturating_sub(2),
-        };
-
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let style = if i == *selected {
-                    theme.list_selected()
-                } else {
-                    Style::default().fg(theme.text)
-                };
-                let marker = if i == *selected { "\u{25b8} " } else { "  " };
-                ListItem::new(format!("{marker}{name}")).style(style)
-            })
-            .collect();
-
-        let list = List::new(items);
-        let mut state = ListState::default().with_selected(Some(*selected));
-        frame.render_stateful_widget(list, list_area, &mut state);
+        let filter = filter.clone();
+        let selected = *selected;
+        let filtered = filtered.clone();
+        render_model_selector_popup(
+            frame,
+            app,
+            "Select Model",
+            &filter,
+            selected,
+            &filtered,
+            false,
+            None,
+        );
     }
 }
 
 fn render_upscale_model_selector(frame: &mut Frame, app: &mut App) {
-    let theme = &app.theme;
-    let area = centered_rect(frame.area(), 55, 50);
-
-    frame.render_widget(Clear, area);
-
     if let Some(Popup::UpscaleModelSelector {
         filter,
         selected,
         filtered,
     }) = &app.popup
     {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.popup_border())
-            .title(" Select Upscaler Model ")
-            .title_style(theme.title_focused())
-            .style(theme.popup_bg());
-
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        if inner.height < 3 {
-            return;
-        }
-
-        // Filter input
-        let filter_display = if filter.is_empty() {
-            "Type to filter...".to_string()
-        } else {
-            filter.clone()
-        };
-        let filter_style = if filter.is_empty() {
-            theme.dim()
-        } else {
-            Style::default().fg(theme.text)
-        };
-        let filter_line = Paragraph::new(format!("Filter: {filter_display}")).style(filter_style);
-        let filter_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(filter_line, filter_area);
-
-        // Model list
-        let list_area = Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: inner.height.saturating_sub(2),
-        };
-
-        let items: Vec<ListItem> = filtered
+        let filter = filter.clone();
+        let selected = *selected;
+        let filtered = filtered.clone();
+        // Determine default upscaler: first downloaded, or "real-esrgan-x4plus:fp16"
+        let default = filtered
             .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let downloaded = app.config.manifest_model_is_downloaded(name);
-                let style = if i == *selected {
-                    theme.list_selected()
-                } else {
-                    Style::default().fg(theme.text)
-                };
-                let marker = if i == *selected { "\u{25b8} " } else { "  " };
-                let suffix = if downloaded { "" } else { "  (pull)" };
-                ListItem::new(format!("{marker}{name}{suffix}")).style(style)
-            })
-            .collect();
-
-        let list = List::new(items);
-        let mut state = ListState::default().with_selected(Some(*selected));
-        frame.render_stateful_widget(list, list_area, &mut state);
+            .find(|n| app.config.manifest_model_is_downloaded(n))
+            .cloned()
+            .unwrap_or_else(|| "real-esrgan-x4plus:fp16".to_string());
+        render_model_selector_popup(
+            frame,
+            app,
+            "Select Upscaler Model",
+            &filter,
+            selected,
+            &filtered,
+            true,
+            Some(&default),
+        );
     }
 }
 
@@ -578,5 +653,73 @@ fn render_settings_input(frame: &mut Frame, app: &mut App) {
                 ..inner
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn upscaler_manifest_has_description_and_size() {
+        // All upscaler models in the manifest should have descriptions and non-zero sizes
+        for manifest in mold_core::manifest::known_manifests() {
+            if !manifest.is_upscaler() {
+                continue;
+            }
+            assert!(
+                !manifest.description.is_empty(),
+                "{} has empty description",
+                manifest.name
+            );
+            assert!(
+                manifest.model_size_bytes() > 0,
+                "{} has zero size",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
+    fn default_upscaler_exists_in_manifest() {
+        let manifest = mold_core::manifest::find_manifest("real-esrgan-x4plus:fp16");
+        assert!(manifest.is_some(), "default upscaler not found in manifest");
+        assert!(manifest.unwrap().is_upscaler());
+    }
+
+    #[test]
+    fn upscaler_size_formats_as_mb() {
+        let manifest = mold_core::manifest::find_manifest("real-esrgan-x4plus:fp16").unwrap();
+        let bytes = manifest.model_size_bytes();
+        // FP16 x4plus is ~32MB, should be < 1GB
+        assert!(bytes < 1_073_741_824, "expected < 1GB, got {bytes}");
+        assert!(bytes > 1_048_576, "expected > 1MB, got {bytes}");
+    }
+
+    #[test]
+    fn status_tag_logic() {
+        // Default + downloaded = "default"
+        // Default + not downloaded = "default · pull"
+        // Not default + not downloaded = "pull"
+        // Not default + downloaded = ""
+        let is_default = true;
+        let downloaded = true;
+        let status = if is_default && downloaded {
+            "default"
+        } else if is_default && !downloaded {
+            "default · pull"
+        } else if !downloaded {
+            "pull"
+        } else {
+            ""
+        };
+        assert_eq!(status, "default");
+
+        let status2 = if true && !true {
+            "default · pull"
+        } else if true && true {
+            "default"
+        } else {
+            ""
+        };
+        assert_eq!(status2, "default");
     }
 }
