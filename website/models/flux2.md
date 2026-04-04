@@ -88,6 +88,14 @@ mold run flux2-klein:bf16 "a majestic owl perched on a mossy branch in a moonlit
 
 ![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
 
+**Flux.2 Klein-9B Q4** — 4 steps, seed 999:
+
+```bash
+mold run flux2-klein-9b:q4 "A glass bottle ship inside a stormy ocean wave, dramatic lightning, hyperrealistic macro photography" --seed 999
+```
+
+![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
+
 ## Architecture
 
 Flux.2 Klein uses a Qwen3 text encoder (BF16 or GGUF, layers 9/18/27), a shared
