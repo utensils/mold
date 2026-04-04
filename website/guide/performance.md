@@ -21,8 +21,20 @@ Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 | `z-image-turbo:q8` | 9             | ~10-20s       | Strong quality/speed trade-off      |
 | `sdxl-turbo:fp16`  | 4             | ~3-8s         | Very fast when you want 1024 output |
 | `sd15:fp16`        | 25            | ~5-15s        | Lightest full-featured family       |
+| `ltx-video:bf16`   | 40            | ~2-5min       | Video: 25 frames at 768×512        |
 
 ## What Slows Things Down
+
+### Video generation
+
+Video generation is significantly slower than image generation. LTX Video
+produces 25 frames at 768×512 in roughly 2-5 minutes on an RTX 4090 (40 steps).
+The bottleneck is the denoising loop — each step processes a 3D latent
+(frames × height × width). VAE decode is also slower due to 3D convolutions.
+
+Reducing frame count (`--frames 9`) or step count (`--steps 20`) helps.
+Reducing resolution has a large impact since the latent sequence length scales
+as frames × height × width.
 
 ### Offloading
 
