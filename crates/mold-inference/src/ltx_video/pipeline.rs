@@ -10,7 +10,6 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::{
-    sampling::{FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType},
     transformer::{LtxVideoTransformer3DModel, LtxVideoTransformer3DModelConfig},
     vae::{AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig},
 };
@@ -308,34 +307,31 @@ impl LtxVideoEngine {
         // Pack latents: [B,C,F,H,W] → [B,S,D]
         let latents = pack_latents(&noise, PATCH_SIZE, PATCH_SIZE_T)?;
 
-        // Build scheduler matching the candle-video pipeline
-        let scheduler_config = FlowMatchEulerDiscreteSchedulerConfig {
-            num_train_timesteps: 1000,
-            shift: 1.0,
-            use_dynamic_shifting: false,
-            base_shift: Some(0.95),
-            max_shift: Some(2.05),
-            base_image_seq_len: Some(1024),
-            max_image_seq_len: Some(4096),
-            shift_terminal: Some(0.1),
-            time_shift_type: TimeShiftType::Exponential,
-            ..Default::default()
-        };
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_config)?;
-
-        // Calculate mu and set timesteps with the sigma schedule
+        // Build sigma schedule matching ComfyUI's LTXVScheduler exactly:
+        // 1. linspace(1.0, 0.0, steps+1) — steps+1 points including terminal
+        // 2. Exponential time shift with mu
+        // 3. Stretch to terminal=0.1
         let mu = calculate_shift(video_seq_len, 1024, 4096, 0.95, 2.05);
-        let sigmas: Vec<f32> = linspace(1.0, 1.0 / steps as f32, steps as usize);
-        scheduler.set_timesteps(
-            Some(steps as usize),
-            &device,
-            Some(&sigmas),
-            Some(mu),
-            None,
-        )?;
 
-        let timesteps: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
-        let total_steps = timesteps.len();
+        let raw = linspace(1.0, 0.0, steps as usize + 1);
+        let mu_exp = mu.exp();
+        let mut sched_sigmas: Vec<f32> = raw
+            .iter()
+            .map(|&s| {
+                if s == 0.0 { 0.0 } else { mu_exp / (mu_exp + (1.0 / s - 1.0)) }
+            })
+            .collect();
+        // Stretch so last non-zero sigma → terminal=0.1
+        {
+            let nz_last = sched_sigmas[sched_sigmas.len() - 2];
+            let scale = (1.0 - nz_last) / (1.0 - 0.1);
+            for s in sched_sigmas.iter_mut() {
+                if *s != 0.0 {
+                    *s = 1.0 - (1.0 - *s) / scale;
+                }
+            }
+        }
+        let total_steps = sched_sigmas.len() - 1;
 
         // Build video coordinates for 3D RoPE (critical for proper positional encoding)
         let video_coords = build_video_coords(1, latent_f, latent_h, latent_w, fps, &device)?;
@@ -348,11 +344,14 @@ impl LtxVideoEngine {
 
         let mut latents = latents;
 
-        for (step, &t) in timesteps.iter().enumerate() {
+        for step in 0..total_steps {
             let step_start = Instant::now();
+            let sigma = sched_sigmas[step];
+            let sigma_next = sched_sigmas[step + 1];
 
             let b = latents.dim(0)?;
-            let timestep_t = Tensor::full(t, (b,), &device)?.to_dtype(dtype)?;
+            // Pass raw sigma to model — it internally multiplies by 1000
+            let timestep_t = Tensor::full(sigma, (b,), &device)?.to_dtype(dtype)?;
             let latents_input = latents.to_dtype(dtype)?;
 
             // Transformer forward pass (with optional CFG)
@@ -409,20 +408,16 @@ impl LtxVideoEngine {
                 let li_rms = latents_input.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
                 if step < 3 || step == total_steps - 1 {
                     progress.info(&format!(
-                        "Step {}: t={:.1}, input_rms={:.4}, output_rms={:.4}, lat_rms={:.4}",
-                        step, t, li_rms, v_rms, l_rms
+                        "Step {}: sigma={:.4}, input_rms={:.4}, output_rms={:.4}, lat_rms={:.4}",
+                        step, sigma, li_rms, v_rms, l_rms
                     ));
                 }
             }
 
-            // Euler step via scheduler
-            let step_out = scheduler.step(
-                &noise_pred.to_dtype(DType::F32)?,
-                t,
-                &latents,
-                None,
-            )?;
-            latents = step_out.prev_sample;
+            // Euler step: x_{t-1} = x_t + (sigma_next - sigma) * model_output
+            let dt = (sigma_next - sigma) as f64;
+            let noise_pred_f32 = noise_pred.to_dtype(DType::F32)?;
+            latents = (&latents + noise_pred_f32 * dt)?;
 
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
@@ -433,11 +428,6 @@ impl LtxVideoEngine {
 
         // Debug: log sigma schedule and latent stats
         {
-            let sched_sigmas: Vec<f32> = scheduler.sigmas().to_vec1::<f32>()?;
-            let sched_ts: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
-            let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
-            let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
-            progress.info(&format!("First 3 timesteps: {:?}", &sched_ts[..3.min(sched_ts.len())]));
             let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
             let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
             progress.info(&format!("Sigmas: {:?}...{:?} (mu={:.3})", first_5, last_3, mu));
@@ -466,12 +456,14 @@ impl LtxVideoEngine {
         progress.stage_start("Loading VAE decoder");
         let vae_start = Instant::now();
 
+        // Load VAE from the separate diffusers-format file (v0.9 architecture).
+        // The v0.9 VAE works with v0.9.5 transformer — same latent space.
         let vae_path = &paths.vae;
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[vae_path.clone()], dtype, &device)?
         };
-        // VAE config matching the diffusers-format config.json from Lightricks/LTX-Video.
-        // This is the v0.9 VAE architecture (simpler, shared encoder/decoder params).
+
+        // v0.9 VAE config (from HuggingFace config.json at Lightricks/LTX-Video/vae/)
         let vae_config = AutoencoderKLLtxVideoConfig {
             block_out_channels: vec![128, 256, 512, 512],
             decoder_block_out_channels: vec![128, 256, 512, 512],
