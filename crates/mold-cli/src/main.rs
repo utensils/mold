@@ -169,6 +169,16 @@ Examples:
         #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..=16))]
         batch: u32,
 
+        /// Number of video frames to generate (video models only, e.g. ltx-video).
+        /// Implies video output mode; output defaults to .gif format.
+        #[arg(long, help_heading = "Video")]
+        frames: Option<u32>,
+
+        /// Video frames per second for output encoding (default: 24).
+        /// Only used with --frames or video model families.
+        #[arg(long, help_heading = "Video")]
+        fps: Option<u32>,
+
         /// Server URL to connect to
         #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
         host: Option<String>,
@@ -716,6 +726,8 @@ async fn run() -> anyhow::Result<()> {
             guidance,
             seed,
             batch,
+            frames,
+            fps,
             host,
             format,
             no_metadata,
@@ -751,6 +763,8 @@ async fn run() -> anyhow::Result<()> {
                 guidance,
                 seed,
                 batch,
+                frames,
+                fps,
                 host,
                 format,
                 no_metadata,
@@ -1437,6 +1451,42 @@ mod tests {
                 assert_eq!(older_than.as_deref(), Some("7d"));
             }
             _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn run_frames_flag() {
+        let cli = parse(&["run", "model", "test", "--frames", "25"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, Some(25));
+                assert_eq!(fps, None);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_fps_flag() {
+        let cli = parse(&["run", "model", "test", "--frames", "17", "--fps", "30"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, Some(17));
+                assert_eq!(fps, Some(30));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_fps_without_frames() {
+        let cli = parse(&["run", "model", "test", "--fps", "15"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, None);
+                assert_eq!(fps, Some(15));
+            }
+            _ => panic!("expected Run"),
         }
     }
 }

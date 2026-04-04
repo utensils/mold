@@ -168,6 +168,29 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err("lora file must be a .safetensors file".to_string());
         }
     }
+    // Video frame validation
+    if let Some(frames) = req.frames {
+        if frames == 0 {
+            return Err("frames must be >= 1".to_string());
+        }
+        // LTX Video requires frames = 8n+1 (9, 17, 25, 33, …)
+        if frames > 1 && (frames - 1) % 8 != 0 {
+            return Err(format!(
+                "frames ({frames}) must be 8n+1 (e.g. 9, 17, 25, 33, 41, 49, …)"
+            ));
+        }
+        if frames > 257 {
+            return Err(format!("frames ({frames}) must be <= 257"));
+        }
+    }
+    if let Some(fps) = req.fps {
+        if fps == 0 {
+            return Err("fps must be >= 1".to_string());
+        }
+        if fps > 120 {
+            return Err(format!("fps ({fps}) must be <= 120"));
+        }
+    }
     Ok(())
 }
 
@@ -234,6 +257,17 @@ const QWEN_IMAGE_DIMS: &[(u32, u32)] = &[
 /// Recommended dimensions for Wuerstchen models (native 1024x1024).
 const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
 
+/// Recommended dimensions for LTX Video models (native 768x512).
+/// LTX Video requires dimensions divisible by 32 (patchification).
+const LTX_VIDEO_DIMS: &[(u32, u32)] = &[
+    (768, 512),   // 3:2 (native)
+    (512, 512),   // 1:1
+    (1024, 576),  // 16:9
+    (576, 1024),  // 9:16
+    (768, 768),   // 1:1
+    (512, 768),   // 2:3
+];
+
 /// Return the list of recommended (width, height) pairs for a model family.
 ///
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
@@ -248,6 +282,7 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "z-image" => ZIMAGE_DIMS,
         "qwen-image" => QWEN_IMAGE_DIMS,
         "wuerstchen" => WUERSTCHEN_DIMS,
+        "ltx-video" => LTX_VIDEO_DIMS,
         _ => &[],
     }
 }
@@ -311,6 +346,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         }
     }
 
@@ -969,6 +1006,7 @@ mod tests {
             ("z-image", 1024, 1024),
             ("qwen-image", 1024, 1024),
             ("wuerstchen", 1024, 1024),
+            ("ltx-video", 768, 512),
         ];
         for (family, w, h) in families {
             let dims = recommended_dimensions(family);

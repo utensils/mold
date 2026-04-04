@@ -82,6 +82,8 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
             | ParamField::Steps
             | ParamField::Guidance
             | ParamField::Batch
+            | ParamField::Frames
+            | ParamField::Fps
             | ParamField::Strength
             | ParamField::ControlScale => {
                 if is_selected {

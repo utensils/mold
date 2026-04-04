@@ -206,6 +206,7 @@ mod tests {
                 generation_time_ms: 1,
                 model: req.model.clone(),
                 seed_used: req.seed.unwrap_or(42),
+            video: None,
             })
         }
 

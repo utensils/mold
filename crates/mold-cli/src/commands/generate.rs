@@ -76,6 +76,8 @@ pub async fn run(
     guidance: Option<f64>,
     seed: Option<u64>,
     batch: u32,
+    frames: Option<u32>,
+    fps: Option<u32>,
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
@@ -150,6 +152,8 @@ pub async fn run(
         expand,
         original_prompt,
         lora: lora.clone(),
+        frames,
+        fps,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -212,6 +216,16 @@ pub async fn run(
             theme::icon_mode(),
             cm.bold(),
             control_scale
+        );
+    }
+    let is_video = frames.is_some();
+    if let Some(f) = frames {
+        let effective_fps = fps.unwrap_or(24);
+        status!(
+            "{} Video mode: {} frames @ {} fps",
+            theme::icon_mode(),
+            f,
+            effective_fps,
         );
     }
     status!(
@@ -311,31 +325,89 @@ pub async fn run(
 
         GenerateResponse {
             images: all_images,
+            video: None,
             generation_time_ms: total_time_ms,
             model: last_model,
             seed_used: last_seed_used,
         }
     };
 
-    // Output: pipe mode writes raw image bytes to stdout; interactive mode saves files.
-    // For batch > 1, images were already saved inside the batch loop above.
-    if piped && output.is_none() {
-        // Pipe mode: write raw image bytes to stdout
-        let mut stdout = std::io::stdout().lock();
-        for img in &response.images {
-            stdout.write_all(&img.data)?;
+    // Output: video or image.
+    if let Some(ref video) = response.video {
+        // --- Video output ---
+        if piped && output.is_none() {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&video.data)?;
+            stdout.flush()?;
+        } else {
+            let filename = match output {
+                Some(ref path) if path == "-" => {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(&video.data)?;
+                    stdout.flush()?;
+                    None
+                }
+                Some(ref path) => Some(path.clone()),
+                None => {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Some(default_filename(model, timestamp, "gif", 1, 0))
+                }
+            };
+            if let Some(ref filename) = filename {
+                if std::path::Path::new(filename).exists() {
+                    status!("{} Overwriting: {}", theme::icon_alert(), filename);
+                }
+                std::fs::write(filename, &video.data)?;
+                status!(
+                    "{} Saved: {} ({} frames, {}x{}, {} fps)",
+                    theme::icon_done(),
+                    filename.bold(),
+                    video.frames,
+                    video.width,
+                    video.height,
+                    video.fps,
+                );
+            }
+            if preview && !video.thumbnail.is_empty() {
+                preview_image(&video.thumbnail);
+            }
         }
-        stdout.flush()?;
-    } else if batch == 1 {
-        // Single image: save and preview now
-        for img in &response.images {
-            save_and_preview_image(img, &output, model, batch, output_format, preview)?;
+    } else {
+        // --- Image output ---
+        // For batch > 1, images were already saved inside the batch loop above.
+        if piped && output.is_none() {
+            let mut stdout = std::io::stdout().lock();
+            for img in &response.images {
+                stdout.write_all(&img.data)?;
+            }
+            stdout.flush()?;
+        } else if batch == 1 {
+            for img in &response.images {
+                save_and_preview_image(img, &output, model, batch, output_format, preview)?;
+            }
         }
+        // batch > 1: already saved+previewed inside the batch loop
     }
-    // batch > 1: already saved+previewed inside the batch loop
 
     let secs = response.generation_time_ms as f64 / 1000.0;
-    if batch > 1 {
+    if is_video {
+        let frame_count = response
+            .video
+            .as_ref()
+            .map(|v| v.frames)
+            .unwrap_or_default();
+        status!(
+            "{} Done — {} in {:.1}s ({} frames, seed: {})",
+            theme::icon_done(),
+            model.bold(),
+            secs,
+            frame_count,
+            response.seed_used,
+        );
+    } else if batch > 1 {
         status!(
             "{} Done — {} in {:.1}s ({} images, base seed: {})",
             theme::icon_done(),
@@ -803,6 +875,7 @@ async fn generate_local_batch(
 
     Ok(GenerateResponse {
         images: all_images,
+        video: None,
         generation_time_ms: total_time_ms,
         model: last_model,
         seed_used: last_seed_used,

@@ -257,6 +257,9 @@ pub enum ParamField {
     SourceImage,
     Strength,
     MaskImage,
+    // Video
+    Frames,
+    Fps,
     // ControlNet
     ControlImage,
     ControlModel,
@@ -295,6 +298,11 @@ impl ParamField {
         }
         fields.push(ParamField::Expand);
         fields.push(ParamField::Offload);
+        // Video
+        if caps.supports_video {
+            fields.push(ParamField::Frames);
+            fields.push(ParamField::Fps);
+        }
         // img2img
         if caps.supports_img2img {
             fields.push(ParamField::SourceImage);
@@ -336,6 +344,8 @@ impl ParamField {
             Self::MaskImage => "Mask",
             Self::ControlImage => "Control",
             Self::ControlModel => "CNet Mdl",
+            Self::Frames => "Frames",
+            Self::Fps => "FPS",
             Self::ControlScale => "Scale",
             Self::ResetDefaults => "\u{21ba} Reset",
             Self::UnloadModel => "\u{23cf} Unload",
@@ -346,6 +356,7 @@ impl ParamField {
     pub fn section_header(&self) -> Option<&'static str> {
         match self {
             Self::Scheduler => Some("Advanced"),
+            Self::Frames => Some("Video"),
             Self::SourceImage => Some("img2img"),
             Self::ControlImage => Some("ControlNet"),
             Self::ResetDefaults => Some("Actions"),
@@ -429,6 +440,9 @@ pub struct GenerateParams {
     pub source_image_path: Option<String>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
+    // Video
+    pub frames: u32,
+    pub fps: u32,
     // ControlNet
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
@@ -490,6 +504,8 @@ impl GenerateParams {
             source_image_path: None,
             strength: 0.75,
             mask_image_path: None,
+            frames: 25,
+            fps: 24,
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
@@ -566,6 +582,8 @@ impl GenerateParams {
                 .as_deref()
                 .unwrap_or("\u{27e8}none\u{27e9}")
                 .to_string(),
+            ParamField::Frames => self.frames.to_string(),
+            ParamField::Fps => self.fps.to_string(),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
             ParamField::ResetDefaults => "restore model defaults".to_string(),
             ParamField::UnloadModel => "free GPU memory".to_string(),
@@ -2080,13 +2098,20 @@ impl App {
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
             }
+            ParamField::Frames => {
+                p.frames = (p.frames as i32 + delta * 8).clamp(9, 257) as u32;
+            }
+            ParamField::Fps => {
+                p.fps = (p.fps as i32 + delta).clamp(1, 60) as u32;
+            }
             ParamField::ControlScale => {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
             ParamField::Format => {
                 p.format = match p.format {
                     OutputFormat::Png => OutputFormat::Jpeg,
-                    OutputFormat::Jpeg => OutputFormat::Png,
+                    OutputFormat::Jpeg => OutputFormat::Gif,
+                    OutputFormat::Gif => OutputFormat::Png,
                 };
             }
             ParamField::Mode => {
@@ -2377,7 +2402,8 @@ impl App {
             ParamField::Format => {
                 self.generate.params.format = match self.generate.params.format {
                     OutputFormat::Png => OutputFormat::Jpeg,
-                    OutputFormat::Jpeg => OutputFormat::Png,
+                    OutputFormat::Jpeg => OutputFormat::Gif,
+                    OutputFormat::Gif => OutputFormat::Png,
                 };
             }
             // Cycle scheduler
@@ -2435,6 +2461,8 @@ impl App {
                 self.generate.params.lora_scale = 1.0;
                 self.generate.params.expand = false;
                 self.generate.params.offload = false;
+                self.generate.params.frames = 25;
+                self.generate.params.fps = 24;
                 self.generate.params.strength = 0.75;
                 self.generate.params.source_image_path = None;
                 self.generate.params.mask_image_path = None;
@@ -3273,6 +3301,7 @@ impl App {
                         let ext = match img_data.format {
                             OutputFormat::Png => "png",
                             OutputFormat::Jpeg => "jpeg",
+                            OutputFormat::Gif => "gif",
                         };
                         let filename = mold_core::default_output_filename(
                             &actual_model,
@@ -3373,6 +3402,8 @@ impl App {
                                 .as_ref()
                                 .map(|_| self.generate.params.lora_scale),
                             version: mold_core::build_info::VERSION.to_string(),
+            frames: None,
+            fps: None,
                         };
 
                         self.gallery.entries.insert(
@@ -4347,6 +4378,8 @@ mod tests {
                 lora: None,
                 lora_scale: None,
                 version: "0.3.1".to_string(),
+            frames: None,
+            fps: None,
             },
             generation_time_ms: Some(5000),
             timestamp: 1234,
@@ -4374,6 +4407,8 @@ mod tests {
                 lora: None,
                 lora_scale: None,
                 version: "0.0.0".to_string(),
+            frames: None,
+            fps: None,
             },
             generation_time_ms: None,
             timestamp: 0,
@@ -4462,6 +4497,8 @@ mod tests {
             lora: Some("/path/to/adapter.safetensors".to_string()),
             lora_scale: Some(0.8),
             version: "0.3.1".to_string(),
+            frames: None,
+            fps: None,
         }
     }
 
@@ -5349,6 +5386,7 @@ mod tests {
             generation_time_ms: 100,
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
+            video: None,
         };
         app.bg_tx
             .send(BackgroundEvent::GenerationComplete(Box::new(response)))

@@ -299,6 +299,7 @@ async fn generate(
             let content_type = match img.format {
                 OutputFormat::Png => HeaderValue::from_static("image/png"),
                 OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
+                OutputFormat::Gif => HeaderValue::from_static("image/gif"),
             };
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, content_type);

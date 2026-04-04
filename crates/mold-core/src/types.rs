@@ -168,6 +168,14 @@ pub struct GenerateRequest {
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
+    /// Number of video frames to generate. Must be 8n+1 (9, 17, 25, 33, …).
+    /// Only used by video model families (e.g. ltx-video). Ignored by image models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    /// Video frames per second for output encoding. Default: 24.
+    /// Only used by video model families. Ignored by image models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -205,12 +213,36 @@ fn default_control_scale() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateResponse {
     pub images: Vec<ImageData>,
+    /// Video output data. Present only for video model families (e.g. ltx-video).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoData>,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
     #[schema(example = 42)]
     pub seed_used: u64,
+}
+
+/// Video output from a video model family.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VideoData {
+    /// Encoded video bytes (GIF).
+    pub data: Vec<u8>,
+    /// Output format (Gif).
+    pub format: OutputFormat,
+    #[schema(example = 768)]
+    pub width: u32,
+    #[schema(example = 512)]
+    pub height: u32,
+    /// Number of frames in the video.
+    #[schema(example = 25)]
+    pub frames: u32,
+    /// Frames per second.
+    #[schema(example = 24)]
+    pub fps: u32,
+    /// First frame as PNG thumbnail for gallery/preview.
+    pub thumbnail: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -246,6 +278,10 @@ pub struct OutputMetadata {
     pub lora: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora_scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
     pub version: String,
 }
 
@@ -280,6 +316,8 @@ impl OutputMetadata {
             scheduler,
             lora,
             lora_scale,
+            frames: req.frames,
+            fps: req.fps,
             version: version.into(),
         }
     }
@@ -291,6 +329,7 @@ pub enum OutputFormat {
     #[default]
     Png,
     Jpeg,
+    Gif,
 }
 
 impl std::fmt::Display for OutputFormat {
@@ -298,6 +337,7 @@ impl std::fmt::Display for OutputFormat {
         match self {
             OutputFormat::Png => write!(f, "png"),
             OutputFormat::Jpeg => write!(f, "jpeg"),
+            OutputFormat::Gif => write!(f, "gif"),
         }
     }
 }
@@ -309,6 +349,7 @@ impl std::str::FromStr for OutputFormat {
         match s.to_lowercase().as_str() {
             "png" => Ok(OutputFormat::Png),
             "jpeg" | "jpg" => Ok(OutputFormat::Jpeg),
+            "gif" => Ok(OutputFormat::Gif),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -556,6 +597,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -698,6 +741,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -730,6 +775,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -759,6 +806,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -790,6 +839,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -819,6 +870,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
 
         let metadata =
@@ -1002,6 +1055,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1052,6 +1107,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1085,6 +1142,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1139,6 +1198,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

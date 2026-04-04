@@ -1028,6 +1028,7 @@ impl WuerstchenEngine {
             generation_time_ms,
             model: req.model.clone(),
             seed_used: seed,
+            video: None,
         })
     }
 }
@@ -1206,6 +1207,7 @@ impl InferenceEngine for WuerstchenEngine {
             generation_time_ms,
             model: req.model.clone(),
             seed_used: seed,
+            video: None,
         })
     }
 

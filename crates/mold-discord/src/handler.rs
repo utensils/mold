@@ -97,6 +97,7 @@ async fn send_result_edit(
         let ext = match image.format {
             mold_core::OutputFormat::Png => "png",
             mold_core::OutputFormat::Jpeg => "jpeg",
+            mold_core::OutputFormat::Gif => "gif",
         };
         let filename = format!("mold-{}.{ext}", resp.seed_used);
         let attachment = CreateAttachment::bytes(image.data.clone(), filename.clone());

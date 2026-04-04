@@ -13,6 +13,8 @@ pub struct ModelCapabilities {
     pub supports_controlnet: bool,
     /// Whether the model supports LoRA adapters.
     pub supports_lora: bool,
+    /// Whether the model is a video model (supports frames/fps params).
+    pub supports_video: bool,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -26,6 +28,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: true,
             supports_controlnet: true,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -34,6 +37,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: true,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -42,6 +46,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -50,6 +55,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -58,6 +64,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: true,
             supports_controlnet: false, // ControlNet only supported on SD1.5
             supports_lora: true,
+            supports_video: false,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -66,6 +73,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -74,6 +82,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -82,6 +91,16 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
+            default_scheduler: None,
+        },
+        "ltx-video" => ModelCapabilities {
+            supports_negative_prompt: false,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_controlnet: false,
+            supports_lora: false,
+            supports_video: true,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -90,6 +109,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_img2img: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: false,
             default_scheduler: None,
         },
     }
@@ -169,5 +189,12 @@ mod tests {
         assert!(caps.supports_negative_prompt);
         assert!(!caps.supports_scheduler);
         assert!(!caps.supports_controlnet);
+    }
+
+    #[test]
+    fn ltx_video_supports_video() {
+        let caps = capabilities_for_family("ltx-video");
+        assert!(caps.supports_video);
+        assert!(!caps.supports_negative_prompt);
     }
 }

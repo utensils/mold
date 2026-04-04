@@ -79,6 +79,10 @@ pub struct ModelConfig {
     pub lora: Option<String>,
     /// Default LoRA scale for this model (0.0-2.0).
     pub lora_scale: Option<f64>,
+    /// Default number of video frames for video models (e.g. 25 for ltx-video).
+    pub default_frames: Option<u32>,
+    /// Default video FPS for video models (e.g. 24 for ltx-video).
+    pub default_fps: Option<u32>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -160,6 +164,16 @@ impl ModelConfig {
         self.lora
             .as_ref()
             .map(|path| (path.clone(), self.lora_scale.unwrap_or(1.0)))
+    }
+
+    /// Effective video frames: per-model default, or None for image-only models.
+    pub fn effective_frames(&self) -> Option<u32> {
+        self.default_frames
+    }
+
+    /// Effective video FPS: per-model default, or None for image-only models.
+    pub fn effective_fps(&self) -> Option<u32> {
+        self.default_fps
     }
 }
 
@@ -508,6 +522,8 @@ impl Config {
                     mc.is_turbo = None;
                     mc.scheduler = None;
                     mc.negative_prompt = None;
+                    mc.default_frames = None;
+                    mc.default_fps = None;
                     mc.description = None;
                     mc.family = None;
                 }
@@ -808,6 +824,12 @@ impl Config {
             }
             if cfg.negative_prompt.is_none() {
                 cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
+            }
+            if cfg.default_frames.is_none() {
+                cfg.default_frames = manifest.defaults.frames;
+            }
+            if cfg.default_fps.is_none() {
+                cfg.default_fps = manifest.defaults.fps;
             }
             // Description and family always come from the manifest for known models.
             // These are metadata, not user-configurable settings.

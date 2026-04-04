@@ -79,7 +79,7 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif")) {
             continue;
         }
 
@@ -91,10 +91,10 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let gallery_entry = if ext.as_deref() == Some("png") {
-            read_png_metadata(&path, timestamp)
-        } else {
-            read_jpeg_metadata(&path, timestamp)
+        let gallery_entry = match ext.as_deref() {
+            Some("png") => read_png_metadata(&path, timestamp),
+            Some("gif") => read_gif_metadata(&path, timestamp),
+            _ => read_jpeg_metadata(&path, timestamp),
         };
         if let Some(ge) = gallery_entry {
             entries.push(ge);
@@ -142,6 +142,74 @@ fn read_png_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
     }
 
     None
+}
+
+/// Read OutputMetadata from a GIF file's comment extension.
+/// GIF comment extensions use introducer 0x21 + label 0xFE, followed by sub-blocks.
+/// Falls back to a placeholder entry so GIF files still appear in the gallery.
+fn read_gif_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
+    let data = std::fs::read(path).ok()?;
+    // Look for comment extension blocks: 0x21 0xFE
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] == 0x21 && data[i + 1] == 0xFE {
+            // Read sub-blocks after the 2-byte header
+            let mut comment = Vec::new();
+            let mut j = i + 2;
+            while j < data.len() {
+                let block_size = data[j] as usize;
+                if block_size == 0 {
+                    break; // Block terminator
+                }
+                j += 1;
+                let end = (j + block_size).min(data.len());
+                comment.extend_from_slice(&data[j..end]);
+                j = end;
+            }
+            if let Ok(text) = std::str::from_utf8(&comment) {
+                if let Some(json) = text.strip_prefix("mold:parameters ") {
+                    if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(json) {
+                        return Some(GalleryEntry {
+                            path: path.to_path_buf(),
+                            metadata: meta,
+                            generation_time_ms: None,
+                            timestamp,
+                            server_url: None,
+                        });
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    // No metadata found — show with default placeholder so GIFs still appear in gallery
+    Some(GalleryEntry {
+        path: path.to_path_buf(),
+        metadata: mold_core::OutputMetadata {
+            prompt: String::new(),
+            negative_prompt: None,
+            original_prompt: None,
+            model: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            seed: 0,
+            steps: 0,
+            guidance: 0.0,
+            width: 0,
+            height: 0,
+            strength: None,
+            scheduler: None,
+            lora: None,
+            lora_scale: None,
+            frames: None,
+            fps: None,
+            version: String::new(),
+        },
+        generation_time_ms: None,
+        timestamp,
+        server_url: None,
+    })
 }
 
 /// Read OutputMetadata from a JPEG file's COM marker.

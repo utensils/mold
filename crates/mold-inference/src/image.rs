@@ -54,6 +54,7 @@ pub(crate) fn encode_image(
     match format {
         OutputFormat::Png => write_png(&rgb_image, &mut buf, metadata)?,
         OutputFormat::Jpeg => write_jpeg(&rgb_image, &mut buf, metadata)?,
+        OutputFormat::Gif => anyhow::bail!("GIF encoding is not supported for single images"),
     }
 
     Ok(buf.into_inner())
@@ -344,6 +345,8 @@ mod tests {
             lora: None,
             lora_scale: None,
             version: "0.1.0".to_string(),
+            frames: None,
+            fps: None,
         };
 
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, Some(&metadata)).unwrap();
@@ -406,6 +409,8 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
@@ -428,6 +433,8 @@ mod tests {
             lora: None,
             lora_scale: None,
             version: "0.1.0".to_string(),
+            frames: None,
+            fps: None,
         });
 
         update_output_metadata_size(&mut metadata, 1008, 1008);
@@ -455,6 +462,8 @@ mod tests {
             lora: None,
             lora_scale: None,
             version: "0.1.0".to_string(),
+            frames: None,
+            fps: None,
         }
     }
 
@@ -575,6 +584,8 @@ mod tests {
             lora: None,
             lora_scale: None,
             version: "0.2.0".to_string(),
+            frames: None,
+            fps: None,
         };
         let bytes = encode_image(&tensor, OutputFormat::Jpeg, 8, 8, Some(&metadata)).unwrap();
 
