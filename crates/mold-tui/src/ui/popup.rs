@@ -258,13 +258,15 @@ fn render_upscale_model_selector(frame: &mut Frame, app: &mut App) {
             .iter()
             .enumerate()
             .map(|(i, name)| {
+                let downloaded = app.config.manifest_model_is_downloaded(name);
                 let style = if i == *selected {
                     theme.list_selected()
                 } else {
                     Style::default().fg(theme.text)
                 };
                 let marker = if i == *selected { "\u{25b8} " } else { "  " };
-                ListItem::new(format!("{marker}{name}")).style(style)
+                let suffix = if downloaded { "" } else { "  (pull)" };
+                ListItem::new(format!("{marker}{name}{suffix}")).style(style)
             })
             .collect();
 

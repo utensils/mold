@@ -806,7 +806,7 @@ pub enum Popup {
     Info {
         message: String,
     },
-    /// Upscaler model selector (filtered to downloaded upscaler models only).
+    /// Upscaler model selector (all known upscaler models, auto-pulls on select).
     UpscaleModelSelector {
         filter: String,
         selected: usize,
@@ -1221,20 +1221,41 @@ impl App {
                 }
             }
 
-            // Local fallback via spawn_blocking
-            let model_name_local = model_name.clone();
+            // Local fallback — auto-pull if not downloaded, then upscale
+            let resolved = mold_core::manifest::resolve_model_name(&model_name);
+            let mut config = config;
+            if config
+                .models
+                .get(&resolved)
+                .and_then(|c| c.transformer.as_ref())
+                .is_none()
+            {
+                // Model not configured — auto-pull with progress bars
+                match crate::backend::auto_pull_model(&resolved, &tx).await {
+                    Ok(updated_config) => {
+                        config = updated_config;
+                    }
+                    Err(msg) => {
+                        let _ = tx.send(BackgroundEvent::UpscaleFailed(msg));
+                        return;
+                    }
+                }
+            }
+
+            let model_name_local = resolved;
             let tx_progress = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let resolved = mold_core::manifest::resolve_model_name(&model_name_local);
                 let weights_path = config
                     .models
-                    .get(&resolved)
+                    .get(&model_name_local)
                     .and_then(|c| c.transformer.as_ref())
                     .map(std::path::PathBuf::from)
-                    .ok_or_else(|| anyhow::anyhow!("Upscaler model '{resolved}' not configured"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Upscaler model '{}' not configured", model_name_local)
+                    })?;
 
                 let mut engine = mold_inference::create_upscale_engine(
-                    resolved,
+                    model_name_local.clone(),
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
                 )?;
@@ -1903,11 +1924,11 @@ impl App {
         }
     }
 
-    /// Return names of downloaded upscaler models.
+    /// Return names of all known upscaler models (downloaded or not).
     fn available_upscaler_models(&self) -> Vec<String> {
         mold_core::manifest::known_manifests()
             .iter()
-            .filter(|m| m.is_upscaler() && self.config.manifest_model_is_downloaded(&m.name))
+            .filter(|m| m.is_upscaler())
             .map(|m| m.name.clone())
             .collect()
     }
@@ -2276,17 +2297,11 @@ impl App {
                     && self.gallery.entries.get(self.gallery.selected).is_some()
                 {
                     let models = self.available_upscaler_models();
-                    if models.is_empty() {
-                        self.popup = Some(Popup::Info {
-                            message: "No upscaler models downloaded. Pull one first: mold pull real-esrgan-x4plus:fp16".into(),
-                        });
-                    } else {
-                        self.popup = Some(Popup::UpscaleModelSelector {
-                            filter: String::new(),
-                            selected: 0,
-                            filtered: models,
-                        });
-                    }
+                    self.popup = Some(Popup::UpscaleModelSelector {
+                        filter: String::new(),
+                        selected: 0,
+                        filtered: models,
+                    });
                 }
             }
             Action::RemoveModel => {
@@ -5905,17 +5920,16 @@ mod tests {
     }
 
     #[test]
-    fn available_upscaler_models_returns_downloaded_only() {
-        // known_manifests includes upscaler models — but none are "downloaded"
-        // in a test environment (no model files on disk), so the list should be empty.
-        let config = Config::load_or_default();
+    fn available_upscaler_models_returns_all_known() {
+        // All known upscaler models should be listed (downloaded or not)
         let models: Vec<String> = mold_core::manifest::known_manifests()
             .iter()
-            .filter(|m| m.is_upscaler() && config.manifest_model_is_downloaded(&m.name))
+            .filter(|m| m.is_upscaler())
             .map(|m| m.name.clone())
             .collect();
-        // In CI, no models are downloaded
-        assert!(models.is_empty() || models.iter().all(|n| !n.is_empty()));
+        // There should be 7 upscaler models in the manifest
+        assert_eq!(models.len(), 7);
+        assert!(models.iter().all(|n| !n.is_empty()));
     }
 
     #[test]
