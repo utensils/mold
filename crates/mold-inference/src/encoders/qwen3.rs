@@ -8,7 +8,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use std::path::{Path, PathBuf};
 
-use super::qwen3_bf16::Bf16Qwen3Encoder;
+use super::qwen3_bf16::{Bf16Qwen3Encoder, Qwen3BF16Config};
 use super::qwen3_gguf::GgufQwen3Encoder;
 
 /// BF16 (safetensors) or quantized (GGUF) Qwen3 text encoder.
@@ -53,6 +53,8 @@ pub(crate) struct Qwen3Encoder {
     /// Paths needed for reload.
     encoder_paths: Vec<PathBuf>,
     dtype: DType,
+    /// BF16 architecture config (Qwen3-4B vs 8B). Used for BF16 reload.
+    bf16_config: Qwen3BF16Config,
 }
 
 /// Format a user prompt for the Qwen3 chat template used by Z-Image.
@@ -74,11 +76,15 @@ fn format_prompt_for_flux2(prompt: &str) -> String {
 
 impl Qwen3Encoder {
     /// Load a BF16 Qwen3 encoder from safetensors shards.
+    ///
+    /// The `bf16_config` selects the architecture variant: `Qwen3BF16Config::qwen3_4b()`
+    /// for Klein-4B / Z-Image, or `Qwen3BF16Config::qwen3_8b()` for Klein-9B.
     pub fn load_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        bf16_config: &Qwen3BF16Config,
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
         let vb = crate::weight_loader::load_safetensors_with_progress(
@@ -88,7 +94,7 @@ impl Qwen3Encoder {
             "Qwen3 encoder",
             progress,
         )?;
-        let model = Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?);
+        let model = Qwen3Model::BF16(Bf16Qwen3Encoder::load(bf16_config, vb)?);
 
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
@@ -102,11 +108,20 @@ impl Qwen3Encoder {
             is_quantized: false,
             encoder_paths: encoder_paths.to_vec(),
             dtype,
+            bf16_config: *bf16_config,
         })
     }
 
     /// Load a quantized Qwen3 encoder from a GGUF file.
-    pub fn load_gguf(gguf_path: &Path, tokenizer_path: &PathBuf, device: &Device) -> Result<Self> {
+    ///
+    /// The `bf16_config` is stored for potential BF16 fallback reload but is not
+    /// used during GGUF loading (GGUF reads dimensions from file metadata).
+    pub fn load_gguf(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        bf16_config: &Qwen3BF16Config,
+    ) -> Result<Self> {
         let model = Qwen3Model::Quantized(GgufQwen3Encoder::load(gguf_path, device)?);
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
@@ -120,6 +135,7 @@ impl Qwen3Encoder {
             is_quantized: true,
             encoder_paths: vec![gguf_path.to_path_buf()],
             dtype: DType::F32, // GGUF dequantizes to F32
+            bf16_config: *bf16_config,
         })
     }
 
@@ -208,7 +224,10 @@ impl Qwen3Encoder {
                 "Qwen3 encoder",
                 progress,
             )?;
-            self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(vb)?));
+            self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(
+                &self.bf16_config,
+                vb,
+            )?));
         }
         Ok(())
     }

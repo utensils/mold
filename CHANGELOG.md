@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-04-04
+
+### Added
+
+- **Qwen3-8B encoder support**: Klein-9B models now use the correct Qwen3-8B text encoder (hidden_size=4096) with auto-selection between 4B and 8B GGUF variant registries ([#157](https://github.com/utensils/mold/issues/157), [#166](https://github.com/utensils/mold/pull/166))
+- **Qwen3-8B GGUF variant registry**: Q8/Q6/IQ4/Q3 quantized encoders from `unsloth/Qwen3-8B-GGUF` for Klein-9B, with separate cache directory (`shared/qwen3-8b-gguf`) ([#166](https://github.com/utensils/mold/pull/166))
+- **Gallery images**: Klein-9B bottle ship and Wuerstchen v2 lighthouse added to homepage gallery and model pages ([#166](https://github.com/utensils/mold/pull/166))
+
+### Changed
+
+- **Quantized inference for Flux.2 GGUF**: rewrote the Flux.2 quantized transformer to keep weights in compressed GGUF format in VRAM and dequantize on-the-fly per matmul via `QMatMul`, matching ComfyUI and InvokeAI; Klein-9B Q4 VRAM usage drops from ~18GB to ~6GB, load time from minutes to seconds ([#166](https://github.com/utensils/mold/pull/166))
+- **Default model**: changed from bare `flux2-klein` to explicit `flux2-klein:q8` for new users ([#166](https://github.com/utensils/mold/pull/166))
+- **Klein guidance default**: both Klein-4B and Klein-9B now default to guidance=1.0, matching BFL model cards and InvokeAI ([#166](https://github.com/utensils/mold/pull/166))
+
+### Fixed
+
+- **Klein-9B OOM on CUDA**: "Metal out of memory" error on Linux/CUDA when loading Klein-9B models; root cause was wrong Qwen3 encoder (4B instead of 8B) and full dequantization exhausting VRAM ([#157](https://github.com/utensils/mold/issues/157), [#166](https://github.com/utensils/mold/pull/166))
+- **CUDA OOM error message**: now shows "CUDA out of memory" on Linux instead of raw candle backtrace ([#166](https://github.com/utensils/mold/pull/166))
+- **GGUF NaN safety**: quantized Flux.2 transformer wraps all linear operations with NaN-safe filter for CUDA, following SD3's established pattern ([#166](https://github.com/utensils/mold/pull/166))
+- **Pre-existing TUI test failures**: settings tests expected bare `flux2-klein` but config resolves to `flux2-klein:q8` ([#166](https://github.com/utensils/mold/pull/166))
+
+### Removed
+
+- **Klein-9B alpha status**: all Klein-9B model descriptions, docs, and skills updated to remove alpha labels — Klein-9B is now fully supported ([#166](https://github.com/utensils/mold/pull/166))
+
 ## [0.5.2] - 2026-04-03
 
 ### Fixed

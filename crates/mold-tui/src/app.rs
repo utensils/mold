@@ -4763,7 +4763,7 @@ mod tests {
         let app = make_settings_test_app();
         assert_eq!(
             app.settings_display_value(&SettingsKey::DefaultModel),
-            "flux2-klein"
+            "flux2-klein:q8"
         );
         assert_eq!(app.settings_display_value(&SettingsKey::ServerPort), "7680");
         assert_eq!(
@@ -5295,7 +5295,7 @@ mod tests {
         assert!(matches!(app.popup, Some(Popup::SettingsInput { .. })));
         if let Some(Popup::SettingsInput { key, input, .. }) = &app.popup {
             assert_eq!(*key, SettingsKey::DefaultModel);
-            assert_eq!(input, "flux2-klein");
+            assert_eq!(input, "flux2-klein:q8");
         }
     }
 

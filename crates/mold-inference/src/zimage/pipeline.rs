@@ -295,6 +295,7 @@ impl ZImageEngine {
                 &bf16_paths,
                 have_bf16,
                 false,
+                crate::encoders::variant_resolution::Qwen3Size::B4,
             )?
         };
         self.base
@@ -309,6 +310,7 @@ impl ZImageEngine {
         let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
 
         // Load text encoder
+        let bf16_cfg = encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b();
         let te_label = if is_qwen3_gguf {
             format!("Loading Qwen3 text encoder (GGUF, {})", te_device_label)
         } else {
@@ -326,6 +328,7 @@ impl ZImageEngine {
                 &resolved_paths[0],
                 &text_tokenizer_path,
                 &te_device,
+                &bf16_cfg,
             )?
         } else {
             encoders::qwen3::Qwen3Encoder::load_bf16(
@@ -333,6 +336,7 @@ impl ZImageEngine {
                 &text_tokenizer_path,
                 &te_device,
                 te_dtype,
+                &bf16_cfg,
                 &self.base.progress,
             )?
         };
@@ -427,6 +431,7 @@ impl ZImageEngine {
                     &bf16_paths,
                     have_bf16,
                     false,
+                    crate::encoders::variant_resolution::Qwen3Size::B4,
                 )?
             };
             self.base
@@ -440,6 +445,7 @@ impl ZImageEngine {
             };
             let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
 
+            let bf16_cfg = encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b();
             let te_label = if is_qwen3_gguf {
                 format!("Loading Qwen3 text encoder (GGUF, {})", te_device_label)
             } else {
@@ -468,6 +474,7 @@ impl ZImageEngine {
                     &resolved_paths[0],
                     &text_tokenizer_path,
                     &te_device,
+                    &bf16_cfg,
                 )?
             } else {
                 encoders::qwen3::Qwen3Encoder::load_bf16(
@@ -475,6 +482,7 @@ impl ZImageEngine {
                     &text_tokenizer_path,
                     &te_device,
                     te_dtype,
+                    &bf16_cfg,
                     &self.base.progress,
                 )?
             };

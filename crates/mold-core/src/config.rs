@@ -385,7 +385,7 @@ impl Default for LoggingConfig {
 }
 
 fn default_model() -> String {
-    "flux2-klein".to_string()
+    "flux2-klein:q8".to_string()
 }
 
 fn default_models_dir() -> String {

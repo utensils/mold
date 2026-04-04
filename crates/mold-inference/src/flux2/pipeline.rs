@@ -1,10 +1,11 @@
-//! Flux.2 Klein-4B inference engine.
+//! Flux.2 Klein inference engine (4B and 9B variants).
 //!
 //! Follows the same Eager + Sequential loading pattern as FluxEngine and ZImageEngine.
 //!
 //! Key differences from FLUX.1:
 //! - Uses Qwen3 text encoder (not T5 + CLIP)
-//! - Qwen3 hidden states from layers 9, 18, 27 are stacked to produce joint_attention_dim=7680
+//!   - Klein-4B: Qwen3-4B (hidden=2560), stacked layers → 7680-dim context
+//!   - Klein-9B: Qwen3-8B (hidden=4096), stacked layers → 12288-dim context
 //! - VAE has latent_channels=32 (not 16)
 //! - Transformer has 128 input channels (not 64)
 //! - 4D RoPE (not 3D)
@@ -53,7 +54,7 @@ struct LoadedFlux2 {
 // Engine
 // ---------------------------------------------------------------------------
 
-/// Flux.2 Klein-4B inference engine backed by candle.
+/// Flux.2 Klein inference engine (4B and 9B variants) backed by candle.
 pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
@@ -84,6 +85,29 @@ impl Flux2Engine {
             Flux2Config::klein_9b()
         } else {
             Flux2Config::klein()
+        }
+    }
+
+    /// Whether this is a Klein-9B model (uses Qwen3-8B text encoder).
+    fn is_9b(&self) -> bool {
+        self.base.model_name.to_lowercase().contains("9b")
+    }
+
+    /// Return the Qwen3 encoder size enum for this model.
+    fn qwen3_size(&self) -> crate::encoders::variant_resolution::Qwen3Size {
+        if self.is_9b() {
+            crate::encoders::variant_resolution::Qwen3Size::B8
+        } else {
+            crate::encoders::variant_resolution::Qwen3Size::B4
+        }
+    }
+
+    /// Return the BF16 config for the Qwen3 encoder used by this model.
+    fn qwen3_bf16_config(&self) -> encoders::qwen3_bf16::Qwen3BF16Config {
+        if self.is_9b() {
+            encoders::qwen3_bf16::Qwen3BF16Config::qwen3_8b()
+        } else {
+            encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b()
         }
     }
 
@@ -144,6 +168,8 @@ impl Flux2Engine {
         device: &Device,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         if self.is_gguf_transformer() {
+            // Weights stay quantized in VRAM via QMatMul — no dequantization at load
+            // time. A Q4 Klein-9B uses ~6GB VRAM instead of ~18GB with full dequant.
             let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
                 &self.base.paths.transformer,
                 device,
@@ -151,7 +177,7 @@ impl Flux2Engine {
             Ok((
                 Flux2TransformerWrapper::Quantized(
                     super::quantized_transformer::QuantizedFlux2Transformer::new(
-                        cfg, gguf_vb, gpu_dtype, device,
+                        cfg, gguf_vb, device,
                     )?,
                 ),
                 "Loading Flux.2 transformer (GPU, GGUF)",
@@ -223,13 +249,13 @@ impl Flux2Engine {
     }
 
     /// Encode a prompt with the Qwen3 text encoder, extracting hidden states from
-    /// layers 9, 18, 27 and stacking them to produce joint_attention_dim=7680.
+    /// layers 9, 18, 27 and stacking them to produce the context embedding.
     ///
-    /// Klein's Qwen3 has hidden_size=2560. The transformer expects context_in_dim=7680,
-    /// which is 2560 * 3. The HuggingFace pipeline stacks outputs from intermediate
-    /// layers [9, 18, 27] to form the text conditioning.
+    /// - Klein-4B: Qwen3-4B (hidden=2560) → stacked dim = 2560 * 3 = 7680
+    /// - Klein-9B: Qwen3-8B (hidden=4096) → stacked dim = 4096 * 3 = 12288
     ///
-    /// Layers 9, 18, 27 correspond to roughly 1/4, 1/2, 3/4 depth of the 36-layer Qwen3.
+    /// Both use the same 36-layer Qwen3 architecture. Layers 9, 18, 27 correspond
+    /// to roughly 1/4, 1/2, 3/4 depth.
     const QWEN3_HIDDEN_LAYERS: [usize; 3] = [9, 18, 27];
 
     fn encode_and_stack(
@@ -281,6 +307,9 @@ impl Flux2Engine {
     /// On error, `self.base.loaded` remains `None` — all components are assembled into
     /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
+    ///
+    /// GGUF variants keep weights quantized in VRAM via QMatMul (~6GB for Q4 9B),
+    /// so both Klein-4B and Klein-9B fit comfortably in eager mode on 24GB GPUs.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
             return Ok(());
@@ -338,6 +367,7 @@ impl Flux2Engine {
 
         self.base.progress.stage_start("Selecting Qwen3 encoder");
         let resolve_start = Instant::now();
+        let qwen3_size = self.qwen3_size();
         let (encoder_paths, is_gguf, on_gpu, device_label) = {
             let bf16_paths = self.text_encoder_paths();
             let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
@@ -349,6 +379,7 @@ impl Flux2Engine {
                 &bf16_paths,
                 have_bf16,
                 true,
+                qwen3_size,
             )?
         };
         self.base
@@ -357,6 +388,7 @@ impl Flux2Engine {
 
         let enc_device = if on_gpu { &device } else { &cpu };
         let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
+        let bf16_cfg = self.qwen3_bf16_config();
 
         let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
         self.base.progress.stage_start(&enc_stage_label);
@@ -367,6 +399,7 @@ impl Flux2Engine {
                 &encoder_paths[0],
                 &text_tokenizer_path,
                 enc_device,
+                &bf16_cfg,
             )?
         } else {
             encoders::qwen3::Qwen3Encoder::load_bf16(
@@ -374,6 +407,7 @@ impl Flux2Engine {
                 &text_tokenizer_path,
                 enc_device,
                 enc_dtype,
+                &bf16_cfg,
                 &self.base.progress,
             )?
         };
@@ -435,6 +469,7 @@ impl Flux2Engine {
             let free = free_vram_bytes().unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let resolve_start = Instant::now();
+            let qwen3_size = self.qwen3_size();
             let (encoder_paths, is_gguf, on_gpu, device_label) = {
                 let bf16_paths = self.text_encoder_paths();
                 let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
@@ -446,6 +481,7 @@ impl Flux2Engine {
                     &bf16_paths,
                     have_bf16,
                     true,
+                    qwen3_size,
                 )?
             };
             self.base
@@ -454,6 +490,7 @@ impl Flux2Engine {
 
             let enc_device = if on_gpu { &device } else { &Device::Cpu };
             let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
+            let bf16_cfg = self.qwen3_bf16_config();
 
             // Pre-flight memory check
             let enc_size: u64 = encoder_paths
@@ -474,6 +511,7 @@ impl Flux2Engine {
                     &encoder_paths[0],
                     &text_tokenizer_path,
                     enc_device,
+                    &bf16_cfg,
                 )?
             } else {
                 encoders::qwen3::Qwen3Encoder::load_bf16(
@@ -481,6 +519,7 @@ impl Flux2Engine {
                     &text_tokenizer_path,
                     enc_device,
                     enc_dtype,
+                    &bf16_cfg,
                     &self.base.progress,
                 )?
             };

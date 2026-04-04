@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-discord"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "mold-ai-core",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "candle-core-mold",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-server"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-tui"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "crossterm 0.28.1",

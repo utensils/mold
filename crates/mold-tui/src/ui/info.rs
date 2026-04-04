@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn truncation_does_not_panic_on_multibyte_chars() {
         // Em dash is 3 bytes (U+2014). Truncation must land on a char boundary.
-        let desc = "Flux.2 Klein-9B Q4 GGUF (alpha) \u{2014} smallest footprint";
+        let desc = "Flux.2 Klein-9B Q4 GGUF \u{2014} smallest footprint";
         let width: u16 = 34; // lands inside the em dash at bytes 32..35
         if desc.len() > width as usize {
             let max = width as usize - 2;
