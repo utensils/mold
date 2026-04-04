@@ -2935,10 +2935,10 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
             family: "upscaler".to_string(),
             description: "Real-ESRGAN x4+ FP16 — high quality 4x upscaler (32MB)".to_string(),
             files: vec![ModelFile {
-                hf_repo: "Comfy-Org/Real-ESRGAN_repackaged".to_string(),
-                hf_filename: "realesrgan-x4plus_fp16.safetensors".to_string(),
+                hf_repo: "hlky/RealESRGAN_x4plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 33_432_808,
+                size_bytes: 33_461_662,
                 gated: false,
                 sha256: None,
             }],
@@ -2949,10 +2949,10 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
             family: "upscaler".to_string(),
             description: "Real-ESRGAN x4+ FP32 — high quality 4x upscaler (64MB)".to_string(),
             files: vec![ModelFile {
-                hf_repo: "Comfy-Org/Real-ESRGAN_repackaged".to_string(),
-                hf_filename: "realesrgan-x4plus_fp32.safetensors".to_string(),
+                hf_repo: "hlky/RealESRGAN_x4plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 66_849_244,
+                size_bytes: 66_857_868,
                 gated: false,
                 sha256: None,
             }],
@@ -2964,24 +2964,25 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
             description: "Real-ESRGAN x4+ Anime FP16 — anime-optimized 4x upscaler (8.5MB)"
                 .to_string(),
             files: vec![ModelFile {
-                hf_repo: "Comfy-Org/Real-ESRGAN_repackaged".to_string(),
-                hf_filename: "realesrgan-x4plus-anime_fp16.safetensors".to_string(),
+                hf_repo: "hlky/RealESRGAN_x4plus_anime_6B".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 8_929_096,
+                size_bytes: 8_953_054,
                 gated: false,
                 sha256: None,
             }],
             defaults: defaults.clone(),
         },
         ModelManifest {
-            name: "real-esrgan-x4v3:fp32".to_string(),
+            name: "real-esrgan-x4plus-anime:fp32".to_string(),
             family: "upscaler".to_string(),
-            description: "Real-ESRGAN Compact v3 FP32 — fast 4x upscaler (4.7MB)".to_string(),
+            description: "Real-ESRGAN x4+ Anime FP32 — anime-optimized 4x upscaler (17MB)"
+                .to_string(),
             files: vec![ModelFile {
-                hf_repo: "Comfy-Org/Real-ESRGAN_repackaged".to_string(),
-                hf_filename: "realesrgan-x4v3_fp32.safetensors".to_string(),
+                hf_repo: "hlky/RealESRGAN_x4plus_anime_6B".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 4_904_268,
+                size_bytes: 17_888_804,
                 gated: false,
                 sha256: None,
             }],
@@ -2993,10 +2994,10 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
             description: "Real-ESRGAN Anime Video v3 FP32 — fast anime 4x upscaler (2.4MB)"
                 .to_string(),
             files: vec![ModelFile {
-                hf_repo: "Comfy-Org/Real-ESRGAN_repackaged".to_string(),
-                hf_filename: "realesrgan-animevideov3_fp32.safetensors".to_string(),
+                hf_repo: "wkrettek/real-esrgan-models".to_string(),
+                hf_filename: "realesr_animevideov3.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 2_497_836,
+                size_bytes: 2_489_904,
                 gated: false,
                 sha256: None,
             }],
@@ -3008,9 +3009,23 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
             description: "Real-ESRGAN x2+ FP16 — high quality 2x upscaler (32MB)".to_string(),
             files: vec![ModelFile {
                 hf_repo: "hlky/RealESRGAN_x2plus".to_string(),
-                hf_filename: "RealESRGAN_x2plus_fp16.safetensors".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
                 component: ModelComponent::Upscaler,
-                size_bytes: 33_432_808,
+                size_bytes: 33_472_030,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x2plus:fp32".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x2+ FP32 — high quality 2x upscaler (64MB)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x2plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 66_878_604,
                 gated: false,
                 sha256: None,
             }],
@@ -3416,8 +3431,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand + 6 Upscaler = 67
-        assert_eq!(known_manifests().len(), 67);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 68
+        assert_eq!(known_manifests().len(), 68);
     }
 
     #[test]
