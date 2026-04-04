@@ -161,9 +161,8 @@ fn build_model_item<'a>(
         })
         .unwrap_or_default();
 
-    // Status tag — fixed width for column alignment
-    let status_width: usize = if show_download_status { 10 } else { 0 };
-    let status = if !downloaded { "available" } else { "" };
+    // Status indicator — compact visual: checkmark for downloaded, "(download)" for not
+    let status_width: usize = if show_download_status { 12 } else { 0 };
 
     // Default indicator
     let default_tag = if is_default { " *" } else { "" };
@@ -184,11 +183,6 @@ fn build_model_item<'a>(
     let default_style = Style::default()
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let status_style = if status == "pull" {
-        Style::default().fg(theme.text_dim)
-    } else {
-        Style::default().fg(Color::Green)
-    };
 
     let mut spans = vec![
         Span::styled(format!("{marker}{name}"), name_style),
@@ -201,20 +195,16 @@ fn build_model_item<'a>(
         Span::styled(format!("{size_str:>7}"), size_style),
     ];
     if show_download_status {
-        let status_text = if status.is_empty() {
-            format!("{:>width$}", "ready", width = status_width)
-        } else {
-            format!("{:>width$}", status, width = status_width)
-        };
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            status_text,
-            if status.is_empty() {
-                Style::default().fg(Color::Green)
-            } else {
-                status_style
-            },
-        ));
+        if downloaded {
+            // Green checkmark — model is ready to use
+            let tag = format!("{:>width$}", "\u{2713}", width = status_width);
+            spans.push(Span::styled(tag, Style::default().fg(Color::Green)));
+        } else {
+            // Dim "(download)" — will be auto-pulled on selection
+            let tag = format!("{:>width$}", "(download)", width = status_width);
+            spans.push(Span::styled(tag, Style::default().fg(theme.text_dim)));
+        }
     }
 
     let line1 = Line::from(spans);
