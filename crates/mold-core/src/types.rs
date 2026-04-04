@@ -481,6 +481,10 @@ pub struct SseCompleteEvent {
     pub seed_used: u64,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
+    /// The model that actually generated this image (server is source of truth).
+    #[serde(default)]
+    #[schema(example = "flux-schnell:q8")]
+    pub model: String,
 }
 
 /// Error event sent when generation fails during SSE streaming.
@@ -880,11 +884,23 @@ mod tests {
             height: 1024,
             seed_used: 42,
             generation_time_ms: 5000,
+            model: "flux-schnell:q8".to_string(),
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: SseCompleteEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.width, 1024);
         assert_eq!(back.seed_used, 42);
+        assert_eq!(back.model, "flux-schnell:q8");
+    }
+
+    #[test]
+    fn sse_complete_event_backward_compat_no_model() {
+        // Older servers may not include the model field; #[serde(default)]
+        // ensures deserialization still succeeds with an empty string.
+        let json = r#"{"image":"data","format":"png","width":512,"height":512,"seed_used":1,"generation_time_ms":100}"#;
+        let event: SseCompleteEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.model, "");
+        assert_eq!(event.width, 512);
     }
 
     #[test]

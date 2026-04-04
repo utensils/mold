@@ -228,6 +228,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                     height: img.height,
                     seed_used: response.seed_used,
                     generation_time_ms: response.generation_time_ms,
+                    model: response.model.clone(),
                 }));
             }
 

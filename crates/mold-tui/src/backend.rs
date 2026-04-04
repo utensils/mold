@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::app::{BackgroundEvent, GenerateParams, InferenceMode};
 
 /// Run a generation request — tries remote first, falls back to local on connection error.
+/// When batch > 1, loops client-side with `batch_size=1` per iteration (matching CLI behavior).
 pub async fn run_generation(
     server_url: Option<String>,
     params: GenerateParams,
@@ -16,37 +17,77 @@ pub async fn run_generation(
     negative_prompt: Option<String>,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    if params.inference_mode == InferenceMode::Local {
-        run_local_generation(params, prompt, negative_prompt, tx).await;
-        return;
-    }
+    let batch = params.batch;
+    let base_seed = params.seed;
 
-    // Determine which server URL to use (params.host overrides server_url)
-    let effective_url = params.host.clone().or(server_url);
+    for i in 0..batch {
+        let mut iter_params = params.clone();
+        iter_params.batch = 1;
 
-    if let Some(url) = effective_url {
-        let client = MoldClient::new(&url);
-        let req = build_request(&params, &prompt, &negative_prompt);
+        // Increment seed for each batch iteration (first uses original seed)
+        if i > 0 {
+            iter_params.seed = base_seed.map(|s| s.wrapping_add(i as u64));
+        }
 
-        match try_server_generate(&client, &req, &tx).await {
-            ServerResult::Done => return,
-            ServerResult::FallbackLocal => {} // fall through to local inference
-            ServerResult::Error(e) => {
-                let _ = tx.send(BackgroundEvent::Error(e));
-                return;
+        if batch > 1 {
+            let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                message: format!("Generating image {}/{batch}...", i + 1),
+            }));
+        }
+
+        if iter_params.inference_mode == InferenceMode::Local {
+            run_local_generation_single(iter_params, prompt.clone(), negative_prompt.clone(), &tx)
+                .await;
+        } else {
+            let effective_url = iter_params.host.clone().or_else(|| server_url.clone());
+
+            let mut fell_through = false;
+            if let Some(url) = effective_url {
+                let client = MoldClient::new(&url);
+                let req = build_request(&iter_params, &prompt, &negative_prompt);
+
+                match try_server_generate(&client, &req, &tx).await {
+                    ServerResult::Done => {}
+                    ServerResult::FallbackLocal => {
+                        fell_through = true;
+                    }
+                    ServerResult::Error(e) => {
+                        let _ = tx.send(BackgroundEvent::Error(e));
+                        return;
+                    }
+                }
+            } else {
+                fell_through = true;
+            }
+
+            if fell_through {
+                if iter_params.inference_mode == InferenceMode::Remote {
+                    let _ = tx.send(BackgroundEvent::Error(
+                        "Server unreachable and mode is set to 'remote'. Switch to 'auto' or 'local'."
+                            .to_string(),
+                    ));
+                    return;
+                }
+                run_local_generation_single(
+                    iter_params,
+                    prompt.clone(),
+                    negative_prompt.clone(),
+                    &tx,
+                )
+                .await;
             }
         }
     }
+}
 
-    // Fall through: no server URL or server unreachable
-    if params.inference_mode == InferenceMode::Remote {
-        let _ = tx.send(BackgroundEvent::Error(
-            "Server unreachable and mode is set to 'remote'. Switch to 'auto' or 'local'."
-                .to_string(),
-        ));
-        return;
-    }
-    run_local_generation(params, prompt, negative_prompt, tx).await;
+/// Run a single local generation and send the result via `tx`.
+async fn run_local_generation_single(
+    params: GenerateParams,
+    prompt: String,
+    negative_prompt: Option<String>,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    run_local_generation(params, prompt, negative_prompt, tx.clone()).await;
 }
 
 /// Pull a model with progress reporting to the TUI.
@@ -568,5 +609,23 @@ mod tests {
         let config = mold_core::Config::default();
         let refs = build_ref_counts(&config);
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn build_request_uses_batch_from_params() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.batch = 4;
+        let req = build_request(&params, "test prompt", &None);
+        assert_eq!(req.batch_size, 4);
+    }
+
+    #[test]
+    fn build_request_single_batch_default() {
+        let config = mold_core::Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        assert_eq!(params.batch, 1);
+        let req = build_request(&params, "test prompt", &None);
+        assert_eq!(req.batch_size, 1);
     }
 }

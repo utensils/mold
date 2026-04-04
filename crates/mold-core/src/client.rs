@@ -205,6 +205,14 @@ impl MoldClient {
                         let complete: SseCompleteEvent = serde_json::from_str(&data)?;
                         let image_data =
                             base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
+                        // Use server-provided model name (source of truth);
+                        // fall back to request model for backwards compat with
+                        // older servers that don't include it.
+                        let model = if complete.model.is_empty() {
+                            req.model.clone()
+                        } else {
+                            complete.model
+                        };
                         return Ok(Some(GenerateResponse {
                             images: vec![ImageData {
                                 data: image_data,
@@ -214,7 +222,7 @@ impl MoldClient {
                                 index: 0,
                             }],
                             generation_time_ms: complete.generation_time_ms,
-                            model: req.model.clone(),
+                            model,
                             seed_used: complete.seed_used,
                         }));
                     }
