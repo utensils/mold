@@ -20,13 +20,13 @@ mold run "a cat" | mold upscale -
 
 ## Available Models
 
-| Model | Architecture | Scale | Size | Speed | Quality |
-|-------|-------------|-------|------|-------|---------|
-| `real-esrgan-x4plus:fp16` | RRDBNet (23 blocks) | 4x | 32 MB | Medium | Best |
-| `real-esrgan-x4plus:fp32` | RRDBNet (23 blocks) | 4x | 64 MB | Medium | Best |
-| `real-esrgan-x2plus:fp16` | RRDBNet (23 blocks) | 2x | 32 MB | Medium | Best |
-| `real-esrgan-x4plus-anime:fp16` | RRDBNet (6 blocks) | 4x | 8.5 MB | Fast | Great (anime) |
-| `real-esrgan-anime-v3:fp32` | SRVGGNetCompact | 4x | 2.4 MB | Fastest | Good (anime) |
+| Model                           | Architecture        | Scale | Size   | Speed   | Quality       |
+| ------------------------------- | ------------------- | ----- | ------ | ------- | ------------- |
+| `real-esrgan-x4plus:fp16`       | RRDBNet (23 blocks) | 4x    | 32 MB  | Medium  | Best          |
+| `real-esrgan-x4plus:fp32`       | RRDBNet (23 blocks) | 4x    | 64 MB  | Medium  | Best          |
+| `real-esrgan-x2plus:fp16`       | RRDBNet (23 blocks) | 2x    | 32 MB  | Medium  | Best          |
+| `real-esrgan-x4plus-anime:fp16` | RRDBNet (6 blocks)  | 4x    | 8.5 MB | Fast    | Great (anime) |
+| `real-esrgan-anime-v3:fp32`     | SRVGGNetCompact     | 4x    | 2.4 MB | Fastest | Good (anime)  |
 
 ### Choosing a Model
 
@@ -114,7 +114,7 @@ curl -X POST http://localhost:7680/api/upscale \
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MOLD_UPSCALE_MODEL` | `real-esrgan-x4plus:fp16` | Default upscaler model |
-| `MOLD_UPSCALE_TILE_SIZE` | `512` | Default tile size |
+| Variable                 | Default                   | Description            |
+| ------------------------ | ------------------------- | ---------------------- |
+| `MOLD_UPSCALE_MODEL`     | `real-esrgan-x4plus:fp16` | Default upscaler model |
+| `MOLD_UPSCALE_TILE_SIZE` | `512`                     | Default tile size      |

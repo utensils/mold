@@ -8,20 +8,20 @@ mold supports Real-ESRGAN super-resolution models for image upscaling. These mod
 
 The Residual-in-Residual Dense Block Network uses deep convolutional layers with dense connections for maximum quality.
 
-| Model | Scale | Params | Size (FP16) | Description |
-|-------|-------|--------|-------------|-------------|
-| `real-esrgan-x4plus:fp16` | 4x | 16.7M | 32 MB | General-purpose, best quality |
-| `real-esrgan-x4plus:fp32` | 4x | 16.7M | 64 MB | Same model, FP32 precision |
-| `real-esrgan-x2plus:fp16` | 2x | 16.7M | 32 MB | 2x upscale, best quality |
-| `real-esrgan-x4plus-anime:fp16` | 4x | 4.5M | 8.5 MB | Anime/illustration optimized (6 blocks) |
+| Model                           | Scale | Params | Size (FP16) | Description                             |
+| ------------------------------- | ----- | ------ | ----------- | --------------------------------------- |
+| `real-esrgan-x4plus:fp16`       | 4x    | 16.7M  | 32 MB       | General-purpose, best quality           |
+| `real-esrgan-x4plus:fp32`       | 4x    | 16.7M  | 64 MB       | Same model, FP32 precision              |
+| `real-esrgan-x2plus:fp16`       | 2x    | 16.7M  | 32 MB       | 2x upscale, best quality                |
+| `real-esrgan-x4plus-anime:fp16` | 4x    | 4.5M   | 8.5 MB      | Anime/illustration optimized (6 blocks) |
 
 ### SRVGGNetCompact Architecture (Fast)
 
 A lightweight linear chain architecture optimized for speed. Uses significantly less compute than RRDBNet while maintaining good quality.
 
-| Model | Scale | Params | Size | Description |
-|-------|-------|--------|------|-------------|
-| `real-esrgan-anime-v3:fp32` | 4x | 0.6M | 2.4 MB | Fast anime/video upscaler |
+| Model                       | Scale | Params | Size   | Description               |
+| --------------------------- | ----- | ------ | ------ | ------------------------- |
+| `real-esrgan-anime-v3:fp32` | 4x    | 0.6M   | 2.4 MB | Fast anime/video upscaler |
 
 ## Architecture Details
 
@@ -73,10 +73,10 @@ All upscaler models are sourced from trusted HuggingFace repositories:
 
 ## Comparison
 
-| Use Case | Recommended Model | Why |
-|----------|------------------|-----|
-| Photo upscaling | `real-esrgan-x4plus:fp16` | Best detail preservation |
-| Anime/manga | `real-esrgan-x4plus-anime:fp16` | Trained on anime data |
-| Batch processing | `real-esrgan-anime-v3:fp32` | 5-10x faster |
-| Video frames | `real-esrgan-anime-v3:fp32` | Smallest, fastest |
-| Subtle enhancement | `real-esrgan-x2plus:fp16` | 2x is less aggressive |
+| Use Case           | Recommended Model               | Why                      |
+| ------------------ | ------------------------------- | ------------------------ |
+| Photo upscaling    | `real-esrgan-x4plus:fp16`       | Best detail preservation |
+| Anime/manga        | `real-esrgan-x4plus-anime:fp16` | Trained on anime data    |
+| Batch processing   | `real-esrgan-anime-v3:fp32`     | 5-10x faster             |
+| Video frames       | `real-esrgan-anime-v3:fp32`     | Smallest, fastest        |
+| Subtle enhancement | `real-esrgan-x2plus:fp16`       | 2x is less aggressive    |
