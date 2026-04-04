@@ -20,7 +20,7 @@ requirements.
 ## Defaults
 
 - **Resolution**: 1024x1024
-- **Guidance**: 0.0
+- **Guidance**: 1.0
 - **Steps**: 4
 
 ---
