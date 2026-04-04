@@ -270,6 +270,15 @@ impl LtxVideoEngine {
             ));
         }
 
+        // Debug: test proj_in weight
+        match vb.get_unchecked_dtype("proj_in.weight", dtype) {
+            Ok(w) => {
+                let rms = w.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+                progress.info(&format!("Debug proj_in.weight: shape={:?}, rms={:.4}", w.dims(), rms));
+            }
+            Err(e) => progress.info(&format!("Debug proj_in.weight ERROR: {}", e)),
+        }
+
         let config = LtxVideoTransformer3DModelConfig::default();
         let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());
@@ -341,14 +350,19 @@ impl LtxVideoEngine {
                 None,
             )?;
 
-            // Debug first step
-            if step == 0 {
+            // Debug: track per-step stats
+            {
                 let v_f32 = noise_pred.to_dtype(DType::F32)?;
-                let v_mean = v_f32.mean_all()?.to_scalar::<f32>()?;
                 let v_rms = v_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
-                progress.info(&format!(
-                    "Step 0: t={:.1}, v_mean={:.4}, v_rms={:.4}", t, v_mean, v_rms
-                ));
+                let l_rms = latents.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+                // Also check the latent input that went into the model
+                let li_rms = latents_input.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+                if step < 3 || step == total_steps - 1 {
+                    progress.info(&format!(
+                        "Step {}: t={:.1}, input_rms={:.4}, output_rms={:.4}, lat_rms={:.4}",
+                        step, t, li_rms, v_rms, l_rms
+                    ));
+                }
             }
 
             // Euler step via scheduler
@@ -369,8 +383,13 @@ impl LtxVideoEngine {
 
         // Debug: log sigma schedule and latent stats
         {
-            let first_5: Vec<f32> = sigmas.iter().take(5).copied().collect();
-            let last_3: Vec<f32> = sigmas.iter().rev().take(3).rev().copied().collect();
+            let sched_sigmas: Vec<f32> = scheduler.sigmas().to_vec1::<f32>()?;
+            let sched_ts: Vec<f32> = scheduler.timesteps().to_vec1::<f32>()?;
+            let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
+            let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
+            progress.info(&format!("First 3 timesteps: {:?}", &sched_ts[..3.min(sched_ts.len())]));
+            let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
+            let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
             progress.info(&format!("Sigmas: {:?}...{:?} (mu={:.3})", first_5, last_3, mu));
             let l_f32 = latents.to_dtype(DType::F32)?;
             let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
