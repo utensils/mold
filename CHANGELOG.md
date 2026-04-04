@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-04-03
+
+### Fixed
+
+- **TUI metadata race condition**: switching models while a generation was running caused the saved image to record the newly selected model instead of the model that actually generated it; now uses `response.model` from the server as source of truth ([#161](https://github.com/utensils/mold/issues/161), [#163](https://github.com/utensils/mold/pull/163))
+- **TUI batch mode**: setting batch > 1 in the TUI had no effect — only one image was generated; now loops client-side with seed increment, matching CLI behavior ([#162](https://github.com/utensils/mold/issues/162), [#163](https://github.com/utensils/mold/pull/163))
+- **SSE protocol**: `SseCompleteEvent` now includes the `model` field so the server confirms which model generated the image; backward-compatible with older servers via `#[serde(default)]`
+
 ## [0.5.1] - 2026-04-03
 
 ### Fixed
