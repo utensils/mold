@@ -94,22 +94,23 @@ fn detect_srvggnet(tensor_names: &[&str]) -> Result<UpscalerArch> {
 }
 
 fn detect_rrdbnet(tensor_names: &[&str]) -> Result<UpscalerArch> {
-    // Count RRDB blocks by finding the highest body.N.rdb1.conv1.weight index.
+    // Count RRDB blocks by finding the highest body.N index that has rdb sub-keys.
+    // The final body.N entry (conv_body) has no rdb prefix, so we filter for it.
     let num_block = tensor_names
         .iter()
         .filter_map(|n| {
-            n.strip_prefix("body.")
-                .and_then(|rest| rest.split('.').next())
-                .and_then(|idx| idx.parse::<usize>().ok())
-        })
-        .filter(|idx| {
-            // Only count RRDB block indices, not the final conv_body
-            tensor_names
-                .iter()
-                .any(|n| n.starts_with(&format!("body.{idx}.rdb1.conv1.weight")))
+            let rest = n.strip_prefix("body.")?;
+            let (idx_str, remainder) = rest.split_once('.')?;
+            let idx = idx_str.parse::<usize>().ok()?;
+            // Only count entries with "rdb" sub-keys (RRDB blocks), not conv_body
+            if remainder.starts_with("rdb") {
+                Some(idx)
+            } else {
+                None
+            }
         })
         .max()
-        .map(|max_idx| max_idx + 1) // 0-indexed
+        .map(|max_idx| max_idx + 1) // 0-indexed to count
         .unwrap_or(23); // default for x4plus
 
     // Detect scale from upsampling conv layers
