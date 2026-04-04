@@ -100,6 +100,14 @@ All images generated locally with mold — click any to see the model and prompt
 <div class="gallery-grid">
 <figure>
 
+![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
+
+**flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy
+ocean wave, dramatic lightning, hyperrealistic macro photography"_
+
+</figure>
+<figure>
+
 ![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
 
 **flux2-klein:bf16** — 4 steps _"a majestic owl perched on a mossy branch in a
@@ -153,14 +161,6 @@ at night, neon signs, steam from woks, bustling crowd"_
 
 **dreamshaper-v8:fp16** (SD 1.5) — 25 steps, seed 555 _"A fantasy castle perched
 on floating islands above clouds, magical waterfalls, ethereal glow"_
-
-</figure>
-<figure>
-
-![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
-
-**flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy
-ocean wave, dramatic lightning, hyperrealistic macro photography"_
 
 </figure>
 </div>
