@@ -734,10 +734,13 @@ impl WuerstchenEngine {
         }
 
         let device = crate::device::create_device(&self.base.progress)?;
-        // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
-        // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
-        // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
-        let dtype = DType::F32;
+        // Use F16 on GPU for ~2x throughput on the Prior stage.
+        // Decoder and VQ-GAN use F32 explicitly (see their load calls below).
+        let dtype = if device.is_cpu() {
+            DType::F32
+        } else {
+            DType::F16
+        };
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);

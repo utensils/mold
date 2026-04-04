@@ -31,10 +31,6 @@ multiples of 16.
 
 ## Notes
 
-Wuerstchen runs in FP16 on GPU for ~2x throughput compared to FP32. The Prior
-and Decoder use FP16 inference while VQ-GAN decode runs in FP32 for pixel-space
-precision.
-
 Wuerstchen includes a default negative prompt. The 42x latent compression means
 the diffusion process operates in a very compact space, which allows for
 efficient generation despite the multi-stage pipeline.
