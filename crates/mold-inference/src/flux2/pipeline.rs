@@ -168,9 +168,14 @@ impl Flux2Engine {
         device: &Device,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         if self.is_gguf_transformer() {
+            // Load GGUF on CPU, dequantize on CPU, then move each tensor to GPU.
+            // This avoids a peak VRAM spike where both the quantized data and the
+            // growing dequantized BF16 data coexist in VRAM. For Klein-9B Q4 this
+            // peak would be ~5.9GB (Q4) + ~18GB (BF16) = ~24GB, OOMing a 24GB GPU.
+            // By dequantizing on CPU, only the final BF16 tensors occupy VRAM.
             let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
                 &self.base.paths.transformer,
-                device,
+                &Device::Cpu,
             )?;
             Ok((
                 Flux2TransformerWrapper::Quantized(
