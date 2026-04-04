@@ -298,18 +298,23 @@ pub(crate) async fn pull_model(
 /// Unload the active model from GPU. The engine remains in the cache (unloaded)
 /// so it can be reloaded quickly on the next request.
 pub(crate) async fn unload_model(state: &AppState) -> String {
+    // Always clear the cached upscaler engine to free GPU memory,
+    // regardless of whether a diffusion model is loaded.
+    // Use try_lock() to avoid blocking the async runtime if an upscale
+    // is in progress (the spawn_blocking thread holds this lock).
+    if let Ok(mut upscaler) = state.upscaler_cache.try_lock() {
+        if upscaler.is_some() {
+            *upscaler = None;
+            tracing::info!("upscaler cache cleared");
+        }
+    }
+
     let mut cache = state.model_cache.lock().await;
     match cache.unload_active() {
         Some(name) => {
             update_snapshot(state, &cache).await;
             drop(cache);
             mold_inference::reclaim_gpu_memory();
-            // Clear cached upscaler engine to free GPU memory.
-            // Use try_lock() to avoid blocking the async runtime if an upscale
-            // is in progress (the spawn_blocking thread holds this lock).
-            if let Ok(mut upscaler) = state.upscaler_cache.try_lock() {
-                *upscaler = None;
-            }
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
