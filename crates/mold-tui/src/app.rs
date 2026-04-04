@@ -1974,11 +1974,24 @@ impl App {
 
     /// Return names of all known upscaler models (downloaded or not).
     fn available_upscaler_models(&self) -> Vec<String> {
-        mold_core::manifest::known_manifests()
+        let mut models: Vec<String> = mold_core::manifest::known_manifests()
             .iter()
             .filter(|m| m.is_upscaler())
             .map(|m| m.name.clone())
-            .collect()
+            .collect();
+        // Sort: downloaded first, then undownloaded
+        let config = &self.config;
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        models
     }
 
     fn update_upscale_model_filter(&mut self) {
@@ -2678,11 +2691,23 @@ impl App {
     }
 
     fn open_model_selector(&mut self) {
-        let all_models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        let mut models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        // Sort: downloaded first, then undownloaded (preserving order within each group)
+        let config = &self.config;
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
         self.popup = Some(Popup::ModelSelector {
             filter: String::new(),
             selected: 0,
-            filtered: all_models,
+            filtered: models,
         });
     }
 
@@ -6077,5 +6102,70 @@ mod tests {
             .filter(|name| name.to_lowercase().contains(&query))
             .collect();
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn model_list_sorts_downloaded_first() {
+        // Simulate the sorting logic used by open_model_selector / available_upscaler_models
+        let config = Config::default();
+        let mut models = vec![
+            "not-downloaded-model:q8".to_string(),
+            "also-not-downloaded:fp16".to_string(),
+        ];
+        // With empty config, none are "downloaded" — order should be preserved
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        assert_eq!(models[0], "not-downloaded-model:q8");
+        assert_eq!(models[1], "also-not-downloaded:fp16");
+    }
+
+    #[test]
+    fn model_list_downloaded_sorts_before_undownloaded() {
+        let mut config = Config::default();
+        // Mark one model as "downloaded" by adding it to config.models
+        config.models.insert(
+            "second-model:fp16".to_string(),
+            mold_core::config::ModelConfig {
+                transformer: Some("/fake/path.safetensors".into()),
+                ..Default::default()
+            },
+        );
+
+        let mut models = vec![
+            "first-model:q8".to_string(),
+            "second-model:fp16".to_string(),
+            "third-model:q4".to_string(),
+        ];
+        models.sort_by_key(|name| {
+            let resolved = mold_core::manifest::resolve_model_name(name);
+            let downloaded =
+                config.models.contains_key(&resolved) || config.manifest_model_is_downloaded(name);
+            if downloaded {
+                0
+            } else {
+                1
+            }
+        });
+        // "second-model:fp16" is downloaded, so it should be first
+        assert_eq!(models[0], "second-model:fp16");
+        // The other two remain in their original relative order
+        assert_eq!(models[1], "first-model:q8");
+        assert_eq!(models[2], "third-model:q4");
+    }
+
+    #[test]
+    fn default_model_resolution_for_selector() {
+        let config = Config::default();
+        let default = mold_core::manifest::resolve_model_name(&config.resolved_default_model());
+        // Default should resolve to a known model name
+        assert!(!default.is_empty());
     }
 }

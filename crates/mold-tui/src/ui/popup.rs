@@ -164,30 +164,30 @@ fn build_model_item<'a>(
     // Status indicator — compact visual: checkmark for downloaded, "(download)" for not
     let status_width: usize = if show_download_status { 12 } else { 0 };
 
-    // Default indicator
-    let default_tag = if is_default { " *" } else { "" };
+    // Default indicator — use display width (2 cols for " ★") for padding calc
+    let default_display_width: usize = if is_default { 2 } else { 0 };
 
     // Build first line: marker + name + default_tag left-aligned, size + status right-aligned
     // Right section is fixed width: 7 (size) + 2 (gap) + status_width
-    let left = format!("{marker}{name}{default_tag}");
+    let left_display_width = 2 + name.len() + default_display_width; // marker(2) + name + star
     let right_width = 7 + if status_width > 0 {
         2 + status_width
     } else {
         0
     };
-    let padding = (width as usize).saturating_sub(left.len() + right_width);
+    let padding = (width as usize).saturating_sub(left_display_width + right_width);
     let pad = " ".repeat(padding);
 
     let name_style = Style::default().fg(theme.text);
     let size_style = Style::default().fg(theme.text_dim);
     let default_style = Style::default()
-        .fg(theme.accent)
+        .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
         Span::styled(format!("{marker}{name}"), name_style),
         if is_default {
-            Span::styled(" *", default_style)
+            Span::styled(" \u{2605}", default_style)
         } else {
             Span::raw("")
         },
@@ -318,6 +318,7 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
         let filter = filter.clone();
         let selected = *selected;
         let filtered = filtered.clone();
+        let default = mold_core::manifest::resolve_model_name(&app.config.resolved_default_model());
         render_model_selector_popup(
             frame,
             app,
@@ -326,7 +327,7 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
             selected,
             &filtered,
             true,
-            None,
+            Some(&default),
         );
     }
 }
