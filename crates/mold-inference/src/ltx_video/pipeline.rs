@@ -424,29 +424,85 @@ impl LtxVideoEngine {
         progress.stage_start("Loading VAE decoder");
         let vae_start = Instant::now();
 
-        // Load VAE from the separate diffusers-format file (v0.9 architecture).
-        // The v0.9 VAE works with v0.9.5 transformer — same latent space.
-        let vae_path = &paths.vae;
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[vae_path.clone()], dtype, &device)?
+        // Load v0.9.5 VAE from the unified transformer file (contains both transformer + VAE).
+        // The native key format needs remapping to diffusers-style names.
+        let unified_path = &paths.transformer_shards.first().unwrap_or(&paths.transformer);
+        // Load ALL safetensors files (transformer shards + any VAE files)
+        let mut all_files: Vec<std::path::PathBuf> = if !paths.transformer_shards.is_empty() {
+            paths.transformer_shards.clone()
+        } else {
+            vec![paths.transformer.clone()]
         };
 
-        // v0.9 VAE config (from HuggingFace config.json at Lightricks/LTX-Video/vae/)
-        let vae_config = AutoencoderKLLtxVideoConfig {
-            block_out_channels: vec![128, 256, 512, 512],
-            decoder_block_out_channels: vec![128, 256, 512, 512],
-            spatiotemporal_scaling: vec![true, true, true, false],
-            decoder_spatiotemporal_scaling: vec![true, true, true, false],
-            layers_per_block: vec![4, 3, 3, 3, 4],
-            decoder_layers_per_block: vec![4, 3, 3, 3, 4],
-            decoder_inject_noise: vec![false, false, false, false, false],
-            decoder_upsample_residual: vec![false, false, false, false, false],
-            decoder_upsample_factor: vec![1, 1, 1, 1, 1],
-            timestep_conditioning: false,
-            ..Default::default()
+        // Check for unified file (contains both transformer + VAE with native keys).
+        // Search the hf-cache for the unified file alongside the transformer shards.
+        let unified_file = {
+            // The transformer shards are in .../snapshots/<hash>/transformer/
+            // The unified file is at .../snapshots/<hash>/ltx-video-2b-v0.9.5.safetensors
+            let xformer_dir = paths
+                .transformer_shards
+                .first()
+                .unwrap_or(&paths.transformer)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            let snapshot_dir = xformer_dir.parent().unwrap_or(xformer_dir);
+            let candidate = snapshot_dir.join("ltx-video-2b-v0.9.5.safetensors");
+            if candidate.exists() {
+                Some(candidate)
+            } else {
+                None
+            }
         };
-        let scaling_factor = vae_config.scaling_factor as f32;
-        let vae = AutoencoderKLLtxVideo::new(vae_config, vae_vb)?;
+
+        // Try loading v0.9.5 VAE from unified file first (better quality)
+        let unified_has_vae = if let Some(ref uf) = unified_file {
+            let test_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[uf.clone()], dtype, &device)?
+            };
+            test_vb.contains_tensor("vae.decoder.conv_in.conv.weight")
+        } else {
+            false
+        };
+
+        let (vae, scaling_factor) = if unified_has_vae {
+            // v0.9.5 VAE from unified file — remap native → diffusers keys
+            progress.info("Using v0.9.5 VAE from unified file (1024-ch, timestep conditioning)");
+            let vae_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[unified_file.unwrap()], dtype, &device)?
+            };
+            let vae_vb = vae_vb.rename_f(remap_vae_native_to_diffusers);
+
+            let vae_config = AutoencoderKLLtxVideoConfig {
+                block_out_channels: vec![128, 256, 512, 1024, 2048],
+                layers_per_block: vec![4, 6, 6, 2, 2],
+                latent_channels: 128,
+                patch_size: 4,
+                timestep_conditioning: true,
+                ..Default::default()
+            };
+            let sf = vae_config.scaling_factor as f32;
+            (AutoencoderKLLtxVideo::new(vae_config, vae_vb)?, sf)
+        } else {
+            // Fallback: v0.9 VAE from separate diffusers-format file
+            let vae_vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[paths.vae.clone()], dtype, &device)?
+            };
+            let vae_config = AutoencoderKLLtxVideoConfig {
+                block_out_channels: vec![128, 256, 512, 512],
+                decoder_block_out_channels: vec![128, 256, 512, 512],
+                spatiotemporal_scaling: vec![true, true, true, false],
+                decoder_spatiotemporal_scaling: vec![true, true, true, false],
+                layers_per_block: vec![4, 3, 3, 3, 4],
+                decoder_layers_per_block: vec![4, 3, 3, 3, 4],
+                decoder_inject_noise: vec![false, false, false, false, false],
+                decoder_upsample_residual: vec![false, false, false, false, false],
+                decoder_upsample_factor: vec![1, 1, 1, 1, 1],
+                timestep_conditioning: false,
+                ..Default::default()
+            };
+            let sf = vae_config.scaling_factor as f32;
+            (AutoencoderKLLtxVideo::new(vae_config, vae_vb)?, sf)
+        };
         progress.stage_done("Loading VAE decoder", vae_start.elapsed());
 
         progress.stage_start("Decoding video frames");
@@ -457,16 +513,13 @@ impl LtxVideoEngine {
         let latents_std = vae.latents_std();
         latents = denormalize_latents(&latents, latents_mean, latents_std, scaling_factor)?;
 
-        // Debug: latent stats after denormalization
-        {
-            let l_f32 = latents.to_dtype(DType::F32)?;
-            let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
-            let var = l_f32.var_keepdim(candle_core::D::Minus1)?.mean_all()?.to_scalar::<f32>()?;
-            progress.info(&format!("Denormalized latents: mean={:.4}, var={:.4}", mean, var));
-        }
-
         latents = latents.to_dtype(dtype)?;
-        let (_dec_output, video) = vae.decode(&latents, None, false, false)?;
+        let decode_timestep = if vae.config().timestep_conditioning {
+            Some(Tensor::full(0.05f32, (1,), &device)?.to_dtype(dtype)?)
+        } else {
+            None
+        };
+        let (_dec_output, video) = vae.decode(&latents, decode_timestep.as_ref(), false, false)?;
         // video: [B, 3, F, H, W] in model dtype
 
         progress.stage_done("Decoding video frames", decode_start.elapsed());
@@ -686,4 +739,99 @@ fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
     (0..steps)
         .map(|i| start + (end - start) * i as f32 / d)
         .collect()
+}
+
+/// Remap diffusers-style VAE key names to native (official) LTX Video format.
+///
+/// The candle VAE model queries diffusers names internally, but the unified
+/// weights file stores native names. This function maps queried → stored.
+///
+/// Native decoder structure (flat indexed):
+///   up_blocks.0 = mid_block (res_blocks)
+///   up_blocks.1 = first upsampler (conv)
+///   up_blocks.2 = first up block (res_blocks)
+///   up_blocks.3 = second upsampler (conv)
+///   ...
+///
+/// Diffusers decoder structure (hierarchical):
+///   mid_block.resnets.* = mid block
+///   up_blocks.0.upsamplers.0.* = first upsampler
+///   up_blocks.0.resnets.* = first up block
+///   up_blocks.1.upsamplers.0.* = second upsampler
+///   ...
+fn remap_vae_native_to_diffusers(queried: &str) -> String {
+    let mut s = queried.to_string();
+
+    // Simple renames
+    s = s.replace("resnets", "res_blocks");
+    s = s.replace("time_embedder", "last_time_embedder");
+    s = s.replace("scale_shift_table", "last_scale_shift_table");
+
+    // latents_mean/std → per_channel_statistics
+    if s == "latents_mean" {
+        return "vae.per_channel_statistics.mean-of-means".to_string();
+    }
+    if s == "latents_std" {
+        return "vae.per_channel_statistics.std-of-means".to_string();
+    }
+
+    // Decoder block remapping: diffusers → native
+    if s.starts_with("decoder.mid_block.") {
+        s = s.replacen("decoder.mid_block.", "decoder.up_blocks.0.", 1);
+    } else if s.starts_with("decoder.up_blocks.") {
+        // Parse the diffusers block index
+        let rest = &s["decoder.up_blocks.".len()..];
+        if let Some(dot_pos) = rest.find('.') {
+            if let Ok(diff_idx) = rest[..dot_pos].parse::<usize>() {
+                let after_idx = &rest[dot_pos + 1..];
+                if after_idx.starts_with("upsamplers.0") {
+                    // diffusers up_blocks.N.upsamplers.0 → native up_blocks.(2N+1)
+                    let native_idx = diff_idx * 2 + 1;
+                    let rest_after = after_idx.replacen("upsamplers.0", "", 1);
+                    let rest_after = rest_after.trim_start_matches('.');
+                    s = if rest_after.is_empty() {
+                        format!("decoder.up_blocks.{native_idx}")
+                    } else {
+                        format!("decoder.up_blocks.{native_idx}.{rest_after}")
+                    };
+                    // Native upsamplers are just "conv" blocks
+                    s = s.replace(".conv.conv.", ".conv.");
+                    if s.ends_with(".conv.weight") && !s.contains(".conv.conv.") {
+                        // Already correct
+                    }
+                } else {
+                    // diffusers up_blocks.N.* → native up_blocks.(2N+2).*
+                    let native_idx = diff_idx * 2 + 2;
+                    s = format!("decoder.up_blocks.{native_idx}.{after_idx}");
+                }
+            }
+        }
+    }
+
+    // Encoder block remapping: diffusers → native
+    if s.starts_with("encoder.mid_block.") {
+        s = s.replacen("encoder.mid_block.", "encoder.down_blocks.8.", 1);
+    } else if s.starts_with("encoder.down_blocks.") {
+        let rest = &s["encoder.down_blocks.".len()..];
+        if let Some(dot_pos) = rest.find('.') {
+            if let Ok(diff_idx) = rest[..dot_pos].parse::<usize>() {
+                let after_idx = &rest[dot_pos + 1..];
+                if after_idx.starts_with("downsamplers.0") {
+                    let native_idx = diff_idx * 2 + 1;
+                    let rest_after = after_idx.replacen("downsamplers.0", "", 1);
+                    let rest_after = rest_after.trim_start_matches('.');
+                    s = if rest_after.is_empty() {
+                        format!("encoder.down_blocks.{native_idx}")
+                    } else {
+                        format!("encoder.down_blocks.{native_idx}.{rest_after}")
+                    };
+                } else {
+                    let native_idx = diff_idx * 2;
+                    s = format!("encoder.down_blocks.{native_idx}.{after_idx}");
+                }
+            }
+        }
+    }
+
+    format!("vae.{s}")
 }
