@@ -304,6 +304,10 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
             update_snapshot(state, &cache).await;
             drop(cache);
             mold_inference::reclaim_gpu_memory();
+            // Also clear cached upscaler engine to free GPU memory
+            if let Ok(mut upscaler) = state.upscaler_cache.lock() {
+                *upscaler = None;
+            }
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }

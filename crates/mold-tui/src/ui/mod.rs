@@ -100,6 +100,17 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
+    // Pre-compute upscale status text so its lifetime covers the shortcut vec.
+    let upscale_status = if app.upscale_in_progress {
+        if let Some((tile, total)) = app.upscale_tile_progress {
+            format!("Upscaling tile {tile}/{total}...")
+        } else {
+            "Upscaling...".to_string()
+        }
+    } else {
+        String::new()
+    };
+
     let shortcuts = match app.active_view {
         View::Generate => {
             if app.generate.generating {
@@ -139,10 +150,13 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Gallery => {
-            if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
+            if app.upscale_in_progress {
+                vec![("Esc", "Cancel"), ("", upscale_status.as_str())]
+            } else if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
                 vec![
                     ("e", "Edit"),
                     ("r", "Regen"),
+                    ("u", "Upscale"),
                     ("d", "Delete"),
                     ("o/Enter", "Open"),
                     ("j/k", "Prev/Next"),
@@ -153,6 +167,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("hjkl", "Navigate"),
                     ("Enter", "Details"),
                     ("e", "Edit"),
+                    ("u", "Upscale"),
                     ("d", "Delete"),
                     ("Esc", "Back"),
                     ("?", "Help"),

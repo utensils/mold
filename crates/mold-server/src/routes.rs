@@ -485,14 +485,25 @@ async fn upscale(
     let model_name_owned = model_name.clone();
     drop(config);
 
+    let upscaler_cache = state.upscaler_cache.clone();
     let resp =
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
-            let mut engine = mold_inference::create_upscale_engine(
-                model_name_owned,
-                weights_path,
-                mold_inference::LoadStrategy::Eager,
-            )?;
-            engine.upscale(&req)
+            let mut cache = upscaler_cache.lock().unwrap();
+
+            // Reuse cached engine if same model
+            let needs_new = cache
+                .as_ref()
+                .is_none_or(|e| e.model_name() != model_name_owned);
+            if needs_new {
+                let new_engine = mold_inference::create_upscale_engine(
+                    model_name_owned,
+                    weights_path,
+                    mold_inference::LoadStrategy::Eager,
+                )?;
+                *cache = Some(new_engine);
+            }
+
+            cache.as_mut().unwrap().upscale(&req)
         })
         .await
         .map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?

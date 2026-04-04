@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
+        Some(Popup::UpscaleModelSelector { .. }) => render_upscale_model_selector(frame, app),
         None => {}
     }
 }
@@ -88,6 +89,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  Enter              Re-generate with same params"),
         Line::from("  e                  Edit parameters & generate"),
         Line::from("  d                  Delete image"),
+        Line::from("  u                  Upscale with AI model"),
         Line::from("  o                  Open in system viewer"),
         Line::from("  hjkl               Pan image viewport"),
         Line::from("  +/-                Zoom in/out"),
@@ -140,6 +142,80 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
             .borders(Borders::ALL)
             .border_style(theme.popup_border())
             .title(" Select Model ")
+            .title_style(theme.title_focused())
+            .style(theme.popup_bg());
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 3 {
+            return;
+        }
+
+        // Filter input
+        let filter_display = if filter.is_empty() {
+            "Type to filter...".to_string()
+        } else {
+            filter.clone()
+        };
+        let filter_style = if filter.is_empty() {
+            theme.dim()
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let filter_line = Paragraph::new(format!("Filter: {filter_display}")).style(filter_style);
+        let filter_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(filter_line, filter_area);
+
+        // Model list
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let style = if i == *selected {
+                    theme.list_selected()
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let marker = if i == *selected { "\u{25b8} " } else { "  " };
+                ListItem::new(format!("{marker}{name}")).style(style)
+            })
+            .collect();
+
+        let list = List::new(items);
+        let mut state = ListState::default().with_selected(Some(*selected));
+        frame.render_stateful_widget(list, list_area, &mut state);
+    }
+}
+
+fn render_upscale_model_selector(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 55, 50);
+
+    frame.render_widget(Clear, area);
+
+    if let Some(Popup::UpscaleModelSelector {
+        filter,
+        selected,
+        filtered,
+    }) = &app.popup
+    {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border())
+            .title(" Select Upscaler Model ")
             .title_style(theme.title_focused())
             .style(theme.popup_bg());
 

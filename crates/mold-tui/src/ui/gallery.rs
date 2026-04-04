@@ -538,6 +538,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let hints: &[(&str, &str)] = &[
         ("e", "Edit"),
         ("r", "Regenerate"),
+        ("u", "Upscale"),
         ("d", "Delete"),
         ("o/Enter", "Open"),
         ("Esc", "Back"),
