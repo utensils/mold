@@ -987,8 +987,7 @@ impl WuerstchenEngine {
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
-        let decoder_latents_f32 = decoder_latents.to_dtype(DType::F32)?;
-        let img = vqgan.decode(&(&decoder_latents_f32 * 0.3764)?)?;
+        let img = vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
         Self::debug_tensor_stats("image_postprocess", &img);
@@ -1169,8 +1168,7 @@ impl InferenceEngine for WuerstchenEngine {
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
-        let decoder_latents_f32 = decoder_latents.to_dtype(DType::F32)?;
-        let img = loaded.vqgan.decode(&(&decoder_latents_f32 * 0.3764)?)?;
+        let img = loaded.vqgan.decode(&(&decoder_latents * 0.3764)?)?;
         Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
         Self::debug_tensor_stats("image_postprocess", &img);
