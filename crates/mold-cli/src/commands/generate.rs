@@ -150,6 +150,7 @@ pub async fn run(
         expand,
         original_prompt,
         lora: lora.clone(),
+        upscale_model: None,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.

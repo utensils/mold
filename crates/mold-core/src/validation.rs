@@ -1,4 +1,4 @@
-use crate::GenerateRequest;
+use crate::{GenerateRequest, UpscaleRequest};
 
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
 /// (1328x1328), other models at ≤1MP. Headroom for non-square aspect ratios.
@@ -171,6 +171,27 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate an upscale request. Returns `Ok(())` if valid, or an error message.
+pub fn validate_upscale_request(req: &UpscaleRequest) -> Result<(), String> {
+    if req.model.trim().is_empty() {
+        return Err("upscale model must not be empty".to_string());
+    }
+    if req.image.is_empty() {
+        return Err("upscale image must not be empty".to_string());
+    }
+    if !is_valid_image_format(&req.image) {
+        return Err("upscale image must be a PNG or JPEG image".to_string());
+    }
+    if let Some(tile_size) = req.tile_size {
+        if tile_size != 0 && tile_size < 64 {
+            return Err(format!(
+                "tile_size ({tile_size}) must be 0 (disabled) or >= 64"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── Dimension recommendations ───────────────────────────────────────────────
 
 /// Recommended (width, height) pairs for SD1.5 models (native 512x512).
@@ -311,6 +332,7 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            upscale_model: None,
         }
     }
 
@@ -994,5 +1016,84 @@ mod tests {
         // SDXL has 9 buckets but warning should show at most 4 + "N total"
         let msg = dimension_warning(800, 600, "sdxl").unwrap();
         assert!(msg.contains("total"), "long lists should show total count");
+    }
+
+    // ── validate_upscale_request tests ────────────────────────────────────
+
+    fn valid_upscale_req() -> crate::UpscaleRequest {
+        crate::UpscaleRequest {
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            image: png_bytes(),
+            output_format: crate::OutputFormat::Png,
+            tile_size: None,
+        }
+    }
+
+    #[test]
+    fn upscale_valid_request_passes() {
+        assert!(validate_upscale_request(&valid_upscale_req()).is_ok());
+    }
+
+    #[test]
+    fn upscale_empty_model_rejected() {
+        let mut req = valid_upscale_req();
+        req.model = "  ".to_string();
+        assert!(validate_upscale_request(&req)
+            .unwrap_err()
+            .contains("model"));
+    }
+
+    #[test]
+    fn upscale_empty_image_rejected() {
+        let mut req = valid_upscale_req();
+        req.image = vec![];
+        assert!(validate_upscale_request(&req)
+            .unwrap_err()
+            .contains("empty"));
+    }
+
+    #[test]
+    fn upscale_invalid_image_format_rejected() {
+        let mut req = valid_upscale_req();
+        req.image = vec![0x00, 0x01, 0x02, 0x03];
+        assert!(validate_upscale_request(&req)
+            .unwrap_err()
+            .contains("PNG or JPEG"));
+    }
+
+    #[test]
+    fn upscale_jpeg_accepted() {
+        let mut req = valid_upscale_req();
+        req.image = jpeg_bytes();
+        assert!(validate_upscale_request(&req).is_ok());
+    }
+
+    #[test]
+    fn upscale_tile_size_too_small_rejected() {
+        let mut req = valid_upscale_req();
+        req.tile_size = Some(32);
+        assert!(validate_upscale_request(&req)
+            .unwrap_err()
+            .contains("tile_size"));
+    }
+
+    #[test]
+    fn upscale_tile_size_zero_accepted() {
+        let mut req = valid_upscale_req();
+        req.tile_size = Some(0);
+        assert!(validate_upscale_request(&req).is_ok());
+    }
+
+    #[test]
+    fn upscale_tile_size_64_accepted() {
+        let mut req = valid_upscale_req();
+        req.tile_size = Some(64);
+        assert!(validate_upscale_request(&req).is_ok());
+    }
+
+    #[test]
+    fn upscale_tile_size_none_accepted() {
+        let req = valid_upscale_req();
+        assert!(validate_upscale_request(&req).is_ok());
     }
 }
