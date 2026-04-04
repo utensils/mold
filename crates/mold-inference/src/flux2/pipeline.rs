@@ -168,14 +168,15 @@ impl Flux2Engine {
         device: &Device,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         if self.is_gguf_transformer() {
-            // Load GGUF on CPU, dequantize on CPU, then move each tensor to GPU.
-            // This avoids a peak VRAM spike where both the quantized data and the
-            // growing dequantized BF16 data coexist in VRAM. For Klein-9B Q4 this
-            // peak would be ~5.9GB (Q4) + ~18GB (BF16) = ~24GB, OOMing a 24GB GPU.
-            // By dequantizing on CPU, only the final BF16 tensors occupy VRAM.
+            // Klein-9B: dequantize on CPU to avoid VRAM peak. During GPU dequant,
+            // both the Q4 data (~5.9GB) and the growing BF16 data (~18GB) coexist,
+            // totaling ~24GB which OOMs a 24GB GPU. CPU dequant is slower (~3 min
+            // vs seconds) but only the final BF16 tensors occupy VRAM.
+            // Klein-4B: GPU dequant is safe (~2.8GB Q4 + ~7.7GB BF16 = ~10.5GB).
+            let gguf_load_device = if self.is_9b() { &Device::Cpu } else { device };
             let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
                 &self.base.paths.transformer,
-                &Device::Cpu,
+                gguf_load_device,
             )?;
             Ok((
                 Flux2TransformerWrapper::Quantized(
@@ -310,8 +311,27 @@ impl Flux2Engine {
     /// On error, `self.base.loaded` remains `None` — all components are assembled into
     /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
+    ///
+    /// Klein-9B auto-downgrades to sequential mode — its dequantized transformer (~18GB)
+    /// plus VAE (~350MB) plus Qwen3-8B encoder (~4-8GB) exceed 24GB VRAM. Sequential
+    /// mode loads each component on demand, dropping it before the next.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
+            return Ok(());
+        }
+
+        // Klein-9B: auto-force sequential mode regardless of caller's preference.
+        // Eager mode requires all components resident in VRAM simultaneously, but
+        // Klein-9B's transformer alone is ~18GB BF16 leaving no room for the encoder.
+        if self.is_9b() && self.base.load_strategy == LoadStrategy::Eager {
+            tracing::info!(
+                model = %self.base.model_name,
+                "Klein-9B: switching to sequential loading (transformer too large for eager mode)"
+            );
+            self.base
+                .progress
+                .info("Klein-9B: using sequential loading (components loaded on demand)");
+            self.base.load_strategy = LoadStrategy::Sequential;
             return Ok(());
         }
 
