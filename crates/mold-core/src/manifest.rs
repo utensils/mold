@@ -1838,7 +1838,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             defaults: ManifestDefaults {
                 steps: 4,
-                guidance: 0.0, // Klein is distilled — no guidance embedding, value is ignored
+                guidance: 1.0,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -1865,7 +1865,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             defaults: ManifestDefaults {
                 steps: 4,
-                guidance: 0.0,
+                guidance: 1.0,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -1891,7 +1891,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             defaults: ManifestDefaults {
                 steps: 4,
-                guidance: 0.0,
+                guidance: 1.0,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -1917,7 +1917,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             },
             defaults: ManifestDefaults {
                 steps: 4,
-                guidance: 0.0,
+                guidance: 1.0,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
@@ -3063,7 +3063,7 @@ mod tests {
         assert_eq!(manifest.name, "flux2-klein:bf16");
         assert_eq!(manifest.family, "flux2");
         assert_eq!(manifest.defaults.steps, 4);
-        assert!((manifest.defaults.guidance - 0.0).abs() < 0.01);
+        assert!((manifest.defaults.guidance - 1.0).abs() < 0.01);
         assert_eq!(manifest.defaults.width, 1024);
         assert_eq!(manifest.defaults.height, 1024);
     }
