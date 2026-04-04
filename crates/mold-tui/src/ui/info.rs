@@ -28,7 +28,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     if !app.generate.model_description.is_empty() {
         let desc = &app.generate.model_description;
         let truncated = if desc.len() > inner.width as usize {
-            format!("{}..", &desc[..inner.width as usize - 2])
+            let max = inner.width as usize - 2;
+            let boundary = desc.floor_char_boundary(max);
+            format!("{}..", &desc[..boundary])
         } else {
             desc.clone()
         };
@@ -195,6 +197,20 @@ mod tests {
         ri.refresh();
         // memory_line should be Some on macOS (unified memory) or CUDA
         // process_memory_mb may be 0 if no mold processes running
+    }
+
+    #[test]
+    fn truncation_does_not_panic_on_multibyte_chars() {
+        // Em dash is 3 bytes (U+2014). Truncation must land on a char boundary.
+        let desc = "Flux.2 Klein-9B Q4 GGUF (alpha) \u{2014} smallest footprint";
+        let width: u16 = 34; // lands inside the em dash at bytes 32..35
+        if desc.len() > width as usize {
+            let max = width as usize - 2;
+            let boundary = desc.floor_char_boundary(max);
+            let truncated = format!("{}..", &desc[..boundary]);
+            assert!(truncated.len() <= width as usize + 2); // +2 for ".."
+            assert!(truncated.ends_with(".."));
+        }
     }
 
     #[test]
