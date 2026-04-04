@@ -168,15 +168,11 @@ impl Flux2Engine {
         device: &Device,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         if self.is_gguf_transformer() {
-            // Klein-9B: dequantize on CPU to avoid VRAM peak. During GPU dequant,
-            // both the Q4 data (~5.9GB) and the growing BF16 data (~18GB) coexist,
-            // totaling ~24GB which OOMs a 24GB GPU. CPU dequant is slower (~3 min
-            // vs seconds) but only the final BF16 tensors occupy VRAM.
-            // Klein-4B: GPU dequant is safe (~2.8GB Q4 + ~7.7GB BF16 = ~10.5GB).
-            let gguf_load_device = if self.is_9b() { &Device::Cpu } else { device };
+            // Weights stay quantized in VRAM via QMatMul — no dequantization at load
+            // time. A Q4 Klein-9B uses ~6GB VRAM instead of ~18GB with full dequant.
             let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
                 &self.base.paths.transformer,
-                gguf_load_device,
+                device,
             )?;
             Ok((
                 Flux2TransformerWrapper::Quantized(
@@ -317,21 +313,6 @@ impl Flux2Engine {
     /// mode loads each component on demand, dropping it before the next.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
-            return Ok(());
-        }
-
-        // Klein-9B: auto-force sequential mode regardless of caller's preference.
-        // Eager mode requires all components resident in VRAM simultaneously, but
-        // Klein-9B's transformer alone is ~18GB BF16 leaving no room for the encoder.
-        if self.is_9b() && self.base.load_strategy == LoadStrategy::Eager {
-            tracing::info!(
-                model = %self.base.model_name,
-                "Klein-9B: switching to sequential loading (transformer too large for eager mode)"
-            );
-            self.base
-                .progress
-                .info("Klein-9B: using sequential loading (components loaded on demand)");
-            self.base.load_strategy = LoadStrategy::Sequential;
             return Ok(());
         }
 
