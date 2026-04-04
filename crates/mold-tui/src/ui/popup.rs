@@ -197,8 +197,8 @@ fn build_model_item<'a>(
     if show_download_status {
         spans.push(Span::raw("  "));
         if downloaded {
-            // Green checkmark — model is ready to use
-            let tag = format!("{:>width$}", "\u{2713}", width = status_width);
+            // Green checkmark + "ready" — model is downloaded
+            let tag = format!("{:>width$}", "\u{2713} ready", width = status_width);
             spans.push(Span::styled(tag, Style::default().fg(Color::Green)));
         } else {
             // Dim "(download)" — will be auto-pulled on selection
