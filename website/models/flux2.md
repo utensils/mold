@@ -25,13 +25,11 @@ requirements.
 
 ---
 
-# Flux.2 Klein-9B (alpha)
-
-> **Note**: Klein-9B is in alpha. The Qwen3 encoder (hidden_size=4096) differs
-> from Klein-4B (hidden_size=2560) and is not yet fully supported.
+# Flux.2 Klein-9B
 
 A larger 9B parameter FLUX variant. Distilled for fast 4-step generation with
-higher quality than the 4B Klein.
+higher quality than the 4B Klein. Uses a Qwen3-8B text encoder (hidden_size=4096)
+vs Klein-4B's Qwen3-4B (hidden_size=2560).
 
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Non-Commercial
@@ -54,8 +52,9 @@ higher quality than the 4B Klein.
 - **Guidance**: 1.0
 - **Steps**: 4
 
-> **Note**: The 9B model requires ~29GB VRAM for BF16. The BF16 variant is gated
-> on HuggingFace and requires license acceptance before download.
+> **Note**: GGUF quantized variants (Q4/Q6/Q8) use ~6-10GB VRAM. The BF16
+> variant requires ~18GB VRAM, is gated on HuggingFace, and requires license
+> acceptance before download.
 
 ## Recommended Dimensions
 
@@ -92,4 +91,7 @@ mold run flux2-klein:bf16 "a majestic owl perched on a mossy branch in a moonlit
 ## Architecture
 
 Flux.2 Klein uses a Qwen3 text encoder (BF16 or GGUF, layers 9/18/27), a shared
-modulation transformer (BF16 or GGUF), and a BN-VAE decoder.
+modulation transformer (BF16 or GGUF), and a BN-VAE decoder. Klein-4B uses
+Qwen3-4B (hidden_size=2560), Klein-9B uses Qwen3-8B (hidden_size=4096). GGUF
+variants keep weights quantized in VRAM with on-the-fly dequantization per
+matmul, minimizing memory usage.

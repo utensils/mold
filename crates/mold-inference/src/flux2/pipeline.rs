@@ -308,9 +308,8 @@ impl Flux2Engine {
     /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     ///
-    /// Klein-9B auto-downgrades to sequential mode — its dequantized transformer (~18GB)
-    /// plus VAE (~350MB) plus Qwen3-8B encoder (~4-8GB) exceed 24GB VRAM. Sequential
-    /// mode loads each component on demand, dropping it before the next.
+    /// GGUF variants keep weights quantized in VRAM via QMatMul (~6GB for Q4 9B),
+    /// so both Klein-4B and Klein-9B fit comfortably in eager mode on 24GB GPUs.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
             return Ok(());
