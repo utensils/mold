@@ -414,6 +414,7 @@ fn build_request(
         expand: if params.expand { Some(true) } else { None },
         original_prompt: None,
         lora,
+        upscale_model: None,
     }
 }
 

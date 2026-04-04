@@ -406,6 +406,7 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            upscale_model: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());

@@ -788,6 +788,10 @@ pub enum Popup {
         input: String,
         label: String,
     },
+    /// Informational message (dismissed with any key).
+    Info {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1533,6 +1537,10 @@ impl App {
                     }
                     _ => self.close_popup(),
                 },
+                Some(Popup::Info { .. }) => {
+                    // Dismiss info popup on any key
+                    self.close_popup();
+                }
                 Some(Popup::SettingsInput { key: sk, input, .. }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -2019,6 +2027,19 @@ impl App {
             }
             Action::OpenFile => {
                 self.open_gallery_file();
+            }
+            Action::UpscaleImage => {
+                if self.active_view == View::Gallery {
+                    if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+                        self.popup = Some(Popup::Info {
+                            message: format!(
+                                "Upscale '{}' — use CLI: mold upscale {}",
+                                entry.filename(),
+                                entry.path.display()
+                            ),
+                        });
+                    }
+                }
             }
             Action::RemoveModel => {
                 if self.active_view == View::Models {

@@ -399,6 +399,7 @@ magick /tmp/mold-cropped.png /tmp/mold-mask.png \
 
 ## Maintenance Notes
 
+- **Keep `CHANGELOG.md` updated** — Follow [Keep a Changelog](https://keepachangelog.com/) format. Add entries under `[Unreleased]` when implementing features, fixes, or breaking changes. Group under Added/Changed/Fixed/Removed headings.
 - **Keep `.claude/skills/mold/SKILL.md` in sync** — This skill file is used by OpenClaw, ClawdBot, and other AI agents. Update it whenever models, CLI flags, env vars, or features change.
 - **Keep `website/` docs in sync** — Update the VitePress docs site when models, CLI flags, env vars, API endpoints, or deployment options change.
 - **Preserve centered gallery thumbnails in the TUI** — `crates/mold-tui/src/ui/gallery.rs` must keep using the fixed-protocol thumbnail path for the gallery grid. Do not switch grid thumbnails back to pure `StatefulImage` rendering for Kitty/Sixel/iTerm2 terminals; that reintroduces top-left-padded thumbnails instead of properly centered, aspect-correct ones. Keep the gallery thumbnail regression tests passing when touching this code.

@@ -13,6 +13,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
+        Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
         None => {}
     }
 }
@@ -416,6 +417,34 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
 
     let paragraph = Paragraph::new(text)
         .block(block)
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, area);
+}
+
+fn render_info(frame: &mut Frame, app: &App, message: String) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 55, 20);
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Info ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+
+    let mut text: Vec<Line> = message.lines().map(|l| Line::from(l.to_string())).collect();
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "Press any key to dismiss",
+        Style::default().fg(theme.text_dim),
+    )));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false })
         .alignment(Alignment::Center);
 
     frame.render_widget(paragraph, area);

@@ -174,7 +174,7 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
     }
 
     match (method.as_str(), path) {
-        ("POST", "/api/generate" | "/api/generate/stream" | "/api/expand") => {
+        ("POST", "/api/generate" | "/api/generate/stream" | "/api/expand" | "/api/upscale") => {
             Some(RouteTier::Generation)
         }
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
@@ -316,6 +316,10 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/models/unload", &Method::DELETE),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/upscale", &Method::POST),
             Some(RouteTier::Generation)
         );
     }

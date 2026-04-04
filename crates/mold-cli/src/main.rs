@@ -256,6 +256,10 @@ Examples:
         /// LLM model for expansion (local or API model name)
         #[arg(long, env = "MOLD_EXPAND_MODEL", help_heading = "Expansion")]
         expand_model: Option<String>,
+
+        /// Upscale generated images with this model (e.g. real-esrgan-x4plus:fp16)
+        #[arg(long, help_heading = "Upscale", add = ArgValueCandidates::new(commands::upscale::complete_upscaler_model))]
+        upscale: Option<String>,
     },
 
     /// Start the inference server
@@ -535,6 +539,48 @@ Setup instructions:
 
   powershell (add to $PROFILE):
     mold completions powershell | Out-String | Invoke-Expression")]
+    /// Upscale an image using a super-resolution model (Real-ESRGAN)
+    ///
+    /// Supports standalone upscaling of existing images and piped I/O.
+    #[command(after_long_help = "\
+Examples:
+  mold upscale photo.png
+  mold upscale photo.png -m real-esrgan-x4plus:fp16 -o photo_4x.png
+  mold upscale - < input.png > output.png
+  mold run \"a cat\" | mold upscale -")]
+    Upscale {
+        /// Input image file path (or - for stdin)
+        image: String,
+
+        /// Upscaler model name
+        #[arg(short, long, add = ArgValueCandidates::new(commands::upscale::complete_upscaler_model))]
+        model: Option<String>,
+
+        /// Output file path (default: <input>_upscaled.<ext>)
+        #[arg(short, long, value_hint = ValueHint::FilePath)]
+        output: Option<String>,
+
+        /// Output format
+        #[arg(long, default_value_t = OutputFormat::Png)]
+        format: OutputFormat,
+
+        /// Tile size for memory-efficient tiled inference (0 to disable)
+        #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
+        tile_size: Option<u32>,
+
+        /// Server URL to connect to
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+
+        /// Skip server and run inference locally
+        #[arg(long)]
+        local: bool,
+
+        /// Display upscaled image inline in the terminal after completion
+        #[arg(long, env = "MOLD_PREVIEW")]
+        preview: bool,
+    },
+
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: String,
@@ -740,6 +786,7 @@ async fn run() -> anyhow::Result<()> {
             no_expand,
             expand_backend,
             expand_model,
+            upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -880,6 +927,21 @@ async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "tui")]
         Commands::Tui { host, local } => {
             mold_tui::run_tui(host, local).await?;
+        }
+        Commands::Upscale {
+            image,
+            model,
+            output,
+            format,
+            tile_size,
+            host,
+            local,
+            preview,
+        } => {
+            commands::upscale::run(
+                image, model, output, format, tile_size, host, local, preview,
+            )
+            .await?;
         }
         Commands::Completions { shell } => {
             generate_completions(&shell)?;

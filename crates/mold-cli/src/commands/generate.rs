@@ -150,6 +150,7 @@ pub async fn run(
         expand,
         original_prompt,
         lora: lora.clone(),
+        upscale_model: None,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -912,7 +913,7 @@ fn save_and_preview_image(
 /// Display an image inline in the terminal using viuer.
 /// Silently skipped if the `preview` feature is not compiled or if decoding fails.
 #[cfg(feature = "preview")]
-fn preview_image(data: &[u8]) {
+pub(crate) fn preview_image(data: &[u8]) {
     let Ok(img) = image::load_from_memory(data) else {
         return;
     };
@@ -924,7 +925,7 @@ fn preview_image(data: &[u8]) {
 }
 
 #[cfg(not(feature = "preview"))]
-fn preview_image(_data: &[u8]) {
+pub(crate) fn preview_image(_data: &[u8]) {
     use std::sync::OnceLock;
     static WARNED: OnceLock<()> = OnceLock::new();
     WARNED.get_or_init(|| {

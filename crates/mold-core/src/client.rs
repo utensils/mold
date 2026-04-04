@@ -425,6 +425,20 @@ impl MoldClient {
             .await?;
         Ok(resp)
     }
+
+    /// Upscale an image using a super-resolution model on the server.
+    pub async fn upscale(&self, req: &crate::UpscaleRequest) -> Result<crate::UpscaleResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/upscale", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<crate::UpscaleResponse>()
+            .await?;
+        Ok(resp)
+    }
 }
 
 fn next_sse_event(buffer: &mut String) -> Option<String> {

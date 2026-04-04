@@ -55,6 +55,8 @@ pub enum Action {
     DeleteImage,
     /// Gallery: open the image file in system viewer.
     OpenFile,
+    /// Gallery: upscale the selected image.
+    UpscaleImage,
     /// Models: pull the selected model.
     PullModel,
     /// Models: remove the selected model.

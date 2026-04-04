@@ -144,6 +144,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/gallery/thumbnail/:filename",
             get(get_gallery_thumbnail),
         )
+        .route("/api/upscale", post(upscale))
         .route("/api/status", get(server_status))
         .route("/api/shutdown", post(shutdown_server))
         .route("/health", get(health))
@@ -454,6 +455,50 @@ async fn expand_prompt(
         original: req.prompt,
         expanded: result.expanded,
     }))
+}
+
+// ── /api/upscale ────────────────────────────────────────────────────────────
+
+async fn upscale(
+    State(state): State<AppState>,
+    Json(req): Json<mold_core::UpscaleRequest>,
+) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
+    if let Err(msg) = mold_core::validate_upscale_request(&req) {
+        return Err(ApiError::validation(msg));
+    }
+
+    let config = state.config.read().await;
+    let model_name = mold_core::manifest::resolve_model_name(&req.model);
+
+    // Get model weights path from config
+    let weights_path = config
+        .models
+        .get(&model_name)
+        .and_then(|c| c.transformer.as_ref())
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "upscaler model '{}' not downloaded. Pull it first with: mold pull {}",
+                model_name, model_name
+            ))
+        })?;
+    let weights_path = std::path::PathBuf::from(weights_path);
+    let model_name_owned = model_name.clone();
+    drop(config);
+
+    let resp =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
+            let mut engine = mold_inference::create_upscale_engine(
+                model_name_owned,
+                weights_path,
+                mold_inference::LoadStrategy::Eager,
+            )?;
+            engine.upscale(&req)
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?
+        .map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?;
+
+    Ok(Json(resp))
 }
 
 // ── /api/generate/stream (SSE) ───────────────────────────────────────────────
