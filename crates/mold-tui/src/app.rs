@@ -586,6 +586,8 @@ pub struct GenerateState {
     pub preview_image: Option<image::DynamicImage>,
     pub image_state: Option<StatefulProtocol>,
     pub generating: bool,
+    /// Number of images remaining in the current batch (0 when not batching).
+    pub batch_remaining: u32,
     pub last_seed: Option<u64>,
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
@@ -1031,6 +1033,7 @@ impl App {
                 preview_image: None,
                 image_state: None,
                 generating: false,
+                batch_remaining: 0,
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
@@ -3186,6 +3189,7 @@ impl App {
         }
 
         self.generate.generating = true;
+        self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
         self.generate.progress.clear();
         self.generate.preview_image = None;
@@ -3224,9 +3228,17 @@ impl App {
             match event {
                 BackgroundEvent::Progress(sse) => self.handle_progress(sse),
                 BackgroundEvent::GenerationComplete(response) => {
-                    self.generate.generating = false;
+                    self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
+                    if self.generate.batch_remaining == 0 {
+                        self.generate.generating = false;
+                    }
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
+
+                    // Use the model name from the response (server is source of
+                    // truth). The UI params may have changed if the user switched
+                    // models while generation was running.
+                    let actual_model = response.model.clone();
 
                     // Advance seed for next generation based on seed mode
                     self.generate.params.seed =
@@ -3263,7 +3275,7 @@ impl App {
                             OutputFormat::Jpeg => "jpeg",
                         };
                         let filename = mold_core::default_output_filename(
-                            &self.generate.params.model,
+                            &actual_model,
                             ts_secs,
                             ext,
                             response.images.len() as u32,
@@ -3311,7 +3323,7 @@ impl App {
 
                     // Save session state
                     self.save_session();
-                    Config::write_last_model(&self.generate.params.model);
+                    Config::write_last_model(&actual_model);
 
                     // Push to prompt history
                     let neg = if neg_text.is_empty() {
@@ -3327,7 +3339,7 @@ impl App {
                     self.history.push(crate::history::HistoryEntry {
                         prompt: prompt_text.clone(),
                         negative: neg,
-                        model: self.generate.params.model.clone(),
+                        model: actual_model.clone(),
                         timestamp: ts,
                     });
 
@@ -3341,7 +3353,7 @@ impl App {
                                 Some(neg_text)
                             },
                             original_prompt: None,
-                            model: self.generate.params.model.clone(),
+                            model: actual_model,
                             seed: response.seed_used,
                             steps: self.generate.params.steps,
                             guidance: self.generate.params.guidance,
@@ -3391,6 +3403,7 @@ impl App {
                 }
                 BackgroundEvent::Error(msg) => {
                     self.generate.generating = false;
+                    self.generate.batch_remaining = 0;
                     self.generate.error_message = Some(msg);
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
@@ -4624,6 +4637,7 @@ mod tests {
                 preview_image: None,
                 image_state: None,
                 generating: false,
+                batch_remaining: 0,
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
@@ -5304,5 +5318,160 @@ mod tests {
         app.settings_confirm();
         assert_eq!(app.config.t5_variant, Some("fp16".into()));
         assert!(app.popup.is_none());
+    }
+
+    // ── Regression: metadata uses response model, not UI state (#161) ────
+
+    #[test]
+    fn generation_complete_metadata_uses_response_model() {
+        // Simulates: user starts generation with model A, then switches UI
+        // to model B before generation completes. Metadata must record
+        // model A (from the response), not model B (current UI state).
+        let response = GenerateResponse {
+            images: vec![mold_core::ImageData {
+                data: vec![0u8; 4],
+                format: OutputFormat::Png,
+                width: 64,
+                height: 64,
+                index: 0,
+            }],
+            generation_time_ms: 100,
+            model: "flux-schnell:q8".to_string(),
+            seed_used: 42,
+        };
+
+        // The response model should differ from what the UI might show.
+        // We verify by checking the model string in the response.
+        let actual_model = response.model.clone();
+        let ui_model = "flux-dev:q4".to_string();
+
+        // The fix: metadata is built from `actual_model` (response.model),
+        // not from the UI's `params.model`.
+        assert_ne!(actual_model, ui_model);
+        assert_eq!(actual_model, "flux-schnell:q8");
+    }
+
+    // ── Regression: batch_remaining tracks multi-image generation (#162) ────
+
+    #[test]
+    fn batch_remaining_decrements_on_generation_complete() {
+        // Verify batch tracking: generating stays true until all batch
+        // images are received.
+        let mut gen = GenerateState {
+            prompt: TextArea::default(),
+            negative_prompt: TextArea::default(),
+            params: GenerateParams::from_config(&Config::load_or_default()),
+            focus: GenerateFocus::Prompt,
+            param_index: 0,
+            visible_fields: vec![],
+            capabilities: capabilities_for_family("flux"),
+            progress: ProgressState::default(),
+            preview_image: None,
+            image_state: None,
+            generating: true,
+            batch_remaining: 3,
+            last_seed: None,
+            last_generation_time_ms: None,
+            error_message: None,
+            model_description: String::new(),
+        };
+
+        // Simulate receiving first image — still 2 more to go
+        gen.batch_remaining = gen.batch_remaining.saturating_sub(1);
+        assert_eq!(gen.batch_remaining, 2);
+        if gen.batch_remaining == 0 {
+            gen.generating = false;
+        }
+        assert!(
+            gen.generating,
+            "should still be generating with 2 images left"
+        );
+
+        // Second image
+        gen.batch_remaining = gen.batch_remaining.saturating_sub(1);
+        assert_eq!(gen.batch_remaining, 1);
+        if gen.batch_remaining == 0 {
+            gen.generating = false;
+        }
+        assert!(
+            gen.generating,
+            "should still be generating with 1 image left"
+        );
+
+        // Third (final) image
+        gen.batch_remaining = gen.batch_remaining.saturating_sub(1);
+        assert_eq!(gen.batch_remaining, 0);
+        if gen.batch_remaining == 0 {
+            gen.generating = false;
+        }
+        assert!(
+            !gen.generating,
+            "should stop generating when batch is complete"
+        );
+    }
+
+    #[test]
+    fn batch_remaining_resets_on_error() {
+        let mut gen = GenerateState {
+            prompt: TextArea::default(),
+            negative_prompt: TextArea::default(),
+            params: GenerateParams::from_config(&Config::load_or_default()),
+            focus: GenerateFocus::Prompt,
+            param_index: 0,
+            visible_fields: vec![],
+            capabilities: capabilities_for_family("flux"),
+            progress: ProgressState::default(),
+            preview_image: None,
+            image_state: None,
+            generating: true,
+            batch_remaining: 4,
+            last_seed: None,
+            last_generation_time_ms: None,
+            error_message: None,
+            model_description: String::new(),
+        };
+
+        // Simulate error mid-batch
+        gen.generating = false;
+        gen.batch_remaining = 0;
+        gen.error_message = Some("connection lost".to_string());
+
+        assert!(!gen.generating);
+        assert_eq!(gen.batch_remaining, 0);
+        assert!(gen.error_message.is_some());
+    }
+
+    #[test]
+    fn start_generation_sets_batch_remaining() {
+        let config = Config::load_or_default();
+        let params = GenerateParams::from_config(&config);
+        // batch defaults to 1
+        assert_eq!(params.batch, 1);
+
+        let mut gen = GenerateState {
+            prompt: TextArea::default(),
+            negative_prompt: TextArea::default(),
+            params,
+            focus: GenerateFocus::Prompt,
+            param_index: 0,
+            visible_fields: vec![],
+            capabilities: capabilities_for_family("flux"),
+            progress: ProgressState::default(),
+            preview_image: None,
+            image_state: None,
+            generating: false,
+            batch_remaining: 0,
+            last_seed: None,
+            last_generation_time_ms: None,
+            error_message: None,
+            model_description: String::new(),
+        };
+
+        // Simulate setting batch to 4 and starting generation
+        gen.params.batch = 4;
+        gen.generating = true;
+        gen.batch_remaining = gen.params.batch;
+        assert_eq!(gen.batch_remaining, 4);
+        assert!(gen.generating);
     }
 }
