@@ -2294,7 +2294,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
 
 fn wuerstchen_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
-        steps: 60,
+        steps: 30,
         guidance: 4.0,
         width: 1024,
         height: 1024,

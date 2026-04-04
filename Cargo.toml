@@ -25,6 +25,11 @@ categories = ["command-line-utilities", "multimedia::images", "science"]
 [workspace.metadata.crane]
 name = "mold"
 
+[patch.crates-io]
+candle-core-mold = { path = "../candle/candle-core" }
+candle-nn-mold = { path = "../candle/candle-nn" }
+candle-transformers-mold = { path = "../candle/candle-transformers" }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
