@@ -1149,6 +1149,13 @@ impl App {
         self.upscale_in_progress = true;
         self.upscale_tile_progress = None;
 
+        // Switch to grid view to avoid image protocol conflicts with progress overlay
+        if self.gallery.view_mode == GalleryViewMode::Detail {
+            self.gallery.view_mode = GalleryViewMode::Grid;
+            self.gallery.preview_image = None;
+            self.gallery.image_state = None;
+        }
+
         let tx = self.bg_tx.clone();
         let server_url = self.server_url.clone();
         let config = self.config.clone();

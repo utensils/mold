@@ -161,53 +161,63 @@ fn build_model_item<'a>(
         })
         .unwrap_or_default();
 
-    // Status tag
-    let status = if is_default && downloaded {
-        "default"
-    } else if is_default && !downloaded {
-        "default | pull"
-    } else if show_download_status && !downloaded {
-        "pull"
-    } else if show_download_status && downloaded {
-        "ready"
-    } else {
-        ""
-    };
+    // Status tag — fixed width for column alignment
+    let status_width: usize = if show_download_status { 8 } else { 0 };
+    let status = if !downloaded { "pull" } else { "" };
 
-    // Build first line: marker + name left-aligned, size + status right-aligned
-    // Use fixed-width columns so alignment is consistent across all rows
-    let left = format!("{marker}{name}");
-    let right = if status.is_empty() {
-        format!("{size_str:>7}")
+    // Default indicator
+    let default_tag = if is_default { " *" } else { "" };
+
+    // Build first line: marker + name + default_tag left-aligned, size + status right-aligned
+    // Right section is fixed width: 7 (size) + 2 (gap) + status_width
+    let left = format!("{marker}{name}{default_tag}");
+    let right_width = 7 + if status_width > 0 {
+        2 + status_width
     } else {
-        format!("{size_str:>7}  {status}")
+        0
     };
-    let used = left.len() + right.len();
-    let padding = (width as usize).saturating_sub(used);
+    let padding = (width as usize).saturating_sub(left.len() + right_width);
     let pad = " ".repeat(padding);
 
     let name_style = Style::default().fg(theme.text);
     let size_style = Style::default().fg(theme.text_dim);
-    let status_style = if status == "ready" {
-        Style::default().fg(Color::Green)
-    } else if is_default {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
+    let default_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let status_style = if status == "pull" {
         Style::default().fg(theme.text_dim)
+    } else {
+        Style::default().fg(Color::Green)
     };
 
-    let line1 = Line::from(vec![
-        Span::styled(left, name_style),
-        Span::styled(pad, name_style),
-        Span::styled(format!("{size_str:>7}"), size_style),
-        if !status.is_empty() {
-            Span::styled(format!("  {status}"), status_style)
+    let mut spans = vec![
+        Span::styled(format!("{marker}{name}"), name_style),
+        if is_default {
+            Span::styled(" *", default_style)
         } else {
             Span::raw("")
         },
-    ]);
+        Span::styled(pad, name_style),
+        Span::styled(format!("{size_str:>7}"), size_style),
+    ];
+    if show_download_status {
+        let status_text = if status.is_empty() {
+            format!("{:>width$}", "ready", width = status_width)
+        } else {
+            format!("{:>width$}", status, width = status_width)
+        };
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            status_text,
+            if status.is_empty() {
+                Style::default().fg(Color::Green)
+            } else {
+                status_style
+            },
+        ));
+    }
+
+    let line1 = Line::from(spans);
 
     // Second line: description (dimmed, indented)
     let desc = manifest.map(|m| m.description.clone()).unwrap_or_default();
@@ -325,7 +335,7 @@ fn render_model_selector(frame: &mut Frame, app: &mut App) {
             &filter,
             selected,
             &filtered,
-            false,
+            true,
             None,
         );
     }

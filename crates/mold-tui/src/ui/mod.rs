@@ -119,6 +119,9 @@ fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
         height: bar_height,
     };
 
+    // Clear area first to prevent image protocol artifacts
+    frame.render_widget(ratatui::widgets::Clear, area);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_focused())
@@ -136,9 +139,11 @@ fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
     let (tile, total) = app.upscale_tile_progress.unwrap_or((0, 0));
     let (pct, label) = if total > 0 {
         let p = tile as f64 / total as f64;
-        (p, format!("Tile {tile}/{total}"))
+        (p, format!("Upscaling tile {tile}/{total}"))
+    } else if app.server_url.is_some() {
+        (0.0, "Processing on server...".to_string())
     } else {
-        (0.0, "Loading model...".to_string())
+        (0.0, "Loading upscaler model...".to_string())
     };
 
     let gauge = Gauge::default()
