@@ -21,7 +21,6 @@ A lightweight linear chain architecture optimized for speed. Uses significantly 
 
 | Model | Scale | Params | Size | Description |
 |-------|-------|--------|------|-------------|
-| `real-esrgan-x4v3:fp32` | 4x | 1.2M | 4.7 MB | Fast general-purpose upscaler |
 | `real-esrgan-anime-v3:fp32` | 4x | 0.6M | 2.4 MB | Fast anime/video upscaler |
 
 ## Architecture Details
@@ -59,7 +58,7 @@ Output (3, H×scale, W×scale)
 mold pull real-esrgan-x4plus:fp16
 
 # Pull the fast compact upscaler
-mold pull real-esrgan-x4v3:fp32
+mold pull real-esrgan-anime-v3:fp32
 
 # List all available models including upscalers
 mold list
@@ -78,6 +77,6 @@ All upscaler models are sourced from trusted HuggingFace repositories:
 |----------|------------------|-----|
 | Photo upscaling | `real-esrgan-x4plus:fp16` | Best detail preservation |
 | Anime/manga | `real-esrgan-x4plus-anime:fp16` | Trained on anime data |
-| Batch processing | `real-esrgan-x4v3:fp32` | 5-10x faster |
+| Batch processing | `real-esrgan-anime-v3:fp32` | 5-10x faster |
 | Video frames | `real-esrgan-anime-v3:fp32` | Smallest, fastest |
 | Subtle enhancement | `real-esrgan-x2plus:fp16` | 2x is less aggressive |

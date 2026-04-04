@@ -113,6 +113,12 @@ impl SRVGGNetCompact {
         out = self.body_last_prelu.forward(&out)?;
         out = self.body_last_conv.forward(&out)?;
         out = candle_nn::ops::pixel_shuffle(&out, self.scale as usize)?;
+
+        // Residual skip: add nearest-neighbor upsampled input to the learned branch.
+        // This is critical — without it the output is dark/distorted.
+        let (_, _, h, w) = xs.dims4()?;
+        let upsampled = xs.upsample_nearest2d(h * self.scale as usize, w * self.scale as usize)?;
+        let out = (out + upsampled)?;
         Ok(out)
     }
 }

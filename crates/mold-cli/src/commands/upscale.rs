@@ -37,6 +37,7 @@ fn default_upscaler_model(config: &Config) -> String {
     "real-esrgan-x4plus:fp16".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     image_path: String,
     model: Option<String>,
@@ -45,6 +46,7 @@ pub async fn run(
     tile_size: Option<u32>,
     host: Option<String>,
     local: bool,
+    preview: bool,
 ) -> Result<()> {
     let config = Config::load_or_default();
     let model = model.unwrap_or_else(|| default_upscaler_model(&config));
@@ -86,7 +88,14 @@ pub async fn run(
         let client = mold_core::MoldClient::new(&base_url);
         match client.upscale(&req).await {
             Ok(resp) => {
-                return write_output(&resp.image.data, &image_path, &output, &format, &resp);
+                return write_output(
+                    &resp.image.data,
+                    &image_path,
+                    &output,
+                    &format,
+                    &resp,
+                    preview,
+                );
             }
             Err(e) => {
                 if mold_core::MoldClient::is_connection_error(&e) {
@@ -102,7 +111,7 @@ pub async fn run(
     }
 
     // Local inference
-    upscale_local(req, &image_path, &output, &format, &config).await
+    upscale_local(req, &image_path, &output, &format, &config, preview).await
 }
 
 async fn upscale_local(
@@ -111,6 +120,7 @@ async fn upscale_local(
     output: &Option<String>,
     format: &OutputFormat,
     config: &Config,
+    preview: bool,
 ) -> Result<()> {
     // Auto-pull if model not downloaded
     let model_name = &req.model;
@@ -129,6 +139,7 @@ async fn upscale_local(
             output,
             format,
             &Config::load_or_default(),
+            preview,
         ))
         .await;
     }
@@ -189,7 +200,7 @@ async fn upscale_local(
     })
     .await??;
 
-    write_output(&resp.image.data, image_path, output, format, &resp)
+    write_output(&resp.image.data, image_path, output, format, &resp, preview)
 }
 
 fn write_output(
@@ -198,6 +209,7 @@ fn write_output(
     output: &Option<String>,
     format: &OutputFormat,
     resp: &mold_core::UpscaleResponse,
+    preview: bool,
 ) -> Result<()> {
     let is_stdout_tty = std::io::stdout().is_terminal();
 
@@ -258,6 +270,9 @@ fn write_output(
             resp.image.height,
             resp.scale_factor,
         );
+    }
+    if preview {
+        super::generate::preview_image(data);
     }
     Ok(())
 }

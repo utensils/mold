@@ -129,13 +129,18 @@ impl RRDBNet {
                 &vb.pp(format!("body.{i}")),
             )?);
         }
-        let conv_body = candle_nn::conv2d(
-            num_feat,
-            num_feat,
-            3,
-            cfg,
-            vb.pp(format!("body.{num_block}")),
-        )?;
+        // conv_body may be "conv_body" (hlky/diffusers format) or
+        // "body.{num_block}" (original Real-ESRGAN format).
+        let conv_body =
+            candle_nn::conv2d(num_feat, num_feat, 3, cfg, vb.pp("conv_body")).or_else(|_| {
+                candle_nn::conv2d(
+                    num_feat,
+                    num_feat,
+                    3,
+                    cfg,
+                    vb.pp(format!("body.{num_block}")),
+                )
+            })?;
 
         let conv_up1 = candle_nn::conv2d(num_feat, num_feat, 3, cfg, vb.pp("conv_up1"))?;
         let conv_up2 = if scale >= 4 {

@@ -9,7 +9,7 @@ mold supports image upscaling using Real-ESRGAN super-resolution models. Upscale
 mold upscale photo.png
 
 # Specify a model
-mold upscale photo.png -m real-esrgan-x4v3:fp32
+mold upscale photo.png -m real-esrgan-anime-v3:fp32
 
 # Upscale and save to a specific path
 mold upscale photo.png -o photo_hires.png
@@ -26,13 +26,12 @@ mold run "a cat" | mold upscale -
 | `real-esrgan-x4plus:fp32` | RRDBNet (23 blocks) | 4x | 64 MB | Medium | Best |
 | `real-esrgan-x2plus:fp16` | RRDBNet (23 blocks) | 2x | 32 MB | Medium | Best |
 | `real-esrgan-x4plus-anime:fp16` | RRDBNet (6 blocks) | 4x | 8.5 MB | Fast | Great (anime) |
-| `real-esrgan-x4v3:fp32` | SRVGGNetCompact | 4x | 4.7 MB | Fastest | Good |
 | `real-esrgan-anime-v3:fp32` | SRVGGNetCompact | 4x | 2.4 MB | Fastest | Good (anime) |
 
 ### Choosing a Model
 
 - **Best quality**: `real-esrgan-x4plus:fp16` -- full RRDBNet with 23 residual blocks
-- **Fastest**: `real-esrgan-x4v3:fp32` -- compact architecture, great for batch processing
+- **Fastest**: `real-esrgan-anime-v3:fp32` -- compact architecture, great for batch processing
 - **Anime/illustration**: `real-esrgan-x4plus-anime:fp16` or `real-esrgan-anime-v3:fp32`
 - **2x upscale**: `real-esrgan-x2plus:fp16` -- when 4x is too much
 

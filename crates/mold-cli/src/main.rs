@@ -256,6 +256,10 @@ Examples:
         /// LLM model for expansion (local or API model name)
         #[arg(long, env = "MOLD_EXPAND_MODEL", help_heading = "Expansion")]
         expand_model: Option<String>,
+
+        /// Upscale generated images with this model (e.g. real-esrgan-x4plus:fp16)
+        #[arg(long, help_heading = "Upscale", add = ArgValueCandidates::new(commands::upscale::complete_upscaler_model))]
+        upscale: Option<String>,
     },
 
     /// Start the inference server
@@ -571,6 +575,10 @@ Examples:
         /// Skip server and run inference locally
         #[arg(long)]
         local: bool,
+
+        /// Display upscaled image inline in the terminal after completion
+        #[arg(long, env = "MOLD_PREVIEW")]
+        preview: bool,
     },
 
     Completions {
@@ -778,6 +786,7 @@ async fn run() -> anyhow::Result<()> {
             no_expand,
             expand_backend,
             expand_model,
+            upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
             commands::run::run(
                 model_or_prompt,
@@ -927,8 +936,12 @@ async fn run() -> anyhow::Result<()> {
             tile_size,
             host,
             local,
+            preview,
         } => {
-            commands::upscale::run(image, model, output, format, tile_size, host, local).await?;
+            commands::upscale::run(
+                image, model, output, format, tile_size, host, local, preview,
+            )
+            .await?;
         }
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
