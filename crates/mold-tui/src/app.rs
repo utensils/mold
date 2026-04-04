@@ -5322,11 +5322,22 @@ mod tests {
 
     // ── Regression: metadata uses response model, not UI state (#161) ────
 
-    #[test]
-    fn generation_complete_metadata_uses_response_model() {
+    #[tokio::test]
+    async fn generation_complete_metadata_uses_response_model() {
         // Simulates: user starts generation with model A, then switches UI
         // to model B before generation completes. Metadata must record
         // model A (from the response), not model B (current UI state).
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        app.generate.generating = true;
+        app.generate.batch_remaining = 1;
+
+        // UI currently shows model B (user switched mid-generation)
+        app.generate.params.model = "flux-dev:q4".to_string();
+        // Set a non-empty prompt so the history entry is recorded
+        app.generate.prompt = TextArea::from(["a test prompt"]);
+
+        // Inject a GenerationComplete with model A (the model that actually ran)
         let response = GenerateResponse {
             images: vec![mold_core::ImageData {
                 data: vec![0u8; 4],
@@ -5339,16 +5350,32 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
         };
+        app.bg_tx
+            .send(BackgroundEvent::GenerationComplete(Box::new(response)))
+            .unwrap();
 
-        // The response model should differ from what the UI might show.
-        // We verify by checking the model string in the response.
-        let actual_model = response.model.clone();
-        let ui_model = "flux-dev:q4".to_string();
+        // Process the event through the real handler
+        app.process_background_events();
 
-        // The fix: metadata is built from `actual_model` (response.model),
-        // not from the UI's `params.model`.
-        assert_ne!(actual_model, ui_model);
-        assert_eq!(actual_model, "flux-schnell:q8");
+        // History entry must record the *response* model, not the UI model
+        assert!(!app.history.is_empty());
+        let results = app.history.search("a test prompt");
+        assert!(!results.is_empty(), "history should contain our prompt");
+        assert_eq!(
+            results[0].model, "flux-schnell:q8",
+            "history should record response model, not UI model"
+        );
+
+        // Gallery metadata (if an entry was created) should also use response model.
+        // The test image bytes aren't a valid PNG so the gallery entry may not be
+        // created (image::load_from_memory fails), but the history entry is the
+        // authoritative check for this regression.
+        if let Some(entry) = app.gallery.entries.first() {
+            assert_eq!(
+                entry.metadata.model, "flux-schnell:q8",
+                "gallery metadata should record response model, not UI model"
+            );
+        }
     }
 
     // ── Regression: batch_remaining tracks multi-image generation (#162) ────
