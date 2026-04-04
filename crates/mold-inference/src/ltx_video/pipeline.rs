@@ -207,8 +207,7 @@ impl LtxVideoEngine {
         progress.stage_start("Encoding prompt");
         let encode_start = Instant::now();
         let prompt_embeds = t5.encode(&req.prompt, &device, dtype)?;
-        // prompt_embeds: [1, seq_len, 4096]
-        let prompt_embeds = prompt_embeds.unsqueeze(0)?; // ensure batch dim
+        // prompt_embeds: [1, seq_len, 4096] (T5 encoder already adds batch dim)
         progress.stage_done("Encoding prompt", encode_start.elapsed());
 
         // Build attention mask (all ones — no padding for single prompt)
@@ -243,6 +242,19 @@ impl LtxVideoEngine {
                 &device,
             )?
         };
+        // Official LTX Video weights use "model.diffusion_model." prefix and
+        // different key names than our diffusers-style candle model.
+        // rename_f maps queried names → stored names in the safetensors file.
+        let vb = vb.rename_f(|queried: &str| {
+            // Our code queries: "proj_in.weight"
+            // File stores:     "model.diffusion_model.patchify_proj.weight"
+            let remapped = queried
+                .replace("proj_in", "patchify_proj")
+                .replace("time_embed", "adaln_single")
+                .replace("norm_q", "q_norm")
+                .replace("norm_k", "k_norm");
+            format!("model.diffusion_model.{remapped}")
+        });
         let config = LtxVideoTransformer3DModelConfig::default();
         let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());
@@ -364,7 +376,21 @@ impl LtxVideoEngine {
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[vae_path.clone()], dtype, &device)?
         };
-        let vae_config = AutoencoderKLLtxVideoConfig::default();
+        // VAE config matching the diffusers-format config.json from Lightricks/LTX-Video.
+        // This is the v0.9 VAE architecture (simpler, shared encoder/decoder params).
+        let vae_config = AutoencoderKLLtxVideoConfig {
+            block_out_channels: vec![128, 256, 512, 512],
+            decoder_block_out_channels: vec![128, 256, 512, 512],
+            spatiotemporal_scaling: vec![true, true, true, false],
+            decoder_spatiotemporal_scaling: vec![true, true, true, false],
+            layers_per_block: vec![4, 3, 3, 3, 4],
+            decoder_layers_per_block: vec![4, 3, 3, 3, 4],
+            decoder_inject_noise: vec![false, false, false, false, false],
+            decoder_upsample_residual: vec![false, false, false, false, false],
+            decoder_upsample_factor: vec![1, 1, 1, 1, 1],
+            timestep_conditioning: false,
+            ..Default::default()
+        };
         let scaling_factor = vae_config.scaling_factor as f32;
         let vae = AutoencoderKLLtxVideo::new(vae_config, vae_vb)?;
         progress.stage_done("Loading VAE decoder", vae_start.elapsed());
@@ -377,10 +403,8 @@ impl LtxVideoEngine {
         let latents_std = vae.latents_std();
         latents = denormalize_latents(&latents, latents_mean, latents_std, scaling_factor)?;
 
-        // VAE decode with timestep conditioning (v0.9.5 uses timestep_conditioning=true)
-        let decode_timestep = Tensor::full(0.05f32, (1,), &device)?.to_dtype(dtype)?;
         latents = latents.to_dtype(dtype)?;
-        let (_dec_output, video) = vae.decode(&latents, Some(&decode_timestep), false, false)?;
+        let (_dec_output, video) = vae.decode(&latents, None, false, false)?;
         // video: [B, 3, F, H, W] in model dtype
 
         progress.stage_done("Decoding video frames", decode_start.elapsed());

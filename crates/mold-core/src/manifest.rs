@@ -2945,12 +2945,14 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             },
             // T5 tokenizer (shared with FLUX)
             ModelFile {
-                hf_repo: "openai/clip-vit-large-patch14".to_string(),
-                hf_filename: "spiece.model".to_string(),
+                hf_repo: "lmz/mt5-tokenizers".to_string(),
+                hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
                 component: ModelComponent::T5Tokenizer,
-                size_bytes: 791_656,
+                size_bytes: 17_163_758,
                 gated: false,
-                sha256: None,
+                sha256: Some(
+                    "812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7",
+                ),
             },
         ],
         defaults,
