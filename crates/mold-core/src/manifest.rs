@@ -2308,7 +2308,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
         family: "wuerstchen".to_string(),
-        description: "Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression".to_string(),
+        description: "Wuerstchen v2 FP16 — research model, 3-stage cascade with 42x latent compression, painterly style".to_string(),
         files: vec![
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),
