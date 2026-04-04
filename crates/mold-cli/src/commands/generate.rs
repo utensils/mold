@@ -814,6 +814,7 @@ async fn generate_local_batch(
     .await??;
 
     let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut last_video: Option<mold_core::VideoData> = None;
     let mut total_time_ms = 0;
     let mut last_seed_used = base_seed;
     let mut last_model = String::new();
@@ -862,6 +863,11 @@ async fn generate_local_batch(
         last_seed_used = response.seed_used;
         last_model = response.model.clone();
 
+        // Capture video response if present
+        if response.video.is_some() {
+            last_video = response.video;
+        }
+
         for mut img in response.images {
             img.index = i;
             // Save and preview each image immediately during batch generation
@@ -875,7 +881,7 @@ async fn generate_local_batch(
 
     Ok(GenerateResponse {
         images: all_images,
-        video: None,
+        video: last_video,
         generation_time_ms: total_time_ms,
         model: last_model,
         seed_used: last_seed_used,
