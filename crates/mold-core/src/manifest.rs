@@ -4401,6 +4401,92 @@ mod tests {
         );
     }
 
+    // --- is_upscaler family-based identification ---
+
+    #[test]
+    fn upscaler_models_are_upscaler() {
+        for manifest in known_manifests() {
+            if manifest.family == "upscaler" {
+                assert!(
+                    manifest.is_upscaler(),
+                    "{} should be upscaler",
+                    manifest.name
+                );
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upscaler_manifests_have_upscaler_component() {
+        for manifest in known_manifests() {
+            if manifest.is_upscaler() {
+                assert!(
+                    manifest
+                        .files
+                        .iter()
+                        .any(|f| f.component == ModelComponent::Upscaler),
+                    "{} missing Upscaler component",
+                    manifest.name
+                );
+                // Upscalers should have exactly one file
+                assert_eq!(
+                    manifest.files.len(),
+                    1,
+                    "{} should have exactly 1 file",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_upscaler_models_identified_by_is_upscaler() {
+        let count = known_manifests().iter().filter(|m| m.is_upscaler()).count();
+        assert_eq!(count, 7, "expected 7 upscaler models, got {count}");
+    }
+
+    #[test]
+    fn upscaler_storage_path_is_model_specific() {
+        let manifest = find_manifest("real-esrgan-x4plus:fp16").unwrap();
+        let file = &manifest.files[0];
+        let path = storage_path(manifest, file);
+        // Upscaler component is model-specific, stored under model name dir
+        assert!(
+            path.starts_with("real-esrgan-x4plus-fp16"),
+            "upscaler should be under model-specific dir, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn diffusion_models_are_not_upscaler() {
+        for manifest in known_manifests() {
+            if [
+                "flux",
+                "sd15",
+                "sdxl",
+                "sd3",
+                "z-image",
+                "flux2",
+                "qwen-image",
+                "wuerstchen",
+            ]
+            .contains(&manifest.family.as_str())
+            {
+                assert!(
+                    !manifest.is_upscaler(),
+                    "{} should NOT be upscaler",
+                    manifest.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_models_are_alpha() {
         for manifest in known_manifests() {

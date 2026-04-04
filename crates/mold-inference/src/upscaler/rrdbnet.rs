@@ -242,4 +242,28 @@ mod tests {
         let dims = output.dims4().unwrap();
         assert_eq!(dims, (1, 3, 32, 32)); // 16*2 = 32
     }
+
+    #[test]
+    fn rrdbnet_anime_6_blocks() {
+        // Anime variant uses 6 blocks instead of 23
+        let (_varmap, model) = build_test_rrdbnet(8, 4, 6, 4);
+        let device = Device::Cpu;
+        let input = Tensor::randn(0f32, 1.0, (1, 3, 8, 8), &device).unwrap();
+        let output = model.forward(&input).unwrap();
+        let dims = output.dims4().unwrap();
+        assert_eq!(dims, (1, 3, 32, 32));
+    }
+
+    #[test]
+    fn rrdbnet_output_has_3_channels() {
+        let (_varmap, model) = build_test_rrdbnet(8, 4, 1, 4);
+        let device = Device::Cpu;
+        let input = Tensor::randn(0f32, 1.0, (1, 3, 16, 12), &device).unwrap();
+        let output = model.forward(&input).unwrap();
+        let (b, c, h, w) = output.dims4().unwrap();
+        assert_eq!(b, 1);
+        assert_eq!(c, 3);
+        assert_eq!(h, 64); // 16*4
+        assert_eq!(w, 48); // 12*4
+    }
 }

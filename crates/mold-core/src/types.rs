@@ -1283,6 +1283,75 @@ mod tests {
         let status: super::ServerStatus = serde_json::from_str(json).unwrap();
         assert!(status.busy);
     }
+
+    // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
+
+    #[test]
+    fn upscale_request_serde_roundtrip() {
+        let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let req = super::UpscaleRequest {
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            image: image_bytes.clone(),
+            output_format: OutputFormat::Png,
+            tile_size: Some(256),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("real-esrgan-x4plus:fp16"));
+        assert!(json.contains("tile_size"));
+        // image should be base64-encoded
+        assert!(!json.contains("[137,"));
+
+        let back: super::UpscaleRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model, "real-esrgan-x4plus:fp16");
+        assert_eq!(back.image, image_bytes);
+        assert_eq!(back.tile_size, Some(256));
+        assert_eq!(back.output_format, OutputFormat::Png);
+    }
+
+    #[test]
+    fn upscale_request_tile_size_omitted_when_none() {
+        let req = super::UpscaleRequest {
+            model: "test".to_string(),
+            image: vec![0xFF, 0xD8],
+            output_format: OutputFormat::Jpeg,
+            tile_size: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("tile_size"));
+    }
+
+    #[test]
+    fn upscale_response_serde_roundtrip() {
+        let resp = super::UpscaleResponse {
+            image: super::ImageData {
+                data: vec![1, 2, 3],
+                format: OutputFormat::Png,
+                width: 2048,
+                height: 2048,
+                index: 0,
+            },
+            upscale_time_ms: 450,
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            scale_factor: 4,
+            original_width: 512,
+            original_height: 512,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: super::UpscaleResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scale_factor, 4);
+        assert_eq!(back.original_width, 512);
+        assert_eq!(back.image.width, 2048);
+        assert_eq!(back.upscale_time_ms, 450);
+    }
+
+    #[test]
+    fn generate_request_upscale_model_backward_compat() {
+        // Existing JSON without upscale_model should deserialize fine
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.upscale_model.is_none());
+    }
 }
 
 /// A gallery image entry returned by the server API.

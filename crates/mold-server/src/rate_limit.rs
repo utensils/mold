@@ -318,6 +318,10 @@ mod tests {
             classify_route("/api/models/unload", &Method::DELETE),
             Some(RouteTier::Generation)
         );
+        assert_eq!(
+            classify_route("/api/upscale", &Method::POST),
+            Some(RouteTier::Generation)
+        );
     }
 
     #[test]

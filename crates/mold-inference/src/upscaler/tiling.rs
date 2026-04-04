@@ -326,4 +326,79 @@ mod tests {
             "interior tile corner should have ramp, got {val}"
         );
     }
+
+    #[test]
+    fn calculate_tiles_non_square_landscape() {
+        let config = TilingConfig {
+            tile_size: 128,
+            overlap: 16,
+            min_tile_size: 64,
+        };
+        let tiles = calculate_tiles(512, 128, &config);
+        // Wide image: multiple columns, single row
+        assert!(tiles.len() >= 2, "wide image needs multiple tiles");
+        // All tiles should be at y=0 since height fits in one tile
+        assert!(tiles.iter().all(|t| t.y == 0));
+    }
+
+    #[test]
+    fn calculate_tiles_non_square_portrait() {
+        let config = TilingConfig {
+            tile_size: 128,
+            overlap: 16,
+            min_tile_size: 64,
+        };
+        let tiles = calculate_tiles(128, 512, &config);
+        // Tall image: single column, multiple rows
+        assert!(tiles.len() >= 2, "tall image needs multiple tiles");
+        // All tiles should be at x=0 since width fits in one tile
+        assert!(tiles.iter().all(|t| t.x == 0));
+    }
+
+    #[test]
+    fn calculate_tiles_exact_fit() {
+        let config = TilingConfig {
+            tile_size: 256,
+            overlap: 0,
+            min_tile_size: 64,
+        };
+        let tiles = calculate_tiles(256, 256, &config);
+        assert_eq!(tiles.len(), 1);
+    }
+
+    #[test]
+    fn blend_weights_scale_factor_doubles_output() {
+        let device = Device::Cpu;
+        let weights = build_blend_weights(0, 0, 64, 64, 64, 64, 0, 4, &device).unwrap();
+        let dims = weights.dims4().unwrap();
+        // 64*4 = 256
+        assert_eq!(dims, (1, 1, 256, 256));
+    }
+
+    #[test]
+    fn tiles_cover_entire_image() {
+        let config = TilingConfig {
+            tile_size: 100,
+            overlap: 20,
+            min_tile_size: 64,
+        };
+        let img_w = 300;
+        let img_h = 250;
+        let tiles = calculate_tiles(img_w, img_h, &config);
+
+        // Every pixel in the image should be covered by at least one tile
+        let mut covered = vec![vec![false; img_w]; img_h];
+        for tile in &tiles {
+            for y in tile.y..tile.y + tile.h {
+                for x in tile.x..tile.x + tile.w {
+                    covered[y][x] = true;
+                }
+            }
+        }
+        for y in 0..img_h {
+            for x in 0..img_w {
+                assert!(covered[y][x], "pixel ({x}, {y}) not covered by any tile");
+            }
+        }
+    }
 }

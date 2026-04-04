@@ -221,6 +221,7 @@ mod tests {
                 KeyCode::Char('e') => Action::EditAndGenerate,
                 KeyCode::Char('d') => Action::DeleteImage,
                 KeyCode::Char('o') => Action::OpenFile,
+                KeyCode::Char('u') => Action::UpscaleImage,
                 KeyCode::Esc => Action::SwitchView(View::Generate),
                 KeyCode::Char('q') => Action::Quit,
                 _ => Action::None,
@@ -230,6 +231,7 @@ mod tests {
                 KeyCode::Char('e') => Action::EditAndGenerate,
                 KeyCode::Char('r') => Action::Regenerate,
                 KeyCode::Char('d') => Action::DeleteImage,
+                KeyCode::Char('u') => Action::UpscaleImage,
                 KeyCode::Up | KeyCode::Char('k') => Action::Up,
                 KeyCode::Down | KeyCode::Char('j') => Action::Down,
                 KeyCode::Esc => Action::Cancel,
@@ -260,6 +262,22 @@ mod tests {
         assert_eq!(
             gallery_key(KeyCode::Char('o'), GalleryViewMode::Grid),
             Action::OpenFile
+        );
+    }
+
+    #[test]
+    fn gallery_grid_u_upscales() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('u'), GalleryViewMode::Grid),
+            Action::UpscaleImage
+        );
+    }
+
+    #[test]
+    fn gallery_detail_u_upscales() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('u'), GalleryViewMode::Detail),
+            Action::UpscaleImage
         );
     }
 
