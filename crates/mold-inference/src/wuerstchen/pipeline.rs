@@ -406,7 +406,7 @@ impl WuerstchenEngine {
             let reload_start = Instant::now();
             let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
                 &[&decoder_path],
-                dtype,
+                DType::F32,
                 &device,
                 "Wuerstchen Decoder",
                 &self.base.progress,
@@ -481,12 +481,13 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
 
-        // Load Decoder (Stage B)
+        // Load Decoder (Stage B) — F32 because the 256x256 latent space
+        // overflows F16 range during denoising (image_embeddings ±200).
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let decoder_start = Instant::now();
         let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&decoder_path],
-            dtype,
+            DType::F32,
             &device,
             "Wuerstchen Decoder",
             &self.base.progress,
@@ -911,11 +912,12 @@ impl WuerstchenEngine {
             self.base.progress.info(&status);
         }
 
+        // Decoder uses F32 — the 256x256 latent space overflows F16 range
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let dec_start = Instant::now();
         let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&decoder_path],
-            dtype,
+            DType::F32,
             &device,
             "Wuerstchen Decoder",
             &self.base.progress,
@@ -935,11 +937,13 @@ impl WuerstchenEngine {
             .stage_done("Loading Decoder (Stage B)", dec_start.elapsed());
 
         // Decoder latent dims derived from prior output spatial dims
+        // Cast prior output and text embeddings to F32 for Decoder
+        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+        let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         device.set_seed(seed.wrapping_add(1))?;
-        let mut decoder_latents =
-            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?.to_dtype(dtype)?;
+        let mut decoder_latents = Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?;
         Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
@@ -951,7 +955,7 @@ impl WuerstchenEngine {
             decoder_steps,
             decoder_guidance,
             &device,
-            dtype,
+            DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
@@ -1121,13 +1125,14 @@ impl InferenceEngine for WuerstchenEngine {
         Self::debug_tensor_stats("image_embeddings", &prior_latents);
 
         // 4. Stage B (Decoder): decode prior latents to VQ-GAN latent space
-        // Decoder latent dims derived from prior output spatial dims
+        // Cast prior output and text embeddings to F32 for Decoder (F16 overflows)
+        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+        let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         loaded.device.set_seed(seed.wrapping_add(1))?;
         let mut decoder_latents =
-            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?
-                .to_dtype(loaded.dtype)?;
+            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
         Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         let decoder = loaded
@@ -1143,7 +1148,7 @@ impl InferenceEngine for WuerstchenEngine {
             decoder_steps,
             decoder_guidance,
             &loaded.device,
-            loaded.dtype,
+            DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
