@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn config_default_values() {
         let cfg = Config::default();
-        assert_eq!(cfg.default_model, "flux2-klein");
+        assert_eq!(cfg.default_model, "flux2-klein:q8");
         assert_eq!(cfg.server_port, 7680);
         assert_eq!(cfg.default_width, 768);
         assert_eq!(cfg.default_height, 768);
@@ -1524,7 +1524,7 @@ is_schnell = false
         std::env::remove_var("MOLD_HOME");
         let _ = std::fs::remove_dir_all(&mold_home);
         // Should fall back to defaults
-        assert_eq!(cfg.default_model, "flux2-klein");
+        assert_eq!(cfg.default_model, "flux2-klein:q8");
         assert_eq!(cfg.server_port, 7680);
     }
 
