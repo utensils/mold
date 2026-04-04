@@ -36,3 +36,13 @@ the diffusion process operates in a very compact space, which allows for
 efficient generation despite the multi-stage pipeline.
 
 Negative prompts are supported and effective with this model.
+
+## Example
+
+**Wuerstchen v2 FP16** — 60 steps, seed 42:
+
+```bash
+mold run wuerstchen-v2:fp16 "A lighthouse on a rocky coast during a dramatic sunset, oil painting style, vibrant orange and purple sky" --seed 42
+```
+
+![Lighthouse — Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)
