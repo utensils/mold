@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-03
+
+### Fixed
+
+- **TUI info panel crash**: model descriptions containing multi-byte UTF-8 characters (e.g., em dash `—`) caused a panic when truncated to fit the panel width; now uses `str::floor_char_boundary()` for safe truncation ([#159](https://github.com/utensils/mold/issues/159), [#160](https://github.com/utensils/mold/pull/160))
+
 ## [0.5.0] - 2026-04-03
 
 ### Added
