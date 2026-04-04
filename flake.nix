@@ -239,6 +239,7 @@
               pkgs.ffmpeg
               pkgs.bun
               pkgs.nodePackages.prettier
+              pkgs.tmux
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv

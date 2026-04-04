@@ -5,6 +5,7 @@
 .playwright-mcp/
 # Claude Code
 .claude/worktrees/
+.playwright-mcp/
 .direnv/
 
 # Website
