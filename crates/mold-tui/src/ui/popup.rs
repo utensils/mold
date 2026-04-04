@@ -162,8 +162,8 @@ fn build_model_item<'a>(
         .unwrap_or_default();
 
     // Status tag — fixed width for column alignment
-    let status_width: usize = if show_download_status { 8 } else { 0 };
-    let status = if !downloaded { "pull" } else { "" };
+    let status_width: usize = if show_download_status { 10 } else { 0 };
+    let status = if !downloaded { "available" } else { "" };
 
     // Default indicator
     let default_tag = if is_default { " *" } else { "" };
