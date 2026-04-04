@@ -182,11 +182,11 @@ impl WuerstchenEngine {
     }
 
     fn effective_prior_steps(requested_steps: usize) -> usize {
-        if requested_steps < 20 {
+        if requested_steps < 10 {
             // Very low step counts produce noise; warn but respect the request.
             tracing::warn!(
                 steps = requested_steps,
-                "Wuerstchen prior works best with ≥60 steps"
+                "Wuerstchen prior works best with ≥20 steps"
             );
         }
         requested_steps
@@ -406,7 +406,7 @@ impl WuerstchenEngine {
             let reload_start = Instant::now();
             let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
                 &[&decoder_path],
-                dtype,
+                DType::F32,
                 &device,
                 "Wuerstchen Decoder",
                 &self.base.progress,
@@ -448,10 +448,14 @@ impl WuerstchenEngine {
         tracing::info!(model = %self.base.model_name, "loading Wuerstchen model components...");
 
         let device = crate::device::create_device(&self.base.progress)?;
-        // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
-        // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
-        // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
-        let dtype = DType::F32;
+        // Use F16 on GPU for ~2x throughput and ~2x less VRAM.
+        // gen_r_embedding computes sincos basis in F32 internally, then casts to
+        // model dtype before the matmul — patched in candle-transformers-mold 0.9.4.
+        let dtype = if device.is_cpu() {
+            DType::F32
+        } else {
+            DType::F16
+        };
 
         // Load Prior (Stage C)
         self.base.progress.stage_start("Loading Prior (Stage C)");
@@ -477,12 +481,13 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
 
-        // Load Decoder (Stage B)
+        // Load Decoder (Stage B) — F32 because the 256x256 latent space
+        // overflows F16 range during denoising (image_embeddings ±200).
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let decoder_start = Instant::now();
         let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&decoder_path],
-            dtype,
+            DType::F32,
             &device,
             "Wuerstchen Decoder",
             &self.base.progress,
@@ -501,12 +506,12 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Loading Decoder (Stage B)", decoder_start.elapsed());
 
-        // Load VQ-GAN (Stage A)
+        // Load VQ-GAN (Stage A) — always F32 for pixel-space decoding
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
         let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&self.base.paths.vae],
-            dtype,
+            DType::F32,
             &device,
             "VQ-GAN",
             &self.base.progress,
@@ -613,6 +618,7 @@ impl WuerstchenEngine {
         steps: usize,
         guidance: f64,
         device: &Device,
+        dtype: DType,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let scheduler = DDPMWScheduler::new(steps, DDPMWSchedulerConfig::default())?;
@@ -632,13 +638,13 @@ impl WuerstchenEngine {
                 // CFG: batch [latents, latents] with [text_embeddings, negative_prompt]
                 // text first (index 0), negative/unconditional second (index 1)
                 let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
-                let r = (Tensor::ones(2, DType::F32, device)? * t)?;
+                let r = (Tensor::ones(2, dtype, device)? * t)?;
                 let pred = prior.forward(&latent_input, &r, text_embeddings)?;
                 let chunks = pred.chunk(2, 0)?;
                 let (pred_text, pred_uncond) = (&chunks[0], &chunks[1]);
                 (pred_uncond + ((pred_text - pred_uncond)? * guidance)?)?
             } else {
-                let r = (Tensor::ones(1, DType::F32, device)? * t)?;
+                let r = (Tensor::ones(1, dtype, device)? * t)?;
                 prior.forward(&*latents, &r, text_embeddings)?
             };
 
@@ -672,6 +678,7 @@ impl WuerstchenEngine {
         steps: usize,
         guidance: f64,
         device: &Device,
+        dtype: DType,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let scheduler = DDPMWScheduler::new(steps, DDPMWSchedulerConfig::default())?;
@@ -689,7 +696,7 @@ impl WuerstchenEngine {
 
             let noise_pred = if use_cfg {
                 let latent_input = Tensor::cat(&[&*latents, &*latents], 0)?;
-                let r = (Tensor::ones(2, DType::F32, device)? * t)?;
+                let r = (Tensor::ones(2, dtype, device)? * t)?;
                 let effnet_input = Tensor::cat(
                     &[image_embeddings, &Tensor::zeros_like(image_embeddings)?],
                     0,
@@ -700,7 +707,7 @@ impl WuerstchenEngine {
                 let (pred_text, pred_uncond) = (&chunks[0], &chunks[1]);
                 (pred_uncond + ((pred_text - pred_uncond)? * guidance)?)?
             } else {
-                let r = (Tensor::ones(1, DType::F32, device)? * t)?;
+                let r = (Tensor::ones(1, dtype, device)? * t)?;
                 decoder.forward(&*latents, &r, image_embeddings, Some(text_embeddings))?
             };
 
@@ -727,10 +734,13 @@ impl WuerstchenEngine {
         }
 
         let device = crate::device::create_device(&self.base.progress)?;
-        // Wuerstchen's candle impl mixes dtypes internally (gen_r_embedding produces F32
-        // that gets fed to F16 TimestepBlock weights). Use F32 for all backends to avoid
-        // dtype mismatches. The model is small enough (~5.6GB) that F32 is fine.
-        let dtype = DType::F32;
+        // Use F16 on GPU for ~2x throughput on the Prior stage.
+        // Decoder and VQ-GAN use F32 explicitly (see their load calls below).
+        let dtype = if device.is_cpu() {
+            DType::F32
+        } else {
+            DType::F16
+        };
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -870,7 +880,8 @@ impl WuerstchenEngine {
         let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
         device.set_seed(seed)?;
         let mut prior_latents =
-            Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?;
+            Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?
+                .to_dtype(dtype)?;
         Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
         self.denoise_prior(
@@ -881,6 +892,7 @@ impl WuerstchenEngine {
             prior_steps,
             prior_guidance,
             &device,
+            dtype,
         )?;
 
         // Scale prior output: convert from Prior latent space to Decoder conditioning space
@@ -903,11 +915,12 @@ impl WuerstchenEngine {
             self.base.progress.info(&status);
         }
 
+        // Decoder uses F32 — the 256x256 latent space overflows F16 range
         self.base.progress.stage_start("Loading Decoder (Stage B)");
         let dec_start = Instant::now();
         let decoder_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&decoder_path],
-            dtype,
+            DType::F32,
             &device,
             "Wuerstchen Decoder",
             &self.base.progress,
@@ -927,6 +940,9 @@ impl WuerstchenEngine {
             .stage_done("Loading Decoder (Stage B)", dec_start.elapsed());
 
         // Decoder latent dims derived from prior output spatial dims
+        // Cast prior output and text embeddings to F32 for Decoder
+        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+        let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         device.set_seed(seed.wrapping_add(1))?;
@@ -942,6 +958,7 @@ impl WuerstchenEngine {
             decoder_steps,
             decoder_guidance,
             &device,
+            DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
@@ -952,11 +969,12 @@ impl WuerstchenEngine {
         self.base.progress.info("Freed Decoder (Stage B)");
 
         // --- Phase 4: VQ-GAN decode (Stage A) ---
+        // VQ-GAN uses F32 for pixel-space decoding regardless of model dtype
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
         let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&self.base.paths.vae],
-            dtype,
+            DType::F32,
             &device,
             "VQ-GAN",
             &self.base.progress,
@@ -1084,7 +1102,8 @@ impl InferenceEngine for WuerstchenEngine {
             1f32,
             (1, PRIOR_C_IN, latent_h, latent_w),
             &loaded.device,
-        )?;
+        )?
+        .to_dtype(loaded.dtype)?;
         Self::debug_tensor_stats("prior_latents_init", &prior_latents);
 
         let prior = loaded
@@ -1099,6 +1118,7 @@ impl InferenceEngine for WuerstchenEngine {
             prior_steps,
             prior_guidance,
             &loaded.device,
+            loaded.dtype,
         )?;
 
         // Scale prior output: convert from Prior latent space to Decoder conditioning space
@@ -1107,7 +1127,9 @@ impl InferenceEngine for WuerstchenEngine {
         Self::debug_tensor_stats("image_embeddings", &prior_latents);
 
         // 4. Stage B (Decoder): decode prior latents to VQ-GAN latent space
-        // Decoder latent dims derived from prior output spatial dims
+        // Cast prior output and text embeddings to F32 for Decoder (F16 overflows)
+        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+        let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
         let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
         loaded.device.set_seed(seed.wrapping_add(1))?;
@@ -1128,6 +1150,7 @@ impl InferenceEngine for WuerstchenEngine {
             decoder_steps,
             decoder_guidance,
             &loaded.device,
+            DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 

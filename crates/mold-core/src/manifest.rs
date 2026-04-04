@@ -2294,7 +2294,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
 
 fn wuerstchen_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
-        steps: 60,
+        steps: 30,
         guidance: 4.0,
         width: 1024,
         height: 1024,
@@ -2308,7 +2308,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
         family: "wuerstchen".to_string(),
-        description: "Wuerstchen v2 FP16 — 3-stage cascade with 42x latent compression".to_string(),
+        description: "Wuerstchen v2 FP16 — research model, 3-stage cascade with 42x latent compression, painterly style".to_string(),
         files: vec![
             ModelFile {
                 hf_repo: "warp-ai/wuerstchen".to_string(),

@@ -167,7 +167,7 @@ on floating islands above clouds, magical waterfalls, ethereal glow"_
 
 ![Lighthouse — Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)
 
-**wuerstchen-v2:fp16** — 60 steps, seed 42 _"A lighthouse on a rocky coast during
+**wuerstchen-v2:fp16** — 30 steps, seed 42 _"A lighthouse on a rocky coast during
 a dramatic sunset, oil painting style, vibrant orange and purple sky"_
 
 </figure>
