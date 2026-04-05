@@ -2948,7 +2948,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
                         hf_filename: "transformer/diffusion_pytorch_model.safetensors"
                             .to_string(),
                         component: ModelComponent::Transformer,
-                        size_bytes: 7_690_339_712,
+                        size_bytes: 3_846_852_608,
                         gated: false,
                         sha256: None,
                     },
