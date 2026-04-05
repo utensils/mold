@@ -2932,12 +2932,12 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: None,
             },
-            // LTX Video uses its own 3D causal VAE
+            // LTX Video 3D causal VAE (v0.9 diffusers format — matches v0.9 transformer)
             ModelFile {
                 hf_repo: "Lightricks/LTX-Video".to_string(),
                 hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
                 component: ModelComponent::Vae,
-                size_bytes: 171_403_958,
+                size_bytes: 1_676_798_532,
                 gated: false,
                 sha256: None,
             },

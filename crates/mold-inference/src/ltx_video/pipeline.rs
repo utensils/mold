@@ -169,6 +169,7 @@ impl LtxVideoEngine {
     ) -> Result<GenerateResponse> {
         let progress = &self.base.progress;
         let paths = &self.base.paths;
+        let ltx_debug = std::env::var("MOLD_LTX_DEBUG").is_ok_and(|v| v == "1");
 
         // Select device
         let device = crate::device::create_device(progress)?;
@@ -264,7 +265,7 @@ impl LtxVideoEngine {
         let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());
 
-        // Generate initial noise
+        // Generate initial noise (raw, std≈1 — no normalization needed for v0.9 transformer)
         let noise = seeded_randn(
             seed,
             &[1, LATENT_CHANNELS, latent_f, latent_h, latent_w],
@@ -367,12 +368,11 @@ impl LtxVideoEngine {
                 )?
             };
 
-            // Debug: track per-step stats
-            {
+            // Debug: track per-step stats (MOLD_LTX_DEBUG=1)
+            if ltx_debug {
                 let v_f32 = noise_pred.to_dtype(DType::F32)?;
                 let v_rms = v_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
                 let l_rms = latents.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
-                // Also check the latent input that went into the model
                 let li_rms = latents_input.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
                 if step < 3 || step == total_steps - 1 {
                     progress.info(&format!(
@@ -394,8 +394,8 @@ impl LtxVideoEngine {
             });
         }
 
-        // Debug: log sigma schedule and latent stats
-        {
+        // Debug: log sigma schedule and latent stats (MOLD_LTX_DEBUG=1)
+        if ltx_debug {
             let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
             let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
             progress.info(&format!("Sigmas: {:?}...{:?} (mu={:.3})", first_5, last_3, mu));
@@ -424,70 +424,20 @@ impl LtxVideoEngine {
         progress.stage_start("Loading VAE decoder");
         let vae_start = Instant::now();
 
-        // Load v0.9.5 VAE from the unified transformer file (contains both transformer + VAE).
-        // The native key format needs remapping to diffusers-style names.
-        let unified_path = &paths.transformer_shards.first().unwrap_or(&paths.transformer);
-        // Load ALL safetensors files (transformer shards + any VAE files)
-        let mut all_files: Vec<std::path::PathBuf> = if !paths.transformer_shards.is_empty() {
-            paths.transformer_shards.clone()
-        } else {
-            vec![paths.transformer.clone()]
+        // Auto-detect VAE version by file size: v0.9.5 ≈ 2.5GB, v0.9 ≈ 1.7GB
+        let vae_file_size = std::fs::metadata(&paths.vae)?.len();
+        let is_v095_vae = vae_file_size > 2_000_000_000;
+
+        let vae_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[paths.vae.clone()], dtype, &device)?
         };
 
-        // Check for unified file (contains both transformer + VAE with native keys).
-        // Search the hf-cache for the unified file alongside the transformer shards.
-        let unified_file = {
-            // The transformer shards are in .../snapshots/<hash>/transformer/
-            // The unified file is at .../snapshots/<hash>/ltx-video-2b-v0.9.5.safetensors
-            let xformer_dir = paths
-                .transformer_shards
-                .first()
-                .unwrap_or(&paths.transformer)
-                .parent()
-                .unwrap_or(std::path::Path::new("."));
-            let snapshot_dir = xformer_dir.parent().unwrap_or(xformer_dir);
-            let candidate = snapshot_dir.join("ltx-video-2b-v0.9.5.safetensors");
-            if candidate.exists() {
-                Some(candidate)
-            } else {
-                None
-            }
-        };
-
-        // Try loading v0.9.5 VAE from unified file first (better quality)
-        let unified_has_vae = if let Some(ref uf) = unified_file {
-            let test_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&[uf.clone()], dtype, &device)?
-            };
-            test_vb.contains_tensor("vae.decoder.conv_in.conv.weight")
+        let vae_config = if is_v095_vae {
+            progress.info("Using v0.9.5 VAE (1024-ch, timestep conditioning)");
+            AutoencoderKLLtxVideoConfig::default()
         } else {
-            false
-        };
-
-        let (vae, scaling_factor) = if unified_has_vae {
-            // v0.9.5 VAE from unified file — remap native → diffusers keys
-            progress.info("Using v0.9.5 VAE from unified file (1024-ch, timestep conditioning)");
-            let vae_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&[unified_file.unwrap()], dtype, &device)?
-            };
-            let vae_vb = vae_vb.rename_f(remap_vae_native_to_diffusers);
-
-            let vae_config = AutoencoderKLLtxVideoConfig {
-                block_out_channels: vec![128, 256, 512, 1024, 2048],
-                layers_per_block: vec![4, 6, 6, 2, 2],
-                latent_channels: 128,
-                patch_size: 4,
-                timestep_conditioning: true,
-                ..Default::default()
-            };
-            let sf = vae_config.scaling_factor as f32;
-            (AutoencoderKLLtxVideo::new(vae_config, vae_vb)?, sf)
-        } else {
-            // Fallback: v0.9 VAE from separate diffusers-format file
-            let vae_vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&[paths.vae.clone()], dtype, &device)?
-            };
-            let vae_config = AutoencoderKLLtxVideoConfig {
+            progress.info("Using v0.9 VAE (512-ch, no timestep conditioning)");
+            AutoencoderKLLtxVideoConfig {
                 block_out_channels: vec![128, 256, 512, 512],
                 decoder_block_out_channels: vec![128, 256, 512, 512],
                 spatiotemporal_scaling: vec![true, true, true, false],
@@ -499,19 +449,21 @@ impl LtxVideoEngine {
                 decoder_upsample_factor: vec![1, 1, 1, 1, 1],
                 timestep_conditioning: false,
                 ..Default::default()
-            };
-            let sf = vae_config.scaling_factor as f32;
-            (AutoencoderKLLtxVideo::new(vae_config, vae_vb)?, sf)
+            }
         };
+        let vae = AutoencoderKLLtxVideo::new(vae_config, vae_vb)?;
         progress.stage_done("Loading VAE decoder", vae_start.elapsed());
 
         progress.stage_start("Decoding video frames");
         let decode_start = Instant::now();
 
-        // Denormalize latents using VAE statistics
-        let latents_mean = vae.latents_mean();
-        let latents_std = vae.latents_std();
-        latents = denormalize_latents(&latents, latents_mean, latents_std, scaling_factor)?;
+        // Feed denoised latents directly to VAE (no denormalization needed for v0.9 VAE)
+        if ltx_debug {
+            let l_f32 = latents.to_dtype(DType::F32)?;
+            progress.info(&format!("Latents pre-VAE: mean={:.4}, std={:.4}",
+                l_f32.mean_all()?.to_scalar::<f32>()?,
+                l_f32.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt()));
+        }
 
         latents = latents.to_dtype(dtype)?;
         let decode_timestep = if vae.config().timestep_conditioning {
@@ -521,6 +473,10 @@ impl LtxVideoEngine {
         };
         let (_dec_output, video) = vae.decode(&latents, decode_timestep.as_ref(), false, false)?;
         // video: [B, 3, F, H, W] in model dtype
+        if ltx_debug {
+            let v_f32 = video.to_dtype(DType::F32)?;
+            progress.info(&format!("VAE output: shape={:?}, mean={:.4}, min={:.4}, max={:.4}", v_f32.shape(), v_f32.mean_all()?.to_scalar::<f32>()?, v_f32.flatten_all()?.min(0)?.to_scalar::<f32>()?, v_f32.flatten_all()?.max(0)?.to_scalar::<f32>()?));
+        }
 
         progress.stage_done("Decoding video frames", decode_start.elapsed());
 
@@ -643,30 +599,6 @@ fn unpack_latents(
     ))?)
 }
 
-/// Denormalize latents using VAE statistics: x = x * std / scaling_factor + mean.
-fn denormalize_latents(
-    latents: &Tensor,
-    mean: &Tensor,
-    std: &Tensor,
-    scaling_factor: f32,
-) -> Result<Tensor> {
-    let c = latents.dim(1)?;
-    let mean = mean
-        .reshape((1, c, 1, 1, 1))?
-        .to_device(latents.device())?
-        .to_dtype(latents.dtype())?;
-    let std = std
-        .reshape((1, c, 1, 1, 1))?
-        .to_device(latents.device())?
-        .to_dtype(latents.dtype())?;
-
-    let x = latents.broadcast_mul(&std)?;
-    let x = x
-        .affine((1.0 / scaling_factor) as f64, 0.0)?
-        .broadcast_add(&mean)?;
-    Ok(x)
-}
-
 /// Calculate the dynamic shift mu for the scheduler (SD3-style).
 fn calculate_shift(
     image_seq_len: usize,
@@ -741,97 +673,3 @@ fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Remap diffusers-style VAE key names to native (official) LTX Video format.
-///
-/// The candle VAE model queries diffusers names internally, but the unified
-/// weights file stores native names. This function maps queried → stored.
-///
-/// Native decoder structure (flat indexed):
-///   up_blocks.0 = mid_block (res_blocks)
-///   up_blocks.1 = first upsampler (conv)
-///   up_blocks.2 = first up block (res_blocks)
-///   up_blocks.3 = second upsampler (conv)
-///   ...
-///
-/// Diffusers decoder structure (hierarchical):
-///   mid_block.resnets.* = mid block
-///   up_blocks.0.upsamplers.0.* = first upsampler
-///   up_blocks.0.resnets.* = first up block
-///   up_blocks.1.upsamplers.0.* = second upsampler
-///   ...
-fn remap_vae_native_to_diffusers(queried: &str) -> String {
-    let mut s = queried.to_string();
-
-    // Simple renames
-    s = s.replace("resnets", "res_blocks");
-    s = s.replace("time_embedder", "last_time_embedder");
-    s = s.replace("scale_shift_table", "last_scale_shift_table");
-
-    // latents_mean/std → per_channel_statistics
-    if s == "latents_mean" {
-        return "vae.per_channel_statistics.mean-of-means".to_string();
-    }
-    if s == "latents_std" {
-        return "vae.per_channel_statistics.std-of-means".to_string();
-    }
-
-    // Decoder block remapping: diffusers → native
-    if s.starts_with("decoder.mid_block.") {
-        s = s.replacen("decoder.mid_block.", "decoder.up_blocks.0.", 1);
-    } else if s.starts_with("decoder.up_blocks.") {
-        // Parse the diffusers block index
-        let rest = &s["decoder.up_blocks.".len()..];
-        if let Some(dot_pos) = rest.find('.') {
-            if let Ok(diff_idx) = rest[..dot_pos].parse::<usize>() {
-                let after_idx = &rest[dot_pos + 1..];
-                if after_idx.starts_with("upsamplers.0") {
-                    // diffusers up_blocks.N.upsamplers.0 → native up_blocks.(2N+1)
-                    let native_idx = diff_idx * 2 + 1;
-                    let rest_after = after_idx.replacen("upsamplers.0", "", 1);
-                    let rest_after = rest_after.trim_start_matches('.');
-                    s = if rest_after.is_empty() {
-                        format!("decoder.up_blocks.{native_idx}")
-                    } else {
-                        format!("decoder.up_blocks.{native_idx}.{rest_after}")
-                    };
-                    // Native upsamplers are just "conv" blocks
-                    s = s.replace(".conv.conv.", ".conv.");
-                    if s.ends_with(".conv.weight") && !s.contains(".conv.conv.") {
-                        // Already correct
-                    }
-                } else {
-                    // diffusers up_blocks.N.* → native up_blocks.(2N+2).*
-                    let native_idx = diff_idx * 2 + 2;
-                    s = format!("decoder.up_blocks.{native_idx}.{after_idx}");
-                }
-            }
-        }
-    }
-
-    // Encoder block remapping: diffusers → native
-    if s.starts_with("encoder.mid_block.") {
-        s = s.replacen("encoder.mid_block.", "encoder.down_blocks.8.", 1);
-    } else if s.starts_with("encoder.down_blocks.") {
-        let rest = &s["encoder.down_blocks.".len()..];
-        if let Some(dot_pos) = rest.find('.') {
-            if let Ok(diff_idx) = rest[..dot_pos].parse::<usize>() {
-                let after_idx = &rest[dot_pos + 1..];
-                if after_idx.starts_with("downsamplers.0") {
-                    let native_idx = diff_idx * 2 + 1;
-                    let rest_after = after_idx.replacen("downsamplers.0", "", 1);
-                    let rest_after = rest_after.trim_start_matches('.');
-                    s = if rest_after.is_empty() {
-                        format!("encoder.down_blocks.{native_idx}")
-                    } else {
-                        format!("encoder.down_blocks.{native_idx}.{rest_after}")
-                    };
-                } else {
-                    let native_idx = diff_idx * 2;
-                    s = format!("encoder.down_blocks.{native_idx}.{after_idx}");
-                }
-            }
-        }
-    }
-
-    format!("vae.{s}")
-}
