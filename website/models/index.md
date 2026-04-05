@@ -16,22 +16,34 @@ and VRAM requirements.
 
 ## VRAM Guide
 
-| Model              | Variant | Approx. VRAM | Speed              | Quality                      |
-| ------------------ | ------- | ------------ | ------------------ | ---------------------------- |
-| `flux-schnell:q8`  | Q8      | ~12 GB       | Fast, 4 steps      | Good                         |
-| `flux-schnell:q6`  | Q6      | ~14 GB       | Fast, 4 steps      | Better than Q8               |
-| `flux-dev:q4`      | Q4      | ~8 GB        | Slow, 25 steps     | Excellent                    |
-| `flux-dev:q6`      | Q6      | ~10 GB       | Slow, 25 steps     | Best FLUX quality/size trade |
-| `flux-dev:bf16`    | BF16    | ~24 GB       | Slow, 25 steps     | Best FLUX quality            |
-| `flux2-klein:q4`   | Q4      | ~4 GB        | Fast, 4 steps      | Good for very small GPUs     |
-| `z-image-turbo:q8` | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                    |
-| `sdxl-turbo:fp16`  | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
-| `sd15:fp16`        | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
-| `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
+VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
+activation headroom. The **default** column is sequential mode (drop-and-reload),
+which loads components one at a time. **Eager** mode keeps everything on GPU
+simultaneously for faster inference but needs more VRAM.
 
-If you are close to your card limit, start with a smaller quantization or use
-`--offload`. Full BF16 FLUX can run on 24 GB cards, but offloading may kick in
-automatically and slow generation down.
+| Model              | Variant | Default VRAM | Eager VRAM | Speed              | Quality                      |
+| ------------------ | ------- | ------------ | ---------- | ------------------ | ---------------------------- |
+| `flux-schnell:q8`  | Q8      | ~15 GB       | ~25 GB     | Fast, 4 steps      | Good                         |
+| `flux-dev:q4`      | Q4      | ~10 GB       | ~15 GB     | Slow, 25 steps     | Excellent                    |
+| `flux-dev:q6`      | Q6      | ~12 GB       | ~20 GB     | Slow, 25 steps     | Best FLUX quality/size trade |
+| `flux-dev:bf16`    | BF16    | ~26 GB       | ~36 GB     | Slow, 25 steps     | Best FLUX quality            |
+| `flux2-klein:q4`   | Q4      | ~5 GB        | ~11 GB     | Fast, 4 steps      | Good for very small GPUs     |
+| `flux2-klein:q8`   | Q8      | ~6 GB        | ~13 GB     | Fast, 4 steps      | Good                         |
+| `z-image-turbo:q8` | Q8      | ~9 GB        | ~13 GB     | Fast, 9 steps      | Excellent                    |
+| `sdxl-turbo:fp16`  | FP16    | ~8 GB        | ~11 GB     | Very fast, 4 steps | Good                         |
+| `sd15:fp16`        | FP16    | ~6 GB        | ~6 GB      | Medium, 25 steps   | Good, broad ecosystem        |
+| `sd35-large:q8`    | Q8      | ~12 GB       | ~22 GB     | Medium, 28 steps   | Excellent                    |
+| `qwen-image:q4`    | Q4      | ~22 GB       | ~41 GB     | Slow, 50 steps     | Strong                       |
+
+::: tip Sequential vs Eager
+In **sequential mode** (the default), mold loads each component (encoder →
+transformer → VAE) one at a time, freeing GPU memory between phases. This
+reduces peak VRAM by 30-50% but adds 10-20% to generation time.
+
+Use `--eager` to keep all components loaded simultaneously for faster inference
+on high-VRAM cards. FLUX.1 also supports `--offload` for block-level CPU↔GPU
+streaming (~4-5 GB peak, 2-4x slower).
+:::
 
 <div class="gallery-grid">
 
@@ -73,12 +85,32 @@ mold run sdxl-base "a cat"     # resolves to sdxl-base:fp16
 
 ## HuggingFace Auth
 
-Some model repos require authentication:
+Some model repos (marked `[gated]`) require a
+[HuggingFace access token](https://huggingface.co/settings/tokens). You may
+need to accept the model's license on its HuggingFace page before downloading.
+
+**Option 1 — Environment variable** (simplest):
 
 ```bash
 export HF_TOKEN=hf_...
 mold pull flux-dev:q4
 ```
+
+**Option 2 — HuggingFace CLI** (persists the token):
+
+```bash
+# Install the HF CLI
+curl -LsSf https://hf.co/cli/install.sh | bash
+
+# Log in (saves token to ~/.cache/huggingface/)
+hf auth login
+```
+
+Once logged in, `mold pull` picks up the stored token automatically — no
+`HF_TOKEN` export needed.
+
+See the [HuggingFace CLI docs](https://huggingface.co/docs/huggingface_hub/guides/cli)
+for more options.
 
 ## All Families
 

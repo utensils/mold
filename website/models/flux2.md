@@ -75,7 +75,10 @@ multiples of 16.
 **Flux.2 Klein Q8** — 4 steps, seed 100:
 
 ```bash
-mold run flux2-klein:q8 "A minimalist zen garden with raked sand patterns, a single cherry blossom tree, morning mist" --seed 100
+mold run flux2-klein:q8 \
+  "A minimalist zen garden with raked sand patterns, \
+  a single cherry blossom tree, morning mist" \
+  --seed 100
 ```
 
 ![Zen garden — Flux.2 Klein](/gallery/flux2-klein-zen.png)
@@ -83,7 +86,8 @@ mold run flux2-klein:q8 "A minimalist zen garden with raked sand patterns, a sin
 **Flux.2 Klein BF16** — 4 steps:
 
 ```bash
-mold run flux2-klein:bf16 "a majestic owl perched on a mossy branch in a moonlit forest"
+mold run flux2-klein:bf16 \
+  "a majestic owl perched on a mossy branch in a moonlit forest"
 ```
 
 ![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
@@ -91,7 +95,10 @@ mold run flux2-klein:bf16 "a majestic owl perched on a mossy branch in a moonlit
 **Flux.2 Klein-9B Q4** — 4 steps, seed 999:
 
 ```bash
-mold run flux2-klein-9b:q4 "A glass bottle ship inside a stormy ocean wave, dramatic lightning, hyperrealistic macro photography" --seed 999
+mold run flux2-klein-9b:q4 \
+  "A glass bottle ship inside a stormy ocean wave, \
+  dramatic lightning, hyperrealistic macro photography" \
+  --seed 999
 ```
 
 ![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)

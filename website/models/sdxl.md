@@ -50,7 +50,10 @@ multiples of 16.
 **SDXL Turbo** — 4 steps, seed 88:
 
 ```bash
-mold run sdxl-turbo:fp16 "A vibrant street food market in Bangkok at night, neon signs, steam from woks, bustling crowd" --seed 88
+mold run sdxl-turbo:fp16 \
+  "A vibrant street food market in Bangkok at night, \
+  neon signs, steam from woks, bustling crowd" \
+  --seed 88
 ```
 
 ![Street market — SDXL Turbo](/gallery/sdxl-turbo-market.png)
