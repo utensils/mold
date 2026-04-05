@@ -11,6 +11,15 @@ use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 use mold_core::{OutputFormat, Scheduler};
 
+/// Value parser for OutputFormat with tab-completion candidates.
+fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::ValueParser {
+    let parser = clap::builder::TypedValueParser::map(
+        clap::builder::PossibleValuesParser::new(formats),
+        |s: String| s.parse::<OutputFormat>().unwrap(),
+    );
+    clap::builder::ValueParser::new(parser)
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
@@ -135,7 +144,7 @@ Examples:
 
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
-              value_parser = clap::builder::PossibleValuesParser::new(["png", "jpeg", "gif", "apng", "webp", "mp4"]))]
+              value_parser = output_format_parser(&["png", "jpeg", "gif", "apng", "webp", "mp4"]))]
         format: OutputFormat,
 
         /// Disable embedded generation metadata in PNG output for this run
@@ -573,7 +582,7 @@ Examples:
 
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Png,
-              value_parser = clap::builder::PossibleValuesParser::new(["png", "jpeg"]))]
+              value_parser = output_format_parser(&["png", "jpeg"]))]
         format: OutputFormat,
 
         /// Tile size for memory-efficient tiled inference (0 to disable)
