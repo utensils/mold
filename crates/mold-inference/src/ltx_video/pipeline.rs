@@ -102,6 +102,18 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
         let width = req.width;
         let height = req.height;
 
+        // Validate dimensions are multiples of 32 (VAE spatial compression)
+        if !width.is_multiple_of(VAE_SPATIAL_COMPRESSION as u32)
+            || !height.is_multiple_of(VAE_SPATIAL_COMPRESSION as u32)
+        {
+            bail!(
+                "LTX Video requires width and height to be multiples of {}, got {}x{}",
+                VAE_SPATIAL_COMPRESSION,
+                width,
+                height
+            );
+        }
+
         // Latent dimensions
         let latent_h = height as usize / VAE_SPATIAL_COMPRESSION;
         let latent_w = width as usize / VAE_SPATIAL_COMPRESSION;

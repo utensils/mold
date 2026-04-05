@@ -27,4 +27,6 @@ result
 tmp/
 uat-*
 *.gif
-tmp/
+*.apng
+*.webp
+*.mp4

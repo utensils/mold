@@ -410,7 +410,7 @@ impl OutputFormat {
             OutputFormat::Png => "png",
             OutputFormat::Jpeg => "jpeg",
             OutputFormat::Gif => "gif",
-            OutputFormat::Apng => "apng",
+            OutputFormat::Apng => "png", // APNG files are valid PNGs — .png opens natively everywhere
             OutputFormat::Webp => "webp",
             OutputFormat::Mp4 => "mp4",
         }

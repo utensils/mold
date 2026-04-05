@@ -196,8 +196,8 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
     match result {
         Ok(Ok(Ok(mut response))) => {
-            if response.images.is_empty() {
-                let err_msg = "generation error: engine returned no images".to_string();
+            if response.images.is_empty() && response.video.is_none() {
+                let err_msg = "generation error: engine returned no images or video".to_string();
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent {
                         message: err_msg.clone(),

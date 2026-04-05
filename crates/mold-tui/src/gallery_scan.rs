@@ -79,7 +79,10 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif")) {
+        if !matches!(
+            ext.as_deref(),
+            Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp" | "mp4")
+        ) {
             continue;
         }
 
