@@ -20,11 +20,13 @@ ARG CUDA_COMPUTE_CAP=89
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies for building (openssl, pkg-config, git for cargo)
+# System dependencies for building
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
         libssl-dev \
+        libwebp-dev \
+        nasm \
         git \
         ca-certificates \
         curl \
@@ -44,6 +46,7 @@ COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
 COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
+COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
 
 # Create stub source files so cargo can resolve and build dependencies
 RUN mkdir -p crates/mold-core/src \
@@ -51,14 +54,16 @@ RUN mkdir -p crates/mold-core/src \
              crates/mold-server/src \
              crates/mold-cli/src \
              crates/mold-discord/src \
+             crates/mold-tui/src \
     && echo "// stub" > crates/mold-core/src/lib.rs \
     && echo "// stub" > crates/mold-inference/src/lib.rs \
     && echo "// stub" > crates/mold-server/src/lib.rs \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
-    && echo "// stub" > crates/mold-discord/src/lib.rs
+    && echo "// stub" > crates/mold-discord/src/lib.rs \
+    && echo "// stub" > crates/mold-tui/src/lib.rs
 
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
-RUN cargo build --release -p mold-ai --features cuda,expand \
+RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4 \
     || true
 
 # Now copy the real source code
@@ -68,7 +73,7 @@ COPY crates/ crates/
 RUN find crates/ -name "*.rs" -exec touch {} +
 
 # Build the real binary
-RUN cargo build --release -p mold-ai --features cuda,expand
+RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4
 
 # Verify no unexpected missing libraries (libcuda.so.1 is expected to be
 # absent — it's the NVIDIA driver, injected at runtime by the container toolkit)
@@ -84,6 +89,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Container Toolkit on GPU hosts like RunPod — it is never in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        libwebp7 \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
@@ -93,9 +99,38 @@ COPY --from=builder /build/target/release/mold /usr/local/bin/mold
 # Copy the entrypoint script
 COPY docker/start.sh /start.sh
 
-# Server defaults
+# ── Environment variable defaults ──────────────────────────────────
+# Core
 ENV MOLD_LOG=info \
-    MOLD_PORT=7680
+    MOLD_PORT=7680 \
+    MOLD_DEFAULT_MODEL=flux2-klein:q8 \
+    MOLD_EMBED_METADATA=1
+# Server
+# MOLD_HOST=               (clients: remote server URL)
+# MOLD_HOME=               (override base mold directory)
+# MOLD_MODELS_DIR=         (override model storage)
+# MOLD_OUTPUT_DIR=         (override output directory, empty to disable)
+# MOLD_API_KEY=            (API key for server auth)
+# MOLD_RATE_LIMIT=         (per-IP rate limit, e.g. "10/min")
+# MOLD_CORS_ORIGIN=        (restrict CORS origin)
+# Inference
+# MOLD_EAGER=              (1 to keep all model components loaded)
+# MOLD_OFFLOAD=            (1 to force CPU↔GPU block streaming)
+# MOLD_T5_VARIANT=auto     (T5 encoder: auto, fp16, q8, q6, q5, q4, q3)
+# MOLD_QWEN3_VARIANT=auto  (Qwen3 encoder: auto, bf16, q8, q6, iq4, q3)
+# MOLD_SCHEDULER=          (ddim, euler-ancestral, uni-pc)
+# MOLD_PREVIEW=            (1 to display images inline)
+# Video
+# MOLD_LTX_DEBUG=          (1 for per-step LTX Video diagnostics)
+# Expansion
+# MOLD_EXPAND=             (1 to enable LLM prompt expansion)
+# MOLD_EXPAND_BACKEND=local
+# MOLD_EXPAND_MODEL=qwen3-expand:q8
+# MOLD_EXPAND_TEMPERATURE=0.7
+# Discord
+# MOLD_DISCORD_TOKEN=      (Discord bot token)
+# MOLD_DISCORD_COOLDOWN=10
+# MOLD_DISCORD_DAILY_QUOTA=
 
 EXPOSE 7680
 
