@@ -225,12 +225,27 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             // Save to output directory if configured
             if let Some(ref dir) = job.output_dir {
                 let dir = dir.clone();
-                let img_clone = img.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
-                tokio::task::spawn_blocking(move || {
-                    save_image_to_dir(&dir, &img_clone, &model, batch_size);
-                });
+                // For video responses, save the actual video data (not just the thumbnail)
+                if let Some(ref video) = response.video {
+                    let video_data = video.data.clone();
+                    let ext = video.format.extension().to_string();
+                    tokio::task::spawn_blocking(move || {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let filename = mold_core::default_output_filename(&model, ts, &ext, 1, 0);
+                        let path = std::path::Path::new(&dir).join(filename);
+                        let _ = std::fs::write(&path, &video_data);
+                    });
+                } else {
+                    let img_clone = img.clone();
+                    tokio::task::spawn_blocking(move || {
+                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
+                    });
+                }
             }
 
             // Send SSE complete event

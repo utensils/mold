@@ -3776,7 +3776,15 @@ impl App {
                     });
 
                     // Add to gallery (most recent first) with full metadata
-                    if let Some(img_data) = response.images.first() {
+                    // Use video dimensions if no images (video-only response)
+                    let (entry_width, entry_height) = if let Some(img) = response.images.first() {
+                        (img.width, img.height)
+                    } else if let Some(ref video) = response.video {
+                        (video.width, video.height)
+                    } else {
+                        (self.generate.params.width, self.generate.params.height)
+                    };
+                    if !response.images.is_empty() || response.video.is_some() {
                         let meta = mold_core::OutputMetadata {
                             prompt: prompt_text,
                             negative_prompt: if neg_text.is_empty() {
@@ -3789,8 +3797,8 @@ impl App {
                             seed: response.seed_used,
                             steps: self.generate.params.steps,
                             guidance: self.generate.params.guidance,
-                            width: img_data.width,
-                            height: img_data.height,
+                            width: entry_width,
+                            height: entry_height,
                             strength: if self.generate.params.source_image_path.is_some() {
                                 Some(self.generate.params.strength)
                             } else {
@@ -3805,8 +3813,8 @@ impl App {
                                 .as_ref()
                                 .map(|_| self.generate.params.lora_scale),
                             version: mold_core::build_info::VERSION.to_string(),
-                            frames: None,
-                            fps: None,
+                            frames: response.video.as_ref().map(|v| v.frames),
+                            fps: response.video.as_ref().map(|v| v.fps),
                         };
 
                         self.gallery.entries.insert(
