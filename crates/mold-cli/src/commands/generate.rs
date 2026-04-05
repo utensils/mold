@@ -389,8 +389,13 @@ pub async fn run(
                     video.fps,
                 );
             }
-            if preview && !video.thumbnail.is_empty() {
-                preview_image(&video.thumbnail);
+            if preview {
+                // Show first frame preview (viuer doesn't support animation)
+                if !video.gif_preview.is_empty() {
+                    preview_image(&video.gif_preview);
+                } else if !video.thumbnail.is_empty() {
+                    preview_image(&video.thumbnail);
+                }
             }
         }
     } else {
