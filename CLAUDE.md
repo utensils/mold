@@ -104,7 +104,7 @@ Shared library used by all other crates:
 
 ### mold-inference
 
-Eight model families, each with its own pipeline implementing the `InferenceEngine` trait:
+Nine model families, each with its own pipeline implementing the `InferenceEngine` trait:
 
 ```rust
 pub trait InferenceEngine: Send + Sync {
@@ -127,6 +127,7 @@ pub trait InferenceEngine: Send + Sync {
 - `"qwen-image"` (also `"qwen_image"`) → `QwenImageEngine` — Qwen2.5-VL text encoder, 3D causal VAE (2D temporal-slice), flow-matching with classifier-free guidance
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
 - `"wuerstchen"` (also `"wuerstchen-v2"`) → `WuerstchenEngine` — CLIP-G text encoder, 3-stage cascade (Prior → Decoder → VQ-GAN), 42x latent compression
+- `"ltx-video"` → `LtxVideoEngine` — T5-XXL text encoding, flow-matching transformer, 3D causal VAE, text-to-video (APNG/GIF/WebP/MP4 output)
 
 **Additional modules:**
 - `encoders/variant_resolution.rs` — Shared T5/Qwen3 encoder variant resolution (auto-fallback quantization)

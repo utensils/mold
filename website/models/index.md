@@ -13,7 +13,7 @@ and VRAM requirements — including both image and video generation.
 | Classic ecosystem | `sd15:fp16` or `dreamshaper-v8` | Huge model library, ControlNet |
 | Fast + great      | `z-image-turbo:q8`              | 9 steps, excellent quality     |
 | SDXL              | `sdxl-turbo:fp16`               | 4 steps, 1024x1024             |
-| **Video**         | `ltx-video-0.9.5:bf16`         | Text-to-video, 24fps, GIF out  |
+| **Video**         | `ltx-video-0.9.5:bf16`         | Text-to-video, 24fps, APNG/MP4 |
 
 ## VRAM Guide
 
@@ -29,7 +29,8 @@ and VRAM requirements — including both image and video generation.
 | `sdxl-turbo:fp16`  | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
 | `sd15:fp16`        | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
 | `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
-| `ltx-video:bf16`   | BF16    | ~12 GB       | Slow, 40 steps     | Video (25 frames @ 24fps)    |
+| `ltx-video-0.9.5:bf16` | BF16 | ~10 GB      | Slow, 40 steps     | Video, sharp (1024-ch VAE)   |
+| `ltx-video-0.9:bf16`   | BF16 | ~12 GB      | Slow, 40 steps     | Video, legacy (512-ch VAE)   |
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),
 which loads components one at a time. **Eager** mode keeps everything on GPU
