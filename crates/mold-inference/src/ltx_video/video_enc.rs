@@ -148,7 +148,7 @@ pub fn encode_webp(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
 /// Produces `ftyp[isom,iso2,avc1,mp41] + moov + mdat` (faststart layout).
 #[cfg(feature = "mp4")]
 pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
-    use openh264::encoder::{EncoderConfig, FrameRate};
+    use openh264::encoder::{EncoderConfig, FrameRate, VuiConfig};
     use openh264::formats::{RgbSliceU8, YUVBuffer};
 
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
@@ -159,7 +159,8 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
         .max_frame_rate(FrameRate::from_hz(fps as f32))
         .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
         .rate_control_mode(openh264::encoder::RateControlMode::Quality)
-        .profile(openh264::encoder::Profile::High);
+        .profile(openh264::encoder::Profile::High)
+        .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source() conversion
 
     let api = openh264::OpenH264API::from_source();
     let mut h264 = openh264::encoder::Encoder::with_api_config(api, config)
@@ -248,7 +249,7 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
 
 /// Minimal MP4 muxer producing QuickTime/macOS-compatible output.
 ///
-/// Writes ftyp(isom,iso2,avc1,mp41) + moov(mvhd,trak(tkhd,mdia(mdhd,hdlr,minf(vmhd,dinf,stbl)))) + mdat.
+/// Writes ftyp(isom,iso2,avc1,mp41) + moov(mvhd,trak(tkhd,edts,mdia(mdhd,hdlr,minf(vmhd,dinf,stbl)))) + mdat.
 #[cfg(feature = "mp4")]
 mod mp4_mux {
     use anyhow::Result;
@@ -360,13 +361,13 @@ mod mp4_mux {
             write_u16(&mut avc1, 0xFFFF); // pre_defined (-1)
                                           // avcC box
             avc1.extend_from_slice(&build_avc_c(sps, pps));
-            // colr box (BT.709)
+            // colr box (BT.601/SMPTE 170M — matches YUVBuffer::from_rgb_source() conversion)
             let mut colr = Vec::new();
             colr.extend_from_slice(b"nclx");
-            write_u16(&mut colr, 1); // colour_primaries (BT.709)
-            write_u16(&mut colr, 1); // transfer_characteristics (BT.709)
-            write_u16(&mut colr, 1); // matrix_coefficients (BT.709)
-            colr.push(0x80); // full_range_flag=1
+            write_u16(&mut colr, 6); // colour_primaries (SMPTE 170M / BT.601)
+            write_u16(&mut colr, 6); // transfer_characteristics (SMPTE 170M)
+            write_u16(&mut colr, 6); // matrix_coefficients (SMPTE 170M / BT.601)
+            colr.push(0x00); // full_range_flag=0 (limited range, matches SPS VUI)
             write_box(&mut avc1, b"colr", &colr);
             // pasp box (square pixels)
             let mut pasp = Vec::new();
@@ -490,8 +491,19 @@ mod mp4_mux {
             write_u32(&mut tkhd, width << 16); // width (fixed point)
             write_u32(&mut tkhd, height << 16); // height (fixed point)
 
+            // edts/elst: identity edit list (playback starts at media time 0)
+            let mut elst = Vec::new();
+            write_u32(&mut elst, 0); // version + flags
+            write_u32(&mut elst, 1); // entry_count
+            write_u32(&mut elst, duration_ticks); // segment_duration
+            write_u32(&mut elst, 0); // media_time (start at 0)
+            write_u32(&mut elst, 0x0001_0000); // media_rate (1.0 fixed point)
+            let mut edts = Vec::new();
+            write_box(&mut edts, b"elst", &elst);
+
             let mut trak = Vec::new();
             write_box(&mut trak, b"tkhd", &tkhd);
+            write_box(&mut trak, b"edts", &edts);
             write_box(&mut trak, b"mdia", &mdia);
 
             let mut moov = Vec::new();
@@ -670,5 +682,151 @@ mod tests {
             "MP4 768x512 output too small: {} bytes (expected >50KB)",
             data.len()
         );
+    }
+
+    #[cfg(feature = "mp4")]
+    mod mp4_quicktime_compat {
+        use super::*;
+
+        /// Find a named MP4 box in a byte slice, returning its content (after the 8-byte header).
+        fn find_box(data: &[u8], name: &[u8; 4]) -> Option<(usize, Vec<u8>)> {
+            let mut pos = 0;
+            while pos + 8 <= data.len() {
+                let size =
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                        as usize;
+                if size < 8 || pos + size > data.len() {
+                    break;
+                }
+                if &data[pos + 4..pos + 8] == name {
+                    return Some((pos, data[pos + 8..pos + size].to_vec()));
+                }
+                pos += size;
+            }
+            None
+        }
+
+        #[test]
+        fn colr_atom_declares_limited_range() {
+            let frames = test_frames(64, 64, 3);
+            let data = encode_mp4(&frames, 10).unwrap();
+
+            // Navigate: ftyp -> moov -> trak -> ... find colr inside the stsd/avc1
+            // The colr box is inside avc1, which is inside stsd, inside stbl, inside minf,
+            // inside mdia, inside trak, inside moov. Search for "colr" in the raw bytes.
+            let colr_tag = b"colr";
+            let colr_pos = data
+                .windows(4)
+                .position(|w| w == colr_tag)
+                .expect("colr box not found in MP4 output");
+
+            // colr box layout: size(4) + "colr"(4) + "nclx"(4) + primaries(2) + transfer(2) + matrix(2) + full_range(1)
+            // The "colr" we found is at offset colr_pos, which is the type field (bytes 4-7 of the box).
+            // So the box starts at colr_pos - 4.
+            let nclx_start = colr_pos + 4; // after "colr" type
+            assert_eq!(
+                &data[nclx_start..nclx_start + 4],
+                b"nclx",
+                "colr should use nclx type"
+            );
+
+            // full_range_flag is the last byte of the colr nclx content
+            let full_range_offset = nclx_start + 4 + 2 + 2 + 2; // nclx + primaries + transfer + matrix
+            assert_eq!(
+                data[full_range_offset], 0x00,
+                "colr full_range_flag should be 0 (limited range) for QuickTime compatibility"
+            );
+
+            // Verify BT.601/SMPTE 170M primaries/transfer/matrix (value 6)
+            let primaries = u16::from_be_bytes([data[nclx_start + 4], data[nclx_start + 5]]);
+            let transfer = u16::from_be_bytes([data[nclx_start + 6], data[nclx_start + 7]]);
+            let matrix = u16::from_be_bytes([data[nclx_start + 8], data[nclx_start + 9]]);
+            assert_eq!(primaries, 6, "colour_primaries should be SMPTE 170M");
+            assert_eq!(transfer, 6, "transfer_characteristics should be SMPTE 170M");
+            assert_eq!(matrix, 6, "matrix_coefficients should be SMPTE 170M");
+        }
+
+        #[test]
+        fn edts_elst_box_present() {
+            let frames = test_frames(64, 64, 3);
+            let data = encode_mp4(&frames, 10).unwrap();
+
+            // Find moov box
+            let moov = find_box(data.as_slice(), b"moov")
+                .expect("moov box not found")
+                .1;
+
+            // Find trak inside moov
+            let trak = find_box(&moov, b"trak").expect("trak box not found").1;
+
+            // Find edts inside trak
+            let edts = find_box(&trak, b"edts")
+                .expect("edts box not found in trak")
+                .1;
+
+            // Find elst inside edts
+            let elst = find_box(&edts, b"elst")
+                .expect("elst box not found in edts")
+                .1;
+
+            // elst content: version(4) + entry_count(4) + segment_duration(4) + media_time(4) + media_rate(4)
+            assert!(
+                elst.len() >= 20,
+                "elst content too short: {} bytes",
+                elst.len()
+            );
+            let entry_count = u32::from_be_bytes([elst[4], elst[5], elst[6], elst[7]]);
+            assert_eq!(entry_count, 1, "elst should have exactly 1 entry");
+            let media_time = u32::from_be_bytes([elst[12], elst[13], elst[14], elst[15]]);
+            assert_eq!(media_time, 0, "media_time should be 0");
+            let media_rate = u32::from_be_bytes([elst[16], elst[17], elst[18], elst[19]]);
+            assert_eq!(
+                media_rate, 0x0001_0000,
+                "media_rate should be 1.0 (fixed point)"
+            );
+        }
+
+        #[test]
+        fn sps_contains_vui_parameters() {
+            let frames = test_frames(64, 64, 3);
+            let data = encode_mp4(&frames, 10).unwrap();
+
+            // Find avcC box — search for "avcC" in the raw bytes
+            let avcc_tag = b"avcC";
+            let avcc_pos = data
+                .windows(4)
+                .position(|w| w == avcc_tag)
+                .expect("avcC box not found");
+
+            // avcC box: size(4) + "avcC"(4) + configurationVersion(1) + profile(1) + compat(1) + level(1)
+            //           + lengthSizeMinusOne(1) + numSPS(1) + spsLen(2) + sps_data...
+            let box_start = avcc_pos - 4;
+            let box_size = u32::from_be_bytes([
+                data[box_start],
+                data[box_start + 1],
+                data[box_start + 2],
+                data[box_start + 3],
+            ]) as usize;
+            let content = &data[avcc_pos + 4..box_start + box_size];
+
+            // content[0] = configVersion, [1] = profile, [2] = compat, [3] = level
+            // content[4] = 0xFF (lengthSizeMinusOne), [5] = 0xE1 (numSPS)
+            // content[6..8] = SPS length (big-endian)
+            assert!(content.len() >= 8, "avcC content too short");
+            let sps_len = u16::from_be_bytes([content[6], content[7]]) as usize;
+            assert!(content.len() >= 8 + sps_len, "avcC too short for SPS data");
+            let sps = &content[8..8 + sps_len];
+
+            // An SPS with VUI (colour description) is significantly longer than without.
+            // Minimal SPS (no VUI) is typically ~7-10 bytes; with BT.601 VUI colour
+            // info it's 15+ bytes. Empirically, openh264 High profile + VuiConfig::bt601()
+            // produces ~18-20 byte SPS. Threshold of 15 ensures VUI is present while
+            // staying above any non-VUI SPS length.
+            assert!(
+                sps.len() >= 15,
+                "SPS too short ({} bytes) — VUI parameters likely missing (expected >= 15 with colour description)",
+                sps.len()
+            );
+        }
     }
 }

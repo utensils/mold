@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
 - **Video file not saved in CLI**: batch loop discarded `response.video` — now captured and passed through
 - **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation
-- **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile
+- **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile. Aligned SPS VUI and colr atom to BT.601 limited range (matching openh264's RGB→YUV conversion), added edts/elst edit list box ([#181](https://github.com/utensils/mold/issues/181))
 - **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
 
 ## [0.5.3] - 2026-04-04
