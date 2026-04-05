@@ -232,10 +232,23 @@ pub struct GenerateRequest {
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
+    /// Number of video frames to generate. Must be 8n+1 (9, 17, 25, 33, …).
+    /// Only used by video model families (e.g. ltx-video). Ignored by image models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    /// Video frames per second for output encoding. Default: 24.
+    /// Only used by video model families. Ignored by image models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
     /// Upscaler model to apply after generation (e.g. "real-esrgan-x4plus:fp16").
     /// When set, each generated image is upscaled before being returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscale_model: Option<String>,
+    /// Request a GIF preview alongside the primary video output.
+    /// Used by TUI gallery and CLI `--preview` to get an animated preview without
+    /// re-encoding when the primary format is not GIF.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gif_preview: bool,
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -273,12 +286,40 @@ fn default_control_scale() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateResponse {
     pub images: Vec<ImageData>,
+    /// Video output data. Present only for video model families (e.g. ltx-video).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoData>,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
     #[schema(example = 42)]
     pub seed_used: u64,
+}
+
+/// Video output from a video model family.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VideoData {
+    /// Encoded video bytes in the requested format (APNG, GIF, WebP, MP4).
+    pub data: Vec<u8>,
+    /// Output format.
+    pub format: OutputFormat,
+    #[schema(example = 768)]
+    pub width: u32,
+    #[schema(example = 512)]
+    pub height: u32,
+    /// Number of frames in the video.
+    #[schema(example = 25)]
+    pub frames: u32,
+    /// Frames per second.
+    #[schema(example = 24)]
+    pub fps: u32,
+    /// First frame as PNG thumbnail for gallery grid.
+    pub thumbnail: Vec<u8>,
+    /// Animated GIF preview for gallery detail view / TUI playback.
+    /// Always generated regardless of primary output format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gif_preview: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -314,6 +355,10 @@ pub struct OutputMetadata {
     pub lora: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora_scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
     pub version: String,
 }
 
@@ -348,6 +393,8 @@ impl OutputMetadata {
             scheduler,
             lora,
             lora_scale,
+            frames: req.frames,
+            fps: req.fps,
             version: version.into(),
         }
     }
@@ -359,14 +406,49 @@ pub enum OutputFormat {
     #[default]
     Png,
     Jpeg,
+    Gif,
+    Apng,
+    Webp,
+    Mp4,
+}
+
+impl OutputFormat {
+    /// Returns the file extension for this format.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            OutputFormat::Png => "png",
+            OutputFormat::Jpeg => "jpeg",
+            OutputFormat::Gif => "gif",
+            OutputFormat::Apng => "png", // APNG files are valid PNGs — .png opens natively everywhere
+            OutputFormat::Webp => "webp",
+            OutputFormat::Mp4 => "mp4",
+        }
+    }
+
+    /// Returns the MIME content type for this format.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            OutputFormat::Png => "image/png",
+            OutputFormat::Jpeg => "image/jpeg",
+            OutputFormat::Gif => "image/gif",
+            OutputFormat::Apng => "image/apng",
+            OutputFormat::Webp => "image/webp",
+            OutputFormat::Mp4 => "video/mp4",
+        }
+    }
+
+    /// Whether this format is a video/animation format.
+    pub fn is_video(&self) -> bool {
+        matches!(
+            self,
+            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4
+        )
+    }
 }
 
 impl std::fmt::Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OutputFormat::Png => write!(f, "png"),
-            OutputFormat::Jpeg => write!(f, "jpeg"),
-        }
+        write!(f, "{}", self.extension())
     }
 }
 
@@ -377,6 +459,10 @@ impl std::str::FromStr for OutputFormat {
         match s.to_lowercase().as_str() {
             "png" => Ok(OutputFormat::Png),
             "jpeg" | "jpg" => Ok(OutputFormat::Jpeg),
+            "gif" => Ok(OutputFormat::Gif),
+            "apng" => Ok(OutputFormat::Apng),
+            "webp" => Ok(OutputFormat::Webp),
+            "mp4" => Ok(OutputFormat::Mp4),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -593,9 +679,19 @@ mod tests {
 
     #[test]
     fn output_format_from_str_invalid() {
-        assert!("webp".parse::<OutputFormat>().is_err());
         assert!("".parse::<OutputFormat>().is_err());
         assert!("bmp".parse::<OutputFormat>().is_err());
+        assert!("tiff".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn output_format_new_formats() {
+        assert_eq!("apng".parse::<OutputFormat>().unwrap(), OutputFormat::Apng);
+        assert_eq!("webp".parse::<OutputFormat>().unwrap(), OutputFormat::Webp);
+        assert_eq!("mp4".parse::<OutputFormat>().unwrap(), OutputFormat::Mp4);
+        assert!(OutputFormat::Apng.is_video());
+        assert!(OutputFormat::Mp4.is_video());
+        assert!(!OutputFormat::Png.is_video());
     }
 
     #[test]
@@ -637,7 +733,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -780,7 +879,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -813,7 +915,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -843,7 +948,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -875,7 +983,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -905,7 +1016,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
 
         let metadata =
@@ -1089,7 +1203,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1140,7 +1257,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1174,7 +1294,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1229,7 +1352,10 @@ mod tests {
             expand: None,
             original_prompt: None,
             lora: None,
+            frames: None,
+            fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

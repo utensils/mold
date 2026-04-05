@@ -79,6 +79,10 @@ pub struct ModelConfig {
     pub lora: Option<String>,
     /// Default LoRA scale for this model (0.0-2.0).
     pub lora_scale: Option<f64>,
+    /// Default number of video frames for video models (e.g. 25 for ltx-video).
+    pub default_frames: Option<u32>,
+    /// Default video FPS for video models (e.g. 24 for ltx-video).
+    pub default_fps: Option<u32>,
 
     // --- metadata ---
     pub description: Option<String>,
@@ -160,6 +164,16 @@ impl ModelConfig {
         self.lora
             .as_ref()
             .map(|path| (path.clone(), self.lora_scale.unwrap_or(1.0)))
+    }
+
+    /// Effective video frames: per-model default, or None for image-only models.
+    pub fn effective_frames(&self) -> Option<u32> {
+        self.default_frames
+    }
+
+    /// Effective video FPS: per-model default, or None for image-only models.
+    pub fn effective_fps(&self) -> Option<u32> {
+        self.default_fps
     }
 }
 
@@ -508,6 +522,8 @@ impl Config {
                     mc.is_turbo = None;
                     mc.scheduler = None;
                     mc.negative_prompt = None;
+                    mc.default_frames = None;
+                    mc.default_fps = None;
                     mc.description = None;
                     mc.family = None;
                 }
@@ -811,6 +827,12 @@ impl Config {
             if cfg.negative_prompt.is_none() {
                 cfg.negative_prompt = manifest.defaults.negative_prompt.clone();
             }
+            if cfg.default_frames.is_none() {
+                cfg.default_frames = manifest.defaults.frames;
+            }
+            if cfg.default_fps.is_none() {
+                cfg.default_fps = manifest.defaults.fps;
+            }
             // Description and family always come from the manifest for known models.
             // These are metadata, not user-configurable settings.
             cfg.description = Some(manifest.description.clone());
@@ -831,9 +853,30 @@ impl Config {
     }
 
     /// Write the config to disk at `config_path()`.
+    ///
+    /// Safety: refuses to save if `models_dir` points to a temp/test directory,
+    /// which can happen when tests race on the `MOLD_HOME` env var.
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::config_path()
             .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for config path"))?;
+
+        // Guard: refuse to persist a config with a test-temp models_dir into a
+        // non-temp config path. This catches the race condition where parallel tests
+        // set MOLD_HOME to /tmp/... and a config.save() writes the corrupted
+        // models_dir to the user's real config file.
+        let path_str = path.to_string_lossy();
+        let is_temp_config = path_str.contains("/tmp/") || path_str.contains("/mold-config-test-");
+        let has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
+            || self.models_dir.contains("/mold-config-test-");
+        if has_temp_models_dir && !is_temp_config {
+            eprintln!(
+                "warning: refusing to save config with test models_dir ({}) to real config ({})",
+                self.models_dir,
+                path.display()
+            );
+            return Ok(());
+        }
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

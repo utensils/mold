@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using LTX Video 0.9.5 2B (Lightricks). 28-layer DiT with T5-XXL encoder (shared with FLUX), 3D causal VAE, flow-matching denoising. Default: 768×512, 25 frames @ 24fps, 40 steps, guidance 3.0 ([#172](https://github.com/utensils/mold/issues/172))
+- **Multiple video output formats**: APNG (default, lossless, metadata in tEXt chunks), GIF (256-color, pipe-friendly), WebP (feature-gated `webp`), MP4/H.264 (feature-gated `mp4`, QuickTime-compatible). Use `--format apng|gif|webp|mp4`
+- **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
+- **Video metadata**: APNG output embeds generation parameters (prompt, model, seed, steps, guidance, dimensions, fps) in PNG tEXt/iTXt chunks
+- **GIF preview cache**: animated GIF preview cached in `~/.mold/cache/previews/` for TUI gallery detail view and generation viewport
+- **Matched v0.9.5 model pair**: v0.9.5 transformer (3.8 GB, single file) + v0.9.5 VAE (2.3 GB, 1024-ch, timestep conditioning) from `Lightricks/LTX-Video-0.9.5` — sharp, photorealistic output
+- **Custom MP4 muxer**: minimal QuickTime-compatible MP4 writer with correct ftyp brands (isom, iso2, avc1, mp41), colr/pasp atoms, faststart layout. Replaces muxide dependency
+- **Hidden manifest support**: `ModelManifest.hidden` field excludes models from user-facing lists (CLI, TUI) while keeping them usable via config.toml
+- **Upscaler CLI color**: upscaler models display in bright purple in `mold list`, consistent with per-family color scheme
+- **Shell completions for --format**: tab completion suggests valid output formats (png, jpeg, gif, apng, webp, mp4)
+- **CI feature checks**: new `check-features` job validates compilation with all optional features (preview, discord, expand, tui, webp, mp4)
 - **Image upscaling**: `mold upscale <image>` command for AI-powered super-resolution using Real-ESRGAN models (RRDBNet and SRVGGNetCompact architectures), with 2x and 4x scale factors
 - **Upscaler models**: 7 Real-ESRGAN variants from HuggingFace — `real-esrgan-x4plus:fp16/fp32`, `real-esrgan-x2plus:fp16/fp32`, `real-esrgan-x4plus-anime:fp16/fp32`, `real-esrgan-anime-v3:fp32`
 - **Tiled upscaling**: memory-efficient processing of large images via overlapping tiles with feathered blending, configurable tile size (`--tile-size`)
@@ -25,9 +36,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`OutputFormat` enum**: added `Apng`, `Webp`, `Mp4` variants with `extension()`, `content_type()`, `is_video()` helper methods
+- **`VideoData` struct**: added `gif_preview` field for cached animated previews
+- **`GenerateResponse`**: `video: Option<VideoData>` field for video model output
+- **Default video format**: video models default to APNG output (lossless, metadata-rich) instead of GIF
+- **Batch limit removed**: `--batch` no longer capped at 16 — unlimited batch size
+- **CI consolidated**: merged check/clippy/test into single job with shared rust-cache; cache only saved on main branch
+- **Nine model families**: `LtxVideoEngine` added to the engine factory
+- **Candle fork**: LTX Video models (transformer, 3D causal VAE, scheduler) ported into `candle-transformers-mold`
 - **`ModelComponent` enum**: added `Upscaler` variant for upscaler model weights
 - **Default model selection**: upscaler models excluded from auto-selection as default generation model
 - **`UpscaleEngine` trait**: new inference trait parallel to `InferenceEngine`, with `upscale()`, `load()`, `unload()`, `scale_factor()` methods
+
+### Fixed
+
+- **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
+- **Video file not saved in CLI**: batch loop discarded `response.video` — now captured and passed through
+- **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation
+- **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile
+- **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
 
 ## [0.5.3] - 2026-04-04
 

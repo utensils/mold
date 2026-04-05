@@ -493,6 +493,7 @@ mod tests {
             generation_time_ms: 5500,
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
+            video: None,
         };
         let embed = format_generation_result(&resp, "a cat on mars");
         assert_eq!(embed.title, "Image Generated");
@@ -531,6 +532,7 @@ mod tests {
             generation_time_ms: 1000,
             model: "test".to_string(),
             seed_used: 1,
+            video: None,
         };
         let embed = format_generation_result(&resp, &long_prompt);
         assert!(embed.description.chars().count() <= 260);
@@ -552,6 +554,7 @@ mod tests {
             generation_time_ms: 1000,
             model: "test".to_string(),
             seed_used: 1,
+            video: None,
         };
         let embed = format_generation_result(&resp, &long_prompt);
         assert!(embed.description.chars().count() <= 260);

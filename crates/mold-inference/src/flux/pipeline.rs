@@ -1621,6 +1621,7 @@ impl FluxEngine {
             generation_time_ms,
             model: req.model.clone(),
             seed_used: seed,
+            video: None,
         })
     }
 }
@@ -2083,6 +2084,7 @@ impl FluxEngine {
             generation_time_ms,
             model: req.model.clone(),
             seed_used: seed,
+            video: None,
         })
     }
 }

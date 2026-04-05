@@ -6,7 +6,7 @@ hero:
   text: AI Image Generation on Your GPU
   tagline:
     'CUDA on Linux. Metal on macOS. FLUX, SD3.5, SDXL, SD 1.5, Z-Image, Flux.2
-    Klein & more — no cloud, no Python, no fuss.'
+    Klein, LTX Video & more — no cloud, no Python, no fuss.'
   image:
     src: /logo-transparent.png
     alt: mold logo
@@ -30,10 +30,9 @@ features:
       image, saves to disk.'
   - icon:
       src: /icons/grid.svg
-    title: 8 Model Families
-    details:
-      FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image, and
-      Wuerstchen v2. Quantized variants fit any GPU.
+    title: 9 Model Families
+    details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
+      Wuerstchen v2, and LTX Video. Images and video. Quantized variants fit any GPU.
   - icon:
       src: /icons/rust.svg
     title: Linux NVIDIA + macOS Metal

@@ -23,7 +23,9 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--seed <N>`              | Random seed                                      |
 | `--batch <N>`             | Number of images (1–16)                          |
 | `--guidance <N>`          | Guidance scale                                   |
-| `--format <FMT>`          | `png` or `jpeg`                                  |
+| `--frames <N>`            | Video frame count (8n+1, video models only)      |
+| `--fps <N>`               | Video frames per second (default: 24)            |
+| `--format <FMT>`          | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`      |
 | `--local`                 | Skip server, run locally                         |
 | `--eager`                 | Keep all components loaded (more VRAM)           |
 | `--offload`               | CPU↔GPU block streaming (less VRAM)              |

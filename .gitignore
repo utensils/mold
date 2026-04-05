@@ -25,4 +25,8 @@ result
 /target
 /target/coverage/
 tmp/
-tmp/
+uat-*
+*.gif
+*.apng
+*.webp
+*.mp4

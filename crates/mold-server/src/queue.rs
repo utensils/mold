@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use mold_core::{SseCompleteEvent, SseErrorEvent, SseProgressEvent};
+use mold_core::{ImageData, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent};
 use sha2::{Digest, Sha256};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -196,8 +196,8 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
     match result {
         Ok(Ok(Ok(mut response))) => {
-            if response.images.is_empty() {
-                let err_msg = "generation error: engine returned no images".to_string();
+            if response.images.is_empty() && response.video.is_none() {
+                let err_msg = "generation error: engine returned no images or video".to_string();
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent {
                         message: err_msg.clone(),
@@ -206,17 +206,48 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
-            let img = response.images.remove(0);
+            // For video-only responses, synthesize an ImageData from the thumbnail
+            // so the existing queue/SSE pipeline can handle it.
+            let img = if !response.images.is_empty() {
+                response.images.remove(0)
+            } else if let Some(ref video) = response.video {
+                ImageData {
+                    data: video.thumbnail.clone(),
+                    format: OutputFormat::Png,
+                    width: video.width,
+                    height: video.height,
+                    index: 0,
+                }
+            } else {
+                unreachable!("checked above");
+            };
 
             // Save to output directory if configured
             if let Some(ref dir) = job.output_dir {
                 let dir = dir.clone();
-                let img_clone = img.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
-                tokio::task::spawn_blocking(move || {
-                    save_image_to_dir(&dir, &img_clone, &model, batch_size);
-                });
+                // For video responses, save the actual video data (not just the thumbnail)
+                if let Some(ref video) = response.video {
+                    let video_data = video.data.clone();
+                    let ext = video.format.extension().to_string();
+                    tokio::task::spawn_blocking(move || {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let filename = mold_core::default_output_filename(&model, ts, &ext, 1, 0);
+                        let path = std::path::Path::new(&dir).join(filename);
+                        if let Err(e) = std::fs::write(&path, &video_data) {
+                            tracing::error!("failed to save video to {}: {e}", path.display());
+                        }
+                    });
+                } else {
+                    let img_clone = img.clone();
+                    tokio::task::spawn_blocking(move || {
+                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
+                    });
+                }
             }
 
             // Send SSE complete event

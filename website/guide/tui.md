@@ -71,12 +71,12 @@ file = true
 
 The TUI has four main views, shown as tabs at the top of the screen:
 
-| View     | Purpose                                         |
-| -------- | ----------------------------------------------- |
-| Generate | Write prompts, tune parameters, generate images |
-| Gallery  | Browse generated images with preview            |
-| Models   | View installed and available models             |
-| Settings | View and edit all config.toml settings          |
+| View     | Purpose                                               |
+| -------- | ----------------------------------------------------- |
+| Generate | Write prompts, tune parameters, generate images/video |
+| Gallery  | Browse generated images and videos with preview       |
+| Models   | View installed and available models                   |
+| Settings | View and edit all config.toml settings                |
 
 Switch views with **Esc** then **1**/**2**/**3**/**4**, arrow keys, or click the
 tabs. **Alt+1**/**Alt+2**/**Alt+3**/**Alt+4** works from anywhere.
@@ -100,6 +100,7 @@ Navigate to Parameters with **Tab** or click, then:
 - **+**/**-** or left/right to adjust numeric values
 - **Enter** or click to activate a field:
   - **Model** — opens the fuzzy model selector
+  - **Frames** / **FPS** — (video models only) adjust frame count and FPS
   - **Seed** (mode row) — cycles random / fixed / increment
   - **Seed** (value row) — opens seed value input popup
   - **Format** / **Mode** / **Expand** / **Offload** — toggles the value

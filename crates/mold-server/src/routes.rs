@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus, SseErrorEvent,
+    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, ServerStatus, SseErrorEvent,
     SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
@@ -300,10 +300,7 @@ async fn generate(
         Ok(job_result) => {
             let img = job_result.image;
             let response = job_result.response;
-            let content_type = match img.format {
-                OutputFormat::Png => HeaderValue::from_static("image/png"),
-                OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
-            };
+            let content_type = HeaderValue::from_static(img.format.content_type());
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, content_type);
             headers.insert(
@@ -322,7 +319,15 @@ async fn generate(
                     }
                 }
             }
-            Ok((headers, img.data))
+            // For video responses, return the actual video data (not the thumbnail)
+            let output_data = if let Some(ref video) = response.video {
+                let ct = HeaderValue::from_static(video.format.content_type());
+                headers.insert(header::CONTENT_TYPE, ct);
+                video.data.clone()
+            } else {
+                img.data
+            };
+            Ok((headers, output_data))
         }
         Err(err_msg) => Err(ApiError::inference(err_msg)),
     }

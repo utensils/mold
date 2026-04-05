@@ -98,6 +98,7 @@ impl MoldClient {
             generation_time_ms,
             model,
             seed_used,
+            video: None,
         })
     }
 
@@ -224,6 +225,7 @@ impl MoldClient {
                             generation_time_ms: complete.generation_time_ms,
                             model,
                             seed_used: complete.seed_used,
+                            video: None,
                         }));
                     }
                     "error" => {

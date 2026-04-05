@@ -1,6 +1,6 @@
 ---
 name: mold
-description: Generate AI images locally using the mold CLI. Use when asked to generate, create, or produce images from text prompts, transform existing images (img2img), or manage local AI models.
+description: Generate AI images and video locally using the mold CLI. Use when asked to generate images from text prompts, create video clips, transform existing images (img2img), or manage local AI models.
 argument-hint: [prompt or command]
 allowed-tools: Bash, Read, Glob, Grep
 ---
@@ -124,6 +124,31 @@ lora = "/path/to/default-adapter.safetensors"
 lora_scale = 0.8
 ```
 
+### Video Generation
+
+Generate video clips with LTX Video models. Output defaults to APNG (lossless, with metadata).
+
+```bash
+# Basic video generation (25 frames, APNG output)
+mold run ltx-video-0.9.5:bf16 "a cat walking across a windowsill" --frames 25
+
+# Custom frame count (must be 8n+1: 9, 17, 25, 33, 49, ...)
+mold run ltx-video-0.9.5:bf16 "ocean waves at sunset" --frames 49 --steps 40
+
+# MP4 output (QuickTime compatible)
+mold run ltx-video-0.9.5:bf16 "a campfire at night" --frames 17 --format mp4
+
+# GIF for pipe-friendly output
+mold run ltx-video-0.9.5:bf16 "a sunset" --format gif | mpv -
+
+# WebP animated output
+mold run ltx-video-0.9.5:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
+```
+
+**Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Default: 768x512, 25 frames, 24 fps, 40 steps, guidance 3.0.
+
+**Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
+
 ### Model Selection Guide
 
 Pick the right model for the task:
@@ -138,6 +163,7 @@ Pick the right model for the task:
 | `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
 | `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
 | `qwen-image:q4` | Slow (50 steps) | Good | Qwen-Image-2512, CFG |
+| `ltx-video-0.9.5:bf16` | Slow (40 steps) | Good | Text-to-video, 24fps |
 
 Default model if none specified: `flux2-klein:q8`
 
@@ -155,6 +181,7 @@ Default model if none specified: `flux2-klein:q8`
 | `flux2-klein` | 4 | 0.0 | 1024x1024 |
 | `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
 | `qwen-image` | 50 | 3.0 | 1328x1328 |
+| `ltx-video-0.9.5` | 40 | 3.0 | 768x512 (25 frames, 24fps) |
 
 ### Available Models
 

@@ -62,7 +62,10 @@ pub fn build_generate_request(
         expand: None,
         original_prompt: None,
         lora: None,
+        frames: None,
+        fps: None,
         upscale_model: None,
+        gif_preview: false,
     }
 }
 

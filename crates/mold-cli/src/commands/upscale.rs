@@ -233,10 +233,7 @@ fn write_output(
         // Derive from input: foo.png -> foo_upscaled.png
         let path = Path::new(image_path);
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = match format {
-            OutputFormat::Png => "png",
-            OutputFormat::Jpeg => "jpeg",
-        };
+        let ext = format.extension();
         let dir = path.parent().unwrap_or(Path::new("."));
         Some(
             dir.join(format!("{stem}_upscaled.{ext}"))

@@ -21,6 +21,8 @@ preview = ["viuer"]
 discord = ["mold-discord"]
 expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]
 tui = ["dep:mold-tui"]
+webp = ["mold-inference/webp"]
+mp4 = ["mold-inference/mp4"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.5.0" }

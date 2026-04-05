@@ -414,7 +414,10 @@ fn build_request(
         expand: if params.expand { Some(true) } else { None },
         original_prompt: None,
         lora,
+        frames: Some(params.frames),
+        fps: Some(params.fps),
         upscale_model: None,
+        gif_preview: true,
     }
 }
 

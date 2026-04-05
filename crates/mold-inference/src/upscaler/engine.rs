@@ -196,6 +196,7 @@ impl UpscaleEngine for UpscalerEngine {
             let fmt = match req.output_format {
                 mold_core::OutputFormat::Png => image::ImageFormat::Png,
                 mold_core::OutputFormat::Jpeg => image::ImageFormat::Jpeg,
+                _ => image::ImageFormat::Png, // video formats not applicable for upscaler
             };
             img_buf.write_to(&mut buf, fmt)?;
             buf.into_inner()

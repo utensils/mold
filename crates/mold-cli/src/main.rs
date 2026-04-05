@@ -11,6 +11,15 @@ use clap::{builder::ValueHint, CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
 use mold_core::{OutputFormat, Scheduler};
 
+/// Value parser for OutputFormat with tab-completion candidates.
+fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::ValueParser {
+    let parser = clap::builder::TypedValueParser::map(
+        clap::builder::PossibleValuesParser::new(formats),
+        |s: String| s.parse::<OutputFormat>().unwrap(),
+    );
+    clap::builder::ValueParser::new(parser)
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
@@ -134,7 +143,8 @@ Examples:
         output: Option<String>,
 
         /// Output format
-        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output")]
+        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
+              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4"]))]
         format: OutputFormat,
 
         /// Disable embedded generation metadata in PNG output for this run
@@ -166,8 +176,18 @@ Examples:
         seed: Option<u64>,
 
         /// Number of images to generate
-        #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..=16))]
+        #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..))]
         batch: u32,
+
+        /// Number of video frames to generate (video models only, e.g. ltx-video).
+        /// Implies video output mode; output defaults to .gif format.
+        #[arg(long, help_heading = "Video")]
+        frames: Option<u32>,
+
+        /// Video frames per second for output encoding (default: 24).
+        /// Only used with --frames or video model families.
+        #[arg(long, help_heading = "Video")]
+        fps: Option<u32>,
 
         /// Server URL to connect to
         #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
@@ -561,7 +581,8 @@ Examples:
         output: Option<String>,
 
         /// Output format
-        #[arg(long, default_value_t = OutputFormat::Png)]
+        #[arg(long, default_value_t = OutputFormat::Png,
+              value_parser = output_format_parser(&["png", "jpeg", "jpg"]))]
         format: OutputFormat,
 
         /// Tile size for memory-efficient tiled inference (0 to disable)
@@ -762,6 +783,8 @@ async fn run() -> anyhow::Result<()> {
             guidance,
             seed,
             batch,
+            frames,
+            fps,
             host,
             format,
             no_metadata,
@@ -798,6 +821,8 @@ async fn run() -> anyhow::Result<()> {
                 guidance,
                 seed,
                 batch,
+                frames,
+                fps,
                 host,
                 format,
                 no_metadata,
@@ -1273,22 +1298,26 @@ mod tests {
     }
 
     #[test]
-    fn run_batch_17_rejected() {
-        let result = try_parse(&["run", "model", "test", "--batch", "17"]);
-        assert!(result.is_err());
+    fn run_batch_large_accepted() {
+        let cli = parse(&["run", "model", "test", "--batch", "100"]);
+        match cli.command {
+            Commands::Run { batch, .. } => assert_eq!(batch, 100),
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
     fn run_format_invalid_rejected() {
-        let result = try_parse(&["run", "model", "test", "--format", "webp"]);
+        let result = try_parse(&["run", "model", "test", "--format", "bmp"]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn run_format_jpg_alias() {
-        let cli = parse(&["run", "model", "test", "--format", "jpg"]);
+    fn run_format_gif_accepted() {
+        // "gif" is in the new format list [png, jpeg, gif, apng, webp, mp4]
+        let cli = parse(&["run", "model", "test", "--format", "gif"]);
         match cli.command {
-            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
+            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Gif),
             _ => panic!("expected Run"),
         }
     }
@@ -1499,6 +1528,42 @@ mod tests {
                 assert_eq!(older_than.as_deref(), Some("7d"));
             }
             _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn run_frames_flag() {
+        let cli = parse(&["run", "model", "test", "--frames", "25"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, Some(25));
+                assert_eq!(fps, None);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_fps_flag() {
+        let cli = parse(&["run", "model", "test", "--frames", "17", "--fps", "30"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, Some(17));
+                assert_eq!(fps, Some(30));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_fps_without_frames() {
+        let cli = parse(&["run", "model", "test", "--fps", "15"]);
+        match cli.command {
+            Commands::Run { frames, fps, .. } => {
+                assert_eq!(frames, None);
+                assert_eq!(fps, Some(15));
+            }
+            _ => panic!("expected Run"),
         }
     }
 }

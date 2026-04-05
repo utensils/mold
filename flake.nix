@@ -97,12 +97,16 @@
             };
             nativeBuildInputs = [
               pkgs.pkg-config
+              pkgs.nasm
+              pkgs.clang
+              pkgs.llvmPackages.libclang.lib
             ]
             ++ lib.optionals isLinux [
               pkgs.cudaPackages.cuda_nvcc
             ];
             buildInputs = [
               pkgs.openssl
+              pkgs.libwebp
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
@@ -135,12 +139,12 @@
             else
               "";
 
-          # Features string for devshell commands: GPU + preview + discord + expand + tui
+          # Features string for devshell commands: GPU + preview + discord + expand + tui + video formats
           devFeatures =
             if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui"
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4"
             else
-              "preview,discord,expand,tui";
+              "preview,discord,expand,tui,webp,mp4";
 
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
@@ -167,7 +171,7 @@
               // {
                 inherit cargoArtifacts meta;
                 cargoExtraArgs =
-                  "-p mold-ai --features preview,discord,expand,tui"
+                  "-p mold-ai --features preview,discord,expand,tui,webp,mp4"
                   + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
                 postInstall = ''
                   installShellCompletion --cmd mold \
@@ -228,9 +232,11 @@
               rustToolchain
               pkgs.pkg-config
               pkgs.openssl
+              pkgs.nasm
               pkgs.git
               pkgs.viu
               pkgs.cargo-llvm-cov
+              pkgs.ffmpeg
               pkgs.bun
               pkgs.nodePackages.prettier
             ]
@@ -250,6 +256,14 @@
             env = [
               {
                 name = "RUST_BACKTRACE";
+                value = "1";
+              }
+              {
+                name = "MOLD_LOG";
+                value = "debug";
+              }
+              {
+                name = "MOLD_LTX_DEBUG";
                 value = "1";
               }
               {
@@ -414,13 +428,13 @@
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
-                help = "start the mold server (debug logging)";
-                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
+                help = "start the mold server";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
               }
               {
                 category = "run";

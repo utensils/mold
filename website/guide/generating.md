@@ -53,6 +53,44 @@ mold run sdxl-turbo "a portrait" --width 832 --height 1216
 See each [model family page](/models/) for the full list of recommended
 dimensions and aspect ratios.
 
+## Video Generation
+
+mold supports text-to-video generation with the LTX Video model family. Video
+output is encoded as animated GIF.
+
+```bash
+# Generate a 25-frame video clip (default for LTX Video)
+mold run ltx-video-0.9.5:bf16 "A cat walking across a sunlit windowsill"
+
+# Custom frame count (must be 8n+1: 9, 17, 25, 33, 49, 97, ...)
+mold run ltx-video-0.9.5:bf16 "Ocean waves at sunset" --frames 33
+
+# Custom FPS (default: 24)
+mold run ltx-video-0.9.5:bf16 "A timelapse of clouds" --frames 49 --fps 30
+
+# Pipe to a video player
+mold run ltx-video-0.9.5:bf16 "A robot dancing" | mpv -
+
+# Convert GIF to MP4 via ffmpeg
+mold run ltx-video-0.9.5:bf16 "A waterfall" -o waterfall.gif
+ffmpeg -i waterfall.gif -movflags faststart -pix_fmt yuv420p waterfall.mp4
+```
+
+::: tip Frame count constraint
+LTX Video requires frame counts of the form **8n+1** (9, 17, 25, 33, 49, 97,
+etc.) due to the VAE's 8x temporal compression. mold will reject invalid counts
+with a helpful error message.
+:::
+
+::: warning VRAM usage
+LTX Video uses sequential load-use-drop to manage VRAM: T5 encoder loads first,
+then drops before the transformer loads, then the transformer drops before VAE
+decode. Peak VRAM is ~10-12 GB for the BF16 pipeline at 768×512 resolution.
+:::
+
+Video dimensions must be multiples of 32 (not 16 like images). Recommended:
+768×512, 512×768, or 512×512.
+
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,

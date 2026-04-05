@@ -307,6 +307,8 @@ mod tests {
             lora: None,
             lora_scale: None,
             version: "test".to_string(),
+            frames: None,
+            fps: None,
         }
     }
 

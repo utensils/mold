@@ -94,10 +94,7 @@ async fn send_result_edit(
     let mut reply = poise::CreateReply::default();
 
     if let Some(image) = resp.images.first() {
-        let ext = match image.format {
-            mold_core::OutputFormat::Png => "png",
-            mold_core::OutputFormat::Jpeg => "jpeg",
-        };
+        let ext = image.format.extension();
         let filename = format!("mold-{}.{ext}", resp.seed_used);
         let attachment = CreateAttachment::bytes(image.data.clone(), filename.clone());
         embed = embed.attachment(&filename);
