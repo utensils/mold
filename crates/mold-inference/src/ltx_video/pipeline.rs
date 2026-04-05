@@ -457,10 +457,27 @@ impl LtxVideoEngine {
         progress.stage_start("Decoding video frames");
         let decode_start = Instant::now();
 
-        // Feed denoised latents directly to VAE (no denormalization needed for v0.9 VAE)
+        // Un-normalize latents before VAE decode (matches official Python _decode()).
+        // For v0.9.5: latents * std + mean (std≈0.15 per channel)
+        // For v0.9: identity (std=1, mean=0 from config defaults)
+        let latents_mean = vae.latents_mean();
+        let latents_std = vae.latents_std();
+        {
+            let c = latents.dim(1)?;
+            let mean = latents_mean
+                .reshape((1, c, 1, 1, 1))?
+                .to_device(latents.device())?
+                .to_dtype(latents.dtype())?;
+            let std = latents_std
+                .reshape((1, c, 1, 1, 1))?
+                .to_device(latents.device())?
+                .to_dtype(latents.dtype())?;
+            latents = latents.broadcast_mul(&std)?.broadcast_add(&mean)?;
+        }
+
         if ltx_debug {
             let l_f32 = latents.to_dtype(DType::F32)?;
-            progress.info(&format!("Latents pre-VAE: mean={:.4}, std={:.4}",
+            progress.info(&format!("Latents pre-VAE (un-normalized): mean={:.4}, std={:.4}",
                 l_f32.mean_all()?.to_scalar::<f32>()?,
                 l_f32.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt()));
         }

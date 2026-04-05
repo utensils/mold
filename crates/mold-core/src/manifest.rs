@@ -2909,63 +2909,111 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         frames: Some(25),
         fps: Some(24),
     };
-    vec![ModelManifest {
-        name: "ltx-video-0.9.5:bf16".to_string(),
-        family: "ltx-video".to_string(),
-        description: "LTX Video 0.9.5 2B BF16 — text-to-video, 24fps, flow-matching"
-            .to_string(),
-        files: vec![
-            // Diffusers-format transformer (2 shards) — keys match candle model directly
-            ModelFile {
-                hf_repo: "Lightricks/LTX-Video".to_string(),
-                hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors".to_string(),
-                component: ModelComponent::TransformerShard,
-                size_bytes: 4_940_691_048,
-                gated: false,
-                sha256: None,
+    let shared_t5_files = vec![
+        // T5-XXL FP16 text encoder (shared with FLUX)
+        ModelFile {
+            hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
+            hf_filename: "t5xxl_fp16.safetensors".to_string(),
+            component: ModelComponent::T5Encoder,
+            size_bytes: 9_787_841_024,
+            gated: false,
+            sha256: Some(
+                "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
+            ),
+        },
+        // T5 tokenizer (shared with FLUX)
+        ModelFile {
+            hf_repo: "lmz/mt5-tokenizers".to_string(),
+            hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
+            component: ModelComponent::T5Tokenizer,
+            size_bytes: 17_163_758,
+            gated: false,
+            sha256: Some(
+                "812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7",
+            ),
+        },
+    ];
+    vec![
+        // v0.9.5: matched transformer + VAE pair (1024-ch VAE, sharp output)
+        ModelManifest {
+            name: "ltx-video-0.9.5:bf16".to_string(),
+            family: "ltx-video".to_string(),
+            description: "LTX Video 0.9.5 2B BF16 — text-to-video, 24fps, flow-matching"
+                .to_string(),
+            files: {
+                let mut f = vec![
+                    // v0.9.5 diffusers-format transformer (single file)
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
+                        hf_filename: "transformer/diffusion_pytorch_model.safetensors"
+                            .to_string(),
+                        component: ModelComponent::Transformer,
+                        size_bytes: 7_690_339_712,
+                        gated: false,
+                        sha256: None,
+                    },
+                    // v0.9.5 VAE (1024-ch decoder, timestep conditioning)
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
+                        hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                        component: ModelComponent::Vae,
+                        size_bytes: 2_493_855_612,
+                        gated: false,
+                        sha256: Some(
+                            "7eb65b16cf8ddfd70ccb1c541384ae49ffd6639d754c6b713a11cb72d097233f",
+                        ),
+                    },
+                ];
+                f.extend(shared_t5_files.clone());
+                f
             },
-            ModelFile {
-                hf_repo: "Lightricks/LTX-Video".to_string(),
-                hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors".to_string(),
-                component: ModelComponent::TransformerShard,
-                size_bytes: 2_749_648_664,
-                gated: false,
-                sha256: None,
+            defaults: defaults.clone(),
+        },
+        // v0.9: original transformer + VAE pair (512-ch VAE, lower quality)
+        ModelManifest {
+            name: "ltx-video-0.9:bf16".to_string(),
+            family: "ltx-video".to_string(),
+            description: "LTX Video 0.9 2B BF16 — text-to-video, 24fps, flow-matching (legacy)"
+                .to_string(),
+            files: {
+                let mut f = vec![
+                    // v0.9 diffusers-format transformer (2 shards)
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video".to_string(),
+                        hf_filename:
+                            "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                                .to_string(),
+                        component: ModelComponent::TransformerShard,
+                        size_bytes: 4_940_691_048,
+                        gated: false,
+                        sha256: None,
+                    },
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video".to_string(),
+                        hf_filename:
+                            "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                                .to_string(),
+                        component: ModelComponent::TransformerShard,
+                        size_bytes: 2_749_648_664,
+                        gated: false,
+                        sha256: None,
+                    },
+                    // v0.9 VAE (512-ch decoder)
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video".to_string(),
+                        hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                        component: ModelComponent::Vae,
+                        size_bytes: 1_676_798_532,
+                        gated: false,
+                        sha256: None,
+                    },
+                ];
+                f.extend(shared_t5_files);
+                f
             },
-            // LTX Video 3D causal VAE (v0.9 diffusers format — matches v0.9 transformer)
-            ModelFile {
-                hf_repo: "Lightricks/LTX-Video".to_string(),
-                hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
-                component: ModelComponent::Vae,
-                size_bytes: 1_676_798_532,
-                gated: false,
-                sha256: None,
-            },
-            // T5-XXL FP16 text encoder (shared with FLUX)
-            ModelFile {
-                hf_repo: "comfyanonymous/flux_text_encoders".to_string(),
-                hf_filename: "t5xxl_fp16.safetensors".to_string(),
-                component: ModelComponent::T5Encoder,
-                size_bytes: 9_787_841_024,
-                gated: false,
-                sha256: Some(
-                    "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
-                ),
-            },
-            // T5 tokenizer (shared with FLUX)
-            ModelFile {
-                hf_repo: "lmz/mt5-tokenizers".to_string(),
-                hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
-                component: ModelComponent::T5Tokenizer,
-                size_bytes: 17_163_758,
-                gated: false,
-                sha256: Some(
-                    "812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7",
-                ),
-            },
-        ],
-        defaults,
-    }]
+            defaults,
+        },
+    ]
 }
 
 fn controlnet_manifests() -> Vec<ModelManifest> {
@@ -3488,8 +3536,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 1 LTX Video + 3 ControlNet + 2 Qwen3-Expand = 62
-        assert_eq!(known_manifests().len(), 62);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand = 63
+        assert_eq!(known_manifests().len(), 63);
     }
 
     #[test]
