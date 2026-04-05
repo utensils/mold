@@ -59,8 +59,8 @@ automatically.
 When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
 
 - **Generation tier** (configured rate): `/api/generate`,
-  `/api/generate/stream`, `/api/expand`, `/api/models/load`, `/api/models/pull`,
-  `/api/models/unload`
+  `/api/generate/stream`, `/api/expand`, `/api/upscale`, `/api/models/load`,
+  `/api/models/pull`, `/api/models/unload`
 - **Read tier** (10x the configured rate): `/api/models`, `/api/status`,
   `/api/gallery/*`
 
