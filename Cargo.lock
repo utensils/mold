@@ -2817,7 +2817,6 @@ dependencies = [
  "gif 0.13.3",
  "image",
  "mold-ai-core",
- "muxide",
  "openh264",
  "png",
  "rand 0.8.5",
@@ -2918,20 +2917,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "muxide"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d245fc0b399318faa933a6bb0b2bd8d0d2a97cd2d47a97a138f61f9270cf12"
-dependencies = [
- "anyhow",
- "clap",
- "indicatif 0.17.11",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]
