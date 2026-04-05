@@ -260,12 +260,12 @@ const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
 /// Recommended dimensions for LTX Video models (native 768x512).
 /// LTX Video requires dimensions divisible by 32 (patchification).
 const LTX_VIDEO_DIMS: &[(u32, u32)] = &[
-    (768, 512),   // 3:2 (native)
-    (512, 512),   // 1:1
-    (1024, 576),  // 16:9
-    (576, 1024),  // 9:16
-    (768, 768),   // 1:1
-    (512, 768),   // 2:3
+    (768, 512),  // 3:2 (native)
+    (512, 512),  // 1:1
+    (1024, 576), // 16:9
+    (576, 1024), // 9:16
+    (768, 768),  // 1:1
+    (512, 768),  // 2:3
 ];
 
 /// Return the list of recommended (width, height) pairs for a model family.

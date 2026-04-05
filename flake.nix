@@ -139,12 +139,12 @@
             else
               "";
 
-          # Features string for devshell commands: GPU + preview + discord + expand + tui
+          # Features string for devshell commands: GPU + preview + discord + expand + tui + video formats
           devFeatures =
             if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui"
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4"
             else
-              "preview,discord,expand,tui";
+              "preview,discord,expand,tui,webp,mp4";
 
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
@@ -171,7 +171,7 @@
               // {
                 inherit cargoArtifacts meta;
                 cargoExtraArgs =
-                  "-p mold-ai --features preview,discord,expand,tui"
+                  "-p mold-ai --features preview,discord,expand,tui,webp,mp4"
                   + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
                 postInstall = ''
                   installShellCompletion --cmd mold \

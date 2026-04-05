@@ -3404,8 +3404,8 @@ impl App {
                                 .as_ref()
                                 .map(|_| self.generate.params.lora_scale),
                             version: mold_core::build_info::VERSION.to_string(),
-            frames: None,
-            fps: None,
+                            frames: None,
+                            fps: None,
                         };
 
                         self.gallery.entries.insert(
@@ -4380,8 +4380,8 @@ mod tests {
                 lora: None,
                 lora_scale: None,
                 version: "0.3.1".to_string(),
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
             generation_time_ms: Some(5000),
             timestamp: 1234,
@@ -4409,8 +4409,8 @@ mod tests {
                 lora: None,
                 lora_scale: None,
                 version: "0.0.0".to_string(),
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
             generation_time_ms: None,
             timestamp: 0,

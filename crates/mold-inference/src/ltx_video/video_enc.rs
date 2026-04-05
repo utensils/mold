@@ -94,7 +94,9 @@ pub fn encode_apng(
             encoder.add_text_chunk("mold:fps".to_string(), meta.fps.to_string())?;
         }
 
-        let mut writer = encoder.write_header().context("failed to write APNG header")?;
+        let mut writer = encoder
+            .write_header()
+            .context("failed to write APNG header")?;
 
         for (i, frame) in frames.iter().enumerate() {
             if i > 0 {
@@ -125,8 +127,7 @@ pub fn encode_webp(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("failed to create WebP encoder: {e}"))?;
 
     for (i, frame_img) in frames.iter().enumerate() {
-        let rgba: image::RgbaImage =
-            image::DynamicImage::ImageRgb8(frame_img.clone()).into_rgba8();
+        let rgba: image::RgbaImage = image::DynamicImage::ImageRgb8(frame_img.clone()).into_rgba8();
         let timestamp_ms = i as i32 * frame_duration_ms;
         encoder
             .add_frame(rgba.as_raw(), timestamp_ms)

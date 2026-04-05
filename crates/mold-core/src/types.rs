@@ -362,7 +362,10 @@ impl OutputFormat {
 
     /// Whether this format is a video/animation format.
     pub fn is_video(&self) -> bool {
-        matches!(self, OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4)
+        matches!(
+            self,
+            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4
+        )
     }
 }
 

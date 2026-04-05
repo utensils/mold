@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::flux2::Flux2Engine;
+use crate::ltx_video::LtxVideoEngine;
 use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
 use crate::sd3::SD3Engine;
 use crate::sdxl::SDXLEngine;
 use crate::shared_pool::SharedPool;
-use crate::ltx_video::LtxVideoEngine;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 

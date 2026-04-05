@@ -347,8 +347,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: true,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -377,8 +377,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -407,8 +407,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -437,8 +437,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -466,8 +466,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -495,8 +495,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: true,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -525,8 +525,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: true,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -555,8 +555,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: true,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -585,8 +585,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -616,8 +616,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -647,8 +647,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -676,8 +676,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // ── jibMixFlux v7 PixelHeaven (FLUX-dev fine-tune by J1B) ──────────
@@ -705,8 +705,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -734,8 +734,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -763,8 +763,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -792,8 +792,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // ── UltraReal Fine-Tune (photorealistic FLUX-dev fine-tune by Danrisi) ──
@@ -822,8 +822,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -852,8 +852,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -882,8 +882,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -912,8 +912,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -941,8 +941,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -970,8 +970,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -999,8 +999,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // ── iNiverse Mix SFW/NSFW (FLUX-dev fine-tune by JinnGames) ──────────
@@ -1029,8 +1029,8 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ];
@@ -1150,8 +1150,8 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1178,8 +1178,8 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // --- SD3.5 Large Turbo (depth=38, 8.1B, 4 steps, CFG=1.0) ---
@@ -1207,8 +1207,8 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // --- SD3.5 Medium (depth=24, 2.5B) ---
@@ -1236,8 +1236,8 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ]
@@ -1303,8 +1303,8 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1334,8 +1334,8 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1364,8 +1364,8 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ]
@@ -1447,8 +1447,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1477,8 +1477,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1507,8 +1507,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1537,8 +1537,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1567,8 +1567,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::Ddim),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // --- Pony / CyberRealistic (standard SDXL architecture, anime/art/photorealistic) ---
@@ -1596,8 +1596,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1624,8 +1624,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
@@ -1655,8 +1655,8 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: Some(Scheduler::EulerAncestral),
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ]
@@ -1765,8 +1765,8 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // GGUF quantized variants (transformer only; shared components are always BF16)
@@ -1796,8 +1796,8 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1826,8 +1826,8 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1856,8 +1856,8 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ]
@@ -1937,8 +1937,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None, // Uses flow-matching Euler
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // Flux.2 Klein-4B GGUF quantizations (from unsloth, Apache 2.0)
@@ -1966,8 +1966,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -1994,8 +1994,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -2022,8 +2022,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
@@ -2064,8 +2064,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -2092,8 +2092,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -2120,8 +2120,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
         ModelManifest {
@@ -2148,8 +2148,8 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 is_schnell: false,
                 scheduler: None,
                 negative_prompt: None,
-            frames: None,
-            fps: None,
+                frames: None,
+                fps: None,
             },
         },
     ]
@@ -2281,8 +2281,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         is_schnell: false,
         scheduler: None,
         negative_prompt: None,
-            frames: None,
-            fps: None,
+        frames: None,
+        fps: None,
     };
 
     vec![
@@ -2917,9 +2917,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             component: ModelComponent::T5Encoder,
             size_bytes: 9_787_841_024,
             gated: false,
-            sha256: Some(
-                "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
-            ),
+            sha256: Some("6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"),
         },
         // T5 tokenizer (shared with FLUX)
         ModelFile {
@@ -2928,9 +2926,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             component: ModelComponent::T5Tokenizer,
             size_bytes: 17_163_758,
             gated: false,
-            sha256: Some(
-                "812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7",
-            ),
+            sha256: Some("812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7"),
         },
     ];
     vec![
@@ -2945,8 +2941,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
                     // v0.9.5 diffusers-format transformer (single file)
                     ModelFile {
                         hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
-                        hf_filename: "transformer/diffusion_pytorch_model.safetensors"
-                            .to_string(),
+                        hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
                         component: ModelComponent::Transformer,
                         size_bytes: 3_846_852_608,
                         gated: false,
@@ -3025,8 +3020,8 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
         is_schnell: false,
         scheduler: Some(Scheduler::Ddim),
         negative_prompt: None,
-            frames: None,
-            fps: None,
+        frames: None,
+        fps: None,
     };
     vec![
         ModelManifest {
@@ -3083,8 +3078,8 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
         is_schnell: false,
         scheduler: None,
         negative_prompt: None,
-            frames: None,
-            fps: None,
+        frames: None,
+        fps: None,
     };
 
     vec![

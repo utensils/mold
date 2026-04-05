@@ -358,7 +358,13 @@ pub async fn run(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    Some(default_filename(model, timestamp, video.format.extension(), 1, 0))
+                    Some(default_filename(
+                        model,
+                        timestamp,
+                        video.format.extension(),
+                        1,
+                        0,
+                    ))
                 }
             };
             if let Some(ref filename) = filename {

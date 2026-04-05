@@ -91,7 +91,7 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
         let guidance = req.guidance;
 
         // Validate frame count: must be 8n+1
-        if (num_frames.wrapping_sub(1)) % 8 != 0 {
+        if !(num_frames.wrapping_sub(1)).is_multiple_of(8) {
             bail!(
                 "frame count must be 8n+1 (9, 17, 25, 33, ...), got {}",
                 num_frames
@@ -110,8 +110,19 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
 
         // Always use sequential mode for video (high VRAM usage)
         self.generate_sequential(
-            req, seed, num_frames, fps, steps, guidance, width, height, latent_h, latent_w,
-            latent_f, video_seq_len, start,
+            req,
+            seed,
+            num_frames,
+            fps,
+            steps,
+            guidance,
+            width,
+            height,
+            latent_h,
+            latent_w,
+            latent_f,
+            video_seq_len,
+            start,
         )
     }
 
@@ -256,9 +267,8 @@ impl LtxVideoEngine {
             bail!("GGUF quantized LTX Video transformer is not yet supported — use :bf16 variant");
         }
 
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, &device)?
-        };
+        let vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, &device)? };
         // Diffusers-format weights use the same key names as our candle model
         // (proj_in, time_embed, norm_q, norm_k, etc.) — no remapping needed.
         let config = LtxVideoTransformer3DModelConfig::default();
@@ -287,7 +297,11 @@ impl LtxVideoEngine {
         let mut sched_sigmas: Vec<f32> = raw
             .iter()
             .map(|&s| {
-                if s == 0.0 { 0.0 } else { mu_exp / (mu_exp + (1.0 / s - 1.0)) }
+                if s == 0.0 {
+                    0.0
+                } else {
+                    mu_exp / (mu_exp + (1.0 / s - 1.0))
+                }
             })
             .collect();
         // Stretch so last non-zero sigma → terminal=0.1
@@ -373,7 +387,12 @@ impl LtxVideoEngine {
                 let v_f32 = noise_pred.to_dtype(DType::F32)?;
                 let v_rms = v_f32.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
                 let l_rms = latents.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
-                let li_rms = latents_input.to_dtype(DType::F32)?.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+                let li_rms = latents_input
+                    .to_dtype(DType::F32)?
+                    .sqr()?
+                    .mean_all()?
+                    .to_scalar::<f32>()?
+                    .sqrt();
                 if step < 3 || step == total_steps - 1 {
                     progress.info(&format!(
                         "Step {}: sigma={:.4}, input_rms={:.4}, output_rms={:.4}, lat_rms={:.4}",
@@ -398,11 +417,20 @@ impl LtxVideoEngine {
         if ltx_debug {
             let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
             let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
-            progress.info(&format!("Sigmas: {:?}...{:?} (mu={:.3})", first_5, last_3, mu));
+            progress.info(&format!(
+                "Sigmas: {:?}...{:?} (mu={:.3})",
+                first_5, last_3, mu
+            ));
             let l_f32 = latents.to_dtype(DType::F32)?;
             let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
-            let var = l_f32.var_keepdim(candle_core::D::Minus1)?.mean_all()?.to_scalar::<f32>()?;
-            progress.info(&format!("Denoised latents: mean={:.4}, var={:.4}", mean, var));
+            let var = l_f32
+                .var_keepdim(candle_core::D::Minus1)?
+                .mean_all()?
+                .to_scalar::<f32>()?;
+            progress.info(&format!(
+                "Denoised latents: mean={:.4}, var={:.4}",
+                mean, var
+            ));
         }
 
         progress.stage_done("Denoising", denoise_start.elapsed());
@@ -415,7 +443,14 @@ impl LtxVideoEngine {
         // ---------------------------------------------------------------
         // Step 4: Unpack and denormalize latents
         // ---------------------------------------------------------------
-        let mut latents = unpack_latents(&latents, latent_f, latent_h, latent_w, PATCH_SIZE, PATCH_SIZE_T)?;
+        let mut latents = unpack_latents(
+            &latents,
+            latent_f,
+            latent_h,
+            latent_w,
+            PATCH_SIZE,
+            PATCH_SIZE_T,
+        )?;
         // latents is now [B, C, F, H, W] in F32
 
         // ---------------------------------------------------------------
@@ -428,9 +463,8 @@ impl LtxVideoEngine {
         let vae_file_size = std::fs::metadata(&paths.vae)?.len();
         let is_v095_vae = vae_file_size > 2_000_000_000;
 
-        let vae_vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[paths.vae.clone()], dtype, &device)?
-        };
+        let vae_vb =
+            unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&paths.vae), dtype, &device)? };
 
         let vae_config = if is_v095_vae {
             progress.info("Using v0.9.5 VAE (1024-ch, timestep conditioning)");
@@ -477,9 +511,11 @@ impl LtxVideoEngine {
 
         if ltx_debug {
             let l_f32 = latents.to_dtype(DType::F32)?;
-            progress.info(&format!("Latents pre-VAE (un-normalized): mean={:.4}, std={:.4}",
+            progress.info(&format!(
+                "Latents pre-VAE (un-normalized): mean={:.4}, std={:.4}",
                 l_f32.mean_all()?.to_scalar::<f32>()?,
-                l_f32.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt()));
+                l_f32.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt()
+            ));
         }
 
         latents = latents.to_dtype(dtype)?;
@@ -492,7 +528,13 @@ impl LtxVideoEngine {
         // video: [B, 3, F, H, W] in model dtype
         if ltx_debug {
             let v_f32 = video.to_dtype(DType::F32)?;
-            progress.info(&format!("VAE output: shape={:?}, mean={:.4}, min={:.4}, max={:.4}", v_f32.shape(), v_f32.mean_all()?.to_scalar::<f32>()?, v_f32.flatten_all()?.min(0)?.to_scalar::<f32>()?, v_f32.flatten_all()?.max(0)?.to_scalar::<f32>()?));
+            progress.info(&format!(
+                "VAE output: shape={:?}, mean={:.4}, min={:.4}, max={:.4}",
+                v_f32.shape(),
+                v_f32.mean_all()?.to_scalar::<f32>()?,
+                v_f32.flatten_all()?.min(0)?.to_scalar::<f32>()?,
+                v_f32.flatten_all()?.max(0)?.to_scalar::<f32>()?
+            ));
         }
 
         progress.stage_done("Decoding video frames", decode_start.elapsed());
@@ -552,7 +594,9 @@ impl LtxVideoEngine {
             #[cfg(feature = "mp4")]
             OutputFormat::Mp4 => video_enc::encode_mp4(&frames, fps)?,
             _ => {
-                progress.info(&format!("{format_name} not available, falling back to APNG"));
+                progress.info(&format!(
+                    "{format_name} not available, falling back to APNG"
+                ));
                 video_enc::encode_apng(&frames, fps, None)?
             }
         };
@@ -720,4 +764,3 @@ fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
         .map(|i| start + (end - start) * i as f32 / d)
         .collect()
 }
-
