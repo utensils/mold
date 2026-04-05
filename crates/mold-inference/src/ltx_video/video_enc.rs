@@ -193,7 +193,8 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
 
     let config = EncoderConfig::new()
         .max_frame_rate(FrameRate::from_hz(fps as f32))
-        .bitrate(BitRate::from_bps(2_000_000));
+        .bitrate(BitRate::from_bps(10_000_000))
+        .rate_control_mode(openh264::encoder::RateControlMode::Quality);
 
     let api = openh264::OpenH264API::from_source();
     let mut h264_encoder = openh264::encoder::Encoder::with_api_config(api, config)
@@ -228,4 +229,136 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
     drop(muxer);
 
     Ok(writer.into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a simple test frame with a gradient pattern.
+    fn test_frame(width: u32, height: u32, seed: u8) -> RgbImage {
+        let mut img = RgbImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let r = ((x as f32 / width as f32) * 255.0) as u8;
+                let g = ((y as f32 / height as f32) * 255.0) as u8;
+                let b = seed.wrapping_mul(37).wrapping_add((x ^ y) as u8);
+                img.put_pixel(x, y, image::Rgb([r, g, b]));
+            }
+        }
+        img
+    }
+
+    fn test_frames(width: u32, height: u32, count: usize) -> Vec<RgbImage> {
+        (0..count)
+            .map(|i| test_frame(width, height, i as u8))
+            .collect()
+    }
+
+    #[test]
+    fn gif_encodes_valid_output() {
+        let frames = test_frames(64, 64, 3);
+        let data = encode_gif(&frames, 10).unwrap();
+        assert!(
+            data.len() > 100,
+            "GIF output too small: {} bytes",
+            data.len()
+        );
+        assert_eq!(&data[..6], b"GIF89a"); // GIF89a magic
+    }
+
+    #[test]
+    fn gif_empty_frames_rejected() {
+        assert!(encode_gif(&[], 24).is_err());
+    }
+
+    #[test]
+    fn apng_encodes_valid_output() {
+        let frames = test_frames(64, 64, 3);
+        let data = encode_apng(&frames, 10, None).unwrap();
+        assert!(
+            data.len() > 100,
+            "APNG output too small: {} bytes",
+            data.len()
+        );
+        assert_eq!(&data[..8], &[137, 80, 78, 71, 13, 10, 26, 10]); // PNG magic
+    }
+
+    #[test]
+    fn apng_with_metadata() {
+        let frames = test_frames(64, 64, 2);
+        let meta = VideoMetadata {
+            prompt: "a test prompt".to_string(),
+            model: "test-model".to_string(),
+            seed: 42,
+            steps: 30,
+            guidance: 3.0,
+            width: 64,
+            height: 64,
+            frames: 2,
+            fps: 10,
+        };
+        let data = encode_apng(&frames, 10, Some(&meta)).unwrap();
+        assert!(data.len() > 100);
+        // Metadata should be embedded — the file should be larger than without
+        let data_no_meta = encode_apng(&frames, 10, None).unwrap();
+        assert!(
+            data.len() > data_no_meta.len(),
+            "metadata should increase file size"
+        );
+    }
+
+    #[test]
+    fn apng_empty_frames_rejected() {
+        assert!(encode_apng(&[], 24, None).is_err());
+    }
+
+    #[test]
+    fn first_frame_png_works() {
+        let frames = test_frames(32, 32, 3);
+        let data = first_frame_png(&frames).unwrap();
+        assert_eq!(&data[..8], &[137, 80, 78, 71, 13, 10, 26, 10]); // PNG magic
+    }
+
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_encodes_valid_output() {
+        let frames = test_frames(64, 64, 3);
+        let data = encode_webp(&frames, 10).unwrap();
+        assert!(
+            data.len() > 100,
+            "WebP output too small: {} bytes",
+            data.len()
+        );
+        assert_eq!(&data[..4], b"RIFF"); // WebP RIFF magic
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn mp4_encodes_valid_output() {
+        let frames = test_frames(64, 64, 3);
+        let data = encode_mp4(&frames, 10).unwrap();
+        // MP4 should have ftyp box
+        assert!(
+            data.len() > 1000,
+            "MP4 output too small: {} bytes",
+            data.len()
+        );
+        let ftyp = &data[4..8];
+        assert_eq!(ftyp, b"ftyp", "MP4 should start with ftyp box");
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn mp4_768x512_reasonable_size() {
+        // Regression: 768x512 at 2 Mbps produced only ~10KB/frame
+        let frames = test_frames(768, 512, 3);
+        let data = encode_mp4(&frames, 24).unwrap();
+        // At quality mode with 10 Mbps, 3 frames should be at least 50KB
+        assert!(
+            data.len() > 50_000,
+            "MP4 768x512 output too small: {} bytes (expected >50KB)",
+            data.len()
+        );
+    }
 }
