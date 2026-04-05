@@ -160,7 +160,7 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
         .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
         .rate_control_mode(openh264::encoder::RateControlMode::Quality)
         .profile(openh264::encoder::Profile::High)
-        .vui(VuiConfig::bt709()); // BT.709 limited range — matches ffmpeg defaults
+        .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source() conversion
 
     let api = openh264::OpenH264API::from_source();
     let mut h264 = openh264::encoder::Encoder::with_api_config(api, config)
@@ -361,12 +361,12 @@ mod mp4_mux {
             write_u16(&mut avc1, 0xFFFF); // pre_defined (-1)
                                           // avcC box
             avc1.extend_from_slice(&build_avc_c(sps, pps));
-            // colr box (BT.709)
+            // colr box (BT.601/SMPTE 170M — matches YUVBuffer::from_rgb_source() conversion)
             let mut colr = Vec::new();
             colr.extend_from_slice(b"nclx");
-            write_u16(&mut colr, 1); // colour_primaries (BT.709)
-            write_u16(&mut colr, 1); // transfer_characteristics (BT.709)
-            write_u16(&mut colr, 1); // matrix_coefficients (BT.709)
+            write_u16(&mut colr, 6); // colour_primaries (SMPTE 170M / BT.601)
+            write_u16(&mut colr, 6); // transfer_characteristics (SMPTE 170M)
+            write_u16(&mut colr, 6); // matrix_coefficients (SMPTE 170M / BT.601)
             colr.push(0x00); // full_range_flag=0 (limited range, matches SPS VUI)
             write_box(&mut avc1, b"colr", &colr);
             // pasp box (square pixels)
@@ -737,13 +737,13 @@ mod tests {
                 "colr full_range_flag should be 0 (limited range) for QuickTime compatibility"
             );
 
-            // Verify BT.709 primaries/transfer/matrix
+            // Verify BT.601/SMPTE 170M primaries/transfer/matrix (value 6)
             let primaries = u16::from_be_bytes([data[nclx_start + 4], data[nclx_start + 5]]);
             let transfer = u16::from_be_bytes([data[nclx_start + 6], data[nclx_start + 7]]);
             let matrix = u16::from_be_bytes([data[nclx_start + 8], data[nclx_start + 9]]);
-            assert_eq!(primaries, 1, "colour_primaries should be BT.709");
-            assert_eq!(transfer, 1, "transfer_characteristics should be BT.709");
-            assert_eq!(matrix, 1, "matrix_coefficients should be BT.709");
+            assert_eq!(primaries, 6, "colour_primaries should be SMPTE 170M");
+            assert_eq!(transfer, 6, "transfer_characteristics should be SMPTE 170M");
+            assert_eq!(matrix, 6, "matrix_coefficients should be SMPTE 170M");
         }
 
         #[test]
