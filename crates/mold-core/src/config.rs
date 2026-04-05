@@ -853,9 +853,30 @@ impl Config {
     }
 
     /// Write the config to disk at `config_path()`.
+    ///
+    /// Safety: refuses to save if `models_dir` points to a temp/test directory,
+    /// which can happen when tests race on the `MOLD_HOME` env var.
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::config_path()
             .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for config path"))?;
+
+        // Guard: refuse to persist a config with a test-temp models_dir into a
+        // non-temp config path. This catches the race condition where parallel tests
+        // set MOLD_HOME to /tmp/... and a config.save() writes the corrupted
+        // models_dir to the user's real config file.
+        let path_str = path.to_string_lossy();
+        let is_temp_config = path_str.contains("/tmp/") || path_str.contains("/mold-config-test-");
+        let has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
+            || self.models_dir.contains("/mold-config-test-");
+        if has_temp_models_dir && !is_temp_config {
+            eprintln!(
+                "warning: refusing to save config with test models_dir ({}) to real config ({})",
+                self.models_dir,
+                path.display()
+            );
+            return Ok(());
+        }
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
