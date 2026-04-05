@@ -65,6 +65,7 @@ pub fn build_generate_request(
         frames: None,
         fps: None,
         upscale_model: None,
+        gif_preview: false,
     }
 }
 

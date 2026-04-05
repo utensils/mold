@@ -368,6 +368,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         }
     }
 

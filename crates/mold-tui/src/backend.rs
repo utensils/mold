@@ -417,6 +417,7 @@ fn build_request(
         frames: Some(params.frames),
         fps: Some(params.fps),
         upscale_model: None,
+        gif_preview: true,
     }
 }
 

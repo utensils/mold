@@ -244,6 +244,11 @@ pub struct GenerateRequest {
     /// When set, each generated image is upscaled before being returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscale_model: Option<String>,
+    /// Request a GIF preview alongside the primary video output.
+    /// Used by TUI gallery and CLI `--preview` to get an animated preview without
+    /// re-encoding when the primary format is not GIF.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gif_preview: bool,
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -731,6 +736,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -876,6 +882,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -911,6 +918,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -943,6 +951,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -977,6 +986,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -1009,6 +1019,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
 
         let metadata =
@@ -1195,6 +1206,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1248,6 +1260,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1284,6 +1297,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1341,6 +1355,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

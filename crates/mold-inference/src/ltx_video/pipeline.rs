@@ -620,12 +620,16 @@ impl LtxVideoEngine {
             _ => bail!("{format_name} is not a supported video output format"),
         };
         let thumbnail_bytes = video_enc::first_frame_png(&frames)?;
-        // Always generate a GIF preview for gallery/TUI animated playback,
-        // reusing the primary data if the format is already GIF.
-        let gif_preview = if output_format == OutputFormat::Gif {
-            video_bytes.clone()
+        // Generate a GIF preview only when the caller will use it (TUI gallery or --preview).
+        // If the primary format is already GIF, reuse the data; otherwise encode on demand.
+        let gif_preview = if req.gif_preview {
+            if output_format == OutputFormat::Gif {
+                video_bytes.clone()
+            } else {
+                video_enc::encode_gif(&frames, fps)?
+            }
         } else {
-            video_enc::encode_gif(&frames, fps)?
+            Vec::new()
         };
 
         progress.stage_done(&format!("Encoding {format_name}"), encode_start.elapsed());

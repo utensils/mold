@@ -160,6 +160,7 @@ pub async fn run(
         frames,
         fps,
         upscale_model: None,
+        gif_preview: preview,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.

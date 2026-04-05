@@ -433,11 +433,14 @@ mod mp4_mux {
 
             let mut dinf = Vec::new();
             {
-                let mut dref = Vec::new();
-                write_u32(&mut dref, 0); // version + flags
-                write_u32(&mut dref, 1); // entry_count
-                write_box(&mut dref, b"url ", &[0, 0, 0, 1]); // self-contained flag
-                write_box(&mut dinf, b"dinf", &dref);
+                // ISO 14496-12 §8.7.2: dinf → dref → url entries
+                let mut dref_payload = Vec::new();
+                write_u32(&mut dref_payload, 0); // version + flags
+                write_u32(&mut dref_payload, 1); // entry_count
+                write_box(&mut dref_payload, b"url ", &[0, 0, 0, 1]); // self-contained flag
+                let mut dinf_content = Vec::new();
+                write_box(&mut dinf_content, b"dref", &dref_payload);
+                write_box(&mut dinf, b"dinf", &dinf_content);
             }
 
             let mut vmhd = Vec::new();
@@ -507,10 +510,11 @@ mod mp4_mux {
 
         // Second pass: build moov with correct mdat offset
         let moov = build_moov(mdat_offset);
-        assert_eq!(
+        anyhow::ensure!(
+            moov.len() == moov_pass1.len(),
+            "moov size changed between passes ({} vs {})",
             moov.len(),
-            moov_pass1.len(),
-            "moov size changed between passes"
+            moov_pass1.len()
         );
 
         // Build mdat (reject if payload exceeds u32 box size limit)

@@ -414,6 +414,7 @@ mod tests {
             frames: None,
             fps: None,
             upscale_model: None,
+            gif_preview: false,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());
