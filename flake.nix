@@ -258,6 +258,14 @@
                 value = "1";
               }
               {
+                name = "MOLD_LOG";
+                value = "debug";
+              }
+              {
+                name = "MOLD_LTX_DEBUG";
+                value = "1";
+              }
+              {
                 name = "PKG_CONFIG_PATH";
                 value = opensslPkgConfigPath;
               }
@@ -419,13 +427,13 @@
                 category = "run";
                 name = "mold";
                 help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
               }
               {
                 category = "run";
                 name = "serve";
-                help = "start the mold server (debug logging)";
-                command = "MOLD_LOG=debug cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
+                help = "start the mold server";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
               }
               {
                 category = "run";
