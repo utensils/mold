@@ -144,7 +144,7 @@ Examples:
 
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
-              value_parser = output_format_parser(&["png", "jpeg", "gif", "apng", "webp", "mp4"]))]
+              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4"]))]
         format: OutputFormat,
 
         /// Disable embedded generation metadata in PNG output for this run
@@ -582,7 +582,7 @@ Examples:
 
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Png,
-              value_parser = output_format_parser(&["png", "jpeg"]))]
+              value_parser = output_format_parser(&["png", "jpeg", "jpg"]))]
         format: OutputFormat,
 
         /// Tile size for memory-efficient tiled inference (0 to disable)
@@ -1313,10 +1313,11 @@ mod tests {
     }
 
     #[test]
-    fn run_format_jpg_alias() {
-        let cli = parse(&["run", "model", "test", "--format", "jpg"]);
+    fn run_format_gif_accepted() {
+        // "gif" is in the new format list [png, jpeg, gif, apng, webp, mp4]
+        let cli = parse(&["run", "model", "test", "--format", "gif"]);
         match cli.command {
-            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
+            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Gif),
             _ => panic!("expected Run"),
         }
     }
