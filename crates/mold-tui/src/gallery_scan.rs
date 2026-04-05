@@ -95,9 +95,38 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             .unwrap_or(0);
 
         let gallery_entry = match ext.as_deref() {
-            Some("png") => read_png_metadata(&path, timestamp),
+            Some("png" | "apng") => read_png_metadata(&path, timestamp),
             Some("gif") => read_gif_metadata(&path, timestamp),
-            _ => read_jpeg_metadata(&path, timestamp),
+            Some("jpg" | "jpeg") => read_jpeg_metadata(&path, timestamp),
+            // WebP/MP4: minimal entry (no embedded metadata to parse)
+            Some("webp" | "mp4") => {
+                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                Some(GalleryEntry {
+                    path: path.clone(),
+                    metadata: mold_core::OutputMetadata {
+                        prompt: String::new(),
+                        negative_prompt: None,
+                        original_prompt: None,
+                        model: name.to_string(),
+                        seed: 0,
+                        steps: 0,
+                        guidance: 0.0,
+                        width: 0,
+                        height: 0,
+                        strength: None,
+                        scheduler: None,
+                        lora: None,
+                        lora_scale: None,
+                        frames: None,
+                        fps: None,
+                        version: String::new(),
+                    },
+                    generation_time_ms: None,
+                    timestamp,
+                    server_url: None,
+                })
+            }
+            _ => None,
         };
         if let Some(ge) = gallery_entry {
             entries.push(ge);

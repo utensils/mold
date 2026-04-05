@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use mold_core::{SseCompleteEvent, SseErrorEvent, SseProgressEvent};
+use mold_core::{ImageData, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent};
 use sha2::{Digest, Sha256};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -206,7 +206,21 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
-            let img = response.images.remove(0);
+            // For video-only responses, synthesize an ImageData from the thumbnail
+            // so the existing queue/SSE pipeline can handle it.
+            let img = if !response.images.is_empty() {
+                response.images.remove(0)
+            } else if let Some(ref video) = response.video {
+                ImageData {
+                    data: video.thumbnail.clone(),
+                    format: OutputFormat::Png,
+                    width: video.width,
+                    height: video.height,
+                    index: 0,
+                }
+            } else {
+                unreachable!("checked above");
+            };
 
             // Save to output directory if configured
             if let Some(ref dir) = job.output_dir {
