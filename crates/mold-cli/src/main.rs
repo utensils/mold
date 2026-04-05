@@ -134,7 +134,8 @@ Examples:
         output: Option<String>,
 
         /// Output format
-        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output")]
+        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
+              value_parser = clap::builder::PossibleValuesParser::new(["png", "jpeg", "gif", "apng", "webp", "mp4"]))]
         format: OutputFormat,
 
         /// Disable embedded generation metadata in PNG output for this run
@@ -571,7 +572,8 @@ Examples:
         output: Option<String>,
 
         /// Output format
-        #[arg(long, default_value_t = OutputFormat::Png)]
+        #[arg(long, default_value_t = OutputFormat::Png,
+              value_parser = clap::builder::PossibleValuesParser::new(["png", "jpeg"]))]
         format: OutputFormat,
 
         /// Tile size for memory-efficient tiled inference (0 to disable)
