@@ -85,12 +85,32 @@ mold run sdxl-base "a cat"     # resolves to sdxl-base:fp16
 
 ## HuggingFace Auth
 
-Some model repos require authentication:
+Some model repos (marked `[gated]`) require a
+[HuggingFace access token](https://huggingface.co/settings/tokens). You may
+need to accept the model's license on its HuggingFace page before downloading.
+
+**Option 1 — Environment variable** (simplest):
 
 ```bash
 export HF_TOKEN=hf_...
 mold pull flux-dev:q4
 ```
+
+**Option 2 — HuggingFace CLI** (persists the token):
+
+```bash
+# Install the HF CLI
+curl -LsSf https://hf.co/cli/install.sh | bash
+
+# Log in (saves token to ~/.cache/huggingface/)
+hf auth login
+```
+
+Once logged in, `mold pull` picks up the stored token automatically — no
+`HF_TOKEN` export needed.
+
+See the [HuggingFace CLI docs](https://huggingface.co/docs/huggingface_hub/guides/cli)
+for more options.
 
 ## All Families
 
