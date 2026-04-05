@@ -19,7 +19,6 @@ and a 3D causal video VAE. Generates short video clips from text prompts.
 | Model                   | Steps | Size    | Notes                                    |
 | ----------------------- | ----- | ------- | ---------------------------------------- |
 | `ltx-video-0.9.5:bf16`  | 40    | ~6.3 GB | v0.9.5 transformer + 1024-ch VAE (sharp) |
-| `ltx-video-0.9:bf16`    | 40    | ~9.4 GB | v0.9 transformer + 512-ch VAE (legacy)   |
 
 GGUF quantized transformer variants (Q3-Q8) exist on HuggingFace via
 [city96/LTX-Video-0.9.5-gguf](https://huggingface.co/city96/LTX-Video-0.9.5-gguf)

@@ -1,7 +1,8 @@
-use crate::manifest::{known_manifests, model_base_name, variant_quality_rank};
+use crate::manifest::{known_manifests, model_base_name, variant_quality_rank, visible_manifests};
 use crate::{Config, ModelDefaults, ModelInfo, ModelInfoExtended};
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
+/// Hidden manifests are excluded from the catalog (CLI list, TUI model selector).
 pub fn build_model_catalog(
     config: &Config,
     loaded_model: Option<&str>,
@@ -9,7 +10,7 @@ pub fn build_model_catalog(
 ) -> Vec<ModelInfoExtended> {
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
 
-    for manifest in known_manifests() {
+    for manifest in visible_manifests() {
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);

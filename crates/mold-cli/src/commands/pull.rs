@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::download::DownloadError;
-use mold_core::manifest::{find_manifest, known_manifests, resolve_model_name, ModelManifest};
+use mold_core::manifest::{find_manifest, resolve_model_name, ModelManifest};
 use mold_core::{classify_server_error, ServerAvailability};
 
 use crate::control::CliContext;
@@ -138,9 +138,9 @@ fn print_unknown_model_error(model: &str) {
     eprintln!("{} Unknown model: {}", theme::icon_fail(), model.bold());
     eprintln!();
     eprintln!("Available models:");
-    let all = known_manifests();
-    let nw = all.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
-    for m in all {
+    let visible: Vec<_> = mold_core::manifest::visible_manifests().collect();
+    let nw = visible.iter().map(|m| m.name.len()).max().unwrap_or(4) + 2;
+    for m in &visible {
         let total_bytes = mold_core::manifest::total_download_size(m);
         let total_gb = total_bytes as f64 / 1_073_741_824.0;
         eprintln!(

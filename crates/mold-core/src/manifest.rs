@@ -65,6 +65,10 @@ pub struct ModelManifest {
     pub description: String,
     pub files: Vec<ModelFile>,
     pub defaults: ManifestDefaults,
+    /// Hidden models are excluded from `mold list`, TUI model selector,
+    /// and `mold pull` tab completion in release builds. They can still be
+    /// used via explicit `mold run <name>` or config.toml entries.
+    pub hidden: bool,
 }
 
 impl ModelManifest {
@@ -333,6 +337,12 @@ pub fn known_manifests() -> &'static [ModelManifest] {
     &KNOWN_MANIFESTS
 }
 
+/// Visible (non-hidden) manifests for user-facing lists (CLI, TUI, tab completion).
+/// Hidden models can still be used via explicit `mold run <name>` or config.toml.
+pub fn visible_manifests() -> impl Iterator<Item = &'static ModelManifest> {
+    known_manifests().iter().filter(|m| !m.hidden)
+}
+
 fn build_known_manifests() -> Vec<ModelManifest> {
     let mut manifests = vec![
         ModelManifest {
@@ -364,6 +374,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-dev:q8".to_string(),
@@ -394,6 +405,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-dev:q4".to_string(),
@@ -424,6 +436,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-dev:q6".to_string(),
@@ -454,6 +467,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-dev:bf16".to_string(),
@@ -483,6 +497,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-schnell:bf16".to_string(),
@@ -512,6 +527,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-schnell:q4".to_string(),
@@ -542,6 +558,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-schnell:q6".to_string(),
@@ -572,6 +589,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-krea:q8".to_string(),
@@ -602,6 +620,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-krea:q4".to_string(),
@@ -633,6 +652,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-krea:q6".to_string(),
@@ -664,6 +684,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux-krea:fp8".to_string(),
@@ -693,6 +714,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // ── jibMixFlux v7 PixelHeaven (FLUX-dev fine-tune by J1B) ──────────
         ModelManifest {
@@ -722,6 +744,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "jibmix-flux:q5".to_string(),
@@ -751,6 +774,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "jibmix-flux:q4".to_string(),
@@ -780,6 +804,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "jibmix-flux:q3".to_string(),
@@ -809,6 +834,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // ── UltraReal Fine-Tune (photorealistic FLUX-dev fine-tune by Danrisi) ──
         ModelManifest {
@@ -839,6 +865,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v3:q8".to_string(),
@@ -869,6 +896,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v3:q6".to_string(),
@@ -899,6 +927,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v3:q4".to_string(),
@@ -929,6 +958,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v4:q8".to_string(),
@@ -958,6 +988,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v4:q5".to_string(),
@@ -987,6 +1018,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "ultrareal-v4:q4".to_string(),
@@ -1016,6 +1048,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // ── iNiverse Mix SFW/NSFW (FLUX-dev fine-tune by JinnGames) ──────────
         ModelManifest {
@@ -1046,6 +1079,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ];
     manifests.extend(sd15_manifests());
@@ -1168,6 +1202,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "sd3.5-large:q4".to_string(),
@@ -1196,6 +1231,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // --- SD3.5 Large Turbo (depth=38, 8.1B, 4 steps, CFG=1.0) ---
         ModelManifest {
@@ -1225,6 +1261,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // --- SD3.5 Medium (depth=24, 2.5B) ---
         ModelManifest {
@@ -1254,6 +1291,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ]
 }
@@ -1321,6 +1359,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "dreamshaper-v8:fp16".to_string(),
@@ -1352,6 +1391,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "realistic-vision-v5:fp16".to_string(),
@@ -1382,6 +1422,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ]
 }
@@ -1465,6 +1506,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "dreamshaper-xl:fp16".to_string(),
@@ -1495,6 +1537,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "juggernaut-xl:fp16".to_string(),
@@ -1525,6 +1568,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "realvis-xl:fp16".to_string(),
@@ -1555,6 +1599,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "playground-v2.5:fp16".to_string(),
@@ -1585,6 +1630,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // --- Pony / CyberRealistic (standard SDXL architecture, anime/art/photorealistic) ---
         ModelManifest {
@@ -1614,6 +1660,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "cyberrealistic-pony:fp16".to_string(),
@@ -1642,6 +1689,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // --- Turbo SDXL (Euler Ancestral, 1-4 steps, guidance 0.0) ---
         ModelManifest {
@@ -1673,6 +1721,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ]
 }
@@ -1783,6 +1832,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // GGUF quantized variants (transformer only; shared components are always BF16)
         ModelManifest {
@@ -1814,6 +1864,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "z-image-turbo:q6".to_string(),
@@ -1844,6 +1895,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "z-image-turbo:q4".to_string(),
@@ -1874,6 +1926,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ]
 }
@@ -1955,6 +2008,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // Flux.2 Klein-4B GGUF quantizations (from unsloth, Apache 2.0)
         ModelManifest {
@@ -1984,6 +2038,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux2-klein:q6".to_string(),
@@ -2012,6 +2067,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux2-klein:q4".to_string(),
@@ -2040,6 +2096,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         // ── Flux.2 Klein-9B (distilled, Non-Commercial) ─────────────────────
         // Klein-9B uses Qwen3-8B (hidden_size=4096) vs Klein-4B's Qwen3-4B (2560).
@@ -2082,6 +2139,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux2-klein-9b:q8".to_string(),
@@ -2110,6 +2168,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux2-klein-9b:q6".to_string(),
@@ -2138,6 +2197,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
         ModelManifest {
             name: "flux2-klein-9b:q4".to_string(),
@@ -2166,6 +2226,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 frames: None,
                 fps: None,
             },
+            hidden: false,
         },
     ]
 }
@@ -2359,6 +2420,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults.clone(),
+            hidden: false,
         },
         // GGUF quantized variants (transformer only; shared components stay BF16)
         ModelManifest {
@@ -2378,6 +2440,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "qwen-image:q6".to_string(),
@@ -2396,6 +2459,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "qwen-image:q4".to_string(),
@@ -2414,6 +2478,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults,
+            hidden: false,
         },
     ]
 }
@@ -2499,6 +2564,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
             },
         ],
         defaults,
+        hidden: false,
     }]
 }
 
@@ -2978,6 +3044,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
                 f
             },
             defaults: defaults.clone(),
+            hidden: false,
         },
         // v0.9: original transformer + VAE pair (512-ch VAE, lower quality)
         ModelManifest {
@@ -3022,6 +3089,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
                 f
             },
             defaults,
+            hidden: true, // v0.9 produces blurry output — hidden until resolved
         },
     ]
 }
@@ -3052,6 +3120,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "controlnet-depth-sd15:fp16".to_string(),
@@ -3066,6 +3135,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "controlnet-openpose-sd15:fp16".to_string(),
@@ -3080,6 +3150,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults,
+            hidden: false,
         },
     ]
 }
@@ -3121,6 +3192,7 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
                 },
             ],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "qwen3-expand-small:q8".to_string(),
@@ -3145,6 +3217,7 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
                 },
             ],
             defaults,
+            hidden: false,
         },
     ]
 }
@@ -3176,6 +3249,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-x4plus:fp32".to_string(),
@@ -3190,6 +3264,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-x4plus-anime:fp16".to_string(),
@@ -3205,6 +3280,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-x4plus-anime:fp32".to_string(),
@@ -3220,6 +3296,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-anime-v3:fp32".to_string(),
@@ -3235,6 +3312,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-x2plus:fp16".to_string(),
@@ -3249,6 +3327,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults: defaults.clone(),
+            hidden: false,
         },
         ModelManifest {
             name: "real-esrgan-x2plus:fp32".to_string(),
@@ -3263,6 +3342,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
                 sha256: None,
             }],
             defaults,
+            hidden: false,
         },
     ]
 }

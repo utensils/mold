@@ -30,7 +30,6 @@ and VRAM requirements — including both image and video generation.
 | `sd15:fp16`        | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
 | `qwen-image:q4`    | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
 | `ltx-video-0.9.5:bf16` | BF16 | ~10 GB      | Slow, 40 steps     | Video, sharp (1024-ch VAE)   |
-| `ltx-video-0.9:bf16`   | BF16 | ~12 GB      | Slow, 40 steps     | Video, legacy (512-ch VAE)   |
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),
 which loads components one at a time. **Eager** mode keeps everything on GPU
