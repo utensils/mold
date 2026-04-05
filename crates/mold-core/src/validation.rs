@@ -93,9 +93,7 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     if req.batch_size == 0 {
         return Err("batch_size must be >= 1".to_string());
     }
-    if req.batch_size > 16 {
-        return Err(format!("batch_size ({}) must be <= 16", req.batch_size));
-    }
+    // No upper limit on batch_size — users can batch as many as they want.
     if req.guidance < 0.0 {
         return Err(format!("guidance ({}) must be >= 0.0", req.guidance));
     }
@@ -522,10 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn excessive_batch_rejected() {
+    fn large_batch_accepted() {
         let mut req = valid_req();
-        req.batch_size = 17;
-        assert!(validate_generate_request(&req).is_err());
+        req.batch_size = 100;
+        assert!(validate_generate_request(&req).is_ok());
     }
 
     #[test]

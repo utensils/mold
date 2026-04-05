@@ -158,7 +158,8 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
     let config = EncoderConfig::new()
         .max_frame_rate(FrameRate::from_hz(fps as f32))
         .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
-        .rate_control_mode(openh264::encoder::RateControlMode::Quality);
+        .rate_control_mode(openh264::encoder::RateControlMode::Quality)
+        .profile(openh264::encoder::Profile::High);
 
     let api = openh264::OpenH264API::from_source();
     let mut h264 = openh264::encoder::Encoder::with_api_config(api, config)

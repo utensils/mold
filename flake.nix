@@ -236,6 +236,7 @@
               pkgs.git
               pkgs.viu
               pkgs.cargo-llvm-cov
+              pkgs.ffmpeg
               pkgs.bun
               pkgs.nodePackages.prettier
             ]

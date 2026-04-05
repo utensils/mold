@@ -176,7 +176,7 @@ Examples:
         seed: Option<u64>,
 
         /// Number of images to generate
-        #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..=16))]
+        #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..))]
         batch: u32,
 
         /// Number of video frames to generate (video models only, e.g. ltx-video).
@@ -1298,9 +1298,12 @@ mod tests {
     }
 
     #[test]
-    fn run_batch_17_rejected() {
-        let result = try_parse(&["run", "model", "test", "--batch", "17"]);
-        assert!(result.is_err());
+    fn run_batch_large_accepted() {
+        let cli = parse(&["run", "model", "test", "--batch", "100"]);
+        match cli.command {
+            Commands::Run { batch, .. } => assert_eq!(batch, 100),
+            _ => panic!("expected Run"),
+        }
     }
 
     #[test]
