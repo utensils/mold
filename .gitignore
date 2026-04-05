@@ -2,6 +2,7 @@
 *~
 .agents/
 .cache/
+.playwright-mcp/
 # Claude Code
 .claude/worktrees/
 .direnv/
