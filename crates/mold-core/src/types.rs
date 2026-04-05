@@ -330,15 +330,45 @@ pub enum OutputFormat {
     Png,
     Jpeg,
     Gif,
+    Apng,
+    Webp,
+    Mp4,
+}
+
+impl OutputFormat {
+    /// Returns the file extension for this format.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            OutputFormat::Png => "png",
+            OutputFormat::Jpeg => "jpeg",
+            OutputFormat::Gif => "gif",
+            OutputFormat::Apng => "apng",
+            OutputFormat::Webp => "webp",
+            OutputFormat::Mp4 => "mp4",
+        }
+    }
+
+    /// Returns the MIME content type for this format.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            OutputFormat::Png => "image/png",
+            OutputFormat::Jpeg => "image/jpeg",
+            OutputFormat::Gif => "image/gif",
+            OutputFormat::Apng => "image/apng",
+            OutputFormat::Webp => "image/webp",
+            OutputFormat::Mp4 => "video/mp4",
+        }
+    }
+
+    /// Whether this format is a video/animation format.
+    pub fn is_video(&self) -> bool {
+        matches!(self, OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4)
+    }
 }
 
 impl std::fmt::Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OutputFormat::Png => write!(f, "png"),
-            OutputFormat::Jpeg => write!(f, "jpeg"),
-            OutputFormat::Gif => write!(f, "gif"),
-        }
+        write!(f, "{}", self.extension())
     }
 }
 
@@ -350,6 +380,9 @@ impl std::str::FromStr for OutputFormat {
             "png" => Ok(OutputFormat::Png),
             "jpeg" | "jpg" => Ok(OutputFormat::Jpeg),
             "gif" => Ok(OutputFormat::Gif),
+            "apng" => Ok(OutputFormat::Apng),
+            "webp" => Ok(OutputFormat::Webp),
+            "mp4" => Ok(OutputFormat::Mp4),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -553,9 +586,19 @@ mod tests {
 
     #[test]
     fn output_format_from_str_invalid() {
-        assert!("webp".parse::<OutputFormat>().is_err());
         assert!("".parse::<OutputFormat>().is_err());
         assert!("bmp".parse::<OutputFormat>().is_err());
+        assert!("tiff".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn output_format_new_formats() {
+        assert_eq!("apng".parse::<OutputFormat>().unwrap(), OutputFormat::Apng);
+        assert_eq!("webp".parse::<OutputFormat>().unwrap(), OutputFormat::Webp);
+        assert_eq!("mp4".parse::<OutputFormat>().unwrap(), OutputFormat::Mp4);
+        assert!(OutputFormat::Apng.is_video());
+        assert!(OutputFormat::Mp4.is_video());
+        assert!(!OutputFormat::Png.is_video());
     }
 
     #[test]

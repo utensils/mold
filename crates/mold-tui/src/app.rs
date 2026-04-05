@@ -2111,7 +2111,10 @@ impl App {
                 p.format = match p.format {
                     OutputFormat::Png => OutputFormat::Jpeg,
                     OutputFormat::Jpeg => OutputFormat::Gif,
-                    OutputFormat::Gif => OutputFormat::Png,
+                    OutputFormat::Gif => OutputFormat::Apng,
+                    OutputFormat::Apng => OutputFormat::Webp,
+                    OutputFormat::Webp => OutputFormat::Mp4,
+                    OutputFormat::Mp4 => OutputFormat::Png,
                 };
             }
             ParamField::Mode => {
@@ -2403,7 +2406,10 @@ impl App {
                 self.generate.params.format = match self.generate.params.format {
                     OutputFormat::Png => OutputFormat::Jpeg,
                     OutputFormat::Jpeg => OutputFormat::Gif,
-                    OutputFormat::Gif => OutputFormat::Png,
+                    OutputFormat::Gif => OutputFormat::Apng,
+                    OutputFormat::Apng => OutputFormat::Webp,
+                    OutputFormat::Webp => OutputFormat::Mp4,
+                    OutputFormat::Mp4 => OutputFormat::Png,
                 };
             }
             // Cycle scheduler
@@ -3298,11 +3304,7 @@ impl App {
                         .to_string();
 
                     for (i, img_data) in response.images.iter().enumerate() {
-                        let ext = match img_data.format {
-                            OutputFormat::Png => "png",
-                            OutputFormat::Jpeg => "jpeg",
-                            OutputFormat::Gif => "gif",
-                        };
+                        let ext = img_data.format.extension();
                         let filename = mold_core::default_output_filename(
                             &actual_model,
                             ts_secs,

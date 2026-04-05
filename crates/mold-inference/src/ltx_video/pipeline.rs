@@ -502,10 +502,17 @@ impl LtxVideoEngine {
         device.synchronize()?;
 
         // ---------------------------------------------------------------
-        // Step 6: Post-process and encode to GIF
+        // Step 6: Post-process and encode video
         // ---------------------------------------------------------------
-        progress.stage_start("Encoding GIF");
-        let gif_start = Instant::now();
+        // Default to APNG for video output (lossless, metadata-rich)
+        let output_format = if req.output_format.is_video() {
+            req.output_format
+        } else {
+            OutputFormat::Apng
+        };
+        let format_name = output_format.extension().to_uppercase();
+        progress.stage_start(&format!("Encoding {format_name}"));
+        let encode_start = Instant::now();
 
         // Convert to [0, 255] u8
         let video = video.to_dtype(DType::F32)?;
@@ -524,10 +531,34 @@ impl LtxVideoEngine {
             frames.push(rgb);
         }
 
-        let gif_bytes = video_enc::encode_gif(&frames, fps)?;
+        let video_bytes = match output_format {
+            OutputFormat::Apng => {
+                let metadata = video_enc::VideoMetadata {
+                    prompt: req.prompt.clone(),
+                    model: self.base.model_name.clone(),
+                    seed,
+                    steps,
+                    guidance: req.guidance,
+                    width,
+                    height,
+                    frames: num_output_frames as u32,
+                    fps,
+                };
+                video_enc::encode_apng(&frames, fps, Some(&metadata))?
+            }
+            OutputFormat::Gif => video_enc::encode_gif(&frames, fps)?,
+            #[cfg(feature = "webp")]
+            OutputFormat::Webp => video_enc::encode_webp(&frames, fps)?,
+            #[cfg(feature = "mp4")]
+            OutputFormat::Mp4 => video_enc::encode_mp4(&frames, fps)?,
+            _ => {
+                progress.info(&format!("{format_name} not available, falling back to APNG"));
+                video_enc::encode_apng(&frames, fps, None)?
+            }
+        };
         let thumbnail_bytes = video_enc::first_frame_png(&frames)?;
 
-        progress.stage_done("Encoding GIF", gif_start.elapsed());
+        progress.stage_done(&format!("Encoding {format_name}"), encode_start.elapsed());
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         progress.info(&format!(
@@ -539,8 +570,8 @@ impl LtxVideoEngine {
         Ok(GenerateResponse {
             images: vec![],
             video: Some(VideoData {
-                data: gif_bytes,
-                format: OutputFormat::Gif,
+                data: video_bytes,
+                format: output_format,
                 width,
                 height,
                 frames: num_output_frames as u32,

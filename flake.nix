@@ -97,12 +97,16 @@
             };
             nativeBuildInputs = [
               pkgs.pkg-config
+              pkgs.nasm
+              pkgs.clang
+              pkgs.llvmPackages.libclang.lib
             ]
             ++ lib.optionals isLinux [
               pkgs.cudaPackages.cuda_nvcc
             ];
             buildInputs = [
               pkgs.openssl
+              pkgs.libwebp
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
@@ -228,6 +232,7 @@
               rustToolchain
               pkgs.pkg-config
               pkgs.openssl
+              pkgs.nasm
               pkgs.git
               pkgs.viu
               pkgs.cargo-llvm-cov

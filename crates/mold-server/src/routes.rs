@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, OutputFormat, ServerStatus, SseErrorEvent,
+    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, ServerStatus, SseErrorEvent,
     SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
@@ -296,11 +296,7 @@ async fn generate(
         Ok(job_result) => {
             let img = job_result.image;
             let response = job_result.response;
-            let content_type = match img.format {
-                OutputFormat::Png => HeaderValue::from_static("image/png"),
-                OutputFormat::Jpeg => HeaderValue::from_static("image/jpeg"),
-                OutputFormat::Gif => HeaderValue::from_static("image/gif"),
-            };
+            let content_type = HeaderValue::from_static(img.format.content_type());
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, content_type);
             headers.insert(

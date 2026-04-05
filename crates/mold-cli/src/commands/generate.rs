@@ -100,7 +100,12 @@ pub async fn run(
     lora: Option<LoraWeight>,
     expand: Option<bool>,
 ) -> Result<()> {
-    let output_format = format;
+    // Default video models to APNG (lossless, metadata-rich) unless user specified a format
+    let output_format = if frames.is_some() && format == OutputFormat::Png {
+        OutputFormat::Apng
+    } else {
+        format
+    };
     let piped = is_piped();
 
     // Reject batch > 1 when output goes to stdout (piped with no --output, or --output -)
@@ -353,7 +358,7 @@ pub async fn run(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    Some(default_filename(model, timestamp, "gif", 1, 0))
+                    Some(default_filename(model, timestamp, video.format.extension(), 1, 0))
                 }
             };
             if let Some(ref filename) = filename {

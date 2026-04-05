@@ -1232,7 +1232,7 @@ mod tests {
 
     #[test]
     fn run_format_invalid_rejected() {
-        let result = try_parse(&["run", "model", "test", "--format", "webp"]);
+        let result = try_parse(&["run", "model", "test", "--format", "bmp"]);
         assert!(result.is_err());
     }
 
