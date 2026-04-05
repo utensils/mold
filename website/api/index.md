@@ -292,11 +292,11 @@ curl -X POST http://localhost:7680/api/upscale \
 
 **Request fields:**
 
-| Field           | Type   | Required | Description                                      |
-| --------------- | ------ | -------- | ------------------------------------------------ |
-| `model`         | string | yes      | Upscaler model name (e.g. `real-esrgan-x4plus:fp16`) |
-| `image`         | string | yes      | Base64-encoded input image (PNG or JPEG)          |
-| `output_format` | string | no       | `png` (default) or `jpeg`                         |
+| Field           | Type   | Required | Description                                               |
+| --------------- | ------ | -------- | --------------------------------------------------------- |
+| `model`         | string | yes      | Upscaler model name (e.g. `real-esrgan-x4plus:fp16`)      |
+| `image`         | string | yes      | Base64-encoded input image (PNG or JPEG)                  |
+| `output_format` | string | no       | `png` (default) or `jpeg`                                 |
 | `tile_size`     | number | no       | Tile size for memory-efficient processing (0 = no tiling) |
 
 **Response:** Raw image bytes (PNG or JPEG) with `Content-Type` header.
@@ -315,14 +315,14 @@ curl -N -X POST http://localhost:7680/api/upscale/stream \
   }'
 ```
 
-Representative events:
+Representative events (tile progress reuses the `denoise_step` event type):
 
 ```text
 event: progress
-data: {"type":"denoise_step","step":1,"total_steps":9}
+data: {"type":"denoise_step","step":1,"total":9,"elapsed_ms":1200}
 
 event: complete
-data: {"image":"<base64-encoded output>","model":"real-esrgan-x4plus:fp16","scale_factor":4,"width":2048,"height":2048}
+data: {"image":"<base64>","model":"real-esrgan-x4plus:fp16","scale_factor":4,"width":2048,"height":2048}
 ```
 
 The server caches the upscaler engine between requests — repeated upscales with the same model skip weight loading.

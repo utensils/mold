@@ -83,16 +83,21 @@ With the default 512px tiling, any GPU with 1 GB+ VRAM can upscale images of any
 
 ## Post-Generation Upscaling
 
-Upscale images immediately after generation using the `--upscale` flag on
-`mold run`:
+::: warning Coming Soon
+The `--upscale` flag is defined but not yet wired into the generation pipeline.
+Use the pipe workflow below instead.
+:::
+
+The `--upscale` flag on `mold run` will upscale images immediately after
+generation:
 
 ```bash
 mold run "a cat" \
   --upscale real-esrgan-x4plus:fp16
 ```
 
-This generates the image at the model's native resolution (e.g. 1024x1024) and
-then upscales it (to 4096x4096 at 4x).
+This will generate at the model's native resolution (e.g. 1024x1024) and then
+upscale it (to 4096x4096 at 4x). In the meantime, use piping:
 
 ## Piping
 
