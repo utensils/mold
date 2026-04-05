@@ -2515,7 +2515,14 @@ impl App {
                 self.gallery.preview_image = None;
                 self.gallery.image_state = None;
             } else if entry.path.exists() && entry.path.is_file() {
-                if let Ok(img) = image::open(&entry.path) {
+                // For video files, prefer the cached GIF preview (animated)
+                let gif_path = crate::thumbnails::preview_gif_path(&entry.path);
+                let load_path = if gif_path.is_file() {
+                    &gif_path
+                } else {
+                    &entry.path
+                };
+                if let Ok(img) = image::open(load_path) {
                     let protocol = self.picker.new_resize_protocol(img.clone());
                     self.gallery.preview_image = Some(img);
                     self.gallery.image_state = Some(protocol);
@@ -3683,6 +3690,40 @@ impl App {
                         // Display preview for first image
                         if i == 0 {
                             if let Ok(img) = image::load_from_memory(&img_data.data) {
+                                let protocol = self.picker.new_resize_protocol(img.clone());
+                                self.generate.preview_image = Some(img);
+                                self.generate.image_state = Some(protocol);
+                            }
+                        }
+                    }
+
+                    // Handle video output: save primary file + cache GIF preview
+                    if let Some(ref video) = response.video {
+                        let ext = video.format.extension();
+                        let filename =
+                            mold_core::default_output_filename(&actual_model, ts_secs, ext, 1, 0);
+                        if let Some(ref dir) = output_dir {
+                            let path = dir.join(&filename);
+                            if std::fs::write(&path, &video.data).is_ok() {
+                                saved_path = path.clone();
+                                // Cache the GIF preview for gallery detail view
+                                if !video.gif_preview.is_empty() {
+                                    crate::thumbnails::save_preview_gif(&video.gif_preview, &path)
+                                        .ok();
+                                }
+                                // Generate a still thumbnail for the gallery grid
+                                if !video.thumbnail.is_empty() {
+                                    crate::thumbnails::save_thumbnail_bytes(
+                                        &video.thumbnail,
+                                        &path,
+                                    )
+                                    .ok();
+                                }
+                            }
+                        }
+                        // Show GIF preview in the generate viewport (animated)
+                        if !video.gif_preview.is_empty() {
+                            if let Ok(img) = image::load_from_memory(&video.gif_preview) {
                                 let protocol = self.picker.new_resize_protocol(img.clone());
                                 self.generate.preview_image = Some(img);
                                 self.generate.image_state = Some(protocol);

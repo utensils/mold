@@ -614,6 +614,13 @@ impl LtxVideoEngine {
             }
         };
         let thumbnail_bytes = video_enc::first_frame_png(&frames)?;
+        // Always generate a GIF preview for gallery/TUI animated playback,
+        // reusing the primary data if the format is already GIF.
+        let gif_preview = if output_format == OutputFormat::Gif {
+            video_bytes.clone()
+        } else {
+            video_enc::encode_gif(&frames, fps)?
+        };
 
         progress.stage_done(&format!("Encoding {format_name}"), encode_start.elapsed());
 
@@ -634,6 +641,7 @@ impl LtxVideoEngine {
                 frames: num_output_frames as u32,
                 fps,
                 thumbnail: thumbnail_bytes,
+                gif_preview,
             }),
             generation_time_ms,
             model: self.base.model_name.clone(),

@@ -83,6 +83,43 @@ pub fn generate_thumbnail_from_cached(source: &Path, key: &Path) -> Result<PathB
     Ok(thumb_path)
 }
 
+// ---------------------------------------------------------------------------
+// Video preview cache — animated GIF for gallery detail/generation viewport
+// ---------------------------------------------------------------------------
+
+/// Returns the video preview cache directory: ~/.mold/cache/previews/
+pub fn preview_dir() -> PathBuf {
+    mold_core::Config::mold_dir()
+        .unwrap_or_else(|| PathBuf::from(".mold"))
+        .join("cache")
+        .join("previews")
+}
+
+/// Compute the cached GIF preview path for a given video source path.
+pub fn preview_gif_path(source: &Path) -> PathBuf {
+    let key = source
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| source.to_string_lossy().to_string());
+    preview_dir().join(format!("{key}.preview.gif"))
+}
+
+/// Check if a GIF preview exists for the given source.
+pub fn preview_gif_exists(source: &Path) -> bool {
+    let path = preview_gif_path(source);
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Save pre-generated GIF preview bytes to the cache.
+pub fn save_preview_gif(data: &[u8], source: &Path) -> Result<PathBuf> {
+    let gif_path = preview_gif_path(source);
+    if let Some(parent) = gif_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&gif_path, data)?;
+    Ok(gif_path)
+}
+
 /// Ensure thumbnails exist for all given image paths.
 /// Generates missing thumbnails. Returns the number generated.
 pub fn ensure_thumbnails(paths: &[PathBuf]) -> usize {

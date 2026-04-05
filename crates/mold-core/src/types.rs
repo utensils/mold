@@ -295,9 +295,9 @@ pub struct GenerateResponse {
 /// Video output from a video model family.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VideoData {
-    /// Encoded video bytes (GIF).
+    /// Encoded video bytes in the requested format (APNG, GIF, WebP, MP4).
     pub data: Vec<u8>,
-    /// Output format (Gif).
+    /// Output format.
     pub format: OutputFormat,
     #[schema(example = 768)]
     pub width: u32,
@@ -309,8 +309,12 @@ pub struct VideoData {
     /// Frames per second.
     #[schema(example = 24)]
     pub fps: u32,
-    /// First frame as PNG thumbnail for gallery/preview.
+    /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
+    /// Animated GIF preview for gallery detail view / TUI playback.
+    /// Always generated regardless of primary output format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gif_preview: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
