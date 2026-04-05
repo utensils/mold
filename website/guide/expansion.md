@@ -35,8 +35,12 @@ mold run "a cat" --no-expand
 Use an OpenAI-compatible API instead of the local LLM:
 
 ```bash
-mold run "a cat" --expand --expand-backend http://localhost:11434/v1
-mold run "a cat" --expand --expand-backend http://localhost:11434/v1 --expand-model llama3
+mold run "a cat" --expand \
+  --expand-backend http://localhost:11434/v1
+
+mold run "a cat" --expand \
+  --expand-backend http://localhost:11434/v1 \
+  --expand-model llama3
 ```
 
 ## Configuration

@@ -203,7 +203,13 @@ Typical terminal usage:
 ```bash
 curl -N http://localhost:7680/api/generate/stream \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"a glowing robot","model":"flux-dev:q4","steps":25,"width":1024,"height":1024}'
+  -d '{
+    "prompt": "a glowing robot",
+    "model": "flux-dev:q4",
+    "steps": 25,
+    "width": 1024,
+    "height": 1024
+  }'
 ```
 
 The final `complete` event matches the `GenerateResponse` JSON shape used by the
