@@ -262,6 +262,59 @@ event: progress
 data: {"type":"pull_complete","model":"flux-schnell:q8"}
 ```
 
+## `/api/upscale`
+
+Upscale an image using Real-ESRGAN super-resolution models.
+
+```bash
+curl -X POST http://localhost:7680/api/upscale \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "real-esrgan-x4plus:fp16",
+    "image": "<base64-encoded PNG or JPEG>",
+    "output_format": "png",
+    "tile_size": 512
+  }' \
+  --output upscaled.png
+```
+
+**Request fields:**
+
+| Field           | Type   | Required | Description                                      |
+| --------------- | ------ | -------- | ------------------------------------------------ |
+| `model`         | string | yes      | Upscaler model name (e.g. `real-esrgan-x4plus:fp16`) |
+| `image`         | string | yes      | Base64-encoded input image (PNG or JPEG)          |
+| `output_format` | string | no       | `png` (default) or `jpeg`                         |
+| `tile_size`     | number | no       | Tile size for memory-efficient processing (0 = no tiling) |
+
+**Response:** Raw image bytes (PNG or JPEG) with `Content-Type` header.
+
+## `/api/upscale/stream`
+
+Same request format as `/api/upscale`, but returns SSE events for tile-by-tile progress:
+
+```bash
+curl -N -X POST http://localhost:7680/api/upscale/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "real-esrgan-x4plus:fp16",
+    "image": "<base64-encoded PNG or JPEG>"
+  }'
+```
+
+Representative events:
+
+```text
+event: progress
+data: {"type":"denoise_step","step":1,"total_steps":9}
+
+event: complete
+data: {"image":"<base64-encoded output>","model":"real-esrgan-x4plus:fp16","scale_factor":4,"width":2048,"height":2048}
+```
+
+The server caches the upscaler engine between requests — repeated upscales with the same model skip weight loading.
+
 ## Image Output
 
 Generated images are saved to `~/.mold/output/` by default. Override with a
