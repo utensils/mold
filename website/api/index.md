@@ -113,6 +113,12 @@ curl -X POST http://localhost:7680/api/models/load \
   -H "Content-Type: application/json" \
   -d '{"model": "flux-dev:q4"}'
 
+# Upscale an image (base64 input, raw image output)
+curl -X POST http://localhost:7680/api/upscale \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"real-esrgan-x4plus:fp16\",\"image\":\"$(base64 < photo.png)\"}" \
+  -o photo_4x.png
+
 # Interactive docs
 open http://localhost:7680/api/docs
 ```

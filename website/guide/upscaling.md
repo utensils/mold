@@ -30,10 +30,18 @@ mold run "a cat" | mold upscale -
 
 ### Choosing a Model
 
-- **Best quality**: `real-esrgan-x4plus:fp16` -- full RRDBNet with 23 residual blocks
-- **Fastest**: `real-esrgan-anime-v3:fp32` -- compact architecture, great for batch processing
-- **Anime/illustration**: `real-esrgan-x4plus-anime:fp16` or `real-esrgan-anime-v3:fp32`
-- **2x upscale**: `real-esrgan-x2plus:fp16` -- when 4x is too much
+- **Photos and realistic images**: `real-esrgan-x4plus:fp16` — the full 23-block RRDBNet
+  produces the sharpest detail recovery on photographs, textures, and AI-generated
+  photorealistic output. Use `fp32` only if you see precision artifacts on Metal.
+- **Anime, illustrations, and flat art**: `real-esrgan-x4plus-anime:fp16` — trained on
+  anime data, preserves clean lines and flat color regions without adding unwanted texture.
+  Lighter than `x4plus` (6 blocks vs 23) so it's faster too.
+- **Batch processing or quick previews**: `real-esrgan-anime-v3:fp32` — the SRVGGNetCompact
+  architecture is ~3x faster than RRDBNet and only 2.4 MB. Quality is lower but adequate
+  for bulk upscaling or when speed matters more than fine detail.
+- **Subtle 2x enhancement**: `real-esrgan-x2plus:fp16` — when 4x magnification is too
+  aggressive. Good for upscaling already high-res images (e.g. 1024px → 2048px) where
+  you want sharpening without extreme enlargement.
 
 ## CLI Reference
 
