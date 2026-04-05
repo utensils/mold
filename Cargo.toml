@@ -30,9 +30,4 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# DEV ONLY: local candle fork override for LTX Video models (remove before merge)
-[patch.crates-io]
-candle-core-mold = { path = "../candle/candle-core" }
-candle-nn-mold = { path = "../candle/candle-nn" }
-candle-transformers-mold = { path = "../candle/candle-transformers" }
 
