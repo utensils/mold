@@ -234,11 +234,13 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                     tokio::task::spawn_blocking(move || {
                         let ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
+                            .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
                         let filename = mold_core::default_output_filename(&model, ts, &ext, 1, 0);
                         let path = std::path::Path::new(&dir).join(filename);
-                        let _ = std::fs::write(&path, &video_data);
+                        if let Err(e) = std::fs::write(&path, &video_data) {
+                            tracing::error!("failed to save video to {}: {e}", path.display());
+                        }
                     });
                 } else {
                     let img_clone = img.clone();

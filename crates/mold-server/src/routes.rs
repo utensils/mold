@@ -319,7 +319,15 @@ async fn generate(
                     }
                 }
             }
-            Ok((headers, img.data))
+            // For video responses, return the actual video data (not the thumbnail)
+            let output_data = if let Some(ref video) = response.video {
+                let ct = HeaderValue::from_static(video.format.content_type());
+                headers.insert(header::CONTENT_TYPE, ct);
+                video.data.clone()
+            } else {
+                img.data
+            };
+            Ok((headers, output_data))
         }
         Err(err_msg) => Err(ApiError::inference(err_msg)),
     }

@@ -279,6 +279,8 @@ impl LtxVideoEngine {
             bail!("GGUF quantized LTX Video transformer is not yet supported — use :bf16 variant");
         }
 
+        // SAFETY: mmap'd safetensors files are not modified while mapped.
+        // The files are read-only model weights from the HuggingFace cache.
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, &device)? };
         // Diffusers-format weights use the same key names as our candle model
@@ -475,6 +477,7 @@ impl LtxVideoEngine {
         let vae_file_size = std::fs::metadata(&paths.vae)?.len();
         let is_v095_vae = vae_file_size > 2_000_000_000;
 
+        // SAFETY: mmap'd safetensors file is not modified while mapped.
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&paths.vae), dtype, &device)?
         };
@@ -606,12 +609,15 @@ impl LtxVideoEngine {
             OutputFormat::Webp => video_enc::encode_webp(&frames, fps)?,
             #[cfg(feature = "mp4")]
             OutputFormat::Mp4 => video_enc::encode_mp4(&frames, fps)?,
-            _ => {
-                progress.info(&format!(
-                    "{format_name} not available, falling back to APNG"
-                ));
-                video_enc::encode_apng(&frames, fps, None)?
+            #[cfg(not(feature = "webp"))]
+            OutputFormat::Webp => {
+                bail!("WebP output requires the 'webp' feature — rebuild with --features webp")
             }
+            #[cfg(not(feature = "mp4"))]
+            OutputFormat::Mp4 => {
+                bail!("MP4 output requires the 'mp4' feature — rebuild with --features mp4")
+            }
+            _ => bail!("{format_name} is not a supported video output format"),
         };
         let thumbnail_bytes = video_enc::first_frame_png(&frames)?;
         // Always generate a GIF preview for gallery/TUI animated playback,

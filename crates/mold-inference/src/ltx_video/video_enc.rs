@@ -513,9 +513,15 @@ mod mp4_mux {
             "moov size changed between passes"
         );
 
-        // Build mdat
-        let mut mdat = Vec::with_capacity(8 + mdat_payload);
-        write_u32(&mut mdat, (8 + mdat_payload) as u32);
+        // Build mdat (reject if payload exceeds u32 box size limit)
+        let mdat_total = 8 + mdat_payload;
+        anyhow::ensure!(
+            mdat_total <= u32::MAX as usize,
+            "MP4 mdat exceeds 4 GB limit ({} bytes) — reduce frames or resolution",
+            mdat_total
+        );
+        let mut mdat = Vec::with_capacity(mdat_total);
+        write_u32(&mut mdat, mdat_total as u32);
         mdat.extend_from_slice(b"mdat");
         for (data, _) in samples {
             mdat.extend_from_slice(data);
