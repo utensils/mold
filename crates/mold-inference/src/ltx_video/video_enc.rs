@@ -817,12 +817,14 @@ mod tests {
             assert!(content.len() >= 8 + sps_len, "avcC too short for SPS data");
             let sps = &content[8..8 + sps_len];
 
-            // An SPS with VUI will be longer than a minimal SPS without VUI.
-            // Minimal SPS (no VUI) is typically ~7-10 bytes. With VUI (colour info),
-            // it's typically 15+ bytes.
+            // An SPS with VUI (colour description) is significantly longer than without.
+            // Minimal SPS (no VUI) is typically ~7-10 bytes; with BT.601 VUI colour
+            // info it's 15+ bytes. Empirically, openh264 High profile + VuiConfig::bt601()
+            // produces ~18-20 byte SPS. Threshold of 15 ensures VUI is present while
+            // staying above any non-VUI SPS length.
             assert!(
-                sps.len() >= 12,
-                "SPS too short ({} bytes) — VUI parameters likely missing",
+                sps.len() >= 15,
+                "SPS too short ({} bytes) — VUI parameters likely missing (expected >= 15 with colour description)",
                 sps.len()
             );
         }
