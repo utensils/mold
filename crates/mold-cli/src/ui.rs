@@ -20,6 +20,7 @@ pub(crate) fn family_label(family: &str) -> &str {
         "ltx-video" | "ltx_video" => "LTX Video",
         "controlnet" => "ControlNet",
         "qwen3-expand" => "Expand",
+        "upscaler" => "Upscaler",
         other => other,
     }
 }
@@ -38,6 +39,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "ltx-video" | "ltx_video" => padded.red().to_string(),
         "controlnet" => padded.bright_red().to_string(),
         "qwen3-expand" => padded.bright_cyan().to_string(),
+        "upscaler" => padded.bright_purple().to_string(),
         _ => padded,
     }
 }
@@ -60,6 +62,7 @@ pub(crate) fn format_family(family: &str) -> String {
             | "ltx_video"
             | "controlnet"
             | "qwen3-expand"
+            | "upscaler"
     ) {
         format_family_padded(family, family_label(family).len())
             .trim_end()
