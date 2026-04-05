@@ -268,6 +268,7 @@ pub async fn run(
         .await?
     } else {
         let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+        let mut last_video: Option<mold_core::VideoData> = None;
         let mut total_time_ms: u64 = 0;
         let mut last_seed_used: u64 = base_seed;
         let mut last_model = String::new();
@@ -318,6 +319,11 @@ pub async fn run(
             last_seed_used = response.seed_used;
             last_model = response.model.clone();
 
+            // Capture video from the last response (video models produce one clip per run)
+            if response.video.is_some() {
+                last_video = response.video;
+            }
+
             for mut img in response.images {
                 img.index = i;
                 // Save and preview each image immediately during batch generation
@@ -331,7 +337,7 @@ pub async fn run(
 
         GenerateResponse {
             images: all_images,
-            video: None,
+            video: last_video,
             generation_time_ms: total_time_ms,
             model: last_model,
             seed_used: last_seed_used,
