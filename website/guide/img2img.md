@@ -3,6 +3,11 @@
 Transform existing images with a text prompt. Source images auto-resize to fit
 the target model's native resolution (preserving aspect ratio).
 
+::: tip Supported Models
+img2img and inpainting work with **FLUX.1**, **SDXL**, and **SD 1.5**. See the
+[feature matrix](/guide/feature-matrix#source-image-workflows) for details.
+:::
+
 ## Basic img2img
 
 ```bash

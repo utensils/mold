@@ -35,6 +35,30 @@ mod base64_opt {
     }
 }
 
+/// Serde helpers for `Vec<u8>` as base64 in JSON (required field).
+mod base64_required {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        s.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded: String = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Scheduler algorithm for UNet-based diffusion models (SD1.5, SDXL).
 ///
 /// Flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image) ignore this setting.
@@ -103,6 +127,46 @@ pub struct ExpandResponse {
     pub original: String,
     /// Expanded prompt(s)
     pub expanded: Vec<String>,
+}
+
+/// Request to upscale an image using a super-resolution model (e.g. Real-ESRGAN).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UpscaleRequest {
+    /// Upscaler model name (e.g. "real-esrgan-x4plus:fp16").
+    #[schema(example = "real-esrgan-x4plus:fp16")]
+    pub model: String,
+    /// Input image bytes (PNG or JPEG, base64-encoded in JSON).
+    #[serde(with = "base64_required")]
+    pub image: Vec<u8>,
+    /// Output image format.
+    #[serde(default)]
+    pub output_format: OutputFormat,
+    /// Tile size override for memory-efficient tiled inference.
+    /// Default is 512. Set to 0 to disable tiling (process entire image at once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_size: Option<u32>,
+}
+
+/// Response from image upscaling.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UpscaleResponse {
+    /// The upscaled image.
+    pub image: ImageData,
+    /// Time spent upscaling in milliseconds.
+    #[schema(example = 450)]
+    pub upscale_time_ms: u64,
+    /// The upscaler model used.
+    #[schema(example = "real-esrgan-x4plus:fp16")]
+    pub model: String,
+    /// The scale factor applied (e.g. 2 or 4).
+    #[schema(example = 4)]
+    pub scale_factor: u32,
+    /// Original input image width.
+    #[schema(example = 512)]
+    pub original_width: u32,
+    /// Original input image height.
+    #[schema(example = 512)]
+    pub original_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -176,6 +240,10 @@ pub struct GenerateRequest {
     /// Only used by video model families. Ignored by image models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// Upscaler model to apply after generation (e.g. "real-esrgan-x4plus:fp16").
+    /// When set, each generated image is upscaled before being returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscale_model: Option<String>,
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -564,6 +632,19 @@ pub struct SseCompleteEvent {
     pub model: String,
 }
 
+/// SSE event emitted when an upscale request completes.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseUpscaleCompleteEvent {
+    /// Base64-encoded upscaled image data.
+    pub image: String,
+    pub format: OutputFormat,
+    pub model: String,
+    pub scale_factor: u32,
+    pub original_width: u32,
+    pub original_height: u32,
+    pub upscale_time_ms: u64,
+}
+
 /// Error event sent when generation fails during SSE streaming.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseErrorEvent {
@@ -645,6 +726,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -789,6 +871,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -823,6 +906,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -854,6 +938,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -887,6 +972,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -918,6 +1004,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
 
         let metadata =
@@ -1103,6 +1190,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1155,6 +1243,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1190,6 +1279,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1246,6 +1336,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));
@@ -1311,6 +1402,75 @@ mod tests {
         }"#;
         let status: super::ServerStatus = serde_json::from_str(json).unwrap();
         assert!(status.busy);
+    }
+
+    // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
+
+    #[test]
+    fn upscale_request_serde_roundtrip() {
+        let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let req = super::UpscaleRequest {
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            image: image_bytes.clone(),
+            output_format: OutputFormat::Png,
+            tile_size: Some(256),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("real-esrgan-x4plus:fp16"));
+        assert!(json.contains("tile_size"));
+        // image should be base64-encoded
+        assert!(!json.contains("[137,"));
+
+        let back: super::UpscaleRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model, "real-esrgan-x4plus:fp16");
+        assert_eq!(back.image, image_bytes);
+        assert_eq!(back.tile_size, Some(256));
+        assert_eq!(back.output_format, OutputFormat::Png);
+    }
+
+    #[test]
+    fn upscale_request_tile_size_omitted_when_none() {
+        let req = super::UpscaleRequest {
+            model: "test".to_string(),
+            image: vec![0xFF, 0xD8],
+            output_format: OutputFormat::Jpeg,
+            tile_size: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("tile_size"));
+    }
+
+    #[test]
+    fn upscale_response_serde_roundtrip() {
+        let resp = super::UpscaleResponse {
+            image: super::ImageData {
+                data: vec![1, 2, 3],
+                format: OutputFormat::Png,
+                width: 2048,
+                height: 2048,
+                index: 0,
+            },
+            upscale_time_ms: 450,
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            scale_factor: 4,
+            original_width: 512,
+            original_height: 512,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: super::UpscaleResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scale_factor, 4);
+        assert_eq!(back.original_width, 512);
+        assert_eq!(back.image.width, 2048);
+        assert_eq!(back.upscale_time_ms, 450);
+    }
+
+    #[test]
+    fn generate_request_upscale_model_backward_compat() {
+        // Existing JSON without upscale_model should deserialize fine
+        let json =
+            r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.upscale_model.is_none());
     }
 }
 

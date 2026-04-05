@@ -17,6 +17,8 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/gallery/image/:name`     | Fetch a saved image                  |
 | `DELETE` | `/api/gallery/image/:name`     | Delete a saved image                 |
 | `GET`    | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail             |
+| `POST`   | `/api/upscale`                 | Upscale image with Real-ESRGAN       |
+| `POST`   | `/api/upscale/stream`          | Upscale with SSE tile progress       |
 | `POST`   | `/api/shutdown`                | Trigger graceful server shutdown     |
 | `GET`    | `/api/status`                  | Server health + status               |
 | `GET`    | `/health`                      | Simple 200 OK health check           |
@@ -57,7 +59,8 @@ automatically.
 When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
 
 - **Generation tier** (configured rate): `/api/generate`,
-  `/api/generate/stream`, `/api/expand`, `/api/models/load`, `/api/models/pull`,
+  `/api/generate/stream`, `/api/expand`, `/api/upscale`,
+  `/api/upscale/stream`, `/api/models/load`, `/api/models/pull`,
   `/api/models/unload`
 - **Read tier** (10x the configured rate): `/api/models`, `/api/status`,
   `/api/gallery/*`
@@ -110,6 +113,12 @@ curl http://localhost:7680/api/models
 curl -X POST http://localhost:7680/api/models/load \
   -H "Content-Type: application/json" \
   -d '{"model": "flux-dev:q4"}'
+
+# Upscale an image (base64 input, raw image output)
+curl -X POST http://localhost:7680/api/upscale \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"real-esrgan-x4plus:fp16\",\"image\":\"$(base64 < photo.png)\"}" \
+  -o photo_4x.png
 
 # Interactive docs
 open http://localhost:7680/api/docs
@@ -195,7 +204,13 @@ Typical terminal usage:
 ```bash
 curl -N http://localhost:7680/api/generate/stream \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"a glowing robot","model":"flux-dev:q4","steps":25,"width":1024,"height":1024}'
+  -d '{
+    "prompt": "a glowing robot",
+    "model": "flux-dev:q4",
+    "steps": 25,
+    "width": 1024,
+    "height": 1024
+  }'
 ```
 
 The final `complete` event matches the `GenerateResponse` JSON shape used by the
@@ -259,6 +274,59 @@ data: {"type":"download_progress","filename":"flux1-schnell-Q8_0.gguf","file_ind
 event: progress
 data: {"type":"pull_complete","model":"flux-schnell:q8"}
 ```
+
+## `/api/upscale`
+
+Upscale an image using Real-ESRGAN super-resolution models.
+
+```bash
+curl -X POST http://localhost:7680/api/upscale \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "real-esrgan-x4plus:fp16",
+    "image": "<base64-encoded PNG or JPEG>",
+    "output_format": "png",
+    "tile_size": 512
+  }' \
+  --output upscaled.png
+```
+
+**Request fields:**
+
+| Field           | Type   | Required | Description                                               |
+| --------------- | ------ | -------- | --------------------------------------------------------- |
+| `model`         | string | yes      | Upscaler model name (e.g. `real-esrgan-x4plus:fp16`)      |
+| `image`         | string | yes      | Base64-encoded input image (PNG or JPEG)                  |
+| `output_format` | string | no       | `png` (default) or `jpeg`                                 |
+| `tile_size`     | number | no       | Tile size for memory-efficient processing (0 = no tiling) |
+
+**Response:** Raw image bytes (PNG or JPEG) with `Content-Type` header.
+
+## `/api/upscale/stream`
+
+Same request format as `/api/upscale`, but returns SSE events for tile-by-tile progress:
+
+```bash
+curl -N -X POST http://localhost:7680/api/upscale/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "model": "real-esrgan-x4plus:fp16",
+    "image": "<base64-encoded PNG or JPEG>"
+  }'
+```
+
+Representative events (tile progress reuses the `denoise_step` event type):
+
+```text
+event: progress
+data: {"type":"denoise_step","step":1,"total":9,"elapsed_ms":1200}
+
+event: complete
+data: {"image":"<base64>","model":"real-esrgan-x4plus:fp16","scale_factor":4,"width":2048,"height":2048}
+```
+
+The server caches the upscaler engine between requests — repeated upscales with the same model skip weight loading.
 
 ## Image Output
 

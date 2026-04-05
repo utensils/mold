@@ -39,7 +39,10 @@ multiples of 16.
 **Z-Image Turbo** — 9 steps, seed 777:
 
 ```bash
-mold run z-image-turbo:q8 "An astronaut floating through a bioluminescent underwater cave, reflections on the helmet visor, science fiction art" --seed 777
+mold run z-image-turbo:q8 \
+  "An astronaut floating through a bioluminescent underwater cave, \
+  reflections on the helmet visor, science fiction art" \
+  --seed 777
 ```
 
 ![Astronaut — Z-Image Turbo](/gallery/zimage-astronaut.png)

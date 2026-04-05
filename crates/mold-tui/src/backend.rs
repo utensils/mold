@@ -416,6 +416,7 @@ fn build_request(
         lora,
         frames: Some(params.frames),
         fps: Some(params.fps),
+        upscale_model: None,
     }
 }
 

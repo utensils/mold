@@ -33,6 +33,7 @@ pub struct ActiveGenerationSnapshot {
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
     Complete(mold_core::SseCompleteEvent),
+    UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }
 
@@ -108,6 +109,8 @@ pub struct AppState {
     pub shared_pool: Arc<std::sync::Mutex<SharedPool>>,
     /// Shutdown trigger for graceful shutdown via `/api/shutdown` endpoint.
     pub shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Cached upscaler engine to avoid recreating per request. Small models (2-64MB), single slot.
+    pub upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn mold_inference::UpscaleEngine>>>>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -136,6 +139,7 @@ impl AppState {
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -152,6 +156,7 @@ impl AppState {
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -179,6 +184,7 @@ impl AppState {
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -209,6 +215,7 @@ impl AppState {
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
         };
         (state, rx)
     }
@@ -243,5 +250,25 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(16);
         let handle = QueueHandle::new(tx);
         assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn upscaler_cache_starts_empty() {
+        let config = mold_core::Config::default();
+        let state = AppState::empty(config, QueueHandle::new(tokio::sync::mpsc::channel(1).0));
+        let cache = state.upscaler_cache.lock().unwrap();
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn upscaler_cache_cleared_by_setting_none() {
+        let config = mold_core::Config::default();
+        let state = AppState::empty(config, QueueHandle::new(tokio::sync::mpsc::channel(1).0));
+        {
+            let mut cache = state.upscaler_cache.lock().unwrap();
+            *cache = None;
+        }
+        let cache = state.upscaler_cache.lock().unwrap();
+        assert!(cache.is_none());
     }
 }

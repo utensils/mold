@@ -463,8 +463,9 @@ impl LtxVideoEngine {
         let vae_file_size = std::fs::metadata(&paths.vae)?.len();
         let is_v095_vae = vae_file_size > 2_000_000_000;
 
-        let vae_vb =
-            unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&paths.vae), dtype, &device)? };
+        let vae_vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&paths.vae), dtype, &device)?
+        };
 
         let vae_config = if is_v095_vae {
             progress.info("Using v0.9.5 VAE (1024-ch, timestep conditioning)");

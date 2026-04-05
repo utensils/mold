@@ -172,13 +172,15 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/gallery/image/:name` | Fetch a saved image |
 | `DELETE` | `/api/gallery/image/:name` | Delete a saved image |
 | `GET` | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail |
+| `POST` | `/api/upscale` | Upscale image with Real-ESRGAN |
+| `POST` | `/api/upscale/stream` | Upscale with SSE tile progress streaming |
 | `POST` | `/api/shutdown` | Trigger graceful server shutdown |
 | `GET` | `/api/status` | Server health + status |
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
 | `GET` | `/api/docs` | Interactive API docs (Scalar) |
 
-State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching.
+State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching and `upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>` for reusing loaded upscaler models across requests.
 
 ### mold-cli
 
@@ -230,6 +232,16 @@ mold run [MODEL] [PROMPT...] [OPTIONS]
         --no-expand             Disable expansion (overrides config/env default)
         --expand-backend <URL>  Expansion backend: "local" or OpenAI-compatible API URL
         --expand-model <MODEL>  LLM model for expansion
+        --upscale <MODEL>       Post-generation upscale with named upscaler model (TODO: not yet wired)
+
+mold upscale <IMAGE> [OPTIONS]     Upscale image with Real-ESRGAN
+    -m, --model <MODEL>         Upscaler model name (env: MOLD_UPSCALE_MODEL)
+    -o, --output <PATH>         Output file [default: {input}_upscaled.png]
+        --format <FORMAT>       png or jpeg [default: png]
+        --tile-size <SIZE>      Tile size for memory-efficient tiling (env: MOLD_UPSCALE_TILE_SIZE)
+        --host <URL>            Override MOLD_HOST
+        --local                 Skip server, run inference locally
+        --preview               Display upscaled image inline in the terminal
 
 mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generating
     -m, --model <MODEL>         Target diffusion model (for model-aware prompt style)
@@ -306,6 +318,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
 | `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs that can use generation commands (unset = all allowed) |
 | `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
+| `MOLD_UPSCALE_MODEL` | — | Default upscaler model for `mold upscale` |
+| `MOLD_UPSCALE_TILE_SIZE` | — | Tile size for upscaling (0 to disable tiling) |
 
 Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
 
@@ -401,6 +415,7 @@ magick /tmp/mold-cropped.png /tmp/mold-mask.png \
 
 ## Maintenance Notes
 
+- **Keep `CHANGELOG.md` updated** — Follow [Keep a Changelog](https://keepachangelog.com/) format. Add entries under `[Unreleased]` when implementing features, fixes, or breaking changes. Group under Added/Changed/Fixed/Removed headings.
 - **Keep `.claude/skills/mold/SKILL.md` in sync** — This skill file is used by OpenClaw, ClawdBot, and other AI agents. Update it whenever models, CLI flags, env vars, or features change.
 - **Keep `website/` docs in sync** — Update the VitePress docs site when models, CLI flags, env vars, API endpoints, or deployment options change.
 - **Preserve centered gallery thumbnails in the TUI** — `crates/mold-tui/src/ui/gallery.rs` must keep using the fixed-protocol thumbnail path for the gallery grid. Do not switch grid thumbnails back to pure `StatefulImage` rendering for Kitty/Sixel/iTerm2 terminals; that reintroduces top-left-padded thumbnails instead of properly centered, aspect-correct ones. Keep the gallery thumbnail regression tests passing when touching this code.

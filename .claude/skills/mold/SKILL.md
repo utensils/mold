@@ -237,6 +237,43 @@ cat photo.png | mold run "style" --image - | viu - # Full pipeline
 
 Force stdout in interactive mode: `mold run "a cat" --output -`
 
+## Upscaling
+
+Upscale images to 2x or 4x resolution using Real-ESRGAN super-resolution models.
+
+```bash
+# Upscale with default model (real-esrgan-x4plus:fp16, auto-downloads ~32MB)
+mold upscale photo.png
+
+# Choose a specific model
+mold upscale photo.png -m real-esrgan-x4plus-anime:fp16
+
+# Custom output path
+mold upscale photo.png -o photo_4x.png
+
+# Display upscaled image inline
+mold upscale photo.png --preview
+
+# Pipe: generate then upscale
+mold run "a cat" | mold upscale -
+
+# Force local (skip server)
+mold upscale photo.png --local
+
+# Smaller tile size for limited VRAM
+mold upscale large_photo.png --tile-size 256
+```
+
+### Available Upscaler Models
+
+| Model | Scale | Size | Best For |
+|-------|-------|------|----------|
+| `real-esrgan-x4plus:fp16` | 4x | 32 MB | General photos (default) |
+| `real-esrgan-x4plus:fp32` | 4x | 64 MB | General photos (full precision) |
+| `real-esrgan-x2plus:fp16` | 2x | 32 MB | Subtle 2x enhancement |
+| `real-esrgan-x4plus-anime:fp16` | 4x | 8.5 MB | Anime/illustration |
+| `real-esrgan-anime-v3:fp32` | 4x | 2.4 MB | Fast anime/video |
+
 ## Model Management
 
 ```bash

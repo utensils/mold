@@ -623,10 +623,12 @@ impl Config {
                 };
             }
         }
-        // 5. Single downloaded model (exclude utility models like qwen3-expand)
+        // 5. Single downloaded model (exclude utility and upscaler models)
         let downloaded: Vec<String> = crate::manifest::known_manifests()
             .iter()
-            .filter(|m| !m.is_utility() && self.manifest_model_is_downloaded(&m.name))
+            .filter(|m| {
+                !m.is_utility() && !m.is_upscaler() && self.manifest_model_is_downloaded(&m.name)
+            })
             .map(|m| m.name.clone())
             .collect();
         if downloaded.len() == 1 {

@@ -57,7 +57,10 @@ Features not yet supported: img2img, inpainting, ControlNet.
 **Wuerstchen v2 FP16** — 30 steps, seed 42:
 
 ```bash
-mold run wuerstchen-v2:fp16 "A lighthouse on a rocky coast during a dramatic sunset, oil painting style, vibrant orange and purple sky" --seed 42
+mold run wuerstchen-v2:fp16 \
+  "A lighthouse on a rocky coast during a dramatic sunset, \
+  oil painting style, vibrant orange and purple sky" \
+  --seed 42
 ```
 
 ![Lighthouse — Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)

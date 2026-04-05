@@ -167,6 +167,7 @@ JPEG).
 | Arrow keys | Navigate the grid                |
 | Enter      | Open detail view                 |
 | e          | Load into Generate (edit)        |
+| u          | Upscale with AI model            |
 | d          | Delete image (with confirmation) |
 | o          | Open in system viewer            |
 | Esc        | Back to Generate                 |
@@ -179,6 +180,7 @@ Press **Enter** on a grid thumbnail to see the full image with all metadata.
 | --- | ------------------------- |
 | e   | Load into Generate (edit) |
 | r   | Regenerate immediately    |
+| u   | Upscale with AI model     |
 | d   | Delete image              |
 | o   | Open in system viewer     |
 | j/k | Previous / next image     |

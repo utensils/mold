@@ -1026,6 +1026,34 @@ pub async fn pull_and_configure(
         return Ok((config, None));
     }
 
+    // Upscaler models have a single weights file (no VAE, no encoders).
+    // Download files and create a minimal config entry with the weights path.
+    if manifest.is_upscaler() {
+        pull_model_files_only(manifest, opts).await?;
+
+        // Resolve the weights path from the manifest storage path
+        let mdir = models_dir();
+        let weights_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == crate::manifest::ModelComponent::Upscaler)
+            .ok_or(DownloadError::MissingComponent)?;
+        let weights_path = mdir.join(crate::manifest::storage_path(manifest, weights_file));
+
+        let mut config = Config::load_or_default();
+        let model_config = crate::config::ModelConfig {
+            transformer: Some(weights_path.to_string_lossy().to_string()),
+            family: Some("upscaler".to_string()),
+            ..Default::default()
+        };
+        config.upsert_model(manifest.name.clone(), model_config);
+        config
+            .save()
+            .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
+
+        return Ok((config, None));
+    }
+
     let paths = pull_model(manifest, opts).await?;
 
     let mut config = Config::load_or_default();
@@ -1064,6 +1092,32 @@ pub async fn pull_and_configure_with_callback(
     if manifest.is_utility() {
         pull_model_files_only_with_callback(manifest, callback, opts).await?;
         let config = Config::load_or_default();
+        return Ok((config, None));
+    }
+
+    // Upscaler models: download files, create minimal config with weights path.
+    if manifest.is_upscaler() {
+        pull_model_files_only_with_callback(manifest, callback, opts).await?;
+
+        let mdir = models_dir();
+        let weights_file = manifest
+            .files
+            .iter()
+            .find(|f| f.component == crate::manifest::ModelComponent::Upscaler)
+            .ok_or(DownloadError::MissingComponent)?;
+        let weights_path = mdir.join(crate::manifest::storage_path(manifest, weights_file));
+
+        let mut config = Config::load_or_default();
+        let model_config = crate::config::ModelConfig {
+            transformer: Some(weights_path.to_string_lossy().to_string()),
+            family: Some("upscaler".to_string()),
+            ..Default::default()
+        };
+        config.upsert_model(manifest.name.clone(), model_config);
+        config
+            .save()
+            .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
+
         return Ok((config, None));
     }
 

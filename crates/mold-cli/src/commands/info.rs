@@ -60,6 +60,7 @@ fn resolve_file_path(
         ModelComponent::TextTokenizer => mcfg.text_tokenizer.clone(),
         ModelComponent::Decoder => mcfg.decoder.clone(),
         ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+        ModelComponent::Upscaler => mcfg.transformer.clone(),
     }
 }
 
@@ -82,8 +83,10 @@ fn resolve_verify_path(
             ModelComponent::ClipTokenizer2 => paths.clip_tokenizer_2.as_ref(),
             ModelComponent::TextTokenizer => paths.text_tokenizer.as_ref(),
             ModelComponent::Decoder => paths.decoder.as_ref(),
-            // Shards and text encoder files are multi-valued; fall through to config
-            ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+            // Shards, text encoder files, and upscaler weights; fall through to config
+            ModelComponent::TransformerShard
+            | ModelComponent::TextEncoder
+            | ModelComponent::Upscaler => None,
         };
         if let Some(p) = path {
             return Some(p.to_string_lossy().to_string());
@@ -107,6 +110,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::TextEncoder => "Text Encoder",
         ModelComponent::TextTokenizer => "Text Tokenizer",
         ModelComponent::Decoder => "Decoder",
+        ModelComponent::Upscaler => "Upscaler",
     }
 }
 

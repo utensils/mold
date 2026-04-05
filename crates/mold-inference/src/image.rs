@@ -413,6 +413,7 @@ mod tests {
             lora: None,
             frames: None,
             fps: None,
+            upscale_model: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());

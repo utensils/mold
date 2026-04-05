@@ -427,6 +427,96 @@ impl MoldClient {
             .await?;
         Ok(resp)
     }
+
+    /// Upscale an image using a super-resolution model on the server.
+    pub async fn upscale(&self, req: &crate::UpscaleRequest) -> Result<crate::UpscaleResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/upscale", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<crate::UpscaleResponse>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Upscale an image via SSE streaming -- progress events are sent to `progress_tx`,
+    /// returns the final `UpscaleResponse` on success.
+    pub async fn upscale_stream(
+        &self,
+        req: &crate::UpscaleRequest,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
+    ) -> Result<Option<crate::UpscaleResponse>> {
+        let mut resp = self
+            .client
+            .post(format!("{}/api/upscale/stream", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                return Ok(None); // server doesn't support SSE upscale
+            }
+            return Err(MoldError::ModelNotFound(body).into());
+        }
+
+        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+        }
+
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server error {status}: {body}");
+        }
+
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (event_type, data) = parse_sse_event(&event_text);
+                match event_type.as_str() {
+                    "progress" => {
+                        if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
+                            let _ = progress_tx.send(p);
+                        }
+                    }
+                    "complete" => {
+                        let complete: crate::SseUpscaleCompleteEvent = serde_json::from_str(&data)?;
+                        let image_data =
+                            base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
+                        return Ok(Some(crate::UpscaleResponse {
+                            image: crate::ImageData {
+                                data: image_data,
+                                format: complete.format,
+                                width: complete.original_width * complete.scale_factor,
+                                height: complete.original_height * complete.scale_factor,
+                                index: 0,
+                            },
+                            upscale_time_ms: complete.upscale_time_ms,
+                            model: complete.model,
+                            scale_factor: complete.scale_factor,
+                            original_width: complete.original_width,
+                            original_height: complete.original_height,
+                        }));
+                    }
+                    "error" => {
+                        let error: crate::SseErrorEvent = serde_json::from_str(&data)?;
+                        anyhow::bail!("server error: {}", error.message);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        anyhow::bail!("SSE stream ended without complete event")
+    }
 }
 
 fn next_sse_event(buffer: &mut String) -> Option<String> {

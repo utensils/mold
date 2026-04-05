@@ -174,9 +174,14 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
     }
 
     match (method.as_str(), path) {
-        ("POST", "/api/generate" | "/api/generate/stream" | "/api/expand") => {
-            Some(RouteTier::Generation)
-        }
+        (
+            "POST",
+            "/api/generate"
+            | "/api/generate/stream"
+            | "/api/expand"
+            | "/api/upscale"
+            | "/api/upscale/stream",
+        ) => Some(RouteTier::Generation),
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
         ("DELETE", "/api/models/unload") => Some(RouteTier::Generation),
         ("DELETE", _) if path.starts_with("/api/gallery/") => Some(RouteTier::Generation),
@@ -316,6 +321,14 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/models/unload", &Method::DELETE),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/upscale", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/upscale/stream", &Method::POST),
             Some(RouteTier::Generation)
         );
     }

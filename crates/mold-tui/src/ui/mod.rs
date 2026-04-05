@@ -9,7 +9,7 @@ pub mod settings;
 pub mod theme;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Padding, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Gauge, Padding, Paragraph, Tabs};
 
 use crate::action::View;
 use crate::app::App;
@@ -41,7 +41,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // ── Content ─────────────────────────────────────────────────
     match app.active_view {
         View::Generate => generate::render(frame, app, layout[1]),
-        View::Gallery => gallery::render(frame, app, layout[1]),
+        View::Gallery => {
+            gallery::render(frame, app, layout[1]);
+            // Upscale progress bar overlay at bottom of gallery area
+            if app.upscale_in_progress {
+                render_upscale_progress(frame, app, layout[1]);
+            }
+        }
         View::Models => models::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
     }
@@ -97,8 +103,71 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(tabs, area);
 }
 
+/// Render an upscale progress bar at the bottom of the gallery area.
+fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
+    let theme = &app.theme;
+
+    // 3-row overlay at the bottom of the gallery area
+    let bar_height = 3u16;
+    if gallery_area.height < bar_height + 2 {
+        return;
+    }
+    let area = Rect {
+        x: gallery_area.x,
+        y: gallery_area.y + gallery_area.height - bar_height,
+        width: gallery_area.width,
+        height: bar_height,
+    };
+
+    // Clear area first to prevent image protocol artifacts
+    frame.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_focused())
+        .title(" Upscaling ")
+        .title_style(theme.title_focused())
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let (tile, total) = app.upscale_tile_progress.unwrap_or((0, 0));
+    let (pct, label) = if total > 0 {
+        let p = tile as f64 / total as f64;
+        (p, format!("Upscaling tile {tile}/{total}"))
+    } else if app.server_url.is_some() {
+        (0.0, "Processing on server...".to_string())
+    } else {
+        (0.0, "Loading upscaler model...".to_string())
+    };
+
+    let gauge = Gauge::default()
+        .ratio(pct.min(1.0))
+        .label(label)
+        .gauge_style(theme.progress_filled())
+        .style(theme.progress_empty());
+
+    frame.render_widget(gauge, inner);
+}
+
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
+
+    // Pre-compute upscale status text so its lifetime covers the shortcut vec.
+    let upscale_status = if app.upscale_in_progress {
+        if let Some((tile, total)) = app.upscale_tile_progress {
+            format!("Upscaling tile {tile}/{total}...")
+        } else {
+            "Upscaling...".to_string()
+        }
+    } else {
+        String::new()
+    };
 
     let shortcuts = match app.active_view {
         View::Generate => {
@@ -139,10 +208,13 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Gallery => {
-            if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
+            if app.upscale_in_progress {
+                vec![("Esc", "Cancel"), ("", upscale_status.as_str())]
+            } else if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
                 vec![
                     ("e", "Edit"),
                     ("r", "Regen"),
+                    ("u", "Upscale"),
                     ("d", "Delete"),
                     ("o/Enter", "Open"),
                     ("j/k", "Prev/Next"),
@@ -153,6 +225,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("hjkl", "Navigate"),
                     ("Enter", "Details"),
                     ("e", "Edit"),
+                    ("u", "Upscale"),
                     ("d", "Delete"),
                     ("Esc", "Back"),
                     ("?", "Help"),

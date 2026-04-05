@@ -64,7 +64,10 @@ multiples of 16.
 **FLUX Schnell Q8** — 4 steps, seed 42:
 
 ```bash
-mold run flux-schnell:q8 "A majestic snow leopard perched on a Himalayan cliff at golden hour, cinematic lighting, photorealistic" --seed 42
+mold run flux-schnell:q8 \
+  "A majestic snow leopard perched on a Himalayan cliff \
+  at golden hour, cinematic lighting, photorealistic" \
+  --seed 42
 ```
 
 ![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
@@ -72,7 +75,10 @@ mold run flux-schnell:q8 "A majestic snow leopard perched on a Himalayan cliff a
 **FLUX Dev Q4** — 25 steps, seed 1337:
 
 ```bash
-mold run flux-dev:q4 "A cozy Japanese tea house interior with warm lantern light, steam rising from ceramic cups, watercolor style" --seed 1337
+mold run flux-dev:q4 \
+  "A cozy Japanese tea house interior with warm lantern light, \
+  steam rising from ceramic cups, watercolor style" \
+  --seed 1337
 ```
 
 ![Tea house — FLUX Dev](/gallery/flux-dev-teahouse.png)

@@ -9,6 +9,10 @@ use std::sync::LazyLock;
 /// These are excluded from default-model selection and don't produce ModelPaths.
 pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand"];
 
+/// Model families that are upscaler models (image-to-image enhancement, not generation).
+/// These are excluded from default-model selection and use a simplified config path.
+pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
     Transformer,
@@ -23,6 +27,7 @@ pub enum ModelComponent {
     TextEncoder,    // Generic text encoder shard (Qwen3 for Z-Image)
     TextTokenizer,  // Generic text encoder tokenizer
     Decoder,        // Stage B decoder weights (Wuerstchen)
+    Upscaler,       // Upscaler model weights (Real-ESRGAN, etc.)
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +91,15 @@ impl ModelManifest {
     /// components like ControlNet also lack a VAE but are NOT utility models.
     pub fn is_utility(&self) -> bool {
         UTILITY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is an upscaler model (Real-ESRGAN, etc.) not a diffusion generator.
+    ///
+    /// Upscaler models are downloaded like regular models and get config entries,
+    /// but they use a simplified config path (only `transformer` field for weights)
+    /// and are not eligible as default generation models.
+    pub fn is_upscaler(&self) -> bool {
+        UPSCALER_FAMILIES.contains(&self.family.as_str())
     }
 
     /// True if any file in this model requires HuggingFace authentication.
@@ -217,7 +231,7 @@ pub fn model_base_name(model_name: &str) -> &str {
 fn is_model_specific_component(component: ModelComponent) -> bool {
     matches!(
         component,
-        ModelComponent::Transformer | ModelComponent::TransformerShard
+        ModelComponent::Transformer | ModelComponent::TransformerShard | ModelComponent::Upscaler
     )
 }
 
@@ -1044,6 +1058,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(ltx_video_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
+    manifests.extend(upscaler_manifests());
     manifests
 }
 
@@ -3134,6 +3149,124 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+fn upscaler_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 0,
+        guidance: 0.0,
+        width: 0,
+        height: 0,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+    };
+
+    vec![
+        ModelManifest {
+            name: "real-esrgan-x4plus:fp16".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x4+ FP16 — high quality 4x upscaler (32MB)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x4plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 33_461_662,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x4plus:fp32".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x4+ FP32 — high quality 4x upscaler (64MB)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x4plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 66_857_868,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x4plus-anime:fp16".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x4+ Anime FP16 — anime-optimized 4x upscaler (8.5MB)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x4plus_anime_6B".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 8_953_054,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x4plus-anime:fp32".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x4+ Anime FP32 — anime-optimized 4x upscaler (17MB)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x4plus_anime_6B".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 17_888_804,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-anime-v3:fp32".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN Anime Video v3 FP32 — fast anime 4x upscaler (2.4MB)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "wkrettek/real-esrgan-models".to_string(),
+                hf_filename: "realesr_animevideov3.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 2_489_904,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x2plus:fp16".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x2+ FP16 — high quality 2x upscaler (32MB)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x2plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.fp16.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 33_472_030,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+        },
+        ModelManifest {
+            name: "real-esrgan-x2plus:fp32".to_string(),
+            family: "upscaler".to_string(),
+            description: "Real-ESRGAN x2+ FP32 — high quality 2x upscaler (64MB)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "hlky/RealESRGAN_x2plus".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Upscaler,
+                size_bytes: 66_878_604,
+                gated: false,
+                sha256: None,
+            }],
+            defaults,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3531,16 +3664,17 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand = 63
-        assert_eq!(known_manifests().len(), 63);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 70
+        assert_eq!(known_manifests().len(), 70);
     }
 
     #[test]
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All diffusion models need VAE (except ControlNet and utility models like qwen3-expand)
-            if !manifest.is_utility() && manifest.family != "controlnet" {
+            // All diffusion models need VAE (except ControlNet, utility models, and upscalers)
+            if !manifest.is_utility() && !manifest.is_upscaler() && manifest.family != "controlnet"
+            {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",
@@ -3748,6 +3882,14 @@ mod tests {
                     assert!(
                         components.contains(&ModelComponent::Transformer),
                         "{} (controlnet) missing Transformer",
+                        manifest.name
+                    );
+                }
+                "upscaler" => {
+                    // Upscaler only needs the upscaler weights file
+                    assert!(
+                        components.contains(&ModelComponent::Upscaler),
+                        "{} (upscaler) missing Upscaler",
                         manifest.name
                     );
                 }
@@ -4134,8 +4276,8 @@ mod tests {
     fn total_size_includes_shared_components() {
         // Models with shared files must have total > transformer-only size
         for manifest in known_manifests() {
-            if manifest.family == "controlnet" {
-                continue; // ControlNet is a single file
+            if manifest.family == "controlnet" || manifest.is_upscaler() {
+                continue; // ControlNet and upscalers are single-file models
             }
             let transformer_bytes: u64 = manifest
                 .files
@@ -4491,6 +4633,92 @@ mod tests {
             utility_count, 2,
             "expected exactly 2 utility models, got {utility_count}"
         );
+    }
+
+    // --- is_upscaler family-based identification ---
+
+    #[test]
+    fn upscaler_models_are_upscaler() {
+        for manifest in known_manifests() {
+            if manifest.family == "upscaler" {
+                assert!(
+                    manifest.is_upscaler(),
+                    "{} should be upscaler",
+                    manifest.name
+                );
+                assert!(
+                    !manifest.is_utility(),
+                    "{} should NOT be utility",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upscaler_manifests_have_upscaler_component() {
+        for manifest in known_manifests() {
+            if manifest.is_upscaler() {
+                assert!(
+                    manifest
+                        .files
+                        .iter()
+                        .any(|f| f.component == ModelComponent::Upscaler),
+                    "{} missing Upscaler component",
+                    manifest.name
+                );
+                // Upscalers should have exactly one file
+                assert_eq!(
+                    manifest.files.len(),
+                    1,
+                    "{} should have exactly 1 file",
+                    manifest.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_upscaler_models_identified_by_is_upscaler() {
+        let count = known_manifests().iter().filter(|m| m.is_upscaler()).count();
+        assert_eq!(count, 7, "expected 7 upscaler models, got {count}");
+    }
+
+    #[test]
+    fn upscaler_storage_path_is_model_specific() {
+        let manifest = find_manifest("real-esrgan-x4plus:fp16").unwrap();
+        let file = &manifest.files[0];
+        let path = storage_path(manifest, file);
+        // Upscaler component is model-specific, stored under model name dir
+        assert!(
+            path.starts_with("real-esrgan-x4plus-fp16"),
+            "upscaler should be under model-specific dir, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn diffusion_models_are_not_upscaler() {
+        for manifest in known_manifests() {
+            if [
+                "flux",
+                "sd15",
+                "sdxl",
+                "sd3",
+                "z-image",
+                "flux2",
+                "qwen-image",
+                "wuerstchen",
+            ]
+            .contains(&manifest.family.as_str())
+            {
+                assert!(
+                    !manifest.is_upscaler(),
+                    "{} should NOT be upscaler",
+                    manifest.name
+                );
+            }
+        }
     }
 
     #[test]
