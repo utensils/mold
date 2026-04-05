@@ -21,7 +21,7 @@ Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 | `z-image-turbo:q8` | 9             | ~10-20s       | Strong quality/speed trade-off      |
 | `sdxl-turbo:fp16`  | 4             | ~3-8s         | Very fast when you want 1024 output |
 | `sd15:fp16`        | 25            | ~5-15s        | Lightest full-featured family       |
-| `ltx-video:bf16`   | 40            | ~2-5min       | Video: 25 frames at 768×512        |
+| `ltx-video:bf16`   | 40            | ~2-5min       | Video: 25 frames at 768×512         |
 
 ## What Slows Things Down
 

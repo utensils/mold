@@ -57,10 +57,10 @@ features today?
 
 ## Video Generation
 
-| Family        | txt2vid | img2vid |
-| ------------- | ------- | ------- |
-| LTX Video     | Yes     | Not yet |
-| All others    | No      | No      |
+| Family     | txt2vid | img2vid |
+| ---------- | ------- | ------- |
+| LTX Video  | Yes     | Not yet |
+| All others | No      | No      |
 
 Video output is encoded as animated GIF. Frame count must be 8n+1 (9, 17, 25,
 33, ...). Dimensions must be multiples of 32.

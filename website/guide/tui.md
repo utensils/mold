@@ -71,12 +71,12 @@ file = true
 
 The TUI has four main views, shown as tabs at the top of the screen:
 
-| View     | Purpose                                         |
-| -------- | ----------------------------------------------- |
+| View     | Purpose                                               |
+| -------- | ----------------------------------------------------- |
 | Generate | Write prompts, tune parameters, generate images/video |
 | Gallery  | Browse generated images and videos with preview       |
-| Models   | View installed and available models             |
-| Settings | View and edit all config.toml settings          |
+| Models   | View installed and available models                   |
+| Settings | View and edit all config.toml settings                |
 
 Switch views with **Esc** then **1**/**2**/**3**/**4**, arrow keys, or click the
 tabs. **Alt+1**/**Alt+2**/**Alt+3**/**Alt+4** works from anywhere.

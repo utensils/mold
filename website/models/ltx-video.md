@@ -16,9 +16,9 @@ and a 3D causal video VAE. Generates short video clips from text prompts.
 
 ## Variants
 
-| Model                   | Steps | Size    | Notes                                    |
-| ----------------------- | ----- | ------- | ---------------------------------------- |
-| `ltx-video-0.9.5:bf16`  | 40    | ~6.3 GB | v0.9.5 transformer + 1024-ch VAE (sharp) |
+| Model                  | Steps | Size    | Notes                                    |
+| ---------------------- | ----- | ------- | ---------------------------------------- |
+| `ltx-video-0.9.5:bf16` | 40    | ~6.3 GB | v0.9.5 transformer + 1024-ch VAE (sharp) |
 
 GGUF quantized transformer variants (Q3-Q8) exist on HuggingFace via
 [city96/LTX-Video-0.9.5-gguf](https://huggingface.co/city96/LTX-Video-0.9.5-gguf)
@@ -35,12 +35,12 @@ but are not yet supported.
 
 ## Output Formats
 
-| Format | Flag | Quality | Metadata | Notes |
-| ------ | ---- | ------- | -------- | ----- |
-| APNG | `--format apng` (default) | Lossless | Yes (tEXt chunks) | Opens as `.png` everywhere |
-| GIF | `--format gif` | 256 colors | No | Pipe-friendly |
-| WebP | `--format webp` | Lossy | No | Requires `webp` feature |
-| MP4 | `--format mp4` | H.264 | No | Requires `mp4` feature |
+| Format | Flag                      | Quality    | Metadata          | Notes                      |
+| ------ | ------------------------- | ---------- | ----------------- | -------------------------- |
+| APNG   | `--format apng` (default) | Lossless   | Yes (tEXt chunks) | Opens as `.png` everywhere |
+| GIF    | `--format gif`            | 256 colors | No                | Pipe-friendly              |
+| WebP   | `--format webp`           | Lossy      | No                | Requires `webp` feature    |
+| MP4    | `--format mp4`            | H.264      | No                | Requires `mp4` feature     |
 
 ## Recommended Dimensions
 
