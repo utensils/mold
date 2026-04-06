@@ -153,7 +153,7 @@ pub fn record_queue_submit() {
 /// Record that a model was loaded, with its duration.
 pub fn record_model_load(model: &str, duration_secs: f64) {
     counter!(MODEL_LOADS_TOTAL, "name" => model.to_string()).increment(1);
-    histogram!(MODEL_LOAD_DURATION).record(duration_secs);
+    histogram!(MODEL_LOAD_DURATION, "name" => model.to_string()).record(duration_secs);
 }
 
 /// Set the `mold_model_loaded` gauge for the given model to 1, and clear

@@ -118,8 +118,8 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_records_queue_submit() {
-        // Use the recording helpers directly (no need for a full app).
-        // The recorder is installed by the first test in this module.
+        // Ensure the recorder is installed regardless of test execution order.
+        metrics::install_recorder_for_test();
         metrics::record_queue_submit();
         metrics::record_queue_depth(3);
         metrics::record_generation("test-model", 1.5);
