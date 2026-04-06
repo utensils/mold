@@ -7,6 +7,12 @@ pub const GIT_SHA: &str = env!("MOLD_GIT_SHA");
 /// Date of the git commit (YYYY-MM-DD), or `"unknown"`.
 pub const BUILD_DATE: &str = env!("MOLD_BUILD_DATE");
 
+/// Compile-time version string: `"0.2.0 (abc1234 2026-03-25)"`.
+///
+/// Equivalent to [`version_string()`] but as a `&'static str` for use in
+/// clap's `#[command(version = ...)]` attribute.
+pub const FULL_VERSION: &str = env!("MOLD_FULL_VERSION");
+
 /// Formatted version string: `"0.2.0 (abc1234 2026-03-25)"`.
 ///
 /// Falls back to just the version if SHA is unknown.

@@ -36,6 +36,16 @@ fn main() {
     println!("cargo:rustc-env=MOLD_GIT_SHA={sha}");
     println!("cargo:rustc-env=MOLD_BUILD_DATE={date}");
 
+    // Build a full version string as a compile-time constant for clap's
+    // #[command(version = ...)] which requires &'static str.
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let full_version = if sha == "unknown" {
+        version
+    } else {
+        format!("{version} ({sha} {date})")
+    };
+    println!("cargo:rustc-env=MOLD_FULL_VERSION={full_version}");
+
     // Rerun when HEAD changes (new commit, branch switch, etc.)
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");

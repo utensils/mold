@@ -18,10 +18,16 @@ use crate::theme;
 use crate::ui::format_bytes;
 use crate::AlreadyReported;
 
-/// Provide completions for installed (configured) model names only.
+/// Provide completions for installed model names (config + manifest-backed).
 pub fn complete_installed_model_name() -> Vec<CompletionCandidate> {
     let config = Config::load_or_default();
-    config.models.keys().map(CompletionCandidate::new).collect()
+    let mut names: HashSet<String> = config.models.keys().cloned().collect();
+    for manifest in mold_core::manifest::known_manifests() {
+        if config.manifest_model_is_downloaded(&manifest.name) {
+            names.insert(manifest.name.clone());
+        }
+    }
+    names.into_iter().map(CompletionCandidate::new).collect()
 }
 
 /// Collect hf-hub cache blob paths for a model's files.
@@ -105,8 +111,10 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
     for model_arg in models {
         let canonical = resolve_model_name(model_arg);
 
-        // Check if the model is installed
-        if !config.models.contains_key(&canonical) {
+        // Check if the model is installed (config entry or manifest-backed download)
+        let in_config = config.models.contains_key(&canonical);
+        let manifest_downloaded = config.manifest_model_is_downloaded(&canonical);
+        if !in_config && !manifest_downloaded {
             eprintln!(
                 "{} {} is not installed",
                 theme::prefix_error(),
@@ -119,16 +127,12 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         // Build reference counts across all installed models
         let ref_counts = build_ref_counts(&config);
 
-        // Defensive: contains_key above makes this unreachable today, but
-        // guards against future refactors that might modify config earlier.
-        let Some(model_config) = config.models.get(&canonical) else {
-            eprintln!(
-                "{} {} is not installed",
-                theme::prefix_error(),
-                canonical.bold()
-            );
-            any_error = true;
-            continue;
+        // Get the model config — either from config.models or resolved from
+        // the manifest registry for manifest-backed models without a config entry.
+        let model_config = if let Some(cfg) = config.models.get(&canonical) {
+            cfg.clone()
+        } else {
+            config.resolved_model_config(&canonical)
         };
         let all_paths = model_config.all_file_paths();
 
@@ -255,11 +259,9 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
         }
 
         // Clean up empty model-specific directories left behind.
-        if let Some(model_cfg) = config.models.get(&canonical) {
-            if let Some(ref t) = model_cfg.transformer {
-                if let Some(parent) = std::path::Path::new(t).parent() {
-                    let _ = std::fs::remove_dir(parent); // only succeeds if empty
-                }
+        if let Some(ref t) = model_config.transformer {
+            if let Some(parent) = std::path::Path::new(t).parent() {
+                let _ = std::fs::remove_dir(parent); // only succeeds if empty
             }
         }
 
@@ -735,6 +737,87 @@ mod tests {
         assert!(
             !snapshot_path.exists(),
             "snapshot symlink should be removed alongside the blob"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- Regression tests for issue #190 ---
+
+    #[test]
+    fn complete_includes_manifest_backed_installed_models() {
+        // Regression: complete_installed_model_name() previously only iterated
+        // config.models.keys(), missing manifest-backed downloaded models.
+        // After the fix, it should also include manifest-backed models detected
+        // via manifest_model_is_downloaded().
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("complete-manifest");
+
+        // Populate manifest files for flux-schnell:q8 on disk
+        let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
+        for file in &manifest.files {
+            let path = tmp.join(mold_core::manifest::storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"test").unwrap();
+        }
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        let candidates = complete_installed_model_name();
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.get_value().to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            names.contains(&"flux-schnell:q8".to_string()),
+            "manifest-backed model should appear in completions, got: {names:?}"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rm_recognises_manifest_backed_model_as_installed() {
+        // Regression: `mold rm` only checked config.models.contains_key(),
+        // so manifest-backed models that were pulled but not in config
+        // were reported as "not installed".
+        let tmp = make_tmp_dir("rm-manifest");
+        let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
+        for file in &manifest.files {
+            let path = tmp.join(mold_core::manifest::storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"test").unwrap();
+        }
+
+        let config = Config {
+            models_dir: tmp.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+
+        // The model is not in config.models — only discoverable via manifest
+        assert!(!config.models.contains_key("flux-schnell:q8"));
+        assert!(
+            config.manifest_model_is_downloaded("flux-schnell:q8"),
+            "manifest-backed model should be detected as downloaded"
+        );
+
+        // Verify resolved_model_config returns usable paths
+        let resolved = config.resolved_model_config("flux-schnell:q8");
+        assert!(
+            resolved.transformer.is_some(),
+            "resolved config should have transformer path"
+        );
+        let paths = resolved.all_file_paths();
+        assert!(
+            !paths.is_empty(),
+            "resolved config should produce file paths for deletion"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

@@ -52,7 +52,7 @@ Run 'mold <command> --help' for more information on a command.
 
 Report bugs: https://github.com/utensils/mold/issues"
 )]
-#[command(version, propagate_version = true)]
+#[command(version = mold_core::build_info::FULL_VERSION, propagate_version = true)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1565,5 +1565,27 @@ mod tests {
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    // --- Regression test for issue #190: --version includes git SHA ---
+
+    #[test]
+    fn version_flag_includes_git_sha() {
+        // Regression: `mold --version` used bare `#[command(version)]` which only
+        // printed CARGO_PKG_VERSION without the git SHA. Now it uses
+        // `mold_core::build_info::FULL_VERSION` to match `mold version`.
+        let cmd = Cli::command();
+        let version = cmd.get_version().expect("version should be set");
+        assert_eq!(
+            version,
+            mold_core::build_info::FULL_VERSION,
+            "--version should match FULL_VERSION"
+        );
+        // Verify it matches the runtime version_string() too
+        assert_eq!(
+            version,
+            mold_core::build_info::version_string(),
+            "--version should match `mold version` output"
+        );
     }
 }
