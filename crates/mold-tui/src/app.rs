@@ -2476,7 +2476,7 @@ impl App {
                 p.guidance = (p.guidance + delta as f64 * 0.5).clamp(0.0, 30.0);
             }
             ParamField::Batch => {
-                p.batch = (p.batch as i32 + delta).clamp(1, 16) as u32;
+                p.batch = (p.batch as i32 + delta).max(1) as u32;
             }
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
@@ -6127,6 +6127,45 @@ mod tests {
         gen.batch_remaining = gen.params.batch;
         assert_eq!(gen.batch_remaining, 4);
         assert!(gen.generating);
+    }
+
+    // ── Regression: batch size unlimited in TUI (#194) ─────────────────
+
+    #[tokio::test]
+    async fn batch_increment_no_upper_cap() {
+        let mut app = make_settings_test_app();
+        // Switch to Generate view with Parameters focus
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Parameters;
+        // Point param_index at the Batch field
+        let batch_idx = app
+            .generate
+            .visible_fields
+            .iter()
+            .position(|f| *f == ParamField::Batch)
+            .expect("Batch field should be in visible_fields");
+        app.generate.param_index = batch_idx;
+
+        // Set batch to 16 and increment — should exceed old cap of 16
+        app.generate.params.batch = 16;
+        app.increment_param(1);
+        assert_eq!(
+            app.generate.params.batch, 17,
+            "batch should exceed old cap of 16"
+        );
+
+        // Set to a large value and increment further
+        app.generate.params.batch = 100;
+        app.increment_param(1);
+        assert_eq!(
+            app.generate.params.batch, 101,
+            "batch should have no upper bound"
+        );
+
+        // Minimum should still be 1
+        app.generate.params.batch = 1;
+        app.increment_param(-1);
+        assert_eq!(app.generate.params.batch, 1, "batch should not go below 1");
     }
 
     #[test]
