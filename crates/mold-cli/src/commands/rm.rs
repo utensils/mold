@@ -271,13 +271,26 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
 
         // Handle default_model update
         if config.default_model == canonical {
+            // Check config entries first, then manifest-backed installed models.
             let new_default = config
                 .models
                 .keys()
                 .min()
                 .cloned()
+                .or_else(|| {
+                    mold_core::manifest::known_manifests()
+                        .iter()
+                        .filter(|m| !m.is_utility() && !m.is_upscaler())
+                        .filter(|m| m.name != canonical)
+                        .find(|m| config.manifest_model_is_downloaded(&m.name))
+                        .map(|m| m.name.clone())
+                })
                 .unwrap_or_else(|| "flux2-klein".to_string());
-            if config.models.is_empty() {
+            let has_remaining = config.models.keys().any(|_| true)
+                || mold_core::manifest::known_manifests()
+                    .iter()
+                    .any(|m| m.name != canonical && config.manifest_model_is_downloaded(&m.name));
+            if !has_remaining {
                 eprintln!(
                     "{} default model reset to {}",
                     theme::prefix_note(),
@@ -820,6 +833,50 @@ mod tests {
             "resolved config should produce file paths for deletion"
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ref_counts_include_manifest_backed_models() {
+        // Regression: build_ref_counts() only counted config.models entries,
+        // so shared components of manifest-backed models were treated as unique
+        // and would be deleted when removing a sibling model.
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("ref-counts-manifest");
+
+        // Populate files for two FLUX models that share VAE/T5/CLIP
+        for model in &["flux-schnell:q8", "flux-dev:q8"] {
+            let manifest = mold_core::manifest::find_manifest(model).unwrap();
+            for file in &manifest.files {
+                let path = tmp.join(mold_core::manifest::storage_path(manifest, file));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(&path, b"test").unwrap();
+            }
+        }
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        let config = Config::default();
+        // Neither model has a config entry
+        assert!(!config.models.contains_key("flux-schnell:q8"));
+        assert!(!config.models.contains_key("flux-dev:q8"));
+
+        let refs = build_ref_counts(&config);
+
+        // Shared VAE should be referenced by both models
+        let schnell_cfg = config.resolved_model_config("flux-schnell:q8");
+        if let Some(vae_path) = &schnell_cfg.vae {
+            let vae_refs = refs.get(vae_path).expect("shared VAE should have refs");
+            assert!(
+                vae_refs.len() >= 2,
+                "shared VAE should be referenced by at least 2 models, got: {vae_refs:?}"
+            );
+        }
+
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

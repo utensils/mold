@@ -26,6 +26,19 @@ pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
             refs.entry(path).or_default().push(model_name.clone());
         }
     }
+    // Include manifest-backed downloaded models that have no config entry.
+    // Without this, shared components (VAE, encoders) referenced by another
+    // manifest-only install would be deleted when removing a model.
+    for manifest in known_manifests() {
+        if config.models.contains_key(&manifest.name) {
+            continue; // already counted above
+        }
+        if config.manifest_model_is_downloaded(&manifest.name) {
+            for path in config.model_config(&manifest.name).all_file_paths() {
+                refs.entry(path).or_default().push(manifest.name.clone());
+            }
+        }
+    }
     refs
 }
 
