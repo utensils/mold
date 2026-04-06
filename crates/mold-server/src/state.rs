@@ -76,7 +76,10 @@ impl QueueHandle {
             return Err("generation queue shut down".to_string());
         }
         #[cfg(feature = "metrics")]
-        crate::metrics::record_queue_submit();
+        {
+            crate::metrics::record_queue_submit();
+            crate::metrics::record_queue_depth(self.pending_count.load(Ordering::SeqCst));
+        }
         Ok(position)
     }
 

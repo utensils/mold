@@ -185,6 +185,8 @@ pub(crate) async fn ensure_model_ready(
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
+                #[cfg(feature = "metrics")]
+                crate::metrics::clear_model_loaded(&active_name);
                 tracing::info!(
                     from = %active_name,
                     to = %model_name,
@@ -359,6 +361,8 @@ async fn create_and_load_engine(
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
         if let Some(ref name) = result {
+            #[cfg(feature = "metrics")]
+            crate::metrics::clear_model_loaded(name);
             tracing::info!(
                 from = %name,
                 to = %model_name,
