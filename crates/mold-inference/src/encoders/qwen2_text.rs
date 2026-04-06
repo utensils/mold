@@ -12,12 +12,6 @@ use candle_nn::VarBuilder;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Minimum text sequence length to prevent degenerate short sequences.
-/// ComfyUI uses pad_to_max_length=False but downstream attention still needs
-/// enough text tokens for stable conditioning. When output is shorter than this,
-/// we pad with the endoftext token to avoid degenerate attention patterns.
-const MIN_TEXT_TOKENS: usize = 77;
-
 const SYSTEM_PROMPT: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
 
 fn format_qwen_image_prompt(prompt: &str) -> String {
@@ -527,23 +521,9 @@ impl Qwen2TextEncoder {
         // Strip template prefix, keeping only user text + trailing tokens
         let emb = emb.narrow(1, strip_idx, output_len)?;
 
-        // Pad short sequences to MIN_TEXT_TOKENS to avoid degenerate attention
-        let (emb, output_len, valid_len) = if output_len < MIN_TEXT_TOKENS {
-            let pad_len = MIN_TEXT_TOKENS - output_len;
-            let emb_pad = Tensor::zeros(
-                (1, pad_len, emb.dim(2)?),
-                emb.dtype(),
-                &self.device,
-            )?;
-            (Tensor::cat(&[&emb, &emb_pad], 1)?, MIN_TEXT_TOKENS, output_len)
-        } else {
-            (emb, output_len, output_len)
-        };
-
-        // Mask: 1 for valid tokens, 0 for padding
-        let mut mask_data = vec![1u8; valid_len];
-        mask_data.resize(output_len, 0);
-        let text_mask = Tensor::from_vec(mask_data, (1, output_len), &self.device)?;
+        // No padding — ComfyUI uses pad_to_max_length=False.
+        // All output tokens are valid (no padding).
+        let text_mask = Tensor::ones((1, output_len), DType::U8, &self.device)?;
 
         Ok((
             emb.to_device(target_device)?.to_dtype(target_dtype)?,
