@@ -12,7 +12,12 @@ use candle_nn::VarBuilder;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const TEXT_WINDOW: usize = 1024;
+/// Minimum text sequence length to prevent degenerate short sequences.
+/// ComfyUI uses pad_to_max_length=False but downstream attention still needs
+/// enough text tokens for stable conditioning. When output is shorter than this,
+/// we pad with the endoftext token to avoid degenerate attention patterns.
+const MIN_TEXT_TOKENS: usize = 77;
+
 const SYSTEM_PROMPT: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
 
 fn format_qwen_image_prompt(prompt: &str) -> String {
@@ -21,9 +26,6 @@ fn format_qwen_image_prompt(prompt: &str) -> String {
     )
 }
 
-fn qwen_image_system_prefix() -> String {
-    format!("<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n")
-}
 
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
@@ -451,40 +453,40 @@ impl Qwen2TextEncoder {
         })
     }
 
-    fn encode_ids(&self, prompt: &str) -> Result<(Vec<u32>, usize)> {
-        let prefix = qwen_image_system_prefix();
-        let formatted = format_qwen_image_prompt(prompt);
-        let prefix_ids = self
-            .tokenizer
-            .encode(prefix, false)
-            .map_err(|e| anyhow::anyhow!("Qwen2.5 prefix tokenization failed: {e}"))?
-            .get_ids()
-            .to_vec();
-        let mut input_ids = self
-            .tokenizer
-            .encode(formatted, false)
-            .map_err(|e| anyhow::anyhow!("Qwen2.5 tokenization failed: {e}"))?
-            .get_ids()
-            .to_vec();
-
-        let pad_id = *self
-            .tokenizer
-            .get_vocab(true)
-            .get("<|endoftext|>")
-            .ok_or_else(|| anyhow::anyhow!("Qwen2.5 tokenizer missing <|endoftext|>"))?;
-
-        let drop_idx = prefix_ids.len();
-        let full_window = TEXT_WINDOW + drop_idx;
-        if input_ids.len() > full_window {
-            input_ids.truncate(full_window);
+    /// Compute the template-strip index matching ComfyUI's encode_token_weights.
+    ///
+    /// ComfyUI finds the 2nd `<|im_start|>` (151644), checks if the next tokens
+    /// are "user" (872) + "\n" (198), and strips up to and including those.
+    /// This removes `<|im_start|>system\n...<|im_end|>\n<|im_start|>user\n`,
+    /// keeping only the actual user text + `<|im_end|>\n<|im_start|>assistant\n`.
+    fn template_strip_index(tokens: &[u32]) -> usize {
+        const IM_START: u32 = 151644;
+        let mut count = 0;
+        let mut strip_at = 0;
+        for (i, &tok) in tokens.iter().enumerate() {
+            if tok == IM_START {
+                count += 1;
+                if count == 2 {
+                    strip_at = i;
+                    break;
+                }
+            }
         }
-        let valid_len = input_ids.len().saturating_sub(drop_idx).min(TEXT_WINDOW);
-        input_ids.resize(full_window, pad_id);
-        Ok((input_ids, valid_len))
+        // Advance past "user\n" tokens (872 = "user", 198 = "\n")
+        if strip_at + 3 <= tokens.len() {
+            if tokens.get(strip_at + 1) == Some(&872) && tokens.get(strip_at + 2) == Some(&198) {
+                strip_at += 3;
+            }
+        }
+        strip_at
     }
 
-    /// Returns fixed-width embeddings and a matching mask after removing the
-    /// system-prefix tokens. The resulting sequence length is always 1024.
+    /// Encode a prompt into variable-length embeddings matching ComfyUI.
+    ///
+    /// Unlike the fixed-1024 window approach, this returns ONLY the meaningful
+    /// tokens (user prompt + trailing template tokens, no padding). ComfyUI uses
+    /// `pad_to_max_length=False` — the transformer receives a compact sequence
+    /// where every token carries signal, dramatically improving prompt adherence.
     pub fn encode(
         &mut self,
         prompt: &str,
@@ -495,29 +497,58 @@ impl Qwen2TextEncoder {
             .model
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Qwen2.5 model unavailable (weights dropped)"))?;
-        let (tokens, valid_len) = self.encode_ids(prompt)?;
-        let drop_idx = tokens.len() - TEXT_WINDOW;
 
-        let input_ids = Tensor::from_vec(tokens, (1, TEXT_WINDOW + drop_idx), &self.device)?;
-        let mut mask = vec![0u8; TEXT_WINDOW + drop_idx];
-        for value in &mut mask[..drop_idx + valid_len] {
-            *value = 1;
-        }
-        let attn_mask = Tensor::from_vec(mask, (1, TEXT_WINDOW + drop_idx), &self.device)?;
+        let formatted = format_qwen_image_prompt(prompt);
+        let tokens = self
+            .tokenizer
+            .encode(formatted, false)
+            .map_err(|e| anyhow::anyhow!("Qwen2.5 tokenization failed: {e}"))?
+            .get_ids()
+            .to_vec();
+
+        let strip_idx = Self::template_strip_index(&tokens);
+        let total_len = tokens.len();
+        let output_len = total_len - strip_idx;
+
+        tracing::debug!(
+            total_tokens = total_len,
+            strip_idx,
+            output_tokens = output_len,
+            "Qwen2.5 text encoding (variable-length, ComfyUI-compatible)"
+        );
+
+        // Run the full template through the encoder (system context influences
+        // the hidden states of user tokens via causal attention)
+        let input_ids = Tensor::from_vec(tokens, (1, total_len), &self.device)?;
+        let mask = vec![1u8; total_len]; // all tokens are valid, no padding
+        let attn_mask = Tensor::from_vec(mask, (1, total_len), &self.device)?;
 
         let emb = model.forward_last_hidden(&input_ids, Some(&attn_mask))?;
-        let emb = emb.narrow(1, drop_idx, TEXT_WINDOW)?;
+        // Strip template prefix, keeping only user text + trailing tokens
+        let emb = emb.narrow(1, strip_idx, output_len)?;
 
-        let mut text_mask = vec![0u8; TEXT_WINDOW];
-        for value in &mut text_mask[..valid_len] {
-            *value = 1;
-        }
-        let text_mask = Tensor::from_vec(text_mask, (1, TEXT_WINDOW), &self.device)?;
+        // Pad short sequences to MIN_TEXT_TOKENS to avoid degenerate attention
+        let (emb, output_len, valid_len) = if output_len < MIN_TEXT_TOKENS {
+            let pad_len = MIN_TEXT_TOKENS - output_len;
+            let emb_pad = Tensor::zeros(
+                (1, pad_len, emb.dim(2)?),
+                emb.dtype(),
+                &self.device,
+            )?;
+            (Tensor::cat(&[&emb, &emb_pad], 1)?, MIN_TEXT_TOKENS, output_len)
+        } else {
+            (emb, output_len, output_len)
+        };
+
+        // Mask: 1 for valid tokens, 0 for padding
+        let mut mask_data = vec![1u8; valid_len];
+        mask_data.resize(output_len, 0);
+        let text_mask = Tensor::from_vec(mask_data, (1, output_len), &self.device)?;
 
         Ok((
             emb.to_device(target_device)?.to_dtype(target_dtype)?,
             text_mask.to_device(target_device)?,
-            valid_len,
+            output_len,
         ))
     }
 

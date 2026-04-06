@@ -593,7 +593,7 @@ impl QwenImageEngine {
         };
         let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
 
-        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if both_cached
+        let (mut encoder_hidden_states, mut encoder_attention_mask, mut uncond_hs, mut uncond_mask) = if both_cached
         {
             self.base.progress.cache_hit("prompt conditioning");
             let cached = prompt_cached.unwrap();
@@ -727,9 +727,30 @@ impl QwenImageEngine {
             );
         }
 
+        // Pad cond/uncond to matching sequence lengths for CFG batching.
+        // Variable-length text encoding produces different lengths for cond vs uncond.
+        if use_cfg {
+            let cond_len = encoder_hidden_states.dim(1)?;
+            let uncond_len = uncond_hs.as_ref().unwrap().dim(1)?;
+            if cond_len != uncond_len {
+                let target = cond_len.max(uncond_len);
+                let pad_to = |hs: &Tensor, mask: &Tensor, len: usize, tgt: usize| -> Result<(Tensor, Tensor)> {
+                    if len == tgt { return Ok((hs.clone(), mask.clone())); }
+                    let pad_len = tgt - len;
+                    let hs_pad = Tensor::zeros((1, pad_len, hs.dim(2)?), hs.dtype(), hs.device())?;
+                    let mask_pad = Tensor::zeros((1, pad_len), DType::U8, mask.device())?;
+                    Ok((Tensor::cat(&[hs, &hs_pad], 1)?, Tensor::cat(&[mask, &mask_pad], 1)?))
+                };
+                let (chs, cmask) = pad_to(&encoder_hidden_states, &encoder_attention_mask, cond_len, target)?;
+                let (uhs, umask) = pad_to(uncond_hs.as_ref().unwrap(), uncond_mask.as_ref().unwrap(), uncond_len, target)?;
+                encoder_hidden_states = chs;
+                encoder_attention_mask = cmask;
+                uncond_hs = Some(uhs);
+                uncond_mask = Some(umask);
+            }
+        }
+
         // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
-        // Each forward pass streams 60 blocks CPU→GPU; batching cond+uncond avoids
-        // doing that twice per step.
         let (batched_hs, batched_mask) = if use_cfg {
             let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
             let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
@@ -983,7 +1004,7 @@ impl InferenceEngine for QwenImageEngine {
         }
 
         // 2. Encode prompt
-        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
+        let (mut encoder_hidden_states, mut encoder_attention_mask) = Self::encode_prompt_cached(
             progress,
             &self.prompt_cache,
             &mut loaded.text_encoder,
@@ -995,7 +1016,7 @@ impl InferenceEngine for QwenImageEngine {
         // Encode unconditional (negative) prompt for classifier-free guidance
         let use_cfg = req.guidance > 1.0;
         let negative = req.negative_prompt.as_deref().unwrap_or("");
-        let (uncond_hs, uncond_mask) = if use_cfg {
+        let (mut uncond_hs, mut uncond_mask) = if use_cfg {
             let (hs, mask) = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
@@ -1043,6 +1064,28 @@ impl InferenceEngine for QwenImageEngine {
                 .transformer
                 .as_ref()
                 .expect("transformer must be loaded for denoising");
+
+            // Pad cond/uncond to matching sequence lengths for CFG batching
+            if use_cfg {
+                let cond_len = encoder_hidden_states.dim(1)?;
+                let uncond_len = uncond_hs.as_ref().unwrap().dim(1)?;
+                if cond_len != uncond_len {
+                    let target = cond_len.max(uncond_len);
+                    let pad_to = |hs: &Tensor, mask: &Tensor, len: usize, tgt: usize| -> Result<(Tensor, Tensor)> {
+                        if len == tgt { return Ok((hs.clone(), mask.clone())); }
+                        let pad_len = tgt - len;
+                        let hs_pad = Tensor::zeros((1, pad_len, hs.dim(2)?), hs.dtype(), hs.device())?;
+                        let mask_pad = Tensor::zeros((1, pad_len), DType::U8, mask.device())?;
+                        Ok((Tensor::cat(&[hs, &hs_pad], 1)?, Tensor::cat(&[mask, &mask_pad], 1)?))
+                    };
+                    let (chs, cmask) = pad_to(&encoder_hidden_states, &encoder_attention_mask, cond_len, target)?;
+                    let (uhs, umask) = pad_to(uncond_hs.as_ref().unwrap(), uncond_mask.as_ref().unwrap(), uncond_len, target)?;
+                    encoder_hidden_states = chs;
+                    encoder_attention_mask = cmask;
+                    uncond_hs = Some(uhs);
+                    uncond_mask = Some(umask);
+                }
+            }
 
             // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
             let (batched_hs, batched_mask) = if use_cfg {
