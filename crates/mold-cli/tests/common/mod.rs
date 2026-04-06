@@ -78,6 +78,11 @@ impl TestEnv {
         "MOLD_CLIP_TOKENIZER_PATH",
         "MOLD_CLIP2_PATH",
         "MOLD_CLIP2_TOKENIZER_PATH",
+        "MOLD_DISCORD_COOLDOWN",
+        "MOLD_DISCORD_ALLOWED_ROLES",
+        "MOLD_DISCORD_DAILY_QUOTA",
+        "MOLD_QWEN_DEBUG",
+        "MOLD_SD3_DEBUG",
     ];
 
     /// Create a `Command` for the mold binary with isolated env vars.

@@ -12,8 +12,6 @@ mod common;
 use common::TestEnv;
 use predicates::prelude::*;
 
-extern crate filetime;
-
 // ── mold version ──────────────────────────────────────────────────────────
 
 #[test]
@@ -440,10 +438,15 @@ fn run_missing_image_file_errors() {
 }
 
 #[test]
-fn run_missing_mask_without_image_errors() {
+fn run_mask_requires_image_flag() {
     let env = TestEnv::new();
+    // Create a real mask file so the error is about --mask requiring --image,
+    // not about the file not existing.
+    let mask = env.home.join("mask.png");
+    std::fs::write(&mask, b"stub").unwrap();
     env.cmd()
-        .args(["run", "a cat", "--mask", "/nonexistent/mask.png"])
+        .args(["run", "a cat", "--mask"])
+        .arg(&mask)
         .assert()
         .failure();
 }
