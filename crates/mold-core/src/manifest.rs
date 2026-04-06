@@ -2439,6 +2439,53 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults: defaults.clone(),
             hidden: false,
         },
+        // FP8 E4M3 (ComfyUI-compatible, single-file transformer + text encoder)
+        ModelManifest {
+            name: "qwen-image:fp8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 FP8 — ComfyUI-compatible, smaller download".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
+                    hf_filename: "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 20_442_787_688,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
+                    hf_filename:
+                        "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
+                            .to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 9_379_805_224,
+                    gated: false,
+                    sha256: None,
+                },
+                // VAE (same as BF16)
+                ModelFile {
+                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
+                    hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 253_806_966,
+                    gated: false,
+                    sha256: None,
+                },
+                // Tokenizer (same as all variants)
+                ModelFile {
+                    hf_repo: "Qwen/Qwen2.5-7B".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 7_031_645,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+            hidden: false,
+        },
         // GGUF quantized variants (transformer only; shared components stay BF16)
         ModelManifest {
             name: "qwen-image:q8".to_string(),
@@ -3825,8 +3872,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 4 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 70
-        assert_eq!(known_manifests().len(), 70);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 5 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 71
+        assert_eq!(known_manifests().len(), 71);
     }
 
     #[test]

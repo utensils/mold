@@ -19,6 +19,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -45,6 +46,35 @@ const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
 const QWEN2_FP16_VRAM_THRESHOLD: u64 = 16_000_000_000;
+
+/// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
+/// Probes `x_embedder.weight` (the img_in linear) on CPU.
+fn safetensors_is_fp8(path: &Path) -> bool {
+    let Ok(tensors) = (unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path]) })
+    else {
+        return false;
+    };
+    tensors
+        .load("x_embedder.weight", &Device::Cpu)
+        .map(|t| t.dtype() == DType::F8E4M3)
+        .unwrap_or(false)
+}
+
+/// Check if text encoder safetensors contain FP8 weights.
+fn text_encoder_is_fp8(paths: &[std::path::PathBuf]) -> bool {
+    let Some(first) = paths.first() else {
+        return false;
+    };
+    let Ok(tensors) = (unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[first]) })
+    else {
+        return false;
+    };
+    // Probe the embedding layer
+    tensors
+        .load("model.embed_tokens.weight", &Device::Cpu)
+        .map(|t| t.dtype() == DType::F8E4M3)
+        .unwrap_or(false)
+}
 
 /// Loaded Qwen-Image model components, ready for inference.
 struct LoadedQwenImage {
@@ -265,21 +295,37 @@ impl QwenImageEngine {
             ))
         } else {
             let xformer_paths = self.transformer_paths();
-            let xformer_size: u64 = xformer_paths
+            let is_fp8 = xformer_paths
+                .first()
+                .map(|p| safetensors_is_fp8(p))
+                .unwrap_or(false);
+
+            // FP8 safetensors must go through F16 on CUDA (candle has a kernel naming
+            // bug that prevents direct CUDA FP8→BF16 casts). The lazy mmap VarBuilder
+            // handles the F8E4M3→F16 dtype conversion during model construction.
+            let load_dtype = if is_fp8 { DType::F16 } else { dtype };
+
+            // For offload detection, use the in-memory size (F16/BF16 = 2× FP8 on disk)
+            let disk_size: u64 = xformer_paths
                 .iter()
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
+            let mem_size = if is_fp8 { disk_size * 2 } else { disk_size };
             let free = free_vram_bytes().unwrap_or(0);
             let use_offload =
-                self.offload || crate::device::should_offload(xformer_size, free);
+                self.offload || crate::device::should_offload(mem_size, free);
+
+            if is_fp8 {
+                self.base.progress.info("Detected FP8 safetensors — loading as F16");
+            }
 
             if use_offload {
-                // Load on CPU in BF16 (not F32 — BF16 halves CPU RAM usage,
-                // and GPU computation stays in BF16 after to_device transfer)
+                // Load on CPU for block-level streaming to GPU
+                let cpu_dtype = if is_fp8 { DType::F16 } else { DType::BF16 };
                 let cpu_vb = crate::weight_loader::load_safetensors_with_progress(
                     &xformer_paths,
-                    DType::BF16,
+                    cpu_dtype,
                     &Device::Cpu,
                     "Qwen-Image transformer (offload)",
                     &self.base.progress,
@@ -295,7 +341,7 @@ impl QwenImageEngine {
             } else {
                 let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
                     &xformer_paths,
-                    dtype,
+                    load_dtype,
                     device,
                     "Qwen-Image transformer",
                     &self.base.progress,
@@ -318,6 +364,9 @@ impl QwenImageEngine {
     }
 
     /// Load text encoder from disk.
+    ///
+    /// Detects FP8 safetensors and uses F16 dtype (candle cannot do native FP8
+    /// matmul; the lazy mmap VarBuilder handles F8E4M3→F16 conversion).
     fn load_text_encoder(
         &self,
         tokenizer_path: &std::path::PathBuf,
@@ -325,11 +374,17 @@ impl QwenImageEngine {
         dtype: DType,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
         let encoder_paths: Vec<std::path::PathBuf> = self.base.paths.text_encoder_files.clone();
+        let load_dtype = if text_encoder_is_fp8(&encoder_paths) {
+            self.base.progress.info("Detected FP8 text encoder — loading as F16");
+            DType::F16
+        } else {
+            dtype
+        };
         encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
             &encoder_paths,
             tokenizer_path,
             device,
-            dtype,
+            load_dtype,
             &self.base.progress,
         )
     }
