@@ -106,9 +106,11 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 /// Render an upscale progress bar at the bottom of the gallery area.
 fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
     let theme = &app.theme;
+    let up = &app.upscale_progress;
+    let has_download = up.is_downloading() && up.download_batch_total > 0;
 
-    // 3-row overlay at the bottom of the gallery area
-    let bar_height = 3u16;
+    // Use taller overlay when showing download progress (need extra row)
+    let bar_height = if has_download { 4u16 } else { 3u16 };
     if gallery_area.height < bar_height + 2 {
         return;
     }
@@ -122,10 +124,16 @@ fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
     // Clear area first to prevent image protocol artifacts
     frame.render_widget(ratatui::widgets::Clear, area);
 
+    let title = if has_download {
+        " Downloading Upscaler "
+    } else {
+        " Upscaling "
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_focused())
-        .title(" Upscaling ")
+        .title(title)
         .title_style(theme.title_focused())
         .style(Style::default().bg(theme.bg));
 
@@ -136,23 +144,90 @@ fn render_upscale_progress(frame: &mut Frame, app: &App, gallery_area: Rect) {
         return;
     }
 
-    let (tile, total) = app.upscale_tile_progress.unwrap_or((0, 0));
-    let (pct, label) = if total > 0 {
-        let p = tile as f64 / total as f64;
-        (p, format!("Upscaling tile {tile}/{total}"))
-    } else if app.server_url.is_some() {
-        (0.0, "Processing on server...".to_string())
+    if has_download {
+        // Download progress phase — show download bar with model name, bytes, speed
+        let pct = (up.download_batch_bytes as f64 / up.download_batch_total as f64).min(1.0);
+        let transfer =
+            if let (Some(rate), Some(eta_secs)) = (up.download_rate_bps, up.download_eta_secs) {
+                format!(
+                    ", {}/s, eta {}",
+                    progress::format_bytes_binary(rate),
+                    progress::format_eta(eta_secs.ceil() as u64)
+                )
+            } else {
+                String::new()
+            };
+        let label = if up.download_total_files > 0 {
+            format!(
+                "[{}/{}] {} [{}/{} total{}]",
+                up.download_file_index + 1,
+                up.download_total_files,
+                up.download_filename,
+                progress::format_bytes(up.download_batch_bytes),
+                progress::format_bytes(up.download_batch_total),
+                transfer,
+            )
+        } else {
+            format!(
+                "{} [{}/{} total{}]",
+                up.download_filename,
+                progress::format_bytes(up.download_batch_bytes),
+                progress::format_bytes(up.download_batch_total),
+                transfer,
+            )
+        };
+
+        let gauge = Gauge::default()
+            .ratio(pct)
+            .label(label)
+            .gauge_style(Style::default().fg(theme.warning).bg(theme.progress_empty));
+
+        // Render download bar in the first row, status text in the second
+        let row = Rect { height: 1, ..inner };
+        frame.render_widget(gauge, row);
+
+        if inner.height > 1 {
+            let status_row = Rect {
+                y: inner.y + 1,
+                height: 1,
+                ..inner
+            };
+            let status = if let Some(ref stage) = up.current_stage {
+                stage.clone()
+            } else {
+                up.download_status_text().to_string()
+            };
+            let status_text = Paragraph::new(status).style(theme.dim());
+            frame.render_widget(status_text, status_row);
+        }
     } else {
-        (0.0, "Loading upscaler model...".to_string())
-    };
+        // Tile progress phase (or waiting)
+        let (tile, total) = app.upscale_tile_progress.unwrap_or((0, 0));
+        let (pct, label) = if total > 0 {
+            let p = tile as f64 / total as f64;
+            (p, format!("Upscaling tile {tile}/{total}"))
+        } else if up.current_stage.is_some() {
+            // Downloading but no batch data yet (preparing)
+            (
+                0.0,
+                up.current_stage
+                    .clone()
+                    .unwrap_or_else(|| "Preparing...".to_string()),
+            )
+        } else if app.server_url.is_some() {
+            (0.0, "Processing on server...".to_string())
+        } else {
+            (0.0, "Loading upscaler model...".to_string())
+        };
 
-    let gauge = Gauge::default()
-        .ratio(pct.min(1.0))
-        .label(label)
-        .gauge_style(theme.progress_filled())
-        .style(theme.progress_empty());
+        let gauge = Gauge::default()
+            .ratio(pct.min(1.0))
+            .label(label)
+            .gauge_style(theme.progress_filled())
+            .style(theme.progress_empty());
 
-    frame.render_widget(gauge, inner);
+        frame.render_widget(gauge, inner);
+    }
 }
 
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {

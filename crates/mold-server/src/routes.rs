@@ -475,18 +475,36 @@ async fn upscale(
         return Err(ApiError::validation(msg));
     }
 
-    let config = state.config.read().await;
     let model_name = mold_core::manifest::resolve_model_name(&req.model);
 
-    // Get model weights path from config
+    // Auto-pull upscaler model if not downloaded
+    let needs_pull = {
+        let config = state.config.read().await;
+        config
+            .models
+            .get(&model_name)
+            .and_then(|c| c.transformer.as_ref())
+            .is_none()
+    };
+    if needs_pull {
+        if mold_core::manifest::find_manifest(&model_name).is_none() {
+            return Err(ApiError::not_found(format!(
+                "unknown upscaler model '{}'. Run 'mold list' to see available models.",
+                model_name
+            )));
+        }
+        model_manager::pull_model(&state, &model_name, None).await?;
+    }
+
+    let config = state.config.read().await;
     let weights_path = config
         .models
         .get(&model_name)
         .and_then(|c| c.transformer.as_ref())
         .ok_or_else(|| {
             ApiError::not_found(format!(
-                "upscaler model '{}' not downloaded. Pull it first with: mold pull {}",
-                model_name, model_name
+                "upscaler model '{}' not configured after pull",
+                model_name
             ))
         })?;
     let weights_path = std::path::PathBuf::from(weights_path);
@@ -530,87 +548,199 @@ async fn upscale_stream(
         return Err(ApiError::validation(msg));
     }
 
-    let config = state.config.read().await;
     let model_name = mold_core::manifest::resolve_model_name(&req.model);
 
-    let weights_path = config
-        .models
-        .get(&model_name)
-        .and_then(|c| c.transformer.as_ref())
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "upscaler model '{}' not downloaded. Pull it first with: mold pull {}",
-                model_name, model_name
-            ))
-        })?;
-    let weights_path = std::path::PathBuf::from(weights_path);
-    let model_name_owned = model_name.clone();
-    drop(config);
+    // Check if model needs pulling before spawning the SSE stream
+    let needs_pull = {
+        let config = state.config.read().await;
+        config
+            .models
+            .get(&model_name)
+            .and_then(|c| c.transformer.as_ref())
+            .is_none()
+    };
+
+    // Validate the model exists in the manifest if we need to pull
+    if needs_pull && mold_core::manifest::find_manifest(&model_name).is_none() {
+        return Err(ApiError::not_found(format!(
+            "unknown upscaler model '{}'. Run 'mold list' to see available models.",
+            model_name
+        )));
+    }
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
+    let model_name_owned = model_name.clone();
+    let state_clone = state.clone();
     let upscaler_cache = state.upscaler_cache.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let mut cache = upscaler_cache.lock().unwrap();
+    tokio::spawn(async move {
+        // Auto-pull the upscaler model if not downloaded
+        if needs_pull {
+            let progress_tx = tx.clone();
+            let callback =
+                std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
+                    let sse_event = match event {
+                        mold_core::download::DownloadProgressEvent::Status { message } => {
+                            SseProgressEvent::Info { message }
+                        }
+                        mold_core::download::DownloadProgressEvent::FileStart {
+                            filename,
+                            file_index,
+                            total_files,
+                            size_bytes,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        } => SseProgressEvent::DownloadProgress {
+                            filename,
+                            file_index,
+                            total_files,
+                            bytes_downloaded: 0,
+                            bytes_total: size_bytes,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        },
+                        mold_core::download::DownloadProgressEvent::FileProgress {
+                            filename,
+                            file_index,
+                            bytes_downloaded,
+                            bytes_total,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        } => SseProgressEvent::DownloadProgress {
+                            filename,
+                            file_index,
+                            total_files: 0,
+                            bytes_downloaded,
+                            bytes_total,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        },
+                        mold_core::download::DownloadProgressEvent::FileDone {
+                            filename,
+                            file_index,
+                            total_files,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        } => SseProgressEvent::DownloadDone {
+                            filename,
+                            file_index,
+                            total_files,
+                            batch_bytes_downloaded,
+                            batch_bytes_total,
+                            batch_elapsed_ms,
+                        },
+                    };
+                    let _ = progress_tx.send(SseMessage::Progress(sse_event));
+                });
 
-        let needs_new = cache
-            .as_ref()
-            .is_none_or(|e| e.model_name() != model_name_owned);
-        if needs_new {
-            let _ = tx.send(SseMessage::Progress(
-                mold_core::SseProgressEvent::StageStart {
-                    name: "Loading upscaler model".to_string(),
-                },
-            ));
-            match mold_inference::create_upscale_engine(
-                model_name_owned,
-                weights_path,
-                mold_inference::LoadStrategy::Eager,
-            ) {
-                Ok(new_engine) => {
-                    *cache = Some(new_engine);
+            match model_manager::pull_model(&state_clone, &model_name_owned, Some(callback)).await {
+                Ok(_) => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+                        model: model_name_owned.clone(),
+                    }));
                 }
                 Err(e) => {
                     let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: format!("failed to load upscaler: {e}"),
+                        message: format!("failed to pull upscaler model: {}", e.error),
                     }));
                     return;
                 }
             }
         }
 
-        let engine = cache.as_mut().unwrap();
+        // Read weights path after potential pull
+        let weights_path = {
+            let config = state_clone.config.read().await;
+            config
+                .models
+                .get(&model_name_owned)
+                .and_then(|c| c.transformer.as_ref())
+                .map(std::path::PathBuf::from)
+        };
 
-        // Install progress callback for tile-by-tile progress
-        let tx_progress = tx.clone();
-        engine.set_on_progress(Box::new(move |event| {
-            let sse_event: mold_core::SseProgressEvent = event.into();
-            let _ = tx_progress.send(SseMessage::Progress(sse_event));
-        }));
+        let Some(weights_path) = weights_path else {
+            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
+                message: format!(
+                    "upscaler model '{}' not configured after pull",
+                    model_name_owned
+                ),
+            }));
+            return;
+        };
 
-        match engine.upscale(&req) {
-            Ok(resp) => {
-                let image_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
-                let _ = tx.send(SseMessage::UpscaleComplete(
-                    mold_core::SseUpscaleCompleteEvent {
-                        image: image_b64,
-                        format: resp.image.format,
-                        model: resp.model,
-                        scale_factor: resp.scale_factor,
-                        original_width: resp.original_width,
-                        original_height: resp.original_height,
-                        upscale_time_ms: resp.upscale_time_ms,
+        let result = tokio::task::spawn_blocking(move || {
+            let mut cache = upscaler_cache.lock().unwrap();
+
+            let needs_new = cache
+                .as_ref()
+                .is_none_or(|e| e.model_name() != model_name_owned);
+            if needs_new {
+                let _ = tx.send(SseMessage::Progress(
+                    mold_core::SseProgressEvent::StageStart {
+                        name: "Loading upscaler model".to_string(),
                     },
                 ));
+                match mold_inference::create_upscale_engine(
+                    model_name_owned,
+                    weights_path,
+                    mold_inference::LoadStrategy::Eager,
+                ) {
+                    Ok(new_engine) => {
+                        *cache = Some(new_engine);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
+                            message: format!("failed to load upscaler: {e}"),
+                        }));
+                        return;
+                    }
+                }
             }
-            Err(e) => {
-                let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                    message: format!("upscale failed: {e}"),
-                }));
-            }
-        }
 
-        engine.clear_on_progress();
+            let engine = cache.as_mut().unwrap();
+
+            // Install progress callback for tile-by-tile progress
+            let tx_progress = tx.clone();
+            engine.set_on_progress(Box::new(move |event| {
+                let sse_event: mold_core::SseProgressEvent = event.into();
+                let _ = tx_progress.send(SseMessage::Progress(sse_event));
+            }));
+
+            match engine.upscale(&req) {
+                Ok(resp) => {
+                    let image_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
+                    let _ = tx.send(SseMessage::UpscaleComplete(
+                        mold_core::SseUpscaleCompleteEvent {
+                            image: image_b64,
+                            format: resp.image.format,
+                            model: resp.model,
+                            scale_factor: resp.scale_factor,
+                            original_width: resp.original_width,
+                            original_height: resp.original_height,
+                            upscale_time_ms: resp.upscale_time_ms,
+                        },
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
+                        message: format!("upscale failed: {e}"),
+                    }));
+                }
+            }
+
+            engine.clear_on_progress();
+        })
+        .await;
+
+        if let Err(e) = result {
+            tracing::error!("upscale task panicked: {e}");
+        }
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
