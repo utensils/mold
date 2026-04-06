@@ -23,7 +23,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build (Metal)
-        run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui
+        run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui,webp,mp4,metrics
 
       - name: Ad-hoc code sign
         run: codesign -s - target/release/mold
@@ -42,6 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install nasm (required by openh264 source build for mp4 feature)
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.8.1"
@@ -59,7 +62,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
@@ -74,6 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install nasm (required by openh264 source build for mp4 feature)
+        run: sudo apt-get update && sudo apt-get install -y nasm
 
       - uses: Jimver/cuda-toolkit@v0.2.35
         with:
@@ -92,7 +98,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui
+        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
@@ -259,8 +265,8 @@ jobs:
             cargo install mold-ai
 
             # From source with GPU support
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal  # macOS
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda   # Linux
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal,preview,discord,expand,tui,webp,mp4,metrics  # macOS
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics   # Linux
 
             # Nix
             nix run github:utensils/mold/${{ github.ref_name }}
