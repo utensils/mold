@@ -30,4 +30,10 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# Local candle fork with FP8→BF16 CUDA cast fix (kernel name mismatch)
+[patch.crates-io]
+candle-core-mold = { path = "../candle/candle-core" }
+candle-nn-mold = { path = "../candle/candle-nn" }
+candle-transformers-mold = { path = "../candle/candle-transformers" }
+
 

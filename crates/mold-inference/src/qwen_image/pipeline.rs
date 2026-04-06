@@ -338,23 +338,15 @@ impl QwenImageEngine {
                 self.offload || crate::device::should_offload(mem_size, free);
 
             if is_fp8 {
-                self.base.progress.info("Detected FP8 safetensors — loading as F16");
+                self.base.progress.info("Detected FP8 safetensors — loading as BF16");
             }
 
-            // FP8 must always go through CPU (candle CUDA kernel bug for F8E4M3
-            // dtype casts). For non-FP8, offloading loads on CPU; otherwise GPU.
-            let force_cpu = is_fp8;
-
-            if use_offload || force_cpu {
+            if use_offload {
                 // Load on CPU as BF16 for block-level streaming. For FP8, candle
                 // handles F8E4M3→BF16 cast during tensor loading (no matmul on CPU
                 // during loading — blocks are just stored, not computed).
                 let cpu_dtype = DType::BF16;
-                let label = if use_offload {
-                    "Qwen-Image transformer (offload)"
-                } else {
-                    "Qwen-Image transformer (FP8→BF16 on CPU)"
-                };
+                let label = "Qwen-Image transformer (offload)";
                 let cpu_vb = crate::weight_loader::load_safetensors_with_progress(
                     &xformer_paths,
                     cpu_dtype,
@@ -397,9 +389,8 @@ impl QwenImageEngine {
 
     /// Load text encoder from disk.
     ///
-    /// Detects FP8 safetensors and loads on CPU with F16 dtype to avoid a candle
-    /// CUDA kernel bug with F8E4M3 dtype casts. The VarBuilder handles the
-    /// F8E4M3→F16 conversion during model construction on CPU.
+    /// FP8 text encoders are loaded on GPU with BF16 dtype — candle's CUDA cast
+    /// kernel handles F8E4M3→BF16 conversion during tensor loading.
     fn load_text_encoder(
         &self,
         tokenizer_path: &std::path::PathBuf,
@@ -408,22 +399,18 @@ impl QwenImageEngine {
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
         let encoder_paths: Vec<std::path::PathBuf> = self.base.paths.text_encoder_files.clone();
         let is_fp8 = text_encoder_is_fp8(&encoder_paths);
-        let (load_device, load_dtype) = if is_fp8 {
-            // FP8 must load on CPU — candle's CUDA backend can't cast F8E4M3.
-            // CPU requires F32 for matmul (no BF16 CPU matmul in candle).
-            // Text encoder output is cast to target dtype when sent to GPU.
+        if is_fp8 {
             self.base
                 .progress
-                .info("Detected FP8 text encoder — loading on CPU as F32");
-            (Device::Cpu, DType::F32)
-        } else {
-            (device.clone(), dtype)
-        };
+                .info("Detected FP8 text encoder — loading as BF16 on GPU");
+        }
+        // FP8 and BF16 both load on the target device with the target dtype.
+        // The VarBuilder handles F8E4M3→BF16 casting during tensor loading.
         encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
             &encoder_paths,
             tokenizer_path,
-            &load_device,
-            load_dtype,
+            device,
+            dtype,
             &self.base.progress,
         )
     }
@@ -758,29 +745,47 @@ impl QwenImageEngine {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let noise_pred = if use_cfg {
-                let t_tensor =
-                    Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
-                let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                let batched_pred =
-                    transformer.forward(&batched_latents, &t_tensor, &batched_hs, &batched_mask)?;
-                let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                // For offloaded transformer: separate cond/uncond passes to halve peak VRAM
+                let is_offloaded = matches!(transformer, QwenImageTransformer::Offloaded(_));
+                let (cond_pred, uncond_pred) = if is_offloaded {
+                    let t_tensor =
+                        Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+                    let cond_pred = transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        &encoder_hidden_states,
+                        &encoder_attention_mask,
+                    )?;
+                    let uncond_pred = transformer.forward(
+                        &latents,
+                        &t_tensor,
+                        uncond_hs.as_ref().unwrap(),
+                        uncond_mask.as_ref().unwrap(),
+                    )?;
+                    (cond_pred, uncond_pred)
+                } else {
+                    let t_tensor =
+                        Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
+                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                    let batched_pred = transformer.forward(
+                        &batched_latents,
+                        &t_tensor,
+                        &batched_hs,
+                        &batched_mask,
+                    )?;
+                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                    (cond_pred, uncond_pred)
+                };
                 if step == 0 {
                     Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
                     Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
                 }
-                // CFG in F32 to avoid BF16 cancellation error, then norm rescale
-                // to match diffusers' Qwen-Image pipeline.
+                // CFG in F32 to avoid BF16 cancellation error
                 let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                 let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
-                let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
-                // Rescale: comb * (norm(cond) / norm(comb)) per-pixel along channels.
-                // Diffusers computes dim=-1 on token-format [B, seq, C*P*P]; our output
-                // is spatial [B, C, H, W] so we norm across C (dim=1).
-                let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
-                let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
-                let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
-                rescaled.to_dtype(dtype)?
+                let noise_pred = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                noise_pred.to_dtype(dtype)?
             } else {
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
                 transformer.forward(
@@ -1056,25 +1061,45 @@ impl InferenceEngine for QwenImageEngine {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let noise_pred = if use_cfg {
-                    let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
-                        .to_dtype(loaded.dtype)?;
-                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                    let batched_pred = transformer.forward(
-                        &batched_latents,
-                        &t_tensor,
-                        &batched_hs,
-                        &batched_mask,
-                    )?;
-                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
-                    // CFG in F32 + norm rescale (matches diffusers Qwen-Image pipeline)
+                    // For offloaded transformer: separate cond/uncond passes to halve peak VRAM
+                    let is_offloaded = matches!(transformer, QwenImageTransformer::Offloaded(_));
+                    let (cond_pred, uncond_pred) = if is_offloaded {
+                        let t_tensor =
+                            Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
+                                .to_dtype(loaded.dtype)?;
+                        let cond_pred = transformer.forward(
+                            &latents,
+                            &t_tensor,
+                            &encoder_hidden_states,
+                            &encoder_attention_mask,
+                        )?;
+                        let uncond_pred = transformer.forward(
+                            &latents,
+                            &t_tensor,
+                            uncond_hs.as_ref().unwrap(),
+                            uncond_mask.as_ref().unwrap(),
+                        )?;
+                        (cond_pred, uncond_pred)
+                    } else {
+                        let t_tensor =
+                            Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                                .to_dtype(loaded.dtype)?;
+                        let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                        let batched_pred = transformer.forward(
+                            &batched_latents,
+                            &t_tensor,
+                            &batched_hs,
+                            &batched_mask,
+                        )?;
+                        let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                        let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                        (cond_pred, uncond_pred)
+                    };
+                    // CFG in F32 to avoid BF16 cancellation error
                     let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                     let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
-                    let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
-                    let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
-                    let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
-                    let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
-                    rescaled.to_dtype(loaded.dtype)?
+                    let noise_pred = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                    noise_pred.to_dtype(loaded.dtype)?
                 } else {
                     let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                         .to_dtype(loaded.dtype)?;

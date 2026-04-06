@@ -342,8 +342,7 @@ impl ApproximateGelu {
 
 impl Module for ApproximateGelu {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.apply(&self.proj)?;
-        x.broadcast_mul(&candle_nn::ops::sigmoid(&(x.clone() * 1.702)?)?)
+        x.apply(&self.proj)?.gelu()
     }
 }
 

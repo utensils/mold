@@ -2439,13 +2439,17 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults: defaults.clone(),
             hidden: false,
         },
-        // FP8 E4M3 (ComfyUI-compatible, single-file transformer + text encoder)
+        // FP8 E4M3 (ComfyUI-compatible transformer, BF16 text encoder)
+        // NOTE: The FP8 text encoder (qwen_2.5_vl_7b_fp8_scaled.safetensors)
+        // requires scale_input/scale_weight dequantization that candle doesn't
+        // support. We use the BF16 text encoder shared with GGUF variants instead.
         ModelManifest {
             name: "qwen-image:fp8".to_string(),
             family: "qwen-image".to_string(),
             description: "Qwen-Image-2512 FP8 — ComfyUI-compatible, smaller download".to_string(),
-            files: vec![
-                ModelFile {
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
                     hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
                     hf_filename: "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
                         .to_string(),
@@ -2453,36 +2457,9 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     size_bytes: 20_442_787_688,
                     gated: false,
                     sha256: None,
-                },
-                ModelFile {
-                    hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
-                    hf_filename:
-                        "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
-                            .to_string(),
-                    component: ModelComponent::TextEncoder,
-                    size_bytes: 9_379_805_224,
-                    gated: false,
-                    sha256: None,
-                },
-                // VAE (same as BF16)
-                ModelFile {
-                    hf_repo: "Qwen/Qwen-Image-2512".to_string(),
-                    hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
-                    component: ModelComponent::Vae,
-                    size_bytes: 253_806_966,
-                    gated: false,
-                    sha256: None,
-                },
-                // Tokenizer (same as all variants)
-                ModelFile {
-                    hf_repo: "Qwen/Qwen2.5-7B".to_string(),
-                    hf_filename: "tokenizer.json".to_string(),
-                    component: ModelComponent::TextTokenizer,
-                    size_bytes: 7_031_645,
-                    gated: false,
-                    sha256: None,
-                },
-            ],
+                });
+                files
+            },
             defaults: defaults.clone(),
             hidden: false,
         },
