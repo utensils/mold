@@ -1,5 +1,7 @@
 pub mod auth;
 pub mod logging;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
@@ -8,6 +10,8 @@ pub mod request_id;
 pub mod routes;
 pub mod state;
 
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_test;
 #[cfg(test)]
 mod routes_test;
 
@@ -113,8 +117,13 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
 
     let cors = build_cors_layer()?;
 
+    // Install the Prometheus metrics recorder (when feature-enabled).
+    // Must happen before any middleware or handler that records metrics.
+    #[cfg(feature = "metrics")]
+    let prometheus_handle = metrics::install_recorder();
+
     // Build the router with middleware layers.
-    // Order (outermost → innermost): CORS → Trace → RequestID → Auth → RateLimit → routes
+    // Order (outermost → innermost): CORS → Trace → RequestID → Metrics → Auth → RateLimit → routes
     // All inject + enforce layers use .layer() (not .route_layer()) so they run on
     // ALL requests, including unmatched 404 paths — preventing auth/rate-limit bypass.
     // Set up graceful shutdown: fires on SIGTERM or POST /api/shutdown.
@@ -137,7 +146,14 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         });
     }
 
-    let app = routes::create_router(state)
+    // Save start_time before state is moved into the router (needed for metrics).
+    #[cfg(feature = "metrics")]
+    let server_start_time = state.start_time;
+
+    // The /metrics endpoint is mounted outside the auth/rate-limit stack so it
+    // is always accessible for monitoring scrapers (Prometheus, Grafana Agent, etc.).
+    #[allow(unused_mut)]
+    let mut app = routes::create_router(state)
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn_with_state(
             rl_config,
@@ -147,7 +163,28 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth::inject_auth_state,
-        ))
+        ));
+
+    // HTTP metrics middleware sits outside auth so it observes all requests
+    // (including auth failures and rate-limited responses).
+    #[cfg(feature = "metrics")]
+    {
+        app = app.layer(middleware::from_fn(metrics::http_metrics_middleware));
+    }
+
+    #[cfg(feature = "metrics")]
+    {
+        let metrics_state = metrics::MetricsState {
+            handle: prometheus_handle,
+            start_time: server_start_time,
+        };
+        app = app.route(
+            "/metrics",
+            axum::routing::get(metrics::metrics_endpoint).with_state(metrics_state),
+        );
+    }
+
+    let app = app
         .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors);

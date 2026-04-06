@@ -106,8 +106,12 @@ pub async fn run_queue_worker(
 ) {
     tracing::debug!("generation queue worker started");
     while let Some(job) = job_rx.recv().await {
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_queue_depth(state.queue.pending());
         process_job(&state, job).await;
         state.queue.decrement();
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_queue_depth(state.queue.pending());
     }
     tracing::info!("generation queue worker shutting down");
 }
@@ -165,6 +169,8 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     let gen_req = job.request.clone();
     let progress_tx = job.progress_tx.clone();
 
+    #[cfg(feature = "metrics")]
+    let inference_start = Instant::now();
     let result = tokio::task::spawn_blocking(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut guard = model_cache.blocking_lock();
@@ -194,8 +200,14 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     })
     .await;
 
+    #[cfg(feature = "metrics")]
+    let inference_duration = inference_start.elapsed().as_secs_f64();
+
     match result {
         Ok(Ok(Ok(mut response))) => {
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_generation(&job.request.model, inference_duration);
+
             if response.images.is_empty() && response.video.is_none() {
                 let err_msg = "generation error: engine returned no images or video".to_string();
                 if let Some(ref tx) = job.progress_tx {
@@ -270,6 +282,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             }));
         }
         Ok(Ok(Err(e))) => {
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_generation_error(&job.request.model);
+
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("generation error: {e:#}");
             let err_msg = format!("generation error: {}", clean_error_message(&e));
@@ -281,6 +296,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             let _ = job.result_tx.send(Err(err_msg));
         }
         Ok(Err(panic_payload)) => {
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_generation_error(&job.request.model);
+
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             let msg = panic_payload
                 .downcast_ref::<String>()
@@ -297,6 +315,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             let _ = job.result_tx.send(Err(err_msg));
         }
         Err(join_err) => {
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_generation_error(&job.request.model);
+
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("inference task join error: {join_err:?}");
             let err_msg = "inference task failed".to_string();
