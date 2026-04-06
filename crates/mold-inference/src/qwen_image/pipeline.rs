@@ -60,10 +60,11 @@ struct LoadedQwenImage {
     dtype: DType,
 }
 
-#[allow(clippy::large_enum_variant)] // both variants heap-allocate (Vec<Block>)
+#[allow(clippy::large_enum_variant)]
 enum QwenImageTransformer {
     BF16(QwenImageTransformer2DModel),
     Quantized(QuantizedQwenImageTransformer2DModel),
+    Offloaded(super::offload::OffloadedQwenImageTransformer),
 }
 
 #[derive(Clone)]
@@ -106,6 +107,9 @@ impl QwenImageTransformer {
             Self::Quantized(model) => {
                 Ok(model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)?)
             }
+            Self::Offloaded(model) => {
+                model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)
+            }
         }
     }
 }
@@ -114,6 +118,7 @@ impl QwenImageTransformer {
 pub struct QwenImageEngine {
     base: EngineBase<LoadedQwenImage>,
     prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
+    offload: bool,
 }
 
 impl QwenImageEngine {
@@ -150,10 +155,16 @@ impl QwenImageEngine {
         }
     }
 
-    pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        offload: bool,
+    ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            offload,
         }
     }
 
@@ -254,16 +265,45 @@ impl QwenImageEngine {
             ))
         } else {
             let xformer_paths = self.transformer_paths();
-            let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
-                &xformer_paths,
-                dtype,
-                device,
-                "Qwen-Image transformer",
-                &self.base.progress,
-            )?;
-            Ok(QwenImageTransformer::BF16(
-                QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
-            ))
+            let xformer_size: u64 = xformer_paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum();
+            let free = free_vram_bytes().unwrap_or(0);
+            let use_offload =
+                self.offload || crate::device::should_offload(xformer_size, free);
+
+            if use_offload {
+                // Load on CPU in BF16 (not F32 — BF16 halves CPU RAM usage,
+                // and GPU computation stays in BF16 after to_device transfer)
+                let cpu_vb = crate::weight_loader::load_safetensors_with_progress(
+                    &xformer_paths,
+                    DType::BF16,
+                    &Device::Cpu,
+                    "Qwen-Image transformer (offload)",
+                    &self.base.progress,
+                )?;
+                Ok(QwenImageTransformer::Offloaded(
+                    super::offload::OffloadedQwenImageTransformer::load(
+                        cpu_vb,
+                        cfg,
+                        device,
+                        &self.base.progress,
+                    )?,
+                ))
+            } else {
+                let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
+                    &xformer_paths,
+                    dtype,
+                    device,
+                    "Qwen-Image transformer",
+                    &self.base.progress,
+                )?;
+                Ok(QwenImageTransformer::BF16(
+                    QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
+                ))
+            }
         }
     }
 
@@ -451,8 +491,9 @@ impl QwenImageEngine {
 
         // --- Phase 1: Text encoding (check cache first to skip encoder load) ---
         let use_cfg = req.guidance > 1.0;
+        let negative = req.negative_prompt.as_deref().unwrap_or("");
         let prompt_key = prompt_text_key(&req.prompt);
-        let uncond_key = prompt_text_key("");
+        let uncond_key = prompt_text_key(negative);
         let prompt_cached = self
             .prompt_cache
             .lock()
@@ -530,7 +571,7 @@ impl QwenImageEngine {
                     &self.base.progress,
                     &self.prompt_cache,
                     &mut text_encoder,
-                    "",
+                    negative,
                     &device,
                     dtype,
                 )?;
@@ -849,14 +890,15 @@ impl InferenceEngine for QwenImageEngine {
             loaded.dtype,
         )?;
 
-        // Encode unconditional (empty) prompt for classifier-free guidance
+        // Encode unconditional (negative) prompt for classifier-free guidance
         let use_cfg = req.guidance > 1.0;
+        let negative = req.negative_prompt.as_deref().unwrap_or("");
         let (uncond_hs, uncond_mask) = if use_cfg {
             let (hs, mask) = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
                 &mut loaded.text_encoder,
-                "",
+                negative,
                 &loaded.device,
                 loaded.dtype,
             )?;
@@ -1070,6 +1112,7 @@ mod tests {
                 decoder: None,
             },
             LoadStrategy::Sequential,
+            false,
         );
 
         assert!(engine.detect_is_quantized());
