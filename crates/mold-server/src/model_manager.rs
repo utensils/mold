@@ -185,6 +185,8 @@ pub(crate) async fn ensure_model_ready(
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
+                #[cfg(feature = "metrics")]
+                crate::metrics::clear_model_loaded(&active_name);
                 tracing::info!(
                     from = %active_name,
                     to = %model_name,
@@ -208,6 +210,8 @@ pub(crate) async fn ensure_model_ready(
             }
 
             let model_log = model_name.to_string();
+            #[cfg(feature = "metrics")]
+            let load_start = std::time::Instant::now();
             let result = tokio::task::spawn_blocking(move || {
                 tracing::info!(model = %model_log, "reloading cached engine...");
                 if let Err(e) = engine.load() {
@@ -224,6 +228,14 @@ pub(crate) async fn ensure_model_ready(
 
             match result {
                 Ok(loaded_engine) => {
+                    #[cfg(feature = "metrics")]
+                    {
+                        let duration = load_start.elapsed().as_secs_f64();
+                        crate::metrics::record_model_load(model_name, duration);
+                        crate::metrics::set_model_loaded(model_name);
+                        let vram_est = mold_inference::device::vram_used_estimate();
+                        crate::metrics::record_gpu_memory(vram_est);
+                    }
                     let vram = mold_inference::device::vram_used_estimate();
                     let mut cache = state.model_cache.lock().await;
                     cache.insert(loaded_engine, vram);
@@ -312,6 +324,11 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
     let mut cache = state.model_cache.lock().await;
     match cache.unload_active() {
         Some(name) => {
+            #[cfg(feature = "metrics")]
+            {
+                crate::metrics::clear_model_loaded(&name);
+                crate::metrics::record_gpu_memory(0);
+            }
             update_snapshot(state, &cache).await;
             drop(cache);
             mold_inference::reclaim_gpu_memory();
@@ -344,6 +361,8 @@ async fn create_and_load_engine(
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
         if let Some(ref name) = result {
+            #[cfg(feature = "metrics")]
+            crate::metrics::clear_model_loaded(name);
             tracing::info!(
                 from = %name,
                 to = %model_name,
@@ -379,6 +398,8 @@ async fn create_and_load_engine(
     }
 
     let model_log = model_name.to_string();
+    #[cfg(feature = "metrics")]
+    let load_start = std::time::Instant::now();
     new_engine = tokio::task::spawn_blocking(move || {
         tracing::info!(model = %model_log, "loading model...");
         new_engine.load().map_err(|e| {
@@ -390,7 +411,17 @@ async fn create_and_load_engine(
     .await
     .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))??;
 
+    #[cfg(feature = "metrics")]
+    {
+        let duration = load_start.elapsed().as_secs_f64();
+        crate::metrics::record_model_load(model_name, duration);
+        crate::metrics::set_model_loaded(model_name);
+    }
+
     let vram = mold_inference::device::vram_used_estimate();
+    #[cfg(feature = "metrics")]
+    crate::metrics::record_gpu_memory(vram);
+
     let mut cache = state.model_cache.lock().await;
     // Evicted engine (if any) is dropped here, freeing its resources.
     let _evicted = cache.insert(new_engine, vram);

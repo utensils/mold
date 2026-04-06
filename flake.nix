@@ -171,7 +171,7 @@
               // {
                 inherit cargoArtifacts meta;
                 cargoExtraArgs =
-                  "-p mold-ai --features preview,discord,expand,tui,webp,mp4"
+                  "-p mold-ai --features preview,discord,expand,tui,webp,mp4,metrics"
                   + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
                 postInstall = ''
                   installShellCompletion --cmd mold \

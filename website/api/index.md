@@ -24,11 +24,12 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/health`                      | Simple 200 OK health check           |
 | `GET`    | `/api/openapi.json`            | OpenAPI spec                         |
 | `GET`    | `/api/docs`                    | Interactive API docs (Scalar)        |
+| `GET`    | `/metrics`                     | Prometheus metrics (feature-gated)   |
 
 ## Authentication
 
-When `MOLD_API_KEY` is set, all API requests (except `/health`, `/api/docs`, and
-`/api/openapi.json`) must include an `X-Api-Key` header:
+When `MOLD_API_KEY` is set, all API requests (except `/health`, `/api/docs`,
+`/api/openapi.json`, and `/metrics`) must include an `X-Api-Key` header:
 
 ```bash
 curl -H "X-Api-Key: your-secret-key" http://localhost:7680/api/status
@@ -65,7 +66,7 @@ When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
 - **Read tier** (10x the configured rate): `/api/models`, `/api/status`,
   `/api/gallery/*`
 
-Health and docs endpoints are exempt from rate limiting.
+Health, docs, and `/metrics` endpoints are exempt from rate limiting.
 
 Example: `MOLD_RATE_LIMIT=10/min` allows 10 generation requests per minute per
 IP, and 100 read requests per minute per IP.

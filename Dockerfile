@@ -63,7 +63,7 @@ RUN mkdir -p crates/mold-core/src \
     && echo "// stub" > crates/mold-tui/src/lib.rs
 
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
-RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4 \
+RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics \
     || true
 
 # Now copy the real source code
@@ -73,7 +73,7 @@ COPY crates/ crates/
 RUN find crates/ -name "*.rs" -exec touch {} +
 
 # Build the real binary
-RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4
+RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
 
 # Verify no unexpected missing libraries (libcuda.so.1 is expected to be
 # absent — it's the NVIDIA driver, injected at runtime by the container toolkit)

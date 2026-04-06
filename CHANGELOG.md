@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Prometheus metrics endpoint**: `GET /metrics` exposes Prometheus-format metrics for HTTP request rates/latency, generation duration, queue depth, model load tracking, GPU memory usage, and server uptime. Gated behind `metrics` feature flag (zero overhead when disabled). Endpoint is excluded from auth and rate limiting for monitoring scrapers ([#142](https://github.com/utensils/mold/issues/142))
 - **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using LTX Video 0.9.5 2B (Lightricks). 28-layer DiT with T5-XXL encoder (shared with FLUX), 3D causal VAE, flow-matching denoising. Default: 768×512, 25 frames @ 24fps, 40 steps, guidance 3.0 ([#172](https://github.com/utensils/mold/issues/172))
 - **Multiple video output formats**: APNG (default, lossless, metadata in tEXt chunks), GIF (256-color, pipe-friendly), WebP (feature-gated `webp`), MP4/H.264 (feature-gated `mp4`, QuickTime-compatible). Use `--format apng|gif|webp|mp4`
 - **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
