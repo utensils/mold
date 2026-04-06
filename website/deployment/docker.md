@@ -101,12 +101,6 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 | `MOLD_RATE_LIMIT_BURST` | —       | Burst allowance override (defaults to 2x rate)           |
 | `HF_TOKEN`              | —       | HuggingFace token for gated model repos                  |
 
-### Monitoring
-
-Docker images include the `metrics` feature. Scrape `GET /metrics` for
-Prometheus-format metrics (HTTP request rates, generation duration, queue depth,
-GPU memory, uptime). The endpoint is excluded from auth and rate limiting.
-
 ### Recommended GPUs
 
 | GPU       | VRAM  | $/hr  | Notes                          |
@@ -118,6 +112,12 @@ GPU memory, uptime). The endpoint is excluded from auth and rate limiting.
 ::: tip Proxy Timeout
 RunPod's Cloudflare proxy has a 100-second timeout. Use the SSE streaming endpoint (`/api/generate/stream`) for long generations.
 :::
+
+## Monitoring
+
+Docker images include the `metrics` feature. Scrape `GET /metrics` for
+Prometheus-format metrics (HTTP request rates, generation duration, queue depth,
+GPU memory, uptime). The endpoint is excluded from auth and rate limiting.
 
 ## Image Details
 
