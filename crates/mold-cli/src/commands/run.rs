@@ -525,14 +525,28 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
 
+    /// Fully explicit config — does NOT use `..Config::default()` which
+    /// triggers `default_models_dir()` → reads `MOLD_HOME` env var and
+    /// races with concurrent tests that set it.
     fn test_config() -> Config {
         Config {
+            config_version: 1,
             default_model: "flux2-klein".to_string(),
-            // Point models_dir to a non-existent path so the smart default
-            // fallback doesn't detect locally downloaded models.
             models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
-            ..Config::default()
+            server_port: 7680,
+            default_width: 1024,
+            default_height: 1024,
+            default_steps: 4,
+            embed_metadata: true,
+            t5_variant: None,
+            qwen3_variant: None,
+            output_dir: None,
+            default_negative_prompt: None,
+            expand: mold_core::ExpandSettings::default(),
+            logging: mold_core::LoggingConfig::default(),
+            models: std::collections::HashMap::new(),
         }
     }
 
@@ -559,6 +573,9 @@ mod tests {
 
     #[test]
     fn first_arg_is_prompt() {
+        // ENV_LOCK: resolved_default_model() reads MOLD_DEFAULT_MODEL and
+        // MOLD_MODELS_DIR env vars, which concurrent tests may mutate.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = test_config();
         let (model, prompt) = resolve_run_args(
             Some("a"),
@@ -576,6 +593,7 @@ mod tests {
 
     #[test]
     fn single_prompt_word() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = test_config();
         let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config).unwrap();
         assert_eq!(model, "flux2-klein:q8");
@@ -584,6 +602,7 @@ mod tests {
 
     #[test]
     fn no_args_returns_none_prompt() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = test_config();
         let (model, prompt) = resolve_run_args(None, &[], &config).unwrap();
         assert_eq!(model, "flux2-klein:q8");

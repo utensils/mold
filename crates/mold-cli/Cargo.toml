@@ -51,4 +51,7 @@ mold-tui = { path = "../mold-tui", package = "mold-ai-tui", version = "0.5.0", o
 walkdir = "2.5.0"
 
 [dev-dependencies]
+assert_cmd = "2"
 filetime = "0.2"
+predicates = "3"
+tempfile = "3"
