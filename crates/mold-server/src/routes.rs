@@ -487,6 +487,12 @@ async fn upscale(
             .is_none()
     };
     if needs_pull {
+        if mold_core::manifest::find_manifest(&model_name).is_none() {
+            return Err(ApiError::not_found(format!(
+                "unknown upscaler model '{}'. Run 'mold list' to see available models.",
+                model_name
+            )));
+        }
         model_manager::pull_model(&state, &model_name, None).await?;
     }
 

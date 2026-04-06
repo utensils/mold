@@ -1312,8 +1312,24 @@ impl App {
                 .and_then(|c| c.transformer.as_ref())
                 .is_none()
             {
-                // Model not configured — auto-pull with progress bars
-                match crate::backend::auto_pull_model(&resolved, &tx).await {
+                // Wrap the sender so auto_pull_model's Progress events become
+                // UpscaleDownloadProgress events (routed to upscale_progress,
+                // not generate.progress).
+                let (remap_tx, mut remap_rx) = tokio::sync::mpsc::unbounded_channel();
+                let tx_remap = tx.clone();
+                let remap_task = tokio::spawn(async move {
+                    while let Some(event) = remap_rx.recv().await {
+                        let remapped = match event {
+                            BackgroundEvent::Progress(sse) => {
+                                BackgroundEvent::UpscaleDownloadProgress(sse)
+                            }
+                            other => other,
+                        };
+                        let _ = tx_remap.send(remapped);
+                    }
+                });
+
+                match crate::backend::auto_pull_model(&resolved, &remap_tx).await {
                     Ok(updated_config) => {
                         config = updated_config;
                     }
@@ -1322,6 +1338,8 @@ impl App {
                         return;
                     }
                 }
+                drop(remap_tx);
+                let _ = remap_task.await;
             }
 
             let model_name_local = resolved;
