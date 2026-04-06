@@ -113,6 +113,12 @@ The entrypoint auto-detects RunPod network volumes at `/workspace`:
 RunPod's Cloudflare proxy has a 100-second timeout. Use the SSE streaming endpoint (`/api/generate/stream`) for long generations.
 :::
 
+## Monitoring
+
+Docker images include the `metrics` feature. Scrape `GET /metrics` for
+Prometheus-format metrics (HTTP request rates, generation duration, queue depth,
+GPU memory, uptime). The endpoint is excluded from auth and rate limiting.
+
 ## Image Details
 
 The Dockerfile uses a multi-stage build:

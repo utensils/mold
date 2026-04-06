@@ -130,6 +130,13 @@ system user, and manages the data directory at `/var/lib/mold`.
 | `logRetentionDays` | int         | `7`                 | Days to retain rotated log files                                     |
 | `environment`      | attrs       | `{}`                | Extra environment variables                                          |
 
+### Monitoring
+
+Nix builds include the `metrics` feature. The server exposes `GET /metrics` in
+Prometheus text exposition format (HTTP request rates, generation duration, queue
+depth, GPU memory, uptime). The endpoint is excluded from auth and rate limiting,
+so Prometheus/Grafana Agent can scrape it without an API key.
+
 ### Discord Bot Options
 
 | Option                    | Type    | Default                        | Description                                           |

@@ -62,8 +62,10 @@ features today?
 | LTX Video  | Yes     | Not yet |
 | All others | No      | No      |
 
-Video output is encoded as animated GIF. Frame count must be 8n+1 (9, 17, 25,
-33, ...). Dimensions must be multiples of 32.
+Video output defaults to APNG (lossless, metadata-rich). Also supports GIF
+(256-color, pipe-friendly), WebP (feature-gated), and MP4/H.264 (feature-gated).
+Use `--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
+Dimensions must be multiples of 32.
 
 ## Notes
 
