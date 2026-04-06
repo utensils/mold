@@ -37,9 +37,61 @@ impl TestEnv {
         }
     }
 
+    /// All `MOLD_*` env vars that could leak from the developer's shell.
+    /// These are cleared before setting our isolated values so tests are
+    /// deterministic regardless of the host environment.
+    const MOLD_ENV_VARS: &'static [&'static str] = &[
+        "MOLD_HOME",
+        "MOLD_MODELS_DIR",
+        "MOLD_OUTPUT_DIR",
+        "MOLD_HOST",
+        "MOLD_PORT",
+        "MOLD_DEFAULT_MODEL",
+        "MOLD_LOG",
+        "MOLD_EAGER",
+        "MOLD_OFFLOAD",
+        "MOLD_EMBED_METADATA",
+        "MOLD_PREVIEW",
+        "MOLD_T5_VARIANT",
+        "MOLD_QWEN3_VARIANT",
+        "MOLD_SCHEDULER",
+        "MOLD_API_KEY",
+        "MOLD_RATE_LIMIT",
+        "MOLD_RATE_LIMIT_BURST",
+        "MOLD_CORS_ORIGIN",
+        "MOLD_EXPAND",
+        "MOLD_EXPAND_BACKEND",
+        "MOLD_EXPAND_MODEL",
+        "MOLD_EXPAND_TEMPERATURE",
+        "MOLD_EXPAND_THINKING",
+        "MOLD_EXPAND_SYSTEM_PROMPT",
+        "MOLD_EXPAND_BATCH_PROMPT",
+        "MOLD_DISCORD_TOKEN",
+        "MOLD_UPSCALE_MODEL",
+        "MOLD_UPSCALE_TILE_SIZE",
+        "MOLD_DEVICE",
+        "MOLD_TRANSFORMER_PATH",
+        "MOLD_VAE_PATH",
+        "MOLD_T5_PATH",
+        "MOLD_CLIP_PATH",
+        "MOLD_T5_TOKENIZER_PATH",
+        "MOLD_CLIP_TOKENIZER_PATH",
+        "MOLD_CLIP2_PATH",
+        "MOLD_CLIP2_TOKENIZER_PATH",
+    ];
+
     /// Create a `Command` for the mold binary with isolated env vars.
+    ///
+    /// Clears all `MOLD_*` env vars from the inherited environment first,
+    /// then sets only the vars needed for test isolation. This prevents
+    /// developer shell exports (e.g. `MOLD_DEFAULT_MODEL`) from leaking
+    /// into test subprocesses.
     pub fn cmd(&self) -> Command {
         let mut cmd = Command::cargo_bin("mold").expect("mold binary not found");
+        // Clear all MOLD_* vars to prevent host environment leakage
+        for var in Self::MOLD_ENV_VARS {
+            cmd.env_remove(var);
+        }
         cmd.env("MOLD_HOME", &self.home);
         cmd.env("MOLD_MODELS_DIR", &self.models);
         cmd.env("MOLD_OUTPUT_DIR", &self.output);
