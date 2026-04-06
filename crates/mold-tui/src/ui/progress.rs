@@ -225,7 +225,7 @@ pub(crate) fn format_eta(seconds: u64) -> String {
     }
 }
 
-fn format_bytes_binary(bytes: f64) -> String {
+pub(crate) fn format_bytes_binary(bytes: f64) -> String {
     if bytes >= 1_073_741_824.0 {
         format!("{:.2}GiB", bytes / 1_073_741_824.0)
     } else if bytes >= 1_048_576.0 {

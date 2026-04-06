@@ -42,6 +42,8 @@ pub enum BackgroundEvent {
     ModelRemoveComplete(String),
     /// Model removal failed.
     ModelRemoveFailed(String),
+    /// Upscale download progress (model pull during upscale).
+    UpscaleDownloadProgress(SseProgressEvent),
     /// Upscale tile progress update.
     UpscaleProgress { tile: usize, total: usize },
     /// Upscale completed successfully.
@@ -867,6 +869,8 @@ pub struct App {
     pub upscale_task: Option<tokio::task::JoinHandle<()>>,
     /// Current tile progress for in-flight upscale (current, total).
     pub upscale_tile_progress: Option<(usize, usize)>,
+    /// Download progress state during upscaler model pull.
+    pub upscale_progress: ProgressState,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -1130,6 +1134,7 @@ impl App {
             upscale_in_progress: false,
             upscale_task: None,
             upscale_tile_progress: None,
+            upscale_progress: ProgressState::default(),
         });
 
         // Spawn background gallery scan
@@ -1166,6 +1171,7 @@ impl App {
 
         self.upscale_in_progress = true;
         self.upscale_tile_progress = None;
+        self.upscale_progress.clear();
 
         // Switch to grid view to avoid image protocol conflicts with progress overlay
         if self.gallery.view_mode == GalleryViewMode::Detail {
@@ -1229,12 +1235,22 @@ impl App {
                 let tx_sse = tx.clone();
                 tokio::spawn(async move {
                     while let Some(event) = progress_rx.recv().await {
-                        if let mold_core::SseProgressEvent::DenoiseStep { step, total, .. } = &event
-                        {
-                            let _ = tx_sse.send(BackgroundEvent::UpscaleProgress {
-                                tile: *step,
-                                total: *total,
-                            });
+                        match &event {
+                            mold_core::SseProgressEvent::DenoiseStep { step, total, .. } => {
+                                let _ = tx_sse.send(BackgroundEvent::UpscaleProgress {
+                                    tile: *step,
+                                    total: *total,
+                                });
+                            }
+                            mold_core::SseProgressEvent::DownloadProgress { .. }
+                            | mold_core::SseProgressEvent::DownloadDone { .. }
+                            | mold_core::SseProgressEvent::PullComplete { .. }
+                            | mold_core::SseProgressEvent::StageStart { .. }
+                            | mold_core::SseProgressEvent::Info { .. } => {
+                                let _ =
+                                    tx_sse.send(BackgroundEvent::UpscaleDownloadProgress(event));
+                            }
+                            _ => {}
                         }
                     }
                 });
@@ -2270,6 +2286,7 @@ impl App {
                     }
                     self.upscale_in_progress = false;
                     self.upscale_tile_progress = None;
+                    self.upscale_progress.clear();
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: "Upscale cancelled".into(),
                         style: ProgressStyle::Warning,
@@ -3999,6 +4016,9 @@ impl App {
                         style: ProgressStyle::Error,
                     });
                 }
+                BackgroundEvent::UpscaleDownloadProgress(event) => {
+                    reduce_progress_state(&mut self.upscale_progress, event);
+                }
                 BackgroundEvent::UpscaleProgress { tile, total } => {
                     self.upscale_tile_progress = Some((tile, total));
                 }
@@ -4014,6 +4034,7 @@ impl App {
                     self.upscale_in_progress = false;
                     self.upscale_task = None;
                     self.upscale_tile_progress = None;
+                    self.upscale_progress.clear();
 
                     let upscaled_w = original_width * scale_factor;
                     let upscaled_h = original_height * scale_factor;
@@ -4129,6 +4150,7 @@ impl App {
                     self.upscale_in_progress = false;
                     self.upscale_task = None;
                     self.upscale_tile_progress = None;
+                    self.upscale_progress.clear();
                     self.generate.error_message = Some(format!("Upscale failed: {msg}"));
                 }
             }
@@ -5266,6 +5288,7 @@ mod tests {
             upscale_in_progress: false,
             upscale_task: None,
             upscale_tile_progress: None,
+            upscale_progress: ProgressState::default(),
         }
     }
 
@@ -6261,5 +6284,143 @@ mod tests {
         let default = mold_core::manifest::resolve_model_name(&config.resolved_default_model());
         // Default should resolve to a known model name
         assert!(!default.is_empty());
+    }
+
+    #[test]
+    fn upscale_download_progress_event_variant() {
+        let event = BackgroundEvent::UpscaleDownloadProgress(SseProgressEvent::DownloadProgress {
+            filename: "weights.safetensors".into(),
+            file_index: 0,
+            total_files: 1,
+            bytes_downloaded: 50_000_000,
+            bytes_total: 100_000_000,
+            batch_bytes_downloaded: 50_000_000,
+            batch_bytes_total: 100_000_000,
+            batch_elapsed_ms: 5_000,
+        });
+        if let BackgroundEvent::UpscaleDownloadProgress(SseProgressEvent::DownloadProgress {
+            filename,
+            bytes_downloaded,
+            bytes_total,
+            ..
+        }) = event
+        {
+            assert_eq!(filename, "weights.safetensors");
+            assert_eq!(bytes_downloaded, 50_000_000);
+            assert_eq!(bytes_total, 100_000_000);
+        } else {
+            panic!("expected UpscaleDownloadProgress(DownloadProgress)");
+        }
+    }
+
+    #[test]
+    fn upscale_progress_state_tracks_download() {
+        let mut progress = ProgressState::default();
+        assert!(!progress.is_downloading());
+
+        // Simulate download progress events via reduce_progress_state
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::Info {
+                message: "Model 'real-esrgan-x4plus:fp16' not found locally, pulling...".into(),
+            },
+        );
+        assert!(progress.is_downloading());
+
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::DownloadProgress {
+                filename: "RealESRGAN_x4plus.pth".into(),
+                file_index: 0,
+                total_files: 1,
+                bytes_downloaded: 30_000_000,
+                bytes_total: 67_000_000,
+                batch_bytes_downloaded: 30_000_000,
+                batch_bytes_total: 67_000_000,
+                batch_elapsed_ms: 3_000,
+            },
+        );
+        assert!(progress.is_downloading());
+        assert_eq!(progress.download_batch_bytes, 30_000_000);
+        assert_eq!(progress.download_batch_total, 67_000_000);
+        assert_eq!(progress.download_filename, "RealESRGAN_x4plus.pth");
+        assert_eq!(progress.download_total_files, 1);
+    }
+
+    #[test]
+    fn upscale_progress_transitions_download_to_tiles() {
+        let mut progress = ProgressState::default();
+
+        // Download phase
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::DownloadProgress {
+                filename: "RealESRGAN_x4plus.pth".into(),
+                file_index: 0,
+                total_files: 1,
+                bytes_downloaded: 67_000_000,
+                bytes_total: 67_000_000,
+                batch_bytes_downloaded: 67_000_000,
+                batch_bytes_total: 67_000_000,
+                batch_elapsed_ms: 6_000,
+            },
+        );
+        assert!(progress.is_downloading());
+
+        // Download done
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::DownloadDone {
+                filename: "RealESRGAN_x4plus.pth".into(),
+                file_index: 0,
+                total_files: 1,
+                batch_bytes_downloaded: 67_000_000,
+                batch_bytes_total: 67_000_000,
+                batch_elapsed_ms: 6_000,
+            },
+        );
+
+        // Pull complete clears download state
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::PullComplete {
+                model: "real-esrgan-x4plus:fp16".into(),
+            },
+        );
+        assert!(!progress.is_downloading());
+        assert_eq!(progress.download_batch_bytes, 0);
+
+        // Now tile progress would come via separate UpscaleProgress events,
+        // not through this progress state. Verify the state is clean for
+        // the next phase.
+        assert_eq!(progress.denoise_step, 0);
+    }
+
+    #[test]
+    fn upscale_progress_cleared_on_completion() {
+        let mut progress = ProgressState::default();
+
+        // Simulate some download state
+        reduce_progress_state(
+            &mut progress,
+            SseProgressEvent::DownloadProgress {
+                filename: "model.pth".into(),
+                file_index: 0,
+                total_files: 1,
+                bytes_downloaded: 10_000,
+                bytes_total: 20_000,
+                batch_bytes_downloaded: 10_000,
+                batch_bytes_total: 20_000,
+                batch_elapsed_ms: 1_000,
+            },
+        );
+        assert!(progress.is_downloading());
+
+        // clear() should reset everything
+        progress.clear();
+        assert!(!progress.is_downloading());
+        assert_eq!(progress.download_batch_bytes, 0);
+        assert_eq!(progress.download_batch_total, 0);
+        assert!(progress.download_filename.is_empty());
     }
 }
