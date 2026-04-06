@@ -24,22 +24,15 @@ use crate::progress::ProgressReporter;
 
 // ── Device-transfer helpers ──────────────────────────────────────────────────
 
-/// Transfer a linear layer to the target device, casting to BF16 for GPU compute.
-/// This handles the F32 (CPU) → BF16 (GPU) conversion for FP8 models.
 fn linear_to_device(l: &Linear, dev: &Device) -> Result<Linear> {
-    let target_dtype = if dev.is_cuda() { DType::BF16 } else { l.weight().dtype() };
-    let w = l.weight().to_device(dev)?.to_dtype(target_dtype)?;
-    let b = l
-        .bias()
-        .map(|b| b.to_device(dev)?.to_dtype(target_dtype))
-        .transpose()?;
+    let w = l.weight().to_device(dev)?;
+    let b = l.bias().map(|b| b.to_device(dev)).transpose()?;
     Ok(Linear::new(w, b))
 }
 
 fn rms_norm_to_device(rn: &candle_nn::RmsNorm, dev: &Device) -> Result<candle_nn::RmsNorm> {
-    let target_dtype = if dev.is_cuda() { DType::BF16 } else { DType::F32 };
     let cloned = rn.clone();
-    let w = cloned.into_inner().weight().to_device(dev)?.to_dtype(target_dtype)?;
+    let w = cloned.into_inner().weight().to_device(dev)?;
     Ok(candle_nn::RmsNorm::new(w, 1e-6))
 }
 
@@ -247,11 +240,7 @@ impl JointAttention {
         let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
 
         let img_out = img_attn.apply(&self.to_out)?;
-        let txt_out = txt_attn.apply(&self.add_out_proj)?.broadcast_mul(
-            &txt_mask
-                .unsqueeze(D::Minus1)?
-                .to_dtype(txt_hidden.dtype())?,
-        )?;
+        let txt_out = txt_attn.apply(&self.add_out_proj)?;
 
         Ok((img_out, txt_out))
     }
@@ -349,11 +338,9 @@ impl OffloadedQwenBlock {
             img_seq_len,
         )?;
 
-        // Gate + residual
+        // Gate + residual (matching ComfyUI: y + gate * x, no mask multiplication)
         let img_hidden = (img_hidden + img_chunks[2].broadcast_mul(&img_attn)?)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + txt_chunks[2].broadcast_mul(&txt_attn)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden = (txt_hidden + txt_chunks[2].broadcast_mul(&txt_attn)?)?;
 
         // Feedforward
         let img_mlp_in = self
@@ -370,11 +357,10 @@ impl OffloadedQwenBlock {
             .broadcast_mul(&(&txt_chunks[4] + 1.0)?)?
             .broadcast_add(&txt_chunks[3])?;
         let txt_ff = self.txt_mlp.forward(&txt_mlp_in)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + txt_chunks[5].broadcast_mul(&txt_ff)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden = (txt_hidden + txt_chunks[5].broadcast_mul(&txt_ff)?)?;
 
-        Ok((img_hidden, txt_hidden))
+        // Return (text, image) to match ComfyUI block output order
+        Ok((txt_hidden, img_hidden))
     }
 }
 
@@ -588,9 +574,10 @@ impl OffloadedQwenImageTransformer {
         };
 
         // 5. Stream blocks CPU → GPU
+        //    Block returns (text, image) — matching ComfyUI convention
         for (i, block) in self.blocks.iter().enumerate() {
             let gpu_block = block.to_device(device)?;
-            (img, txt) = gpu_block.forward(
+            (txt, img) = gpu_block.forward(
                 &img,
                 &txt,
                 encoder_attention_mask,

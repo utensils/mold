@@ -346,10 +346,10 @@ impl QwenImageEngine {
             let force_cpu = is_fp8;
 
             if use_offload || force_cpu {
-                // Load on CPU for block-level streaming. FP8 loads as F32 on CPU
-                // (candle can't do BF16 matmul on CPU). Non-FP8 loads as BF16.
-                // Blocks are cast to GPU dtype during to_device() transfer.
-                let cpu_dtype = if is_fp8 { DType::F32 } else { DType::BF16 };
+                // Load on CPU as BF16 for block-level streaming. For FP8, candle
+                // handles F8E4M3→BF16 cast during tensor loading (no matmul on CPU
+                // during loading — blocks are just stored, not computed).
+                let cpu_dtype = DType::BF16;
                 let label = if use_offload {
                     "Qwen-Image transformer (offload)"
                 } else {
