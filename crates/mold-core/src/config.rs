@@ -178,7 +178,9 @@ impl ModelConfig {
 }
 
 /// Resolved model file paths.
-/// `transformer` and `vae` are always required.
+/// For diffusion models, `transformer` and `vae` are always required.
+/// For upscaler models, only `transformer` (weights) is required; `vae` is empty.
+/// For utility models, only `transformer` is required; `vae` may be empty.
 /// Other paths are optional — each engine validates what it needs at load time.
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
@@ -769,14 +771,32 @@ impl Config {
                 path.exists().then_some((file.component, path))
             })
             .collect::<Option<Vec<_>>>()?;
-        crate::manifest::paths_from_downloads(&downloads)
+        crate::manifest::paths_from_downloads(&downloads, &manifest.family)
     }
 
     pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
         if crate::download::has_pulling_marker(name) {
             return false;
         }
+        let manifest = match crate::manifest::find_manifest(name) {
+            Some(m) => m,
+            None => return false,
+        };
+        // Upscaler and utility models don't produce full ModelPaths (no VAE).
+        // Check file existence directly instead of going through ModelPaths::resolve.
+        if manifest.is_upscaler() || manifest.is_utility() {
+            return self.manifest_files_exist(manifest);
+        }
         self.resolved_local_manifest_model_config(name).is_some()
+    }
+
+    /// Check whether all files for a manifest exist on disk.
+    fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
+        let models_dir = self.resolved_models_dir();
+        manifest.files.iter().all(|file| {
+            let path = models_dir.join(crate::manifest::storage_path(manifest, file));
+            path.exists()
+        })
     }
 
     /// Return the ModelConfig for a given model name, or an empty default.
