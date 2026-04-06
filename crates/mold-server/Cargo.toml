@@ -21,6 +21,7 @@ default = []
 cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
+metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 
 [dependencies]
@@ -48,3 +49,5 @@ image = "0.25"
 governor = { version = "0.8", features = ["std"] }
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }

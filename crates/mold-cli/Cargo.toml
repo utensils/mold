@@ -23,6 +23,7 @@ expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]
 tui = ["dep:mold-tui"]
 webp = ["mold-inference/webp"]
 mp4 = ["mold-inference/mp4"]
+metrics = ["mold-server/metrics"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.5.0" }

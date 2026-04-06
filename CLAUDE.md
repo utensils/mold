@@ -85,7 +85,7 @@ crates/
 └── mold-tui/                 # Interactive terminal UI (feature-gated, consumed by mold-cli via `tui` feature)
 ```
 
-**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`).
+**Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`), `metrics` (Prometheus `/metrics` endpoint via `mold-server`).
 
 **Feature flags** (on `mold-inference`): `cuda`, `metal`, `expand` (same as above), `webp` (animated WebP output via libwebp FFI), `mp4` (H.264/MP4 output via OpenH264 + muxide). The `webp` and `mp4` features are optional — GIF and APNG work without them.
 
@@ -158,6 +158,8 @@ Feature flags: `cuda` (CUDA backend), `metal` (Metal backend), `expand` (local L
 
 ### mold-server
 
+> Feature flags: `cuda`, `metal`, `expand` (forwarded to mold-inference), `metrics` (Prometheus `/metrics` endpoint + instrumentation).
+
 Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` (via `mold serve`).
 
 | Method | Path | Description |
@@ -180,6 +182,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/health` | Simple 200 OK health check |
 | `GET` | `/api/openapi.json` | OpenAPI spec |
 | `GET` | `/api/docs` | Interactive API docs (Scalar) |
+| `GET` | `/metrics` | Prometheus metrics (feature-gated) |
 
 State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching and `upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>` for reusing loaded upscaler models across requests.
 
