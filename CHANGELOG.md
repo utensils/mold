@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))
 - **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
 - **Video file not saved in CLI**: batch loop discarded `response.video` — now captured and passed through
 - **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation

@@ -359,6 +359,12 @@ MOLD_HOST=http://gpu-host:7680 mold run "a cat"
 MOLD_OUTPUT_DIR=/srv/mold/output mold serve
 ```
 
+### Prometheus Metrics
+
+When built with the `metrics` feature flag (included in Docker images and Nix builds), the server exposes a `GET /metrics` endpoint in Prometheus text exposition format. This endpoint is excluded from auth and rate limiting for monitoring scrapers.
+
+Metrics include: HTTP request rates/latency, generation duration, queue depth, model load tracking, GPU memory usage, and server uptime.
+
 ## Key Environment Variables
 
 | Variable | Default | Purpose |
