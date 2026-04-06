@@ -620,6 +620,9 @@ mod tests {
 
     #[test]
     fn stale_pull_marker_is_removed_when_old() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("stale-marker");
         let marker_dir = tmp.join("flux-dev-q6");
         std::fs::create_dir_all(&marker_dir).unwrap();
@@ -628,6 +631,8 @@ mod tests {
 
         let old = filetime::FileTime::from_unix_time(1, 0);
         filetime::set_file_mtime(&marker, old).unwrap();
+
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
 
         let mut cfg = Config::default();
         cfg.models_dir = tmp.to_string_lossy().to_string();
@@ -640,11 +645,15 @@ mod tests {
             "empty model dir should be removed too"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn hf_cache_cleanup_removes_inactive_repo_transient_files() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("inactive-repo");
         let blobs_dir = tmp
             .join(".hf-cache")
@@ -657,6 +666,8 @@ mod tests {
         std::fs::write(&lock, b"").unwrap();
         std::fs::write(&part, b"partial").unwrap();
 
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
         let mut cfg = Config::default();
         cfg.models_dir = tmp.to_string_lossy().to_string();
 
@@ -668,11 +679,15 @@ mod tests {
             "inactive repo sync.part file should be removed"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn clean_orphaned_shared_files_preserves_manifest_discovered_shared_files() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("manifest-shared");
         let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
 
@@ -686,6 +701,10 @@ mod tests {
 
         let orphan = tmp.join("shared/flux/orphan.bin");
         std::fs::write(&orphan, b"orphan").unwrap();
+
+        // Set env var so manifest_model_is_downloaded() resolves against the
+        // temp dir, not the host machine's real models directory.
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
 
         let mut cfg = Config::default();
         cfg.models_dir = tmp.to_string_lossy().to_string();
@@ -713,12 +732,16 @@ mod tests {
             "unreferenced sibling orphan should be removed"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[cfg(unix)]
     #[test]
     fn orphaned_shared_file_cleanup_removes_hf_blob_and_snapshot_symlink() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("shared-hf");
         let shared_flux = tmp.join("shared").join("flux");
         let repo = tmp
@@ -740,6 +763,9 @@ mod tests {
         let clean_path = shared_flux.join("t5xxl_fp16.safetensors");
         std::fs::hard_link(&blob, &clean_path).unwrap();
 
+        // Isolate from host machine's real models directory.
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
         let mut cfg = Config::default();
         cfg.models_dir = tmp.to_string_lossy().to_string();
 
@@ -755,6 +781,7 @@ mod tests {
             "snapshot symlink should be removed alongside the blob"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

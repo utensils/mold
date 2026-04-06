@@ -375,6 +375,7 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
+    use crate::test_support::ENV_LOCK;
 
     #[test]
     fn tilde_replaces_home() {
@@ -391,6 +392,7 @@ mod tests {
 
     #[test]
     fn shared_components_label_empty_when_no_shared_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "mold-stats-shared-{}",
             std::time::SystemTime::now()
@@ -398,14 +400,17 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
         let mut config = Config::default();
         config.models_dir = tmp.to_string_lossy().to_string();
         let label = shared_components_label(&config);
         assert!(label.is_empty(), "expected empty label, got: {label}");
+        std::env::remove_var("MOLD_MODELS_DIR");
     }
 
     #[test]
     fn shared_components_label_detects_t5_and_vae() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "mold-stats-label-{}",
             std::time::SystemTime::now()
@@ -417,16 +422,19 @@ mod tests {
         std::fs::create_dir_all(&shared).unwrap();
         std::fs::write(shared.join("t5xxl_fp16.safetensors"), b"x").unwrap();
         std::fs::write(shared.join("ae.safetensors"), b"x").unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
         let mut config = Config::default();
         config.models_dir = tmp.to_string_lossy().to_string();
         let label = shared_components_label(&config);
         assert!(label.contains("T5 encoder"), "expected T5, got: {label}");
         assert!(label.contains("VAE"), "expected VAE, got: {label}");
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn collect_model_stats_empty_models_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "mold-stats-empty-{}",
             std::time::SystemTime::now()
@@ -435,6 +443,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
         let mut config = Config::default();
         config.models_dir = tmp.to_string_lossy().to_string();
         let (models, shared) = collect_model_stats(&config);
@@ -444,6 +453,7 @@ mod tests {
             models.len()
         );
         assert_eq!(shared, 0);
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
