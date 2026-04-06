@@ -286,10 +286,13 @@ pub async fn run(models: &[String], force: bool) -> Result<()> {
                         .map(|m| m.name.clone())
                 })
                 .unwrap_or_else(|| "flux2-klein".to_string());
-            let has_remaining = config.models.keys().any(|_| true)
-                || mold_core::manifest::known_manifests()
-                    .iter()
-                    .any(|m| m.name != canonical && config.manifest_model_is_downloaded(&m.name));
+            let has_remaining = !config.models.is_empty()
+                || mold_core::manifest::known_manifests().iter().any(|m| {
+                    !m.is_utility()
+                        && !m.is_upscaler()
+                        && m.name != canonical
+                        && config.manifest_model_is_downloaded(&m.name)
+                });
             if !has_remaining {
                 eprintln!(
                     "{} default model reset to {}",
