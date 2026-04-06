@@ -2204,4 +2204,106 @@ qwen3_variant = "iq4"
             crate::config::DefaultModelSource::Config
         );
     }
+
+    // --- Upscaler/utility manifest_model_is_downloaded (issue #184) ---
+
+    #[test]
+    fn upscaler_manifest_model_is_downloaded_when_files_exist() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("upscaler-downloaded");
+        populate_manifest_files(&dir, "real-esrgan-x4plus:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
+            "upscaler with files on disk should be reported as downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn upscaler_manifest_model_not_downloaded_when_files_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("upscaler-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            !cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
+            "upscaler without files should not be reported as downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn utility_manifest_model_is_downloaded_when_files_exist() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("utility-downloaded");
+        populate_manifest_files(&dir, "qwen3-expand:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            cfg.manifest_model_is_downloaded("qwen3-expand:q8"),
+            "utility model with files on disk should be reported as downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn utility_manifest_model_not_downloaded_when_files_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("utility-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            !cfg.manifest_model_is_downloaded("qwen3-expand:q8"),
+            "utility model without files should not be reported as downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn upscaler_discovered_manifest_paths_returns_some() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("upscaler-paths");
+        populate_manifest_files(&dir, "real-esrgan-x4plus:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        let paths = cfg.discovered_manifest_paths("real-esrgan-x4plus:fp16");
+        assert!(
+            paths.is_some(),
+            "upscaler with files on disk should produce ModelPaths"
+        );
+        let paths = paths.unwrap();
+        assert!(
+            paths
+                .transformer
+                .to_string_lossy()
+                .contains("diffusion_pytorch_model"),
+            "upscaler transformer should point to weights file"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn utility_discovered_manifest_paths_returns_some() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("utility-paths");
+        populate_manifest_files(&dir, "qwen3-expand:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        let paths = cfg.discovered_manifest_paths("qwen3-expand:q8");
+        assert!(
+            paths.is_some(),
+            "utility model with files on disk should produce ModelPaths"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -2938,9 +2938,15 @@ pub fn is_file_cached(manifest: &ModelManifest, file: &ModelFile) -> bool {
 }
 
 /// Convert a `ModelManifest` to a `ModelPaths` from resolved download paths.
-/// Transformer (or TransformerShards) and VAE are always required.
+///
+/// For diffusion models, Transformer (or TransformerShards) and VAE are always required.
+/// For upscaler models, only the Upscaler component is required (mapped to `transformer`).
+/// For utility models (e.g., qwen3-expand), only the Transformer is required (no VAE).
 /// Other components are optional — each engine validates what it needs at load time.
-pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<ModelPaths> {
+pub fn paths_from_downloads(
+    downloads: &[(ModelComponent, PathBuf)],
+    family: &str,
+) -> Option<ModelPaths> {
     let find = |c: ModelComponent| -> Option<PathBuf> {
         downloads
             .iter()
@@ -2956,16 +2962,42 @@ pub fn paths_from_downloads(downloads: &[(ModelComponent, PathBuf)]) -> Option<M
             .collect()
     };
 
+    // Upscaler models: single weights file via Upscaler component, no VAE or encoders
+    if UPSCALER_FAMILIES.contains(&family) {
+        let transformer = find(ModelComponent::Upscaler)?;
+        return Some(ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae: PathBuf::new(),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        });
+    }
+
     let transformer_shards = collect(ModelComponent::TransformerShard);
 
     // Transformer: use single Transformer file, or first TransformerShard as primary path
     let transformer =
         find(ModelComponent::Transformer).or_else(|| transformer_shards.first().cloned())?;
 
+    // Utility models (e.g., qwen3-expand): transformer + optional tokenizer, no VAE
+    let vae = if UTILITY_FAMILIES.contains(&family) {
+        find(ModelComponent::Vae).unwrap_or_default()
+    } else {
+        find(ModelComponent::Vae)?
+    };
+
     Some(ModelPaths {
         transformer,
         transformer_shards,
-        vae: find(ModelComponent::Vae)?,
+        vae,
         t5_encoder: find(ModelComponent::T5Encoder),
         clip_encoder: find(ModelComponent::ClipEncoder),
         t5_tokenizer: find(ModelComponent::T5Tokenizer),
@@ -5028,6 +5060,167 @@ mod tests {
                 "{family} pipeline ({path}): prompt cache check ('{cache_pattern}' at offset {cache_pos}) \
                  must appear BEFORE encoder load ('{load_pattern}' at offset {load_pos}) \
                  in generate_sequential() — encoder should not be loaded when cache hits"
+            );
+        }
+    }
+
+    // --- paths_from_downloads: upscaler and utility family support (issue #184) ---
+
+    #[test]
+    fn paths_from_downloads_upscaler_returns_some() {
+        let downloads = vec![(
+            ModelComponent::Upscaler,
+            PathBuf::from("/models/upscaler/weights.safetensors"),
+        )];
+        let paths = paths_from_downloads(&downloads, "upscaler");
+        assert!(
+            paths.is_some(),
+            "upscaler downloads should produce ModelPaths"
+        );
+        let paths = paths.unwrap();
+        assert_eq!(
+            paths.transformer,
+            PathBuf::from("/models/upscaler/weights.safetensors"),
+            "upscaler weights should map to transformer field"
+        );
+        assert_eq!(paths.vae, PathBuf::new(), "upscaler should have empty vae");
+    }
+
+    #[test]
+    fn paths_from_downloads_upscaler_missing_component_returns_none() {
+        // No Upscaler component → should return None
+        let downloads: Vec<(ModelComponent, PathBuf)> = vec![];
+        assert!(
+            paths_from_downloads(&downloads, "upscaler").is_none(),
+            "empty downloads for upscaler should return None"
+        );
+    }
+
+    #[test]
+    fn paths_from_downloads_utility_returns_some_without_vae() {
+        let downloads = vec![
+            (
+                ModelComponent::Transformer,
+                PathBuf::from("/models/qwen3/model.gguf"),
+            ),
+            (
+                ModelComponent::TextTokenizer,
+                PathBuf::from("/models/qwen3/tokenizer.json"),
+            ),
+        ];
+        let paths = paths_from_downloads(&downloads, "qwen3-expand");
+        assert!(
+            paths.is_some(),
+            "utility downloads without VAE should produce ModelPaths"
+        );
+        let paths = paths.unwrap();
+        assert_eq!(paths.transformer, PathBuf::from("/models/qwen3/model.gguf"));
+        assert_eq!(paths.vae, PathBuf::new(), "utility should have empty vae");
+        assert_eq!(
+            paths.text_tokenizer,
+            Some(PathBuf::from("/models/qwen3/tokenizer.json"))
+        );
+    }
+
+    #[test]
+    fn paths_from_downloads_utility_missing_transformer_returns_none() {
+        // Utility model with only a tokenizer (no transformer) → should return None
+        let downloads = vec![(
+            ModelComponent::TextTokenizer,
+            PathBuf::from("/models/qwen3/tokenizer.json"),
+        )];
+        assert!(
+            paths_from_downloads(&downloads, "qwen3-expand").is_none(),
+            "utility without transformer should return None"
+        );
+    }
+
+    #[test]
+    fn paths_from_downloads_diffusion_still_requires_vae() {
+        // Diffusion model without VAE → should return None (unchanged behavior)
+        let downloads = vec![(
+            ModelComponent::Transformer,
+            PathBuf::from("/models/flux/transformer.safetensors"),
+        )];
+        assert!(
+            paths_from_downloads(&downloads, "flux").is_none(),
+            "diffusion model without VAE should return None"
+        );
+    }
+
+    #[test]
+    fn paths_from_downloads_diffusion_with_all_components() {
+        let downloads = vec![
+            (
+                ModelComponent::Transformer,
+                PathBuf::from("/models/flux/transformer.safetensors"),
+            ),
+            (
+                ModelComponent::Vae,
+                PathBuf::from("/models/flux/vae.safetensors"),
+            ),
+        ];
+        let paths = paths_from_downloads(&downloads, "flux");
+        assert!(
+            paths.is_some(),
+            "diffusion model with transformer+vae should work"
+        );
+        let paths = paths.unwrap();
+        assert_eq!(
+            paths.transformer,
+            PathBuf::from("/models/flux/transformer.safetensors")
+        );
+        assert_eq!(paths.vae, PathBuf::from("/models/flux/vae.safetensors"));
+    }
+
+    #[test]
+    fn all_upscaler_manifests_produce_paths() {
+        // Regression: every upscaler manifest should produce valid ModelPaths
+        for manifest in known_manifests() {
+            if !manifest.is_upscaler() {
+                continue;
+            }
+            let downloads: Vec<(ModelComponent, PathBuf)> = manifest
+                .files
+                .iter()
+                .map(|f| {
+                    (
+                        f.component,
+                        PathBuf::from(format!("/fake/{}", f.hf_filename)),
+                    )
+                })
+                .collect();
+            let paths = paths_from_downloads(&downloads, &manifest.family);
+            assert!(
+                paths.is_some(),
+                "upscaler manifest '{}' should produce ModelPaths from its downloads",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_utility_manifests_produce_paths() {
+        // Regression: every utility manifest should produce valid ModelPaths
+        for manifest in known_manifests() {
+            if !manifest.is_utility() {
+                continue;
+            }
+            let downloads: Vec<(ModelComponent, PathBuf)> = manifest
+                .files
+                .iter()
+                .map(|f| {
+                    (
+                        f.component,
+                        PathBuf::from(format!("/fake/{}", f.hf_filename)),
+                    )
+                })
+                .collect();
+            let paths = paths_from_downloads(&downloads, &manifest.family);
+            assert!(
+                paths.is_some(),
+                "utility manifest '{}' should produce ModelPaths from its downloads",
+                manifest.name
             );
         }
     }

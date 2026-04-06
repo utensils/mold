@@ -574,7 +574,7 @@ pub async fn pull_model(
     }
 
     remove_pulling_marker(&manifest.name);
-    paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
+    paths_from_downloads(&downloads, &manifest.family).ok_or(DownloadError::MissingComponent)
 }
 
 /// Download all files for a model manifest, reporting progress via callback.
@@ -688,7 +688,7 @@ pub async fn pull_model_with_callback(
     }
 
     remove_pulling_marker(&manifest.name);
-    paths_from_downloads(&downloads).ok_or(DownloadError::MissingComponent)
+    paths_from_downloads(&downloads, &manifest.family).ok_or(DownloadError::MissingComponent)
 }
 
 /// Download all files for a utility model (no ModelPaths, no config writing).
