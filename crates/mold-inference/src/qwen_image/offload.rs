@@ -1,4 +1,4 @@
-//! Block-level GPU offloading for the Qwen-Image BF16 transformer.
+//! Block-level GPU offloading for the Qwen-Image BF16/FP8 transformer.
 //!
 //! Streams 60 transformer blocks one at a time between CPU and GPU during each
 //! denoising step. Reduces peak VRAM from ~38GB (full BF16) to ~4-6GB at the
@@ -7,10 +7,15 @@
 //!
 //! Self-contained: defines its own block types with `to_device()` methods,
 //! following the same pattern as `flux/offload.rs`.
+//!
+//! Key names match the official diffusers/ComfyUI safetensors format:
+//! `img_in`, `txt_in`, `txt_norm`, `time_text_embed.timestep_embedder`,
+//! `transformer_blocks.N.img_mod.1`, `transformer_blocks.N.attn.to_out.0`,
+//! `transformer_blocks.N.img_mlp.net.{0.proj,2}`, etc.
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::{linear, linear_no_bias, Linear, VarBuilder};
+use candle_nn::{linear, Linear, VarBuilder};
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 
 use super::quantized_transformer::QwenRopeEmbedder;
@@ -19,17 +24,22 @@ use crate::progress::ProgressReporter;
 
 // ── Device-transfer helpers ──────────────────────────────────────────────────
 
+/// Transfer a linear layer to the target device, casting to BF16 for GPU compute.
+/// This handles the F32 (CPU) → BF16 (GPU) conversion for FP8 models.
 fn linear_to_device(l: &Linear, dev: &Device) -> Result<Linear> {
-    let w = l.weight().to_device(dev)?;
-    let b = l.bias().map(|b| b.to_device(dev)).transpose()?;
+    let target_dtype = if dev.is_cuda() { DType::BF16 } else { l.weight().dtype() };
+    let w = l.weight().to_device(dev)?.to_dtype(target_dtype)?;
+    let b = l
+        .bias()
+        .map(|b| b.to_device(dev)?.to_dtype(target_dtype))
+        .transpose()?;
     Ok(Linear::new(w, b))
 }
 
 fn rms_norm_to_device(rn: &candle_nn::RmsNorm, dev: &Device) -> Result<candle_nn::RmsNorm> {
-    // candle_nn::RmsNorm stores a single weight tensor + eps
-    // We clone to avoid moving out of the reference, then transfer
+    let target_dtype = if dev.is_cuda() { DType::BF16 } else { DType::F32 };
     let cloned = rn.clone();
-    let w = cloned.into_inner().weight().to_device(dev)?;
+    let w = cloned.into_inner().weight().to_device(dev)?.to_dtype(target_dtype)?;
     Ok(candle_nn::RmsNorm::new(w, 1e-6))
 }
 
@@ -39,7 +49,6 @@ fn load_rms_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<candle_nn::Rms
 
 // ── Parameterless LayerNorm ──────────────────────────────────────────────────
 
-/// LayerNorm without learnable parameters. No device transfer needed (no weights).
 #[derive(Debug, Clone)]
 struct LayerNormNoParams {
     eps: f64,
@@ -68,33 +77,29 @@ impl Module for LayerNormNoParams {
     }
 }
 
-// ── FeedForward (SwiGLU) ─────────────────────────────────────────────────────
+// ── GELU MLP (diffusers format: net.0.proj + net.2) ──────────────────────────
 
-struct FeedForward {
-    w1: Linear,
-    w2: Linear,
-    w3: Linear,
+struct GeluMlp {
+    proj: Linear,   // net.0.proj — GELU gate projection
+    out: Linear,    // net.2 — output projection
 }
 
-impl FeedForward {
-    fn load(dim: usize, hidden_dim: usize, vb: VarBuilder) -> Result<Self> {
+impl GeluMlp {
+    fn load(in_dim: usize, hidden_dim: usize, vb: VarBuilder) -> Result<Self> {
+        let vb_net = vb.pp("net");
         Ok(Self {
-            w1: linear_no_bias(dim, hidden_dim, vb.pp("w1"))?,
-            w2: linear_no_bias(hidden_dim, dim, vb.pp("w2"))?,
-            w3: linear_no_bias(dim, hidden_dim, vb.pp("w3"))?,
+            proj: linear(in_dim, hidden_dim, vb_net.pp("0").pp("proj"))?,
+            out: linear(hidden_dim, in_dim, vb_net.pp("2"))?,
         })
     }
     fn to_device(&self, dev: &Device) -> Result<Self> {
         Ok(Self {
-            w1: linear_to_device(&self.w1, dev)?,
-            w2: linear_to_device(&self.w2, dev)?,
-            w3: linear_to_device(&self.w3, dev)?,
+            proj: linear_to_device(&self.proj, dev)?,
+            out: linear_to_device(&self.out, dev)?,
         })
     }
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x1 = x.apply(&self.w1)?.silu()?;
-        let x3 = x.apply(&self.w3)?;
-        Ok((x1 * x3)?.apply(&self.w2)?)
+        Ok(x.apply(&self.proj)?.gelu()?.apply(&self.out)?)
     }
 }
 
@@ -104,11 +109,11 @@ struct JointAttention {
     to_q: Linear,
     to_k: Linear,
     to_v: Linear,
-    to_out: Linear,
+    to_out: Linear,          // safetensors: attn.to_out.0
     add_q_proj: Linear,
     add_k_proj: Linear,
     add_v_proj: Linear,
-    add_out_proj: Linear,
+    add_out_proj: Linear,    // safetensors: attn.to_add_out
     norm_q: candle_nn::RmsNorm,
     norm_k: candle_nn::RmsNorm,
     norm_added_q: candle_nn::RmsNorm,
@@ -120,20 +125,21 @@ struct JointAttention {
 impl JointAttention {
     fn load(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
         let dim = cfg.inner_dim;
-        let text_dim = cfg.joint_attention_dim;
         let n_heads = cfg.num_attention_heads;
         let head_dim = cfg.attention_head_dim;
         let qkv_dim = n_heads * head_dim;
+        // After txt_in projection, text is inner_dim (3072), not joint_attention_dim
+        let text_proj_dim = dim;
 
         Ok(Self {
-            to_q: linear_no_bias(dim, qkv_dim, vb.pp("to_q"))?,
-            to_k: linear_no_bias(dim, qkv_dim, vb.pp("to_k"))?,
-            to_v: linear_no_bias(dim, qkv_dim, vb.pp("to_v"))?,
-            to_out: linear_no_bias(qkv_dim, dim, vb.pp("to_out_0"))?,
-            add_q_proj: linear_no_bias(text_dim, qkv_dim, vb.pp("add_q_proj"))?,
-            add_k_proj: linear_no_bias(text_dim, qkv_dim, vb.pp("add_k_proj"))?,
-            add_v_proj: linear_no_bias(text_dim, qkv_dim, vb.pp("add_v_proj"))?,
-            add_out_proj: linear_no_bias(qkv_dim, text_dim, vb.pp("to_add_out"))?,
+            to_q: linear(dim, qkv_dim, vb.pp("to_q"))?,
+            to_k: linear(dim, qkv_dim, vb.pp("to_k"))?,
+            to_v: linear(dim, qkv_dim, vb.pp("to_v"))?,
+            to_out: linear(qkv_dim, dim, vb.pp("to_out").pp("0"))?,
+            add_q_proj: linear(text_proj_dim, qkv_dim, vb.pp("add_q_proj"))?,
+            add_k_proj: linear(text_proj_dim, qkv_dim, vb.pp("add_k_proj"))?,
+            add_v_proj: linear(text_proj_dim, qkv_dim, vb.pp("add_v_proj"))?,
+            add_out_proj: linear(qkv_dim, text_proj_dim, vb.pp("to_add_out"))?,
             norm_q: load_rms_norm(head_dim, 1e-6, vb.pp("norm_q"))?,
             norm_k: load_rms_norm(head_dim, 1e-6, vb.pp("norm_k"))?,
             norm_added_q: load_rms_norm(head_dim, 1e-6, vb.pp("norm_added_q"))?,
@@ -257,34 +263,31 @@ struct OffloadedQwenBlock {
     norm1: LayerNormNoParams,
     norm1_context: LayerNormNoParams,
     attn: JointAttention,
-    ff: FeedForward,
-    ff_context: FeedForward,
+    img_mlp: GeluMlp,           // safetensors: img_mlp.net.{0.proj,2}
+    txt_mlp: GeluMlp,           // safetensors: txt_mlp.net.{0.proj,2}
     norm2: LayerNormNoParams,
     norm2_context: LayerNormNoParams,
-    adaln_modulation: Linear,
-    adaln_context_modulation: Linear,
+    img_mod: Linear,             // safetensors: img_mod.1
+    txt_mod: Linear,             // safetensors: txt_mod.1
 }
 
 impl OffloadedQwenBlock {
     fn load(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
         let dim = cfg.inner_dim;
-        let text_dim = cfg.joint_attention_dim;
-        let hidden_dim = cfg.hidden_dim();
+        // After txt_in: text embeddings are inner_dim (3072), not joint_attention_dim
+        let text_dim = dim;
 
         Ok(Self {
             norm1: LayerNormNoParams::new(cfg.norm_eps),
             norm1_context: LayerNormNoParams::new(cfg.norm_eps),
             attn: JointAttention::load(cfg, vb.pp("attn"))?,
-            ff: FeedForward::load(dim, hidden_dim, vb.pp("ff"))?,
-            ff_context: FeedForward::load(text_dim, text_dim * 4, vb.pp("ff_context"))?,
+            img_mlp: GeluMlp::load(dim, dim * 4, vb.pp("img_mlp"))?,
+            txt_mlp: GeluMlp::load(text_dim, text_dim * 4, vb.pp("txt_mlp"))?,
             norm2: LayerNormNoParams::new(cfg.norm_eps),
             norm2_context: LayerNormNoParams::new(cfg.norm_eps),
-            adaln_modulation: linear(dim, 6 * dim, vb.pp("norm1").pp("linear"))?,
-            adaln_context_modulation: linear(
-                dim,
-                6 * text_dim,
-                vb.pp("norm1_context").pp("linear"),
-            )?,
+            // Safetensors key: img_mod.1.weight (sequential module index 1)
+            img_mod: linear(dim, 6 * dim, vb.pp("img_mod").pp("1"))?,
+            txt_mod: linear(dim, 6 * text_dim, vb.pp("txt_mod").pp("1"))?,
         })
     }
 
@@ -293,12 +296,12 @@ impl OffloadedQwenBlock {
             norm1: self.norm1.clone(),
             norm1_context: self.norm1_context.clone(),
             attn: self.attn.to_device(dev)?,
-            ff: self.ff.to_device(dev)?,
-            ff_context: self.ff_context.to_device(dev)?,
+            img_mlp: self.img_mlp.to_device(dev)?,
+            txt_mlp: self.txt_mlp.to_device(dev)?,
             norm2: self.norm2.clone(),
             norm2_context: self.norm2_context.clone(),
-            adaln_modulation: linear_to_device(&self.adaln_modulation, dev)?,
-            adaln_context_modulation: linear_to_device(&self.adaln_context_modulation, dev)?,
+            img_mod: linear_to_device(&self.img_mod, dev)?,
+            txt_mod: linear_to_device(&self.txt_mod, dev)?,
         })
     }
 
@@ -317,13 +320,10 @@ impl OffloadedQwenBlock {
         let img_seq_len = img_hidden.dim(1)?;
 
         // AdaLN modulation (6 params per stream)
-        let img_mod = temb.silu()?.apply(&self.adaln_modulation)?.unsqueeze(1)?;
+        let img_mod = temb.silu()?.apply(&self.img_mod)?.unsqueeze(1)?;
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
 
-        let txt_mod = temb
-            .silu()?
-            .apply(&self.adaln_context_modulation)?
-            .unsqueeze(1)?;
+        let txt_mod = temb.silu()?.apply(&self.txt_mod)?.unsqueeze(1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
 
         // Attention
@@ -361,7 +361,7 @@ impl OffloadedQwenBlock {
             .forward(&img_hidden)?
             .broadcast_mul(&(&img_chunks[4] + 1.0)?)?
             .broadcast_add(&img_chunks[3])?;
-        let img_ff = self.ff.forward(&img_mlp_in)?;
+        let img_ff = self.img_mlp.forward(&img_mlp_in)?;
         let img_hidden = (img_hidden + img_chunks[5].broadcast_mul(&img_ff)?)?;
 
         let txt_mlp_in = self
@@ -369,7 +369,7 @@ impl OffloadedQwenBlock {
             .forward(&txt_hidden)?
             .broadcast_mul(&(&txt_chunks[4] + 1.0)?)?
             .broadcast_add(&txt_chunks[3])?;
-        let txt_ff = self.ff_context.forward(&txt_mlp_in)?;
+        let txt_ff = self.txt_mlp.forward(&txt_mlp_in)?;
         let txt_dtype = txt_hidden.dtype();
         let txt_hidden = (txt_hidden + txt_chunks[5].broadcast_mul(&txt_ff)?)?
             .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
@@ -388,7 +388,9 @@ struct TimestepProjEmbeddings {
 }
 
 impl TimestepProjEmbeddings {
+    /// Load from safetensors key: time_text_embed.timestep_embedder.linear_{1,2}
     fn load(inner_dim: usize, vb: VarBuilder) -> Result<Self> {
+        let vb = vb.pp("timestep_embedder");
         Ok(Self {
             linear1: linear(FREQUENCY_EMBEDDING_SIZE, inner_dim, vb.pp("linear_1"))?,
             linear2: linear(inner_dim, inner_dim, vb.pp("linear_2"))?,
@@ -419,8 +421,8 @@ impl TimestepProjEmbeddings {
 
 struct OutputLayer {
     norm_final: LayerNormNoParams,
-    linear: Linear,
-    adaln_linear: Linear,
+    proj_out: Linear,        // safetensors: proj_out
+    adaln_linear: Linear,    // safetensors: norm_out.linear
 }
 
 impl OutputLayer {
@@ -428,14 +430,14 @@ impl OutputLayer {
         let output_dim = patch_size * patch_size * out_channels;
         Ok(Self {
             norm_final: LayerNormNoParams::new(1e-6),
-            linear: linear(inner_dim, output_dim, vb.pp("proj_out"))?,
+            proj_out: linear(inner_dim, output_dim, vb.pp("proj_out"))?,
             adaln_linear: linear(inner_dim, 2 * inner_dim, vb.pp("norm_out").pp("linear"))?,
         })
     }
     fn to_device(&self, dev: &Device) -> Result<Self> {
         Ok(Self {
             norm_final: self.norm_final.clone(),
-            linear: linear_to_device(&self.linear, dev)?,
+            proj_out: linear_to_device(&self.proj_out, dev)?,
             adaln_linear: linear_to_device(&self.adaln_linear, dev)?,
         })
     }
@@ -450,19 +452,19 @@ impl OutputLayer {
             .forward(x)?
             .broadcast_mul(&(scale + 1.0)?)?
             .broadcast_add(&shift)?;
-        Ok(x.apply(&self.linear)?)
+        Ok(x.apply(&self.proj_out)?)
     }
 }
 
 // ── Main offloaded transformer ───────────────────────────────────────────────
 
-/// BF16 Qwen-Image transformer with blocks on CPU, streamed to GPU one at a time.
+/// BF16/FP8 Qwen-Image transformer with blocks on CPU, streamed to GPU one at a time.
 pub(crate) struct OffloadedQwenImageTransformer {
     // Stem layers on GPU permanently
     time_embed: TimestepProjEmbeddings,
-    img_in: Linear,
-    txt_in: Linear,
-    txt_norm: candle_nn::RmsNorm,
+    img_in: Linear,          // safetensors: img_in
+    txt_in: Linear,          // safetensors: txt_in
+    txt_norm: candle_nn::RmsNorm,  // safetensors: txt_norm
     output_layer: OutputLayer,
     rope_embedder: QwenRopeEmbedder,
     cfg: QwenImageConfig,
@@ -472,7 +474,7 @@ pub(crate) struct OffloadedQwenImageTransformer {
 }
 
 impl OffloadedQwenImageTransformer {
-    /// Load the full transformer from BF16 safetensors on CPU, then move stem to GPU.
+    /// Load the full transformer from safetensors on CPU, then move stem to GPU.
     pub fn load(
         vb: VarBuilder,
         cfg: &QwenImageConfig,
@@ -486,14 +488,14 @@ impl OffloadedQwenImageTransformer {
             TimestepProjEmbeddings::load(cfg.inner_dim, vb.pp("time_text_embed"))?
                 .to_device(gpu_device)?;
         let img_in = linear_to_device(
-            &linear(cfg.in_channels, cfg.inner_dim, vb.pp("x_embedder"))?,
+            &linear(cfg.in_channels, cfg.inner_dim, vb.pp("img_in"))?,
             gpu_device,
         )?;
         let txt_in = linear_to_device(
             &linear(
                 cfg.joint_attention_dim,
-                cfg.joint_attention_dim,
-                vb.pp("context_embedder"),
+                cfg.inner_dim,
+                vb.pp("txt_in"),
             )?,
             gpu_device,
         )?;
@@ -514,7 +516,7 @@ impl OffloadedQwenImageTransformer {
         let rope_embedder =
             QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, vb.dtype())?;
 
-        // Load 60 blocks on CPU
+        // Load blocks on CPU
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         let vb_blocks = vb.pp("transformer_blocks");
         for i in 0..cfg.num_layers {
@@ -564,17 +566,26 @@ impl OffloadedQwenImageTransformer {
             .contiguous()?;
         let mut img = x_packed.apply(&self.img_in)?;
 
-        // 3. Text embedding (on GPU)
+        // 3. Text embedding (on GPU): norm then project
         let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
         let mut txt = txt_normed.apply(&self.txt_in)?;
 
-        // 4. RoPE
+        // 4. RoPE (cast to computation dtype — RoPE tables may be F32 from CPU)
         let h_tokens = h / patch_size;
         let w_tokens = w / patch_size;
         let txt_seq_len = encoder_hidden_states.dim(1)?;
-        let (img_cos, img_sin, txt_cos, txt_sin) =
-            self.rope_embedder
-                .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
+        let compute_dtype = x.dtype();
+        let (img_cos, img_sin, txt_cos, txt_sin) = {
+            let (ic, is, tc, ts) =
+                self.rope_embedder
+                    .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
+            (
+                ic.to_dtype(compute_dtype)?,
+                is.to_dtype(compute_dtype)?,
+                tc.to_dtype(compute_dtype)?,
+                ts.to_dtype(compute_dtype)?,
+            )
+        };
 
         // 5. Stream blocks CPU → GPU
         for (i, block) in self.blocks.iter().enumerate() {
