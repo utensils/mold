@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Qwen-Image model sources**: base `qwen-image:*` GGUF models now map to `Qwen/Qwen-Image` companion files plus `city96/Qwen-Image-gguf`, while `qwen-image-2512:*` maps to `Qwen/Qwen-Image-2512` plus `unsloth/Qwen-Image-2512-GGUF` ([#178](https://github.com/utensils/mold/issues/178))
 - **Qwen-Image documentation and skills**: README, website docs, and `.claude/skills/mold/SKILL.md` now document the validated base and 2512 GGUF variants, upstream sources, and current 24 GB validation limits ([#178](https://github.com/utensils/mold/issues/178))
+- **LTX 0.9.8 execution path**: `ltx-video-0.9.8-*` checkpoints now run the full upstream-style two-pass multiscale refinement path instead of stopping after the first pass, including the latent spatial upsampler, second-pass continuation window, and upstream CFG/STG schedules where applicable ([#201](https://github.com/utensils/mold/issues/201))
 - **`OutputFormat` enum**: added `Apng`, `Webp`, `Mp4` variants with `extension()`, `content_type()`, `is_video()` helper methods
 - **`VideoData` struct**: added `gif_preview` field for cached animated previews
 - **`GenerateResponse`**: `video: Option<VideoData>` field for video model output
@@ -57,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`UpscaleEngine` trait**: new inference trait parallel to `InferenceEngine`, with `upscale()`, `load()`, `unload()`, `scale_factor()` methods
 - **LTX model catalog**: replaced the broken legacy `ltx-video-0.9` and `ltx-video-0.9.5` manifests with `ltx-video-0.9.6`, `ltx-video-0.9.6-distilled`, `ltx-video-0.9.8-2b-distilled`, `ltx-video-0.9.8-13b-dev`, and `ltx-video-0.9.8-13b-distilled`
 - **LTX asset wiring**: `ModelConfig` and `ModelPaths` now carry an explicit `spatial_upscaler` component for the 0.9.8 family
+- **LTX shared asset layout**: canonical shared-file placement now matches the actual upstream sources: shared FLUX T5 assets stay under `shared/flux/...`, the still-compatible LTX VAE stays under `shared/LTX-Video-0.9.5/...`, and the `0.9.8` spatial upscaler lives under `shared/LTX-Video/...`. Legacy `shared/ltx-video/...` installs are still discovered and repaired automatically on pull ([#204](https://github.com/utensils/mold/issues/204))
 
 ### Fixed
 
@@ -74,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
 - **LTX inference quality path**: the LTX engine now selects versioned transformer/VAE presets, uses the current improved VAE for supported checkpoints, applies the published `decode_noise_scale` before timestep-conditioned VAE decode, and stops guessing model behavior from legacy VAE file sizes
 - **LTX VAE source validation**: verified that the current `Lightricks/LTX-Video` VAE is not yet compatible with Candle's ported LTX VAE layout, so the manifest intentionally keeps using the published `Lightricks/LTX-Video-0.9.5` VAE until that follow-up architecture work lands
+- **LTX shared asset compatibility**: manifest-backed discovery and `mold pull` now migrate older LTX shared installs into the current canonical layout instead of silently treating them as missing ([#204](https://github.com/utensils/mold/issues/204))
 
 ### Removed
 

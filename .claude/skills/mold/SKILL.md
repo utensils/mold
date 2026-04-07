@@ -148,7 +148,7 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Current LTX defaults are 1216x704, 25 frames, 30 fps. Distilled models use fewer steps.
 
-**Current status:** `ltx-video-0.9.6-distilled:bf16` is the safest default. The `0.9.8` models require a spatial upscaler asset, which mold now pulls and resolves explicitly. mold currently runs the `0.9.8` first pass, but not the second multiscale refinement pass, so `0.9.8` is not yet at full upstream quality parity.
+**Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 
 **Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
 
@@ -169,7 +169,7 @@ Pick the right model for the task:
 | `qwen-image-2512:q4` | Slow (50 steps) | Good | Stable 2512 GGUF on 24 GB cards |
 | `qwen-image:q8` | Slow (50 steps) | Better | Best base GGUF quality, validated at 768x768 on 24 GB |
 | `ltx-video-0.9.6-distilled:bf16` | Fast (8 steps) | Good | Text-to-video, 30fps |
-| `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7 steps) | Better first pass | Newer checkpoint family, first-pass only today |
+| `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7+3 steps) | Better | Newer checkpoint family with full multiscale refinement |
 
 Default model if none specified: `flux2-klein:q8`
 
@@ -189,7 +189,7 @@ Default model if none specified: `flux2-klein:q8`
 | `qwen-image` | 50 | 4.0 | 1328x1328 |
 | `qwen-image-2512` | 50 | 4.0 | 1328x1328 |
 | `ltx-video-0.9.6-distilled` | 8 | 1.0 | 1216x704 (25 frames, 30fps) |
-| `ltx-video-0.9.8-2b-distilled` | 7 | 1.0 | 1216x704 (25 frames, 30fps, first pass) |
+| `ltx-video-0.9.8-2b-distilled` | 7 | 1.0 | 1216x704 (25 frames, 30fps, multiscale refine) |
 
 ### Available Models
 

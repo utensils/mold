@@ -32,7 +32,7 @@ and VRAM requirements — including both image and video generation.
 | `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                |
 | `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768              |
 | `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default                  |
-| `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7 steps      | Newer video checkpoint, first pass today |
+| `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7+3 steps    | Newer video checkpoint, multiscale refine |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),

@@ -30,10 +30,10 @@ tracks that file explicitly.
 These sizes are approximate full-download totals, including the shared T5
 encoder, tokenizer, VAE, and the `0.9.8` spatial upscaler where applicable.
 
-Today, mold runs the `0.9.8` first pass correctly and resolves the upscaler
-asset, but it does not yet execute the second multiscale refinement pass. That
-means `0.9.8` is usable and materially better wired than before, but still not
-at full upstream quality parity.
+The `0.9.8` family now runs the full two-pass multiscale refinement path. mold
+keeps the shared T5 assets in `shared/flux/...`, stores the `0.9.8` spatial
+upscaler under `shared/LTX-Video/...`, and intentionally continues using the
+compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 
 ## Defaults
 
@@ -41,7 +41,7 @@ at full upstream quality parity.
 - **Frames**: 25
 - **FPS**: 30
 - **Default model**: `ltx-video-0.9.6-distilled:bf16`
-- **Steps**: 8 on distilled models, 40 on `0.9.6`, 7 on current `0.9.8` first-pass presets
+- **Steps**: 8 on `0.9.6-distilled`, 40 on `0.9.6`, 7+3 on `0.9.8` distilled multiscale presets
 - **Output format**: APNG (animated PNG with metadata)
 
 ## Output Formats
@@ -105,6 +105,6 @@ mold run ltx-video-0.9.8-2b-distilled:bf16 "a humanoid robot walking" --frames 4
 ```
 
 If you want the safest current quality path in mold, start with
-`ltx-video-0.9.6-distilled:bf16`. If you want to evaluate the newer checkpoint
-family and are comfortable with the current first-pass-only limitation, try
+`ltx-video-0.9.6-distilled:bf16`. If you want the newer upstream 0.9.8
+checkpoint family with full multiscale refinement, try
 `ltx-video-0.9.8-2b-distilled:bf16`.

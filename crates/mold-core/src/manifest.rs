@@ -276,6 +276,28 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
     } else {
+        if manifest.family == "ltx-video" {
+            return match file.component {
+                // LTX reuses the shared FLUX T5 assets. Keep them under the
+                // flux shared bucket so path layout matches the actual source.
+                ModelComponent::T5Encoder | ModelComponent::T5Tokenizer => {
+                    PathBuf::from("shared").join("flux").join(&file.hf_filename)
+                }
+                // The currently compatible VAE still comes from the legacy
+                // LTX-Video-0.9.5 repo, and the 0.9.8 latent upsampler comes
+                // from the current LTX-Video repo. Keep the clean path aligned
+                // with the source repo to avoid shared/ltx-video ambiguity.
+                ModelComponent::Vae | ModelComponent::SpatialUpscaler => {
+                    let repo_leaf = file.hf_repo.rsplit('/').next().unwrap_or("ltx-video");
+                    PathBuf::from("shared")
+                        .join(repo_leaf)
+                        .join(&file.hf_filename)
+                }
+                _ => PathBuf::from("shared")
+                    .join(&manifest.family)
+                    .join(&file.hf_filename),
+            };
+        }
         if manifest.family == "qwen-image" {
             match file.hf_repo.as_str() {
                 "Qwen/Qwen-Image" => {
@@ -310,6 +332,27 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 .join(&file.hf_filename)
         }
     }
+}
+
+/// Candidate on-disk storage paths for a manifest file.
+///
+/// The first path is the canonical current clean path. Additional entries are
+/// backwards-compatible legacy locations that should still be discovered and
+/// repaired in place by `mold pull`.
+pub fn storage_path_candidates(manifest: &ModelManifest, file: &ModelFile) -> Vec<PathBuf> {
+    let canonical = storage_path(manifest, file);
+    let mut paths = vec![canonical.clone()];
+
+    if manifest.family == "ltx-video" && !is_model_specific_component(file.component) {
+        let legacy = PathBuf::from("shared")
+            .join(&manifest.family)
+            .join(&file.hf_filename);
+        if legacy != canonical {
+            paths.push(legacy);
+        }
+    }
+
+    paths
 }
 
 /// Shared FLUX component files (VAE, T5, CLIP, tokenizers) — identical across all FLUX models.
@@ -4429,6 +4472,54 @@ mod tests {
                 "{model} missing spatial upscaler component"
             );
         }
+    }
+
+    #[test]
+    fn ltx_shared_t5_assets_live_under_shared_flux() {
+        let manifest = find_manifest("ltx-video-0.9.8-2b-distilled:bf16").unwrap();
+        let t5 = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::T5Encoder)
+            .unwrap();
+        let tokenizer = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::T5Tokenizer)
+            .unwrap();
+        assert!(storage_path(manifest, t5).starts_with("shared/flux"));
+        assert!(storage_path(manifest, tokenizer).starts_with("shared/flux"));
+    }
+
+    #[test]
+    fn ltx_shared_vae_and_spatial_upscaler_use_repo_aligned_paths() {
+        let manifest = find_manifest("ltx-video-0.9.8-13b-distilled:bf16").unwrap();
+        let vae = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::Vae)
+            .unwrap();
+        let upscaler = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::SpatialUpscaler)
+            .unwrap();
+        assert!(storage_path(manifest, vae).starts_with("shared/LTX-Video-0.9.5"));
+        assert!(storage_path(manifest, upscaler).starts_with("shared/LTX-Video"));
+    }
+
+    #[test]
+    fn ltx_storage_candidates_include_legacy_shared_bucket() {
+        let manifest = find_manifest("ltx-video-0.9.8-2b-distilled:bf16").unwrap();
+        let t5 = manifest
+            .files
+            .iter()
+            .find(|file| file.component == ModelComponent::T5Encoder)
+            .unwrap();
+        let candidates = storage_path_candidates(manifest, t5);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].starts_with("shared/flux"));
+        assert!(candidates[1].starts_with("shared/ltx-video"));
     }
 
     #[test]

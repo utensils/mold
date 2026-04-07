@@ -776,8 +776,11 @@ impl Config {
             .files
             .iter()
             .map(|file| {
-                let path = models_dir.join(crate::manifest::storage_path(manifest, file));
-                path.exists().then_some((file.component, path))
+                crate::manifest::storage_path_candidates(manifest, file)
+                    .into_iter()
+                    .map(|path| models_dir.join(path))
+                    .find(|path| path.exists())
+                    .map(|path| (file.component, path))
             })
             .collect::<Option<Vec<_>>>()?;
         crate::manifest::paths_from_downloads(&downloads, &manifest.family)
@@ -811,8 +814,10 @@ impl Config {
     fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
         let models_dir = self.resolved_models_dir();
         manifest.files.iter().all(|file| {
-            let path = models_dir.join(crate::manifest::storage_path(manifest, file));
-            path.exists()
+            crate::manifest::storage_path_candidates(manifest, file)
+                .into_iter()
+                .map(|path| models_dir.join(path))
+                .any(|path| path.exists())
         })
     }
 
