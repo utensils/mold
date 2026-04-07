@@ -119,7 +119,7 @@ See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference
 
 ## Models
 
-Supports 8 model families with 60+ variants:
+Supports 9 model families with 80+ variants:
 
 | Family | Models | Highlights |
 |--------|--------|------------|
@@ -129,8 +129,9 @@ Supports 8 model families with 60+ variants:
 | **SD 1.5** | base + fine-tunes | Lightweight, ControlNet support |
 | **SD 3.5** | large, medium, turbo | Triple encoder, high quality |
 | **Z-Image** | turbo | Fast 9-step, Qwen3 encoder |
-| **Qwen-Image** | 2512 | High resolution, CFG guidance |
+| **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
 | **Wuerstchen** | v2 | 42x latent compression |
+| **LTX Video** | 0.9.5 | Text-to-video with APNG/GIF/WebP/MP4 output |
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 

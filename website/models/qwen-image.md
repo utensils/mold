@@ -5,23 +5,94 @@ flow-matching with classifier-free guidance.
 
 - **Developer**: [Alibaba / Qwen Team](https://huggingface.co/Qwen)
 - **License**: Apache 2.0
-- **HuggingFace**:
-  [Qwen/Qwen2.5-Image-2512](https://huggingface.co/Qwen/Qwen2.5-Image-2512)
+- **Upstream releases**:
+  [Qwen/Qwen-Image](https://huggingface.co/Qwen/Qwen-Image),
+  [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512)
+- **GGUF sources**:
+  [city96/Qwen-Image-gguf](https://huggingface.co/city96/Qwen-Image-gguf),
+  [unsloth/Qwen-Image-2512-GGUF](https://huggingface.co/unsloth/Qwen-Image-2512-GGUF)
 
-## Variants
+## Stable GGUF Variants
 
-| Model             | Steps | Size    | Notes                           |
-| ----------------- | ----- | ------- | ------------------------------- |
-| `qwen-image:bf16` | 50    | 44+ GB  | Full precision, maximum quality |
-| `qwen-image:q8`   | 50    | 21.8 GB | Best quality                    |
-| `qwen-image:q6`   | 50    | 16.8 GB | Best quality/size trade-off     |
-| `qwen-image:q4`   | 50    | 12.3 GB | Smallest practical footprint    |
+`mold` supports two quantized Qwen lines:
+
+- `qwen-image:*` uses the base `Qwen/Qwen-Image` release with GGUF transformers from `city96/Qwen-Image-gguf`
+- `qwen-image-2512:*` uses `Qwen/Qwen-Image-2512` with GGUF transformers from `unsloth/Qwen-Image-2512-GGUF`
+
+### Base Qwen-Image
+
+| Model | Steps | Size | Validated On 24 GB | Notes |
+| ----- | ----- | ---- | ------------------ | ----- |
+| `qwen-image:q8` | 50 | 21.8 GB | `768x768` | Highest-quality GGUF tier |
+| `qwen-image:q6` | 50 | 16.8 GB | `1024x1024` | Quality/size trade-off |
+| `qwen-image:q5` | 50 | 14.9 GB | `1024x1024` | Dynamic `K_M` quant |
+| `qwen-image:q4` | 50 | 13.1 GB | `1024x1024` | Stable 24 GB choice |
+| `qwen-image:q3` | 50 | 9.7 GB | `1024x1024` | Lower bitrate, still prompt-faithful |
+| `qwen-image:q2` | 50 | 7.1 GB | `1024x1024` | Smallest published base GGUF |
+
+### Qwen-Image-2512
+
+| Model | Steps | Size | Validated On 24 GB | Notes |
+| ----- | ----- | ---- | ------------------ | ----- |
+| `qwen-image-2512:q8` | 50 | 21.8 GB | `768x768` | Highest-quality 2512 GGUF tier |
+| `qwen-image-2512:q6` | 50 | 16.8 GB | `1024x1024` | Quality/size trade-off |
+| `qwen-image-2512:q5` | 50 | 15.0 GB | `1024x1024` | Dynamic `K_M` quant |
+| `qwen-image-2512:q4` | 50 | 13.2 GB | `1024x1024` | Stable 24 GB choice |
+| `qwen-image-2512:q3` | 50 | 9.9 GB | `1024x1024` | Lower bitrate, still prompt-faithful |
+| `qwen-image-2512:q2` | 50 | 7.3 GB | `1024x1024` | Smallest published 2512 GGUF |
+
+::: tip Recommended Stable Quant Paths
+On a 24 GB card, `qwen-image:q4` and `qwen-image-2512:q4` are the safest
+starting points for native-quality GGUF inference. `q6` and `q5` also work
+well at `1024x1024`, while `q8` is currently validated at `768x768`.
+
+```bash
+mold pull qwen-image:q4
+mold run qwen-image:q4 "your prompt here"
+
+mold pull qwen-image-2512:q4
+mold run qwen-image-2512:q4 "your prompt here"
+```
+:::
 
 ## Defaults
 
 - **Resolution**: 1328x1328
-- **Guidance**: 3.0
+- **Guidance**: 4.0
 - **Steps**: 50
+
+On the 24 GB validation machine used for mold development:
+
+- `q2` through `q6` were validated at `1024x1024`
+- `q8` was validated at `768x768`
+- `qwen-image-2512:q4` still ran out of memory at `1328x1328`
+
+## Negative Prompts
+
+Qwen-Image supports negative prompts via `--negative-prompt`.
+
+For the GGUF quantized paths above, the best prompt adherence came from using
+no default negative prompt at all. Start without one and only add a negative
+prompt if you need to push the image away from a specific failure mode.
+
+The upstream Chinese negative prompt is more appropriate for BF16 / FP8 paths:
+
+```bash
+mold run qwen-image:fp8 "a cat" --negative-prompt "低分辨率，低画质，肢体畸形，手指畸形"
+```
+
+::: warning
+The upstream Chinese negative prompt can hurt GGUF prompt adherence. Avoid
+using it by default with `qwen-image:q2` through `qwen-image:q8` or
+`qwen-image-2512:q2` through `qwen-image-2512:q8`.
+:::
+
+## Other Qwen Variants
+
+`mold` also exposes higher-VRAM Qwen paths such as `qwen-image:bf16`,
+`qwen-image:fp8`, `qwen-image-lightning:fp8`, and `qwen-image-lightning:fp8-8step`.
+Those are separate from the GGUF quantized matrix above and have different
+memory and scheduler behavior.
 
 ## Recommended Dimensions
 
