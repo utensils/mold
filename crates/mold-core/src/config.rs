@@ -767,10 +767,10 @@ impl Config {
     }
 
     pub fn discovered_manifest_paths(&self, name: &str) -> Option<ModelPaths> {
-        if crate::download::has_pulling_marker(name) {
+        let manifest = crate::manifest::find_manifest(name)?;
+        if self.incomplete_pull_blocks_manifest(manifest) {
             return None;
         }
-        let manifest = crate::manifest::find_manifest(name)?;
         let models_dir = self.resolved_models_dir();
         let downloads = manifest
             .files
@@ -784,13 +784,13 @@ impl Config {
     }
 
     pub fn manifest_model_is_downloaded(&self, name: &str) -> bool {
-        if crate::download::has_pulling_marker(name) {
-            return false;
-        }
         let manifest = match crate::manifest::find_manifest(name) {
             Some(m) => m,
             None => return false,
         };
+        if self.incomplete_pull_blocks_manifest(manifest) {
+            return false;
+        }
         // Upscaler and utility models don't produce full ModelPaths (no VAE).
         // Check file existence directly instead of going through ModelPaths::resolve.
         if manifest.is_upscaler() || manifest.is_utility() {
@@ -806,6 +806,25 @@ impl Config {
             let path = models_dir.join(crate::manifest::storage_path(manifest, file));
             path.exists()
         })
+    }
+
+    /// Return true when an active `.pulling` marker should block manifest discovery.
+    ///
+    /// If all manifest files already exist, the marker is stale (for example a
+    /// prior pull finished but crashed before marker cleanup). In that case we
+    /// remove it and continue with manifest-derived paths instead of falling
+    /// back to potentially stale config entries.
+    fn incomplete_pull_blocks_manifest(&self, manifest: &crate::manifest::ModelManifest) -> bool {
+        if !crate::download::has_pulling_marker(&manifest.name) {
+            return false;
+        }
+
+        if self.manifest_files_exist(manifest) {
+            crate::download::remove_pulling_marker(&manifest.name);
+            return false;
+        }
+
+        true
     }
 
     /// Return the ModelConfig for a given model name, or an empty default.
