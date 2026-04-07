@@ -494,16 +494,29 @@ impl QwenImageEngine {
     fn resolve_text_encoder_device(&self, gpu_device: &Device, free_vram: u64) -> (bool, String) {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
-        let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, QWEN2_FP16_VRAM_THRESHOLD);
+        let on_gpu = Self::should_use_gpu_for_text_encoder(is_cuda, is_metal, free_vram);
         let label = if on_gpu { "GPU" } else { "CPU" };
-        if !on_gpu && (is_cuda || is_metal) {
-            self.base.progress.info(&format!(
-                "Qwen2.5 text encoder on CPU ({} free < {} threshold)",
-                fmt_gb(free_vram),
-                fmt_gb(QWEN2_FP16_VRAM_THRESHOLD),
-            ));
+        if !on_gpu {
+            if is_metal {
+                self.base
+                    .progress
+                    .info("Qwen2.5 text encoder on CPU (Metal safety fallback)");
+            } else if is_cuda {
+                self.base.progress.info(&format!(
+                    "Qwen2.5 text encoder on CPU ({} free < {} threshold)",
+                    fmt_gb(free_vram),
+                    fmt_gb(QWEN2_FP16_VRAM_THRESHOLD),
+                ));
+            }
         }
         (on_gpu, label.to_string())
+    }
+
+    fn should_use_gpu_for_text_encoder(is_cuda: bool, is_metal: bool, free_vram: u64) -> bool {
+        if is_metal {
+            return false;
+        }
+        should_use_gpu(is_cuda, is_metal, free_vram, QWEN2_FP16_VRAM_THRESHOLD)
     }
 
     /// Load all model components (Eager mode).
@@ -703,7 +716,9 @@ impl QwenImageEngine {
                     .filter_map(|p| std::fs::metadata(p).ok())
                     .map(|m| m.len())
                     .sum();
-                preflight_memory_check("Qwen2.5 text encoder", te_size)?;
+                if te_on_gpu || !device.is_metal() {
+                    preflight_memory_check("Qwen2.5 text encoder", te_size)?;
+                }
 
                 if let Some(status) = memory_status_string() {
                     self.base.progress.info(&status);
@@ -1311,5 +1326,30 @@ mod tests {
         );
 
         assert!(engine.detect_is_quantized());
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_cpu_on_metal() {
+        assert!(!QwenImageEngine::should_use_gpu_for_text_encoder(
+            false, true, 32_000_000_000
+        ));
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_gpu_on_cuda_with_headroom() {
+        assert!(QwenImageEngine::should_use_gpu_for_text_encoder(
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD + 1
+        ));
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_cpu_on_cuda_without_headroom() {
+        assert!(!QwenImageEngine::should_use_gpu_for_text_encoder(
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD
+        ));
     }
 }

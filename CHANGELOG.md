@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Qwen-Image Metal/MPS regression**: Qwen2.5 text encoding now falls back to CPU on Apple Silicon instead of running on MPS, avoiding the recent local bad-math/OOM regression path and bypassing a false-negative text-encoder preflight failure on unified-memory systems
 - **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))
 - **Qwen-Image GGUF prompt adherence**: restored correct combined padding + causal attention masking in the Qwen2 text encoder, fixing the quantized Q4/Q6 regression that produced coherent but prompt-incorrect images on this branch ([#178](https://github.com/utensils/mold/issues/178))
 - **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
