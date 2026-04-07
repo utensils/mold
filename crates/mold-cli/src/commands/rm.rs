@@ -829,6 +829,9 @@ mod tests {
         // Regression: `mold rm` only checked config.models.contains_key(),
         // so manifest-backed models that were pulled but not in config
         // were reported as "not installed".
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("rm-manifest");
         let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
         for file in &manifest.files {
