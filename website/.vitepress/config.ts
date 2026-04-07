@@ -81,6 +81,7 @@ export default defineConfig({
             { text: 'Z-Image', link: '/models/z-image' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
+            { text: 'LTX Video', link: '/models/ltx-video' },
             { text: 'Upscalers', link: '/models/upscalers' },
           ],
         },

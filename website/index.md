@@ -99,6 +99,15 @@ All images generated locally with mold — click any to see the model and prompt
 <div class="gallery-grid">
 <figure>
 
+![Winter cabin — Qwen-Image 2512](/gallery/qwen-image-cabin.png)
+
+**qwen-image-2512:q4** — 50 steps, seed 888 _"A snowy mountain cabin at twilight,
+warm orange light pouring from the windows, aurora borealis in the sky above, tall
+pine trees covered in snow, peaceful winter scene"_
+
+</figure>
+<figure>
+
 ![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
 
 **flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy
@@ -168,6 +177,33 @@ on floating islands above clouds, magical waterfalls, ethereal glow"_
 
 **wuerstchen-v2:fp16** — 30 steps, seed 42 _"A lighthouse on a rocky coast during
 a dramatic sunset, oil painting style, vibrant orange and purple sky"_
+
+</figure>
+<figure>
+
+![Hot air balloon — Qwen-Image 2512](/gallery/qwen-image-balloon.png)
+
+**qwen-image-2512:q4** — 50 steps, seed 314 _"A colorful hot air balloon floating
+over a misty valley at sunrise, the balloon has the word MOLD written in bold white
+letters on the side, mountains in the background, dreamy atmosphere"_
+
+</figure>
+<figure>
+
+![Northern lights — LTX Video](/gallery/ltx-aurora.webp)
+
+**ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 1234 _"Northern
+lights dancing over a frozen lake in Iceland, green and purple aurora ribbons
+reflected in the ice, stars visible, time-lapse photography"_
+
+</figure>
+<figure>
+
+![Jellyfish — LTX Video 0.9.8](/gallery/ltx-jellyfish.webp)
+
+**ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 707 _"Underwater
+footage of a jellyfish pulsing through deep blue water, bioluminescent glow,
+particles floating, ethereal slow motion"_
 
 </figure>
 </div>

@@ -111,6 +111,13 @@ Environment variables take precedence over config file values.
 | `MOLD_RATE_LIMIT`       | —                | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)  |
 | `MOLD_RATE_LIMIT_BURST` | —                | Burst allowance override (defaults to 2x rate, capped at 100)                     |
 
+### Upscaling
+
+| Variable                 | Default | Description                                                    |
+| ------------------------ | ------- | -------------------------------------------------------------- |
+| `MOLD_UPSCALE_MODEL`     | —       | Default upscaler model for `mold upscale`                      |
+| `MOLD_UPSCALE_TILE_SIZE` | —       | Tile size for memory-efficient upscaling (0 to disable tiling) |
+
 ### Auth
 
 | Variable   | Default | Description                        |

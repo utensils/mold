@@ -37,8 +37,8 @@ mold run "a sunset over mountains"
 
 ## What You Get
 
-- **8 model families** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein,
-  Qwen-Image, Wuerstchen v2
+- **9 model families** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein,
+  Qwen-Image, Wuerstchen v2, LTX Video
 - **txt2img, img2img, inpainting, ControlNet** — all in one binary
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works

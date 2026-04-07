@@ -7,81 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-07
+
 ### Added
 
-- **Qwen-Image quantized text encoder selection**: new `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2` CLI flag (env: `MOLD_QWEN2_VARIANT`) to choose Qwen2.5-VL GGUF text encoder variants for Qwen-Image
-- **Qwen-Image text encoder mode override**: new `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu` CLI flag (env: `MOLD_QWEN2_TEXT_ENCODER_MODE`) to control Qwen2.5-VL text encoder placement/staging for Qwen-Image models
-- **Prometheus metrics endpoint**: `GET /metrics` exposes Prometheus-format metrics for HTTP request rates/latency, generation duration, queue depth, model load tracking, GPU memory usage, and server uptime. Gated behind `metrics` feature flag (zero overhead when disabled). Endpoint is excluded from auth and rate limiting for monitoring scrapers ([#142](https://github.com/utensils/mold/issues/142))
-- **Qwen-Image FP8 support**: new `qwen-image:fp8` variant using ComfyUI-compatible FP8 E4M3 safetensors from Comfy-Org/Qwen-Image_ComfyUI ([#178](https://github.com/utensils/mold/issues/178))
-- **Qwen-Image block-level offloading**: CPU↔GPU block streaming for BF16/FP8 Qwen-Image transformers, enabling native 1328×1328 generation on 24GB cards. Auto-detects when VRAM is insufficient; force with `--offload` or `MOLD_OFFLOAD=1`. Peak VRAM ~10GB during denoising ([#178](https://github.com/utensils/mold/issues/178))
-- **Qwen-Image negative prompt support**: `req.negative_prompt` now flows through CFG conditioning (was hardcoded to empty string). Use `--negative-prompt` on CLI ([#178](https://github.com/utensils/mold/issues/178))
-- **Qwen-Image GGUF tier coverage**: added validated `q5`, `q3`, and `q2` variants for both `qwen-image:*` and `qwen-image-2512:*`, completing the published Q2-Q8 quantized matrix in mold ([#178](https://github.com/utensils/mold/issues/178))
-- **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using current LTX 0.9.6 and 0.9.8 checkpoints (Lightricks), with 2B and 13B variants plus the published 0.9.8 spatial upscaler asset ([#172](https://github.com/utensils/mold/issues/172))
-- **Multiple video output formats**: APNG (default, lossless, metadata in tEXt chunks), GIF (256-color, pipe-friendly), WebP (feature-gated `webp`), MP4/H.264 (feature-gated `mp4`, QuickTime-compatible). Use `--format apng|gif|webp|mp4`
-- **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
-- **Video metadata**: APNG output embeds generation parameters (prompt, model, seed, steps, guidance, dimensions, fps) in PNG tEXt/iTXt chunks
-- **GIF preview cache**: animated GIF preview cached in `~/.mold/cache/previews/` for TUI gallery detail view and generation viewport
-- **Custom MP4 muxer**: minimal QuickTime-compatible MP4 writer with correct ftyp brands (isom, iso2, avc1, mp41), colr/pasp atoms, faststart layout. Replaces muxide dependency
-- **Hidden manifest support**: `ModelManifest.hidden` field excludes models from user-facing lists (CLI, TUI) while keeping them usable via config.toml
-- **Upscaler CLI color**: upscaler models display in bright purple in `mold list`, consistent with per-family color scheme
-- **Shell completions for --format**: tab completion suggests valid output formats (png, jpeg, gif, apng, webp, mp4)
-- **CI feature checks**: new `check-features` job validates compilation with all optional features (preview, discord, expand, tui, webp, mp4)
-- **Image upscaling**: `mold upscale <image>` command for AI-powered super-resolution using Real-ESRGAN models (RRDBNet and SRVGGNetCompact architectures), with 2x and 4x scale factors
-- **Upscaler models**: 7 Real-ESRGAN variants from HuggingFace — `real-esrgan-x4plus:fp16/fp32`, `real-esrgan-x2plus:fp16/fp32`, `real-esrgan-x4plus-anime:fp16/fp32`, `real-esrgan-anime-v3:fp32`
-- **Tiled upscaling**: memory-efficient processing of large images via overlapping tiles with feathered blending, configurable tile size (`--tile-size`)
-- **`POST /api/upscale`**: server endpoint for image upscaling, classified under generation rate limit tier; upscaler engine cached in `AppState` for reuse
-- **`--preview` on upscale**: display upscaled image inline in terminal after completion
-- **`--upscale` on `mold run`**: flag to chain upscaling after generation (wired, pipeline integration pending)
-- **TUI gallery upscale**: press `u` on any gallery image to open a model selector popup, choose an upscaler model, and upscale in the background with a progress bar showing tile-by-tile progress. Upscaled image is saved to the output directory and inserted into the gallery. Esc cancels in-progress upscales. Models auto-download on first use with progress bars ([#170](https://github.com/utensils/mold/issues/170))
-- **`POST /api/upscale/stream`**: SSE streaming endpoint for upscale requests, streaming tile-by-tile `DenoiseStep` progress events and a final `SseUpscaleCompleteEvent` with the upscaled image
-- **Server upscaler engine caching**: `AppState` holds a single cached upscaler engine slot, reused across `/api/upscale` requests for the same model. Cleared on `DELETE /api/models/unload`
-- **Rich model selector popups**: both generation and upscaler model selectors show two-line entries with model name, size, description, download status (green `✓ ready` or dim `(download)`), and yellow `★` on the default model. Downloaded models sorted first, matching `mold list` behavior
-- **Architecture auto-detection**: upscaler model architecture (RRDBNet vs SRVGGNetCompact) inferred from safetensors tensor names at load time
-- **Shell completions**: tab-completion for upscaler model names on `mold upscale --model`
-- **Upscaler documentation**: `website/guide/upscaling.md` guide and `website/models/upscalers.md` model reference
+- **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using LTX 0.9.6 and 0.9.8 checkpoints (2B and 13B variants) with APNG, GIF, WebP, and MP4 output formats ([#172](https://github.com/utensils/mold/issues/172))
+- **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24), `--format apng|gif|webp|mp4` for video models
+- **Image upscaling**: `mold upscale <image>` with 7 Real-ESRGAN variants (2x/4x, RRDBNet + SRVGGNetCompact), tiled processing for large images, server API (`POST /api/upscale`), and TUI gallery integration with background upscaling ([#170](https://github.com/utensils/mold/issues/170))
+- **Qwen-Image enhancements**: FP8 support, block-level offloading for 24GB cards, negative prompt support, full Q2-Q8 GGUF tier coverage for both base and 2512 variants, and encoder variant selection via `--qwen2-variant` / `--qwen2-text-encoder-mode` CLI flags ([#178](https://github.com/utensils/mold/issues/178))
+- **Prometheus metrics**: `GET /metrics` endpoint with HTTP rates, generation duration, queue depth, GPU memory, and uptime (behind `metrics` feature flag) ([#142](https://github.com/utensils/mold/issues/142))
+- **Custom MP4 muxer**: minimal QuickTime-compatible H.264 writer with faststart layout, replacing muxide dependency ([#181](https://github.com/utensils/mold/issues/181))
+- **CI feature matrix**: new `check-features` job validates all optional feature combinations
+- **GIF preview cache**: animated GIF previews cached in `~/.mold/cache/previews/` for TUI gallery
 
 ### Changed
 
-- **Qwen-Image model sources**: base `qwen-image:*` GGUF models now map to `Qwen/Qwen-Image` companion files plus `city96/Qwen-Image-gguf`, while `qwen-image-2512:*` maps to `Qwen/Qwen-Image-2512` plus `unsloth/Qwen-Image-2512-GGUF` ([#178](https://github.com/utensils/mold/issues/178))
-- **Qwen-Image documentation and skills**: README, website docs, and `.claude/skills/mold/SKILL.md` now document the validated base and 2512 GGUF variants, upstream sources, and current 24 GB validation limits ([#178](https://github.com/utensils/mold/issues/178))
-- **LTX 0.9.8 execution path**: `ltx-video-0.9.8-*` checkpoints now run the full upstream-style two-pass multiscale refinement path instead of stopping after the first pass, including the latent spatial upsampler, second-pass continuation window, and upstream CFG/STG schedules where applicable ([#201](https://github.com/utensils/mold/issues/201))
-- **`OutputFormat` enum**: added `Apng`, `Webp`, `Mp4` variants with `extension()`, `content_type()`, `is_video()` helper methods
-- **`VideoData` struct**: added `gif_preview` field for cached animated previews
-- **`GenerateResponse`**: `video: Option<VideoData>` field for video model output
-- **Default video format**: video models default to APNG output (lossless, metadata-rich) instead of GIF
-- **Batch limit removed**: `--batch` no longer capped at 16 — unlimited batch size
-- **CI consolidated**: merged check/clippy/test into single job with shared rust-cache; cache only saved on main branch
-- **Nine model families**: `LtxVideoEngine` added to the engine factory
-- **Candle fork**: LTX Video models (transformer, 3D causal VAE, scheduler) ported into `candle-transformers-mold`
-- **`ModelComponent` enum**: added `Upscaler` variant for upscaler model weights
-- **Default model selection**: upscaler models excluded from auto-selection as default generation model
-- **`UpscaleEngine` trait**: new inference trait parallel to `InferenceEngine`, with `upscale()`, `load()`, `unload()`, `scale_factor()` methods
-- **LTX model catalog**: replaced the broken legacy `ltx-video-0.9` and `ltx-video-0.9.5` manifests with `ltx-video-0.9.6`, `ltx-video-0.9.6-distilled`, `ltx-video-0.9.8-2b-distilled`, `ltx-video-0.9.8-13b-dev`, and `ltx-video-0.9.8-13b-distilled`
-- **LTX asset wiring**: `ModelConfig` and `ModelPaths` now carry an explicit `spatial_upscaler` component for the 0.9.8 family
-- **LTX shared asset layout**: canonical shared-file placement now matches the actual upstream sources: shared FLUX T5 assets stay under `shared/flux/...`, the still-compatible LTX VAE stays under `shared/LTX-Video-0.9.5/...`, and the `0.9.8` spatial upscaler lives under `shared/LTX-Video/...`. Legacy `shared/ltx-video/...` installs are still discovered and repaired automatically on pull ([#204](https://github.com/utensils/mold/issues/204))
+- **LTX 0.9.8 multiscale refinement**: 0.9.8 checkpoints now run full two-pass generation with spatial upsampler and continuation window ([#201](https://github.com/utensils/mold/issues/201))
+- **LTX model catalog**: replaced legacy 0.9/0.9.5 manifests with 0.9.6, 0.9.6-distilled, 0.9.8-2b-distilled, 0.9.8-13b-dev, and 0.9.8-13b-distilled
+- **LTX shared asset layout**: canonical paths now match upstream sources; legacy installs auto-migrate on pull ([#204](https://github.com/utensils/mold/issues/204))
+- **Qwen-Image model sources**: base GGUF models now map to `Qwen/Qwen-Image` + `city96/Qwen-Image-gguf`; 2512 variants use `unsloth/Qwen-Image-2512-GGUF` ([#178](https://github.com/utensils/mold/issues/178))
+- **Batch limit removed**: `--batch` no longer capped at 16
+- **Nine model families**: `LtxVideoEngine` added to engine factory; `UpscaleEngine` trait added for upscaler models
+- **CI consolidated**: merged check/clippy/test into single job with shared rust-cache
 
 ### Fixed
 
-- **Stale `.pulling` markers masking completed installs**: manifest-backed models now self-heal stale pull markers when all files are already present, so `mold run` prefers current manifest paths instead of falling back to stale config entries. Fixes Qwen-Image FP8/base shared-asset path regressions after interrupted or partially cleaned pulls
-- **Partial manifest installs now auto-repair on use**: local `mold run` detects missing downloadable assets even when stale config paths still resolve, runs the equivalent of `mold pull`, and only then loads the engine. This prevents low-level `file not found` failures when shared Qwen-Image assets were partially deleted
-- **Test isolation for live `MOLD_HOME` installs**: config and cleanup regressions now run under temp `MOLD_HOME`/`MOLD_MODELS_DIR`, and TUI gallery path tests follow the resolved mold dir instead of assuming `~/.mold`. This prevents workspace tests from touching live model caches
-- **Qwen-Image Metal denoising regression**: the quantized GGUF transformer no longer dequantizes full linear weights on every forward pass on Metal. Qwen-Image now uses Candle's quantized linear path for large projections, caches device-local RoPE tensors across denoise steps, and uses a Metal-safe attention mask path. On an M4 Max this improved a 512x512 Q4 benchmark from roughly `0.03-0.05 it/s` to about `0.15 it/s` during denoising ([#202](https://github.com/utensils/mold/issues/202))
-- **Qwen-Image Metal text encoding**: Apple Metal/MPS `auto` now prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) on GPU, with real GGUF inference support and CUDA defaults left unchanged
-- **Qwen-Image BF16 sequential pressure on Metal**: when BF16 is still selected on Apple Metal/MPS, sequential mode keeps the existing CPU staging path after encoding to reduce unified-memory pressure during denoising
-- **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))
-- **Qwen-Image GGUF prompt adherence**: restored correct combined padding + causal attention masking in the Qwen2 text encoder, fixing the quantized Q4/Q6 regression that produced coherent but prompt-incorrect images on this branch ([#178](https://github.com/utensils/mold/issues/178))
-- **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
-- **Video file not saved in CLI**: batch loop discarded `response.video` — now captured and passed through
-- **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation
-- **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile. Aligned SPS VUI and colr atom to BT.601 limited range (matching openh264's RGB→YUV conversion), added edts/elst edit list box ([#181](https://github.com/utensils/mold/issues/181))
-- **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
-- **LTX inference quality path**: the LTX engine now selects versioned transformer/VAE presets, uses the current improved VAE for supported checkpoints, applies the published `decode_noise_scale` before timestep-conditioned VAE decode, and stops guessing model behavior from legacy VAE file sizes
-- **LTX VAE source validation**: verified that the current `Lightricks/LTX-Video` VAE is not yet compatible with Candle's ported LTX VAE layout, so the manifest intentionally keeps using the published `Lightricks/LTX-Video-0.9.5` VAE until that follow-up architecture work lands
-- **LTX shared asset compatibility**: manifest-backed discovery and `mold pull` now migrate older LTX shared installs into the current canonical layout instead of silently treating them as missing ([#204](https://github.com/utensils/mold/issues/204))
+- **Qwen-Image CUDA black images**: Metal GGUF denoising optimization (#207) replaced per-forward BF16 dequantization with QMatMul/F32 globally, breaking CUDA inference. Fixed with device-gated dispatch — BF16 dequant on CUDA, QMatMul on Metal, F32 on CPU ([#207](https://github.com/utensils/mold/pull/207))
+- **Qwen-Image Metal performance**: quantized GGUF transformer uses Candle's quantized linear path and caches RoPE tensors, improving Q4 denoising from ~0.03 it/s to ~0.15 it/s on M4 Max ([#202](https://github.com/utensils/mold/issues/202))
+- **Qwen-Image GGUF prompt adherence**: restored combined padding + causal attention masking in Qwen2 text encoder ([#178](https://github.com/utensils/mold/issues/178))
+- **Qwen-Image Metal text encoding**: `auto` now prefers quantized GGUF encoders on Metal/MPS
+- **Stale pull markers**: manifest-backed models self-heal stale `.pulling` markers; partial installs auto-repair on use
+- **Upscaler/utility model listing**: `mold list` correctly shows non-diffusion models as installed ([#184](https://github.com/utensils/mold/issues/184))
+- **LTX inference quality**: versioned transformer/VAE presets with `decode_noise_scale` for timestep-conditioned VAE decode
+- **MP4 QuickTime compatibility**: correct ftyp brands, colr/pasp atoms, BT.601 range alignment ([#181](https://github.com/utensils/mold/issues/181))
+- **Server video handling**: queue worker and CLI batch loop no longer discard video responses
+- **Test isolation**: config/cleanup tests use temp `MOLD_HOME` to avoid touching live model caches
 
 ### Removed
 
-- **Legacy LTX manifests**: removed `ltx-video-0.9:bf16` and `ltx-video-0.9.5:bf16` from the published model list
+- **Legacy LTX manifests**: removed `ltx-video-0.9:bf16` and `ltx-video-0.9.5:bf16`
 
 ## [0.5.3] - 2026-04-04
 

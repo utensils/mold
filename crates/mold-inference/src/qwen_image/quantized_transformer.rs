@@ -1,42 +1,90 @@
-//! Quantized (GGUF) Qwen-Image transformer with QMatMul-backed inference.
+//! Quantized (GGUF) Qwen-Image transformer with device-specific linear dispatch.
 //!
-//! Large projection weights stay quantized in device memory and dequantize on
-//! demand inside candle's quantized matmul kernels. That avoids the previous
-//! per-forward full-weight dequantization path that was especially slow on
-//! Metal. Small norm and bias tensors are still dequantized at load time.
+//! **CUDA**: keeps GGUF weights on GPU and dequantizes each linear layer to BF16
+//! per forward call (~72MB peak temporary). All computation in BF16 matching the
+//! model's training dtype.
+//!
+//! **Metal**: uses candle's `QMatMul`-backed `Linear` which avoids per-forward
+//! full dequantization (faster on Metal). Computation in F32 since Metal's QMatMul
+//! dequantizes to F32 internally.
 
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::RmsNorm;
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
-use candle_transformers::quantized_nn::Linear;
+use candle_transformers::quantized_nn::Linear as QMatMulLinear;
 use candle_transformers::quantized_var_builder::VarBuilder;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 pub(crate) const ROPE_CACHE_LEN: usize = 4096;
 
-type QwenLinear = Linear;
+/// CUDA: BF16 (matches training dtype, halves activation memory vs F32).
+/// Metal: F32 (QMatMul dequantizes to F32 internally on Metal).
+fn working_dtype(device: &Device) -> DType {
+    if device.is_cuda() {
+        DType::BF16
+    } else {
+        DType::F32
+    }
+}
+
+/// Device-dispatched quantized linear layer.
+///
+/// CUDA: dequantizes weight to BF16 per forward (temporary ~72MB peak).
+/// Metal: uses QMatMul (weight stays quantized, dequant inside kernel).
+enum QwenLinear {
+    /// Per-forward BF16 dequantization — correct dtype for CUDA.
+    Dequant {
+        weight: Arc<QTensor>,
+        bias: Option<Tensor>,
+    },
+    /// QMatMul-backed — avoids full dequant, faster on Metal.
+    QMatMul(QMatMulLinear),
+}
+
+impl Module for QwenLinear {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dequant { weight, bias } => {
+                let dtype = working_dtype(x.device());
+                let x = x.to_dtype(dtype)?;
+                let w = weight.dequantize(x.device())?.to_dtype(dtype)?;
+                candle_nn::Linear::new(w, bias.clone()).forward(&x)
+            }
+            Self::QMatMul(inner) => inner.forward(x),
+        }
+    }
+}
 
 fn qlinear(vb: &VarBuilder, name: &str) -> Result<QwenLinear> {
     let vb = vb.pp(name);
     let weight = vb.get_no_shape("weight")?;
+    let dtype = working_dtype(vb.device());
     let bias = match vb.get_no_shape("bias") {
-        Ok(b) => Some(b.dequantize(vb.device())?.to_dtype(DType::F32)?),
+        Ok(b) => Some(b.dequantize(vb.device())?.to_dtype(dtype)?),
         Err(_) => None,
     };
-    Linear::from_arc(weight, bias)
+    if vb.device().is_metal() {
+        // F32 bias matches QMatMul's F32 output on Metal.
+        Ok(QwenLinear::QMatMul(QMatMulLinear::from_arc(weight, bias)?))
+    } else {
+        // BF16 bias for CUDA dequant path.
+        Ok(QwenLinear::Dequant { weight, bias })
+    }
 }
 
 /// Dequantize a small 1D weight vector for RmsNorm (norm weights are tiny).
 fn dequant_rms_norm(vb: &VarBuilder, name: &str, eps: f64) -> Result<RmsNorm> {
+    let dtype = working_dtype(vb.device());
     let weight = vb
         .pp(name)
         .get_no_shape("weight")?
         .dequantize(vb.device())?
-        .to_dtype(DType::F32)?;
+        .to_dtype(dtype)?;
     Ok(RmsNorm::new(weight, eps))
 }
 
@@ -108,9 +156,6 @@ pub(crate) struct QwenRopeEmbedder {
     neg_cos: Tensor,
     neg_sin: Tensor,
     dtype: DType,
-    // Qwen-Image uses a small set of request shapes in practice, so a simple
-    // process-local cache is enough here. If we add variable-resolution sweeps
-    // or long-lived heterogeneous workloads, this should grow an eviction policy.
     cache: Mutex<HashMap<RopeCacheKey, RopeCacheValue>>,
 }
 
@@ -570,8 +615,11 @@ impl JointAttention {
         scale: f64,
     ) -> Result<Tensor> {
         let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        let key_mask = key_mask.to_dtype(attn_weights.dtype())?;
-        let key_mask = ((key_mask - 1.0)? * 1e9)?;
+        let on_true = key_mask.zeros_like()?.to_dtype(attn_weights.dtype())?;
+        let on_false = Tensor::new(f32::NEG_INFINITY, attn_weights.device())?
+            .broadcast_as(key_mask.shape())?
+            .to_dtype(attn_weights.dtype())?;
+        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
         attn_weights = attn_weights.broadcast_add(&key_mask)?;
         attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
         attn_weights.matmul(v)
@@ -753,7 +801,7 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
 }
 
 impl QuantizedQwenImageTransformer2DModel {
-    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder, _device: &Device) -> Result<Self> {
         let time_embed = TimestepProjEmbeddings::new(vb.clone())?;
         let img_in = qlinear(&vb, "img_in")?;
         let txt_in = qlinear(&vb, "txt_in")?;
@@ -765,12 +813,13 @@ impl QuantizedQwenImageTransformer2DModel {
             blocks.push(QwenImageTransformerBlock::new(cfg, vb_blocks.pp(i))?);
         }
 
-        // RoPE source tables stay on CPU and device-local views are cached by shape.
+        // RoPE source tables stay on CPU; device-local views are cached by shape.
+        let rope_dtype = working_dtype(vb.device());
         let rope_embedder = QwenRopeEmbedder::new(
             10000.0,
             cfg.axes_dims_rope.clone(),
             &Device::Cpu,
-            DType::F32,
+            rope_dtype,
         )?;
         let output_layer = OutputLayer::new(vb)?;
 
@@ -796,10 +845,12 @@ impl QuantizedQwenImageTransformer2DModel {
         let out_dtype = x.dtype();
         let device = x.device();
 
-        // QMatMul-backed quantized inference runs in F32 internally.
-        let x = x.to_dtype(DType::F32)?;
-        let t = t.to_dtype(DType::F32)?;
-        let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
+        // CUDA: BF16 (matches training dtype, halves activation memory).
+        // Metal/CPU: F32 (QMatMul dequantizes to F32 internally on Metal).
+        let dtype = working_dtype(device);
+        let x = x.to_dtype(dtype)?;
+        let t = t.to_dtype(dtype)?;
+        let encoder_hidden_states = encoder_hidden_states.to_dtype(dtype)?;
         let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
 
         let (batch, channels, height, width) = x.dims4()?;
