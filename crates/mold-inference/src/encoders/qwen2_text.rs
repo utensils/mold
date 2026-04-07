@@ -10,8 +10,10 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::VarBuilder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use super::qwen2_text_gguf::GgufQwen2TextEncoder;
 
 const TOKENIZER_WINDOW: usize = 1024;
 const MAX_SEQUENCE_LENGTH: usize = 512;
@@ -45,6 +47,24 @@ fn template_strip_index(tokens: &[u32]) -> usize {
     }
 
     strip_at
+}
+
+fn window_qwen_image_tokens(
+    mut input_ids: Vec<u32>,
+    strip_idx: usize,
+    pad_id: u32,
+) -> (Vec<u32>, usize) {
+    let total_window = TOKENIZER_WINDOW + strip_idx;
+    if input_ids.len() > total_window {
+        input_ids.truncate(total_window);
+    }
+    let valid_len = input_ids
+        .len()
+        .saturating_sub(strip_idx)
+        .min(TOKENIZER_WINDOW)
+        .min(MAX_SEQUENCE_LENGTH);
+    input_ids.resize(total_window, pad_id);
+    (input_ids, valid_len)
 }
 
 #[derive(Debug, Clone)]
@@ -288,7 +308,7 @@ impl DecoderLayer {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Qwen2TextModel {
+pub(crate) struct Bf16Qwen2TextModel {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
     sliding_window: usize,
@@ -296,7 +316,7 @@ pub(crate) struct Qwen2TextModel {
     dtype: DType,
 }
 
-impl Qwen2TextModel {
+impl Bf16Qwen2TextModel {
     fn new(cfg: &Qwen2TextEncoderConfig, vb: VarBuilder) -> Result<Self> {
         let vb_m = vb.pp("model");
         let embed_tokens =
@@ -434,11 +454,30 @@ impl Qwen2TextEncoderConfig {
 }
 
 /// Loaded Qwen2.5 text encoder.
+pub(crate) enum Qwen2TextModel {
+    Bf16(Bf16Qwen2TextModel),
+    Quantized(GgufQwen2TextEncoder),
+}
+
+impl Qwen2TextModel {
+    fn forward_last_hidden(
+        &mut self,
+        input_ids: &Tensor,
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        match self {
+            Self::Bf16(model) => model.forward_last_hidden(input_ids, attn_mask),
+            Self::Quantized(model) => model.forward_last_hidden(input_ids, attn_mask),
+        }
+    }
+}
+
 pub(crate) struct Qwen2TextEncoder {
     pub model: Option<Qwen2TextModel>,
     pub tokenizer: tokenizers::Tokenizer,
     pub device: Device,
     pub on_gpu: bool,
+    pub is_quantized: bool,
     encoder_paths: Vec<PathBuf>,
     dtype: DType,
     config: Qwen2TextEncoderConfig,
@@ -460,7 +499,7 @@ impl Qwen2TextEncoder {
             "Qwen2.5-VL encoder",
             progress,
         )?;
-        let model = Qwen2TextModel::new(&config, vb)?;
+        let model = Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(&config, vb)?);
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
         let on_gpu = crate::device::is_gpu(device);
@@ -469,22 +508,40 @@ impl Qwen2TextEncoder {
             tokenizer,
             device: device.clone(),
             on_gpu,
+            is_quantized: false,
             encoder_paths: encoder_paths.to_vec(),
             dtype,
             config,
         })
     }
 
+    pub fn load_gguf(gguf_path: &Path, tokenizer_path: &PathBuf, device: &Device) -> Result<Self> {
+        let config = Qwen2TextEncoderConfig::qwen_image();
+        let model = Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(gguf_path, device)?);
+        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
+        let on_gpu = crate::device::is_gpu(device);
+        Ok(Self {
+            model: Some(model),
+            tokenizer,
+            device: device.clone(),
+            on_gpu,
+            is_quantized: true,
+            encoder_paths: vec![gguf_path.to_path_buf()],
+            dtype: DType::F32,
+            config,
+        })
+    }
+
     fn encode_ids(&self, prompt: &str) -> Result<(Vec<u32>, usize, usize)> {
         let formatted = format_qwen_image_prompt(prompt);
-        let mut input_ids = self
+        let input_ids = self
             .tokenizer
             .encode(formatted, false)
             .map_err(|e| anyhow::anyhow!("Qwen2.5 tokenization failed: {e}"))?
             .get_ids()
             .to_vec();
         let strip_idx = template_strip_index(&input_ids);
-        let total_window = TOKENIZER_WINDOW + strip_idx;
 
         let pad_id = *self
             .tokenizer
@@ -492,15 +549,7 @@ impl Qwen2TextEncoder {
             .get("<|endoftext|>")
             .ok_or_else(|| anyhow::anyhow!("Qwen2.5 tokenizer missing <|endoftext|>"))?;
 
-        if input_ids.len() > total_window {
-            input_ids.truncate(total_window);
-        }
-        let valid_len = input_ids
-            .len()
-            .saturating_sub(strip_idx)
-            .min(TOKENIZER_WINDOW)
-            .min(MAX_SEQUENCE_LENGTH);
-        input_ids.resize(total_window, pad_id);
+        let (input_ids, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, pad_id);
         Ok((input_ids, strip_idx, valid_len))
     }
 
@@ -512,11 +561,11 @@ impl Qwen2TextEncoder {
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<(Tensor, Tensor, usize)> {
+        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
         let model = self
             .model
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Qwen2.5 model unavailable (weights dropped)"))?;
-        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
         let total_window = tokens.len();
         let input_ids = Tensor::from_vec(tokens, (1, total_window), &self.device)?;
         let mut mask = vec![0u8; total_window];
@@ -543,14 +592,65 @@ impl Qwen2TextEncoder {
     }
 
     pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            &self.encoder_paths,
-            self.dtype,
-            &self.device,
-            "Qwen2.5-VL encoder",
-            progress,
-        )?;
-        self.model = Some(Qwen2TextModel::new(&self.config, vb)?);
+        self.model = if self.is_quantized {
+            Some(Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(
+                &self.encoder_paths[0],
+                &self.device,
+            )?))
+        } else {
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                &self.encoder_paths,
+                self.dtype,
+                &self.device,
+                "Qwen2.5-VL encoder",
+                progress,
+            )?;
+            Some(Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(
+                &self.config,
+                vb,
+            )?))
+        };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen_image_prompt_format_includes_chat_template() {
+        let formatted = format_qwen_image_prompt("a red apple");
+        assert!(formatted.starts_with("<|im_start|>system\n"));
+        assert!(formatted.contains(SYSTEM_PROMPT));
+        assert!(formatted.contains("<|im_start|>user\na red apple<|im_end|>"));
+        assert!(formatted.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn template_strip_index_skips_second_im_start_user_prefix() {
+        let tokens = vec![1, 2, 151644, 999, 151644, 872, 198, 77, 88];
+        assert_eq!(template_strip_index(&tokens), 7);
+    }
+
+    #[test]
+    fn window_qwen_image_tokens_truncates_to_1024_and_caps_valid_len_at_512() {
+        let strip_idx = 4;
+        let input_ids = (0..2_000).collect::<Vec<u32>>();
+        let (windowed, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, 42);
+        assert_eq!(windowed.len(), TOKENIZER_WINDOW + strip_idx);
+        assert_eq!(valid_len, MAX_SEQUENCE_LENGTH);
+        assert_eq!(windowed[TOKENIZER_WINDOW + strip_idx - 1], 1027);
+    }
+
+    #[test]
+    fn window_qwen_image_tokens_pads_short_sequences_after_template_strip() {
+        let strip_idx = 3;
+        let input_ids = vec![10, 11, 12, 13, 14];
+        let (windowed, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, 99);
+        assert_eq!(valid_len, 2);
+        assert_eq!(windowed.len(), TOKENIZER_WINDOW + strip_idx);
+        assert_eq!(&windowed[..5], &[10, 11, 12, 13, 14]);
+        assert!(windowed[5..].iter().all(|&id| id == 99));
     }
 }

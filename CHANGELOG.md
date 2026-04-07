@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Qwen-Image quantized text encoder selection**: new `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2` CLI flag (env: `MOLD_QWEN2_VARIANT`) to choose Qwen2.5-VL GGUF text encoder variants for Qwen-Image
+- **Qwen-Image text encoder mode override**: new `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu` CLI flag (env: `MOLD_QWEN2_TEXT_ENCODER_MODE`) to control Qwen2.5-VL text encoder placement/staging for Qwen-Image models
 - **Prometheus metrics endpoint**: `GET /metrics` exposes Prometheus-format metrics for HTTP request rates/latency, generation duration, queue depth, model load tracking, GPU memory usage, and server uptime. Gated behind `metrics` feature flag (zero overhead when disabled). Endpoint is excluded from auth and rate limiting for monitoring scrapers ([#142](https://github.com/utensils/mold/issues/142))
 - **Qwen-Image FP8 support**: new `qwen-image:fp8` variant using ComfyUI-compatible FP8 E4M3 safetensors from Comfy-Org/Qwen-Image_ComfyUI ([#178](https://github.com/utensils/mold/issues/178))
 - **Qwen-Image block-level offloading**: CPU↔GPU block streaming for BF16/FP8 Qwen-Image transformers, enabling native 1328×1328 generation on 24GB cards. Auto-detects when VRAM is insufficient; force with `--offload` or `MOLD_OFFLOAD=1`. Peak VRAM ~10GB during denoising ([#178](https://github.com/utensils/mold/issues/178))
@@ -58,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Qwen-Image Metal text encoding**: Apple Metal/MPS `auto` now prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) on GPU, with real GGUF inference support and CUDA defaults left unchanged
+- **Qwen-Image BF16 sequential pressure on Metal**: when BF16 is still selected on Apple Metal/MPS, sequential mode keeps the existing CPU staging path after encoding to reduce unified-memory pressure during denoising
 - **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))
 - **Qwen-Image GGUF prompt adherence**: restored correct combined padding + causal attention masking in the Qwen2 text encoder, fixing the quantized Q4/Q6 regression that produced coherent but prompt-incorrect images on this branch ([#178](https://github.com/utensils/mold/issues/178))
 - **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)

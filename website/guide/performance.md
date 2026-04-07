@@ -53,6 +53,10 @@ pressure, but prompt encoding takes longer.
 If your GPU has headroom, `--eager` can improve repeat generation speed by
 keeping more components resident.
 
+For Qwen-Image on Apple Metal/MPS, `auto` now prefers quantized Qwen2.5-VL
+GGUF text encoders before falling back to the heavier BF16 text stack. That is
+mainly a memory-responsiveness improvement, not a promise of higher throughput.
+
 ### Cold starts
 
 The first request for a model pays for:

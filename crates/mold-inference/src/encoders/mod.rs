@@ -1,5 +1,6 @@
 pub(crate) mod clip;
 pub(crate) mod qwen2_text;
+pub(crate) mod qwen2_text_gguf;
 pub(crate) mod qwen3;
 pub(crate) mod qwen3_bf16;
 pub(crate) mod qwen3_gguf;

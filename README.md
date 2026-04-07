@@ -59,6 +59,7 @@ mold run "a sunset" --batch 4 --seed 42               # Batch with reproducible 
 mold run "oil painting" --image photo.png              # img2img
 mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 mold run "a cat" --expand                              # LLM prompt expansion
+mold run qwen-image:q2 "a poster" --qwen2-variant q6  # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors  # LoRA adapter
 ```
 
@@ -166,6 +167,7 @@ quality yet.
 - **PNG metadata** — embedded prompt, seed, model info
 - **Terminal preview** — Kitty, Sixel, iTerm2, halfblock
 - **Smart VRAM** — quantized encoders, block offloading, drop-and-reload
+- **Qwen-Image encoder control** — selectable Qwen2.5-VL GGUF text encoders with Metal-safe defaults
 - **Shell completions** — bash, zsh, fish, elvish, powershell
 - **REST API** — `mold serve` with SSE streaming, auth, rate limiting
 - **Discord bot** — slash commands with role permissions and quotas

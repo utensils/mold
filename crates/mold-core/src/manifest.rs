@@ -3270,6 +3270,15 @@ pub struct Qwen3Variant {
     pub size_bytes: u64,
 }
 
+/// A quantized Qwen2.5-VL text encoder variant available from HuggingFace.
+#[derive(Debug, Clone)]
+pub struct Qwen2VlVariant {
+    pub tag: &'static str,
+    pub hf_repo: &'static str,
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+}
+
 /// Known Qwen3 quantized variants, sorted largest → smallest.
 pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
     static VARIANTS: &[Qwen3Variant] = &[
@@ -3299,6 +3308,54 @@ pub fn known_qwen3_variants() -> &'static [Qwen3Variant] {
         },
     ];
     VARIANTS
+}
+
+/// Known Qwen2.5-VL-7B quantized variants, sorted largest → smallest.
+pub fn known_qwen2_vl_variants() -> &'static [Qwen2VlVariant] {
+    static VARIANTS: &[Qwen2VlVariant] = &[
+        Qwen2VlVariant {
+            tag: "q8",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q8_0.gguf",
+            size_bytes: 8_100_000_000,
+        },
+        Qwen2VlVariant {
+            tag: "q6",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q6_K.gguf",
+            size_bytes: 6_250_000_000,
+        },
+        Qwen2VlVariant {
+            tag: "q5",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q5_K_M.gguf",
+            size_bytes: 5_440_000_000,
+        },
+        Qwen2VlVariant {
+            tag: "q4",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+            size_bytes: 4_680_000_000,
+        },
+        Qwen2VlVariant {
+            tag: "q3",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q3_K_M.gguf",
+            size_bytes: 3_810_000_000,
+        },
+        Qwen2VlVariant {
+            tag: "q2",
+            hf_repo: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF",
+            hf_filename: "Qwen2.5-VL-7B-Instruct-Q2_K.gguf",
+            size_bytes: 3_020_000_000,
+        },
+    ];
+    VARIANTS
+}
+
+/// Find a Qwen2.5-VL variant by tag (e.g. "q6", "q4", "q3").
+pub fn find_qwen2_vl_variant(tag: &str) -> Option<&'static Qwen2VlVariant> {
+    known_qwen2_vl_variants().iter().find(|v| v.tag == tag)
 }
 
 /// Find a Qwen3-4B variant by tag (e.g. "q8", "q6", "iq4", "q3").
@@ -4829,6 +4886,17 @@ mod tests {
         assert_eq!(find_qwen3_variant("iq4").unwrap().tag, "iq4");
         assert_eq!(find_qwen3_variant("q3").unwrap().tag, "q3");
         assert!(find_qwen3_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_qwen2_vl_variant_by_tag() {
+        assert_eq!(find_qwen2_vl_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_qwen2_vl_variant("q6").unwrap().tag, "q6");
+        assert_eq!(find_qwen2_vl_variant("q5").unwrap().tag, "q5");
+        assert_eq!(find_qwen2_vl_variant("q4").unwrap().tag, "q4");
+        assert_eq!(find_qwen2_vl_variant("q3").unwrap().tag, "q3");
+        assert_eq!(find_qwen2_vl_variant("q2").unwrap().tag, "q2");
+        assert!(find_qwen2_vl_variant("nonexistent").is_none());
     }
 
     #[test]

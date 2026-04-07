@@ -65,6 +65,27 @@ fn effective_dimensions(
     }
 }
 
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+fn apply_local_engine_env_overrides(
+    t5_variant_override: Option<&str>,
+    qwen3_variant_override: Option<&str>,
+    qwen2_variant_override: Option<&str>,
+    qwen2_text_encoder_mode_override: Option<&str>,
+) {
+    if let Some(variant) = t5_variant_override {
+        std::env::set_var("MOLD_T5_VARIANT", variant);
+    }
+    if let Some(variant) = qwen3_variant_override {
+        std::env::set_var("MOLD_QWEN3_VARIANT", variant);
+    }
+    if let Some(variant) = qwen2_variant_override {
+        std::env::set_var("MOLD_QWEN2_VARIANT", variant);
+    }
+    if let Some(mode) = qwen2_text_encoder_mode_override {
+        std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", mode);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
@@ -85,6 +106,8 @@ pub async fn run(
     local: bool,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
     scheduler: Option<Scheduler>,
     eager: bool,
     offload: bool,
@@ -253,6 +276,8 @@ pub async fn run(
             &config,
             t5_variant.clone(),
             qwen3_variant.clone(),
+            qwen2_variant.clone(),
+            qwen2_text_encoder_mode.clone(),
             eager,
             offload,
             width,
@@ -307,6 +332,8 @@ pub async fn run(
                 effective_steps,
                 t5_variant.clone(),
                 qwen3_variant.clone(),
+                qwen2_variant.clone(),
+                qwen2_text_encoder_mode.clone(),
                 eager,
                 offload,
                 width,
@@ -469,6 +496,8 @@ async fn generate_remote(
     effective_steps: u32,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
     eager: bool,
     offload: bool,
     cli_width: Option<u32>,
@@ -499,6 +528,8 @@ async fn generate_remote(
                 effective_steps,
                 t5_variant,
                 qwen3_variant,
+                qwen2_variant,
+                qwen2_text_encoder_mode,
                 eager,
                 offload,
                 cli_width,
@@ -537,6 +568,8 @@ async fn generate_remote(
                         config,
                         t5_variant,
                         qwen3_variant,
+                        qwen2_variant,
+                        qwen2_text_encoder_mode,
                         eager,
                         offload,
                         cli_width,
@@ -565,6 +598,8 @@ async fn generate_remote_blocking(
     effective_steps: u32,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
     eager: bool,
     offload: bool,
     cli_width: Option<u32>,
@@ -608,6 +643,8 @@ async fn generate_remote_blocking(
                         config,
                         t5_variant,
                         qwen3_variant,
+                        qwen2_variant,
+                        qwen2_text_encoder_mode,
                         eager,
                         offload,
                         cli_width,
@@ -629,6 +666,8 @@ async fn prepare_local_engine(
     config: &Config,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
+    qwen2_variant_override: Option<String>,
+    qwen2_text_encoder_mode_override: Option<String>,
     eager: bool,
     offload: bool,
     cli_width: Option<u32>,
@@ -724,13 +763,12 @@ async fn prepare_local_engine(
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Apply CLI variant overrides via env vars (factory reads MOLD_T5_VARIANT / MOLD_QWEN3_VARIANT)
-    if let Some(ref variant) = t5_variant_override {
-        std::env::set_var("MOLD_T5_VARIANT", variant);
-    }
-    if let Some(ref variant) = qwen3_variant_override {
-        std::env::set_var("MOLD_QWEN3_VARIANT", variant);
-    }
+    apply_local_engine_env_overrides(
+        t5_variant_override.as_deref(),
+        qwen3_variant_override.as_deref(),
+        qwen2_variant_override.as_deref(),
+        qwen2_text_encoder_mode_override.as_deref(),
+    );
     let is_eager = eager || std::env::var("MOLD_EAGER").map_or(false, |v| v == "1");
     let load_strategy = if is_eager {
         LoadStrategy::Eager
@@ -757,6 +795,8 @@ async fn generate_local(
     config: &Config,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
+    qwen2_variant_override: Option<String>,
+    qwen2_text_encoder_mode_override: Option<String>,
     eager: bool,
     offload: bool,
     cli_width: Option<u32>,
@@ -769,6 +809,8 @@ async fn generate_local(
         config,
         t5_variant_override,
         qwen3_variant_override,
+        qwen2_variant_override,
+        qwen2_text_encoder_mode_override,
         eager,
         offload,
         cli_width,
@@ -801,6 +843,8 @@ async fn generate_local_batch(
     config: &Config,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
+    qwen2_variant_override: Option<String>,
+    qwen2_text_encoder_mode_override: Option<String>,
     eager: bool,
     offload: bool,
     cli_width: Option<u32>,
@@ -819,6 +863,8 @@ async fn generate_local_batch(
         config,
         t5_variant_override,
         qwen3_variant_override,
+        qwen2_variant_override,
+        qwen2_text_encoder_mode_override,
         eager,
         offload,
         cli_width,
@@ -919,6 +965,8 @@ async fn generate_local(
     _config: &Config,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
+    _qwen2_variant: Option<String>,
+    _qwen2_text_encoder_mode: Option<String>,
     _eager: bool,
     _offload: bool,
     _cli_width: Option<u32>,
@@ -939,6 +987,8 @@ async fn generate_local_batch(
     _config: &Config,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
+    _qwen2_variant: Option<String>,
+    _qwen2_text_encoder_mode: Option<String>,
     _eager: bool,
     _offload: bool,
     _cli_width: Option<u32>,
@@ -1045,6 +1095,7 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use mold_core::ModelConfig;
 
     #[test]
@@ -1240,5 +1291,37 @@ mod tests {
             effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
             (1024, 1024)
         );
+    }
+
+    #[test]
+    fn apply_local_engine_env_overrides_sets_qwen2_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_variant = std::env::var("MOLD_QWEN2_VARIANT").ok();
+        let prior_mode = std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok();
+
+        std::env::remove_var("MOLD_QWEN2_VARIANT");
+        std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE");
+
+        apply_local_engine_env_overrides(None, None, Some("q6"), Some("cpu-stage"));
+
+        assert_eq!(
+            std::env::var("MOLD_QWEN2_VARIANT").ok().as_deref(),
+            Some("q6")
+        );
+        assert_eq!(
+            std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
+                .ok()
+                .as_deref(),
+            Some("cpu-stage")
+        );
+
+        match prior_variant {
+            Some(value) => std::env::set_var("MOLD_QWEN2_VARIANT", value),
+            None => std::env::remove_var("MOLD_QWEN2_VARIANT"),
+        }
+        match prior_mode {
+            Some(value) => std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", value),
+            None => std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE"),
+        }
     }
 }

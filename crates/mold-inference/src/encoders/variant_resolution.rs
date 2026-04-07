@@ -501,3 +501,24 @@ fn resolve_qwen3_gguf_path_with_cache(
     download_single_file_sync(variant.hf_repo, variant.hf_filename, Some(cache_subdir))
         .map_err(|e| anyhow::anyhow!("failed to download Qwen3 {}: {e}", variant.tag))
 }
+
+/// Resolve the path for a quantized Qwen2.5-VL GGUF file: check cache, download if needed.
+pub(crate) fn resolve_qwen2_vl_gguf_path(
+    progress: &ProgressReporter,
+    variant: &mold_core::manifest::Qwen2VlVariant,
+) -> Result<PathBuf> {
+    use mold_core::download::{cached_file_path, download_single_file_sync};
+
+    const CACHE_SUBDIR: &str = "shared/qwen2-vl-gguf";
+
+    if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename, Some(CACHE_SUBDIR)) {
+        return Ok(path);
+    }
+    progress.info(&format!(
+        "Downloading Qwen2.5-VL {} ({})...",
+        variant.tag,
+        fmt_gb(variant.size_bytes),
+    ));
+    download_single_file_sync(variant.hf_repo, variant.hf_filename, Some(CACHE_SUBDIR))
+        .map_err(|e| anyhow::anyhow!("failed to download Qwen2.5-VL {}: {e}", variant.tag))
+}

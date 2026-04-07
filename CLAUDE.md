@@ -299,6 +299,8 @@ mold completions <SHELL>        Generate shell completions
 | `MOLD_CLIP_TOKENIZER_PATH` | — | Override CLIP tokenizer path |
 | `MOLD_T5_VARIANT` | `auto` | T5 encoder variant: auto, fp16, q8, q6, q5, q4, q3 |
 | `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder variant: auto, bf16, q8, q6, iq4, q3 |
+| `MOLD_QWEN2_VARIANT` | `auto` | Qwen2.5-VL encoder variant for Qwen-Image: auto, bf16, q8, q6, q5, q4, q3, q2 |
+| `MOLD_QWEN2_TEXT_ENCODER_MODE` | `auto` | Qwen-Image text encoder placement mode: auto, gpu, cpu-stage, cpu |
 | `MOLD_CLIP2_PATH` | — | Override CLIP-G encoder path (SDXL) |
 | `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
 | `MOLD_DEVICE` | — | Override device placement for text encoders |

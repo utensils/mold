@@ -17,6 +17,7 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
+mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
 ```
 
@@ -215,7 +216,11 @@ Default model if none specified: `flux2-klein:q8`
 **Qwen-Image-2512**: `qwen-image-2512:q8`, `qwen-image-2512:q6`, `qwen-image-2512:q5`, `qwen-image-2512:q4`, `qwen-image-2512:q3`, `qwen-image-2512:q2`, `qwen-image-lightning:fp8`, `qwen-image-lightning:fp8-8step`, `qwen-image-2512:bf16`
 
 **LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
-
+**Qwen-Image text encoder controls**:
+- `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
+- `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
+- On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) to reduce memory pressure
+- On CUDA, `auto` keeps the existing BF16 path unless an explicit `--qwen2-variant` is set
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
 **Utility (LLM)**: `qwen3-expand:q8`, `qwen3-expand-small:q8`

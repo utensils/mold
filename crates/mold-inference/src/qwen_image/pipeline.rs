@@ -31,7 +31,8 @@ use crate::cache::{
     clear_cache, prompt_text_key, CachedTensor, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check, should_use_gpu,
+    fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    qwen2_vram_threshold, should_use_gpu,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -47,6 +48,45 @@ const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
 const QWEN2_FP16_VRAM_THRESHOLD: u64 = 16_000_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qwen2TextEncoderMode {
+    Auto,
+    Gpu,
+    CpuStage,
+    Cpu,
+}
+
+impl Qwen2TextEncoderMode {
+    fn from_env() -> Self {
+        match std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "gpu" => Self::Gpu,
+            "cpu-stage" => Self::CpuStage,
+            "cpu_stage" => Self::CpuStage,
+            "cpu" => Self::Cpu,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Qwen2TextEncoderPlan {
+    use_gpu: bool,
+    use_cpu_staging: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedQwen2TextEncoder {
+    paths: Vec<std::path::PathBuf>,
+    is_gguf: bool,
+    variant_label: String,
+    size_bytes: u64,
+    auto_use_gpu: bool,
+}
 
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
 /// Uses filename pattern first, then dtype probing as fallback.
@@ -218,6 +258,90 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn choose_text_encoder_source(
+        preference: Option<&str>,
+        is_cuda: bool,
+        is_metal: bool,
+        free_vram: u64,
+        bf16_size_bytes: u64,
+    ) -> Result<ResolvedQwen2TextEncoder> {
+        match preference {
+            Some(tag) if tag != "auto" && tag != "bf16" => {
+                let variant = mold_core::manifest::find_qwen2_vl_variant(tag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown Qwen2.5-VL variant '{}'. Valid: bf16, auto, q8, q6, q5, q4, q3, q2",
+                        tag
+                    )
+                })?;
+                Ok(ResolvedQwen2TextEncoder {
+                    paths: vec![],
+                    is_gguf: true,
+                    variant_label: variant.tag.to_string(),
+                    size_bytes: variant.size_bytes,
+                    auto_use_gpu: should_use_gpu(
+                        is_cuda,
+                        is_metal,
+                        free_vram,
+                        qwen2_vram_threshold(variant.size_bytes),
+                    ),
+                })
+            }
+            Some("bf16") => Ok(ResolvedQwen2TextEncoder {
+                paths: vec![],
+                is_gguf: false,
+                variant_label: "bf16".to_string(),
+                size_bytes: bf16_size_bytes,
+                auto_use_gpu: should_use_gpu(
+                    is_cuda,
+                    is_metal,
+                    free_vram,
+                    QWEN2_FP16_VRAM_THRESHOLD,
+                ),
+            }),
+            _ if is_metal => {
+                for tag in ["q6", "q4"] {
+                    let variant = mold_core::manifest::find_qwen2_vl_variant(tag)
+                        .expect("known Metal auto qwen2 variant missing");
+                    if fits_in_memory(
+                        is_cuda,
+                        is_metal,
+                        free_vram,
+                        qwen2_vram_threshold(variant.size_bytes),
+                    ) {
+                        return Ok(ResolvedQwen2TextEncoder {
+                            paths: vec![],
+                            is_gguf: true,
+                            variant_label: variant.tag.to_string(),
+                            size_bytes: variant.size_bytes,
+                            auto_use_gpu: true,
+                        });
+                    }
+                }
+                let fallback = mold_core::manifest::find_qwen2_vl_variant("q4")
+                    .expect("known Metal fallback qwen2 variant missing");
+                Ok(ResolvedQwen2TextEncoder {
+                    paths: vec![],
+                    is_gguf: true,
+                    variant_label: fallback.tag.to_string(),
+                    size_bytes: fallback.size_bytes,
+                    auto_use_gpu: true,
+                })
+            }
+            _ => Ok(ResolvedQwen2TextEncoder {
+                paths: vec![],
+                is_gguf: false,
+                variant_label: "bf16".to_string(),
+                size_bytes: bf16_size_bytes,
+                auto_use_gpu: should_use_gpu(
+                    is_cuda,
+                    is_metal,
+                    free_vram,
+                    QWEN2_FP16_VRAM_THRESHOLD,
+                ),
+            }),
+        }
+    }
+
     fn debug_tensor_stats(name: &str, tensor: &Tensor) {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
             return;
@@ -299,6 +423,30 @@ impl QwenImageEngine {
         }
         let attention_mask = Tensor::from_vec(mask, (1, hidden_states.dim(1)?), device)?;
         Ok((hidden_states, attention_mask))
+    }
+
+    fn spill_conditioning_to_cpu(
+        hidden_states: Tensor,
+        attention_mask: Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        Ok((
+            hidden_states
+                .to_device(&Device::Cpu)?
+                .to_dtype(DType::F32)?,
+            attention_mask.to_device(&Device::Cpu)?,
+        ))
+    }
+
+    fn maybe_spill_conditioning(
+        use_cpu_staging: bool,
+        hidden_states: Tensor,
+        attention_mask: Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        if use_cpu_staging {
+            Self::spill_conditioning_to_cpu(hidden_states, attention_mask)
+        } else {
+            Ok((hidden_states, attention_mask))
+        }
     }
 
     /// Resolve transformer shard paths.
@@ -466,44 +614,165 @@ impl QwenImageEngine {
     ///
     /// FP8 text encoders are loaded on GPU with BF16 dtype — candle's CUDA cast
     /// kernel handles F8E4M3→BF16 conversion during tensor loading.
+    fn resolve_text_encoder_source(
+        &self,
+        gpu_device: &Device,
+        free_vram: u64,
+    ) -> Result<ResolvedQwen2TextEncoder> {
+        let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
+        let is_cuda = gpu_device.is_cuda();
+        let is_metal = gpu_device.is_metal();
+        let bf16_size_bytes = self
+            .base
+            .paths
+            .text_encoder_files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let mut resolved = Self::choose_text_encoder_source(
+            preference.as_deref(),
+            is_cuda,
+            is_metal,
+            free_vram,
+            bf16_size_bytes,
+        )?;
+
+        if resolved.is_gguf {
+            let variant = mold_core::manifest::find_qwen2_vl_variant(&resolved.variant_label)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
+                })?;
+            resolved.paths = vec![
+                crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
+                    &self.base.progress,
+                    variant,
+                )?,
+            ];
+        } else {
+            resolved.paths = self.base.paths.text_encoder_files.clone();
+        }
+
+        match preference.as_deref() {
+            Some(tag) if tag != "auto" && tag != "bf16" => self.base.progress.info(&format!(
+                "Using quantized Qwen2.5-VL {} ({}) on {} (explicit)",
+                resolved.variant_label,
+                fmt_gb(resolved.size_bytes),
+                if resolved.auto_use_gpu { "GPU" } else { "CPU" },
+            )),
+            Some("bf16") => {}
+            _ if is_metal && resolved.is_gguf && resolved.variant_label == "q6" => self
+                .base
+                .progress
+                .info(&format!(
+                    "Metal auto mode selected quantized Qwen2.5-VL {} ({}) for lower memory pressure",
+                    resolved.variant_label,
+                    fmt_gb(resolved.size_bytes),
+                )),
+            _ if is_metal && resolved.is_gguf => self.base.progress.info(&format!(
+                "Metal auto mode forcing quantized Qwen2.5-VL {} ({}) to avoid BF16 memory pressure",
+                resolved.variant_label,
+                fmt_gb(resolved.size_bytes),
+            )),
+            _ => {}
+        }
+
+        Ok(resolved)
+    }
+
     fn load_text_encoder(
         &self,
+        resolved: &ResolvedQwen2TextEncoder,
         tokenizer_path: &std::path::PathBuf,
         device: &Device,
         dtype: DType,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
-        let encoder_paths: Vec<std::path::PathBuf> = self.base.paths.text_encoder_files.clone();
-        let is_fp8 = text_encoder_is_fp8(&encoder_paths);
-        if is_fp8 {
-            self.base
-                .progress
-                .info("Detected FP8 text encoder — loading as BF16 on GPU");
+        if resolved.is_gguf {
+            encoders::qwen2_text::Qwen2TextEncoder::load_gguf(
+                &resolved.paths[0],
+                tokenizer_path,
+                device,
+            )
+        } else {
+            let is_fp8 = text_encoder_is_fp8(&resolved.paths);
+            if is_fp8 {
+                self.base
+                    .progress
+                    .info("Detected FP8 text encoder — loading as BF16 on GPU");
+            }
+            encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
+                &resolved.paths,
+                tokenizer_path,
+                device,
+                dtype,
+                &self.base.progress,
+            )
         }
-        // FP8 and BF16 both load on the target device with the target dtype.
-        // The VarBuilder handles F8E4M3→BF16 casting during tensor loading.
-        encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
-            &encoder_paths,
-            tokenizer_path,
-            device,
-            dtype,
-            &self.base.progress,
-        )
     }
 
-    /// Resolve text encoder device placement.
-    fn resolve_text_encoder_device(&self, gpu_device: &Device, free_vram: u64) -> (bool, String) {
+    /// Resolve text encoder device placement and optional CPU staging.
+    fn resolve_text_encoder_plan(
+        &self,
+        gpu_device: &Device,
+        resolved: &ResolvedQwen2TextEncoder,
+        free_vram: u64,
+    ) -> (Qwen2TextEncoderPlan, String) {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
-        let on_gpu = should_use_gpu(is_cuda, is_metal, free_vram, QWEN2_FP16_VRAM_THRESHOLD);
-        let label = if on_gpu { "GPU" } else { "CPU" };
-        if !on_gpu && (is_cuda || is_metal) {
-            self.base.progress.info(&format!(
-                "Qwen2.5 text encoder on CPU ({} free < {} threshold)",
-                fmt_gb(free_vram),
-                fmt_gb(QWEN2_FP16_VRAM_THRESHOLD),
-            ));
+        let plan = Self::qwen2_text_encoder_plan_for_mode(
+            Qwen2TextEncoderMode::from_env(),
+            is_cuda,
+            is_metal,
+            resolved,
+        );
+        let label = if plan.use_gpu { "GPU" } else { "CPU" };
+        if plan.use_cpu_staging {
+            self.base
+                .progress
+                .info("Qwen2.5 text encoder on GPU with CPU staging after encoding");
+        } else if !plan.use_gpu {
+            if resolved.is_gguf {
+                self.base.progress.info(&format!(
+                    "Qwen2.5 text encoder on CPU ({} variant {}, {} free)",
+                    resolved.variant_label,
+                    fmt_gb(resolved.size_bytes),
+                    fmt_gb(free_vram),
+                ));
+            } else if is_metal || is_cuda {
+                self.base.progress.info(&format!(
+                    "Qwen2.5 text encoder on CPU ({} free < {} threshold)",
+                    fmt_gb(free_vram),
+                    fmt_gb(QWEN2_FP16_VRAM_THRESHOLD),
+                ));
+            }
         }
-        (on_gpu, label.to_string())
+        (plan, label.to_string())
+    }
+
+    fn qwen2_text_encoder_plan_for_mode(
+        mode: Qwen2TextEncoderMode,
+        is_cuda: bool,
+        is_metal: bool,
+        resolved: &ResolvedQwen2TextEncoder,
+    ) -> Qwen2TextEncoderPlan {
+        match mode {
+            Qwen2TextEncoderMode::Gpu => Qwen2TextEncoderPlan {
+                use_gpu: is_cuda || is_metal,
+                use_cpu_staging: false,
+            },
+            Qwen2TextEncoderMode::CpuStage => Qwen2TextEncoderPlan {
+                use_gpu: is_cuda || is_metal,
+                use_cpu_staging: is_cuda || is_metal,
+            },
+            Qwen2TextEncoderMode::Cpu => Qwen2TextEncoderPlan {
+                use_gpu: false,
+                use_cpu_staging: false,
+            },
+            Qwen2TextEncoderMode::Auto => Qwen2TextEncoderPlan {
+                use_gpu: resolved.auto_use_gpu,
+                use_cpu_staging: is_metal && resolved.auto_use_gpu && !resolved.is_gguf,
+            },
+        }
     }
 
     /// Load all model components (Eager mode).
@@ -581,22 +850,36 @@ impl QwenImageEngine {
             .stage_done(&vae_label, vae_start.elapsed());
 
         // Load text encoder
-        let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
-        let te_device = if te_on_gpu {
+        let resolved_text_encoder = self.resolve_text_encoder_source(&device, free)?;
+        let (te_plan, te_device_label) =
+            self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
+        let te_device = if te_plan.use_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
-        let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
+        let te_dtype = if te_plan.use_gpu { dtype } else { DType::F32 };
 
-        let te_label = format!(
-            "Loading Qwen2.5 text encoder ({} shards, {})",
-            self.base.paths.text_encoder_files.len(),
-            te_device_label,
-        );
+        let te_label = if resolved_text_encoder.is_gguf {
+            format!(
+                "Loading Qwen2.5 text encoder ({} GGUF, {})",
+                resolved_text_encoder.variant_label, te_device_label
+            )
+        } else {
+            format!(
+                "Loading Qwen2.5 text encoder ({} shards, {})",
+                resolved_text_encoder.paths.len(),
+                te_device_label,
+            )
+        };
         self.base.progress.stage_start(&te_label);
         let te_start = Instant::now();
-        let text_encoder = self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
+        let text_encoder = self.load_text_encoder(
+            &resolved_text_encoder,
+            &text_tokenizer_path,
+            &te_device,
+            te_dtype,
+        )?;
         self.base.progress.stage_done(&te_label, te_start.elapsed());
         tracing::info!(device = %te_device_label, "Qwen2.5 text encoder loaded");
 
@@ -636,6 +919,11 @@ impl QwenImageEngine {
 
         let width = req.width as usize;
         let height = req.height as usize;
+        let free = free_vram_bytes().unwrap_or(0);
+        let resolved_text_encoder = self.resolve_text_encoder_source(&device, free)?;
+        let (plan, _device_label) =
+            self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
+        let use_cpu_staging = plan.use_cpu_staging;
 
         tracing::info!(
             prompt = %req.prompt,
@@ -671,39 +959,53 @@ impl QwenImageEngine {
             if both_cached {
                 self.base.progress.cache_hit("prompt conditioning");
                 let cached = prompt_cached.unwrap();
-                let (hs, mask) = cached.restore(&device, dtype)?;
+                let restore_device = if use_cpu_staging {
+                    &Device::Cpu
+                } else {
+                    &device
+                };
+                let restore_dtype = if use_cpu_staging { DType::F32 } else { dtype };
+                let (hs, mask) = cached.restore(restore_device, restore_dtype)?;
                 let (u_hs, u_mask) = if use_cfg {
                     let ucached = uncond_cached.unwrap();
-                    let (u_hs, u_mask) = ucached.restore(&device, dtype)?;
+                    let (u_hs, u_mask) = ucached.restore(restore_device, restore_dtype)?;
                     (Some(u_hs), Some(u_mask))
                 } else {
                     (None, None)
                 };
                 (hs, mask, u_hs, u_mask)
             } else {
-                let free = free_vram_bytes().unwrap_or(0);
-                let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
-                let te_device = if te_on_gpu {
+                let (te_plan, te_device_label) =
+                    self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
+                let te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
                     Device::Cpu
                 };
-                let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
+                let te_dtype = if te_plan.use_gpu { dtype } else { DType::F32 };
 
-                let te_label = format!(
-                    "Loading Qwen2.5 text encoder ({} shards, {})",
-                    self.base.paths.text_encoder_files.len(),
-                    te_device_label,
-                );
-                let te_size: u64 = self
-                    .base
-                    .paths
-                    .text_encoder_files
-                    .iter()
-                    .filter_map(|p| std::fs::metadata(p).ok())
-                    .map(|m| m.len())
-                    .sum();
-                preflight_memory_check("Qwen2.5 text encoder", te_size)?;
+                let te_label = if resolved_text_encoder.is_gguf {
+                    format!(
+                        "Loading Qwen2.5 text encoder ({} GGUF, {})",
+                        resolved_text_encoder.variant_label, te_device_label
+                    )
+                } else {
+                    format!(
+                        "Loading Qwen2.5 text encoder ({} shards, {})",
+                        resolved_text_encoder.paths.len(),
+                        te_device_label,
+                    )
+                };
+                if te_plan.use_cpu_staging && device.is_metal() && !resolved_text_encoder.is_gguf {
+                    self.base.progress.info(
+                        "Skipping hard preflight for Qwen2.5 text encoder on Metal; sequential mode spills prompt conditioning to CPU after encoding",
+                    );
+                } else {
+                    preflight_memory_check(
+                        "Qwen2.5 text encoder",
+                        resolved_text_encoder.size_bytes,
+                    )?;
+                }
 
                 if let Some(status) = memory_status_string() {
                     self.base.progress.info(&status);
@@ -711,8 +1013,12 @@ impl QwenImageEngine {
 
                 self.base.progress.stage_start(&te_label);
                 let te_start = Instant::now();
-                let mut text_encoder =
-                    self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
+                let mut text_encoder = self.load_text_encoder(
+                    &resolved_text_encoder,
+                    &text_tokenizer_path,
+                    &te_device,
+                    te_dtype,
+                )?;
                 self.base.progress.stage_done(&te_label, te_start.elapsed());
 
                 let (hs, mask) = Self::encode_prompt_cached(
@@ -723,6 +1029,7 @@ impl QwenImageEngine {
                     &device,
                     dtype,
                 )?;
+                let (hs, mask) = Self::maybe_spill_conditioning(use_cpu_staging, hs, mask)?;
 
                 let (u_hs, u_mask) = if use_cfg {
                     let (hs, mask) = Self::encode_prompt_cached(
@@ -733,20 +1040,33 @@ impl QwenImageEngine {
                         &device,
                         dtype,
                     )?;
+                    let (hs, mask) = Self::maybe_spill_conditioning(use_cpu_staging, hs, mask)?;
                     (Some(hs), Some(mask))
                 } else {
                     (None, None)
                 };
 
                 drop(text_encoder);
-                // Force CUDA to finish async work, then report actual free VRAM.
+                // Force the backend to release allocator state before transformer load.
                 device.synchronize()?;
                 if let Some(status) = crate::device::memory_status_string() {
-                    self.base
-                        .progress
-                        .info(&format!("Freed Qwen2.5 text encoder — {status}"));
+                    if use_cpu_staging {
+                        self.base.progress.info(&format!(
+                            "Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU — {status}"
+                        ));
+                    } else {
+                        self.base
+                            .progress
+                            .info(&format!("Freed Qwen2.5 text encoder — {status}"));
+                    }
                 } else {
-                    self.base.progress.info("Freed Qwen2.5 text encoder");
+                    if use_cpu_staging {
+                        self.base.progress.info(
+                            "Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU",
+                        );
+                    } else {
+                        self.base.progress.info("Freed Qwen2.5 text encoder");
+                    }
                 }
 
                 (hs, mask, u_hs, u_mask)
@@ -792,6 +1112,26 @@ impl QwenImageEngine {
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
+
+        if use_cpu_staging {
+            encoder_hidden_states = encoder_hidden_states.to_device(&device)?.to_dtype(dtype)?;
+            encoder_attention_mask = encoder_attention_mask.to_device(&device)?;
+            if let Some(hs) = uncond_hs.take() {
+                uncond_hs = Some(hs.to_device(&device)?.to_dtype(dtype)?);
+            }
+            if let Some(mask) = uncond_mask.take() {
+                uncond_mask = Some(mask.to_device(&device)?);
+            }
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&format!(
+                    "Restored prompt conditioning to GPU for denoising — {status}"
+                ));
+            } else {
+                self.base
+                    .progress
+                    .info("Restored prompt conditioning to GPU for denoising");
+            }
+        }
 
         // Calculate latent dimensions: image_size / 8 (VAE downsample factor)
         let vae_downsample = 8;
@@ -1287,6 +1627,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn resolved_text_encoder(is_gguf: bool, auto_use_gpu: bool) -> ResolvedQwen2TextEncoder {
+        ResolvedQwen2TextEncoder {
+            paths: vec![],
+            is_gguf,
+            variant_label: if is_gguf {
+                "q6".to_string()
+            } else {
+                "bf16".to_string()
+            },
+            size_bytes: 0,
+            auto_use_gpu,
+        }
+    }
+
     #[test]
     fn qwen_image_detects_gguf_transformer() {
         let engine = QwenImageEngine::new(
@@ -1311,5 +1665,108 @@ mod tests {
         );
 
         assert!(engine.detect_is_quantized());
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_gpu_on_metal() {
+        let plan = QwenImageEngine::qwen2_text_encoder_plan_for_mode(
+            Qwen2TextEncoderMode::Auto,
+            false,
+            true,
+            &resolved_text_encoder(true, true),
+        );
+        assert!(plan.use_gpu);
+        assert!(!plan.use_cpu_staging);
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_gpu_on_cuda_with_headroom() {
+        let plan = QwenImageEngine::qwen2_text_encoder_plan_for_mode(
+            Qwen2TextEncoderMode::Auto,
+            true,
+            false,
+            &resolved_text_encoder(false, true),
+        );
+        assert!(plan.use_gpu);
+        assert!(!plan.use_cpu_staging);
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_uses_cpu_on_cuda_without_headroom() {
+        let plan = QwenImageEngine::qwen2_text_encoder_plan_for_mode(
+            Qwen2TextEncoderMode::Auto,
+            true,
+            false,
+            &resolved_text_encoder(false, false),
+        );
+        assert!(!plan.use_gpu);
+        assert!(!plan.use_cpu_staging);
+    }
+
+    #[test]
+    fn qwen_image_text_encoder_gpu_override_disables_metal_staging() {
+        let plan = QwenImageEngine::qwen2_text_encoder_plan_for_mode(
+            Qwen2TextEncoderMode::Gpu,
+            false,
+            true,
+            &resolved_text_encoder(true, true),
+        );
+        assert!(plan.use_gpu);
+        assert!(!plan.use_cpu_staging);
+    }
+
+    #[test]
+    fn qwen_image_auto_prefers_q6_on_metal_with_headroom() {
+        let q6 = mold_core::manifest::find_qwen2_vl_variant("q6").unwrap();
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            false,
+            true,
+            qwen2_vram_threshold(q6.size_bytes) + 1,
+            16_600_000_000,
+        )
+        .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q6");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_falls_back_to_q4_on_metal_when_q6_does_not_fit() {
+        let q4 = mold_core::manifest::find_qwen2_vl_variant("q4").unwrap();
+        let q6 = mold_core::manifest::find_qwen2_vl_variant("q6").unwrap();
+        let free_vram = qwen2_vram_threshold(q4.size_bytes);
+        assert!(free_vram < qwen2_vram_threshold(q6.size_bytes));
+
+        let resolved =
+            QwenImageEngine::choose_text_encoder_source(Some("auto"), false, true, free_vram, 0)
+                .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_keeps_bf16_default_on_cuda() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD + 1,
+            16_600_000_000,
+        )
+        .unwrap();
+        assert!(!resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "bf16");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_explicit_q6_respects_cpu_fallback_on_cuda() {
+        let resolved =
+            QwenImageEngine::choose_text_encoder_source(Some("q6"), true, false, 1, 0).unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q6");
+        assert!(!resolved.auto_use_gpu);
     }
 }
