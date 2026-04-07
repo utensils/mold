@@ -10,8 +10,10 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::VarBuilder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use super::qwen2_text_gguf::GgufQwen2TextEncoder;
 
 const TOKENIZER_WINDOW: usize = 1024;
 const MAX_SEQUENCE_LENGTH: usize = 512;
@@ -288,7 +290,7 @@ impl DecoderLayer {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Qwen2TextModel {
+pub(crate) struct Bf16Qwen2TextModel {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
     sliding_window: usize,
@@ -296,7 +298,7 @@ pub(crate) struct Qwen2TextModel {
     dtype: DType,
 }
 
-impl Qwen2TextModel {
+impl Bf16Qwen2TextModel {
     fn new(cfg: &Qwen2TextEncoderConfig, vb: VarBuilder) -> Result<Self> {
         let vb_m = vb.pp("model");
         let embed_tokens =
@@ -434,11 +436,30 @@ impl Qwen2TextEncoderConfig {
 }
 
 /// Loaded Qwen2.5 text encoder.
+pub(crate) enum Qwen2TextModel {
+    Bf16(Bf16Qwen2TextModel),
+    Quantized(GgufQwen2TextEncoder),
+}
+
+impl Qwen2TextModel {
+    fn forward_last_hidden(
+        &mut self,
+        input_ids: &Tensor,
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        match self {
+            Self::Bf16(model) => model.forward_last_hidden(input_ids, attn_mask),
+            Self::Quantized(model) => model.forward_last_hidden(input_ids, attn_mask),
+        }
+    }
+}
+
 pub(crate) struct Qwen2TextEncoder {
     pub model: Option<Qwen2TextModel>,
     pub tokenizer: tokenizers::Tokenizer,
     pub device: Device,
     pub on_gpu: bool,
+    pub is_quantized: bool,
     encoder_paths: Vec<PathBuf>,
     dtype: DType,
     config: Qwen2TextEncoderConfig,
@@ -460,7 +481,7 @@ impl Qwen2TextEncoder {
             "Qwen2.5-VL encoder",
             progress,
         )?;
-        let model = Qwen2TextModel::new(&config, vb)?;
+        let model = Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(&config, vb)?);
         let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
         let on_gpu = crate::device::is_gpu(device);
@@ -469,8 +490,27 @@ impl Qwen2TextEncoder {
             tokenizer,
             device: device.clone(),
             on_gpu,
+            is_quantized: false,
             encoder_paths: encoder_paths.to_vec(),
             dtype,
+            config,
+        })
+    }
+
+    pub fn load_gguf(gguf_path: &Path, tokenizer_path: &PathBuf, device: &Device) -> Result<Self> {
+        let config = Qwen2TextEncoderConfig::qwen_image();
+        let model = Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(gguf_path, device)?);
+        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
+        let on_gpu = crate::device::is_gpu(device);
+        Ok(Self {
+            model: Some(model),
+            tokenizer,
+            device: device.clone(),
+            on_gpu,
+            is_quantized: true,
+            encoder_paths: vec![gguf_path.to_path_buf()],
+            dtype: DType::F32,
             config,
         })
     }
@@ -512,11 +552,11 @@ impl Qwen2TextEncoder {
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<(Tensor, Tensor, usize)> {
+        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
         let model = self
             .model
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Qwen2.5 model unavailable (weights dropped)"))?;
-        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
         let total_window = tokens.len();
         let input_ids = Tensor::from_vec(tokens, (1, total_window), &self.device)?;
         let mut mask = vec![0u8; total_window];
@@ -543,14 +583,24 @@ impl Qwen2TextEncoder {
     }
 
     pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            &self.encoder_paths,
-            self.dtype,
-            &self.device,
-            "Qwen2.5-VL encoder",
-            progress,
-        )?;
-        self.model = Some(Qwen2TextModel::new(&self.config, vb)?);
+        self.model = if self.is_quantized {
+            Some(Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(
+                &self.encoder_paths[0],
+                &self.device,
+            )?))
+        } else {
+            let vb = crate::weight_loader::load_safetensors_with_progress(
+                &self.encoder_paths,
+                self.dtype,
+                &self.device,
+                "Qwen2.5-VL encoder",
+                progress,
+            )?;
+            Some(Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(
+                &self.config,
+                vb,
+            )?))
+        };
         Ok(())
     }
 }

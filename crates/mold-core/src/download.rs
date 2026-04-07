@@ -490,6 +490,40 @@ impl Progress for CallbackProgress {
     }
 }
 
+/// Sync progress adapter bridging hf-hub's sync `Progress` trait to our
+/// local `indicatif::ProgressBar`.
+struct SyncDownloadProgress {
+    bar: ProgressBar,
+    max_msg_len: usize,
+    filename: String,
+}
+
+impl SyncDownloadProgress {
+    fn new(bar: ProgressBar, max_msg_len: usize) -> Self {
+        Self {
+            bar,
+            max_msg_len,
+            filename: String::new(),
+        }
+    }
+}
+
+impl hf_hub::api::Progress for SyncDownloadProgress {
+    fn init(&mut self, size: usize, filename: &str) {
+        self.bar.set_length(size as u64);
+        self.filename = truncate_filename(filename, self.max_msg_len);
+        self.bar.set_message(self.filename.clone());
+    }
+
+    fn update(&mut self, size: usize) {
+        self.bar.inc(size as u64);
+    }
+
+    fn finish(&mut self) {
+        self.bar.finish_with_message(self.filename.clone());
+    }
+}
+
 /// Returns `true` if the file already exists at `clean_path` with the correct
 /// size and (if a SHA-256 is available) the correct digest.
 ///
@@ -926,30 +960,42 @@ pub fn download_single_file_sync(
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
     let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
-    let hf_path = repo.get(hf_filename).map_err(|e| {
-        let err_str = e.to_string();
-        if err_str.contains("401") || err_str.contains("Unauthorized") {
-            DownloadError::Unauthorized {
-                repo: hf_repo.to_string(),
-                model: String::new(),
+    let msg_width = filename_column_width();
+    let bar_style = ProgressStyle::with_template(&format!(
+        "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
+    ))
+    .unwrap()
+    .progress_chars("━╸─");
+    let bar = ProgressBar::new(0);
+    bar.set_style(bar_style);
+    bar.set_message(truncate_filename(hf_filename, msg_width));
+    let progress = SyncDownloadProgress::new(bar, msg_width);
+    let hf_path = repo
+        .download_with_progress(hf_filename, progress)
+        .map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("401") || err_str.contains("Unauthorized") {
+                DownloadError::Unauthorized {
+                    repo: hf_repo.to_string(),
+                    model: String::new(),
+                }
+            } else if err_str.contains("403")
+                || err_str.contains("Forbidden")
+                || err_str.contains("gated")
+                || err_str.contains("Access denied")
+            {
+                DownloadError::GatedModel {
+                    repo: hf_repo.to_string(),
+                    model: String::new(),
+                }
+            } else {
+                DownloadError::SyncDownloadFailed {
+                    repo: hf_repo.to_string(),
+                    filename: hf_filename.to_string(),
+                    message: err_str,
+                }
             }
-        } else if err_str.contains("403")
-            || err_str.contains("Forbidden")
-            || err_str.contains("gated")
-            || err_str.contains("Access denied")
-        {
-            DownloadError::GatedModel {
-                repo: hf_repo.to_string(),
-                model: String::new(),
-            }
-        } else {
-            DownloadError::SyncDownloadFailed {
-                repo: hf_repo.to_string(),
-                filename: hf_filename.to_string(),
-                message: err_str,
-            }
-        }
-    })?;
+        })?;
 
     // Place at clean path if target_subdir specified
     if let Some(subdir) = target_subdir {

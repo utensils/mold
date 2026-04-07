@@ -52,6 +52,12 @@ pub fn qwen3_vram_threshold(model_size_bytes: u64) -> u64 {
     model_size_bytes + T5_ACTIVATION_HEADROOM
 }
 
+/// Compute VRAM threshold for a Qwen2.5-VL text encoder of a given size.
+/// Uses the same headroom formula as T5/Qwen3 (model size + 2GB activations).
+pub fn qwen2_vram_threshold(model_size_bytes: u64) -> u64 {
+    model_size_bytes + T5_ACTIVATION_HEADROOM
+}
+
 /// Minimum free VRAM for BF16 Qwen3-4B on GPU with drop-and-reload.
 /// 8.2GB model + 2GB activation headroom = 10.2GB.
 /// With drop-and-reload, the encoder is temporary — loaded for encoding, then dropped.
@@ -780,6 +786,13 @@ mod tests {
         let threshold = qwen3_vram_threshold(2_080_000_000);
         assert_eq!(threshold, 4_080_000_000);
         assert!(should_use_gpu(true, false, 5_000_000_000, threshold));
+    }
+
+    #[test]
+    fn qwen2_threshold_for_q6() {
+        let threshold = qwen2_vram_threshold(6_250_000_000);
+        assert_eq!(threshold, 8_250_000_000);
+        assert!(should_use_gpu(true, false, 12_000_000_000, threshold));
     }
 
     #[test]

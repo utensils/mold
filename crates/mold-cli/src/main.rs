@@ -205,6 +205,25 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         qwen3_variant: Option<String>,
 
+        /// Qwen2.5-VL text encoder variant (Qwen-Image): auto, bf16, q8, q6, q5, q4, q3, q2
+        #[arg(
+            long,
+            env = "MOLD_QWEN2_VARIANT",
+            value_parser = ["auto", "bf16", "q8", "q6", "q5", "q4", "q3", "q2"],
+            help_heading = "Advanced"
+        )]
+        qwen2_variant: Option<String>,
+
+        /// Qwen2.5-VL text encoder mode (Qwen-Image): auto, gpu, cpu-stage, cpu
+        /// `auto` respects the selected variant; BF16 on Metal stages after encoding, CUDA defaults stay unchanged.
+        #[arg(
+            long,
+            env = "MOLD_QWEN2_TEXT_ENCODER_MODE",
+            value_parser = ["auto", "gpu", "cpu-stage", "cpu"],
+            help_heading = "Advanced"
+        )]
+        qwen2_text_encoder_mode: Option<String>,
+
         /// Scheduler algorithm for UNet models: ddim, euler-ancestral, uni-pc
         /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
         #[arg(long, env = "MOLD_SCHEDULER", help_heading = "Advanced")]
@@ -792,6 +811,8 @@ async fn run() -> anyhow::Result<()> {
             local,
             t5_variant,
             qwen3_variant,
+            qwen2_variant,
+            qwen2_text_encoder_mode,
             scheduler,
             eager,
             offload,
@@ -830,6 +851,8 @@ async fn run() -> anyhow::Result<()> {
                 local,
                 t5_variant,
                 qwen3_variant,
+                qwen2_variant,
+                qwen2_text_encoder_mode,
                 scheduler,
                 eager,
                 offload,
@@ -1143,6 +1166,35 @@ mod tests {
         let cli = parse(&["run", "model", "test", "--guidance", "7.5"]);
         match cli.command {
             Commands::Run { guidance, .. } => assert_eq!(guidance, Some(7.5)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_qwen2_text_encoder_mode() {
+        let cli = parse(&[
+            "run",
+            "qwen-image:q2",
+            "test",
+            "--qwen2-text-encoder-mode",
+            "cpu-stage",
+        ]);
+        match cli.command {
+            Commands::Run {
+                qwen2_text_encoder_mode,
+                ..
+            } => assert_eq!(qwen2_text_encoder_mode.as_deref(), Some("cpu-stage")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_qwen2_variant() {
+        let cli = parse(&["run", "qwen-image:q2", "test", "--qwen2-variant", "q6"]);
+        match cli.command {
+            Commands::Run { qwen2_variant, .. } => {
+                assert_eq!(qwen2_variant.as_deref(), Some("q6"))
+            }
             _ => panic!("expected Run"),
         }
     }

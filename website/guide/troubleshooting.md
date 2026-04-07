@@ -35,6 +35,18 @@ For Qwen-Image on a 24 GB card, start with `qwen-image:q4` or
 variants `q2` through `q6` were validated at `1024x1024`, while `q8` was
 validated at `768x768`.
 
+On Apple Silicon, Qwen-Image now also has a separate quantized Qwen2.5-VL text
+encoder path. If the machine becomes unresponsive during prompt encoding, keep
+the model the same and try:
+
+```bash
+mold run qwen-image:q2 "your prompt" --qwen2-variant q6
+mold run qwen-image:q2 "your prompt" --qwen2-variant q4
+```
+
+Metal `auto` already prefers that path by default. Only force `--qwen2-variant
+bf16` if you are deliberately comparing the old behavior.
+
 ## Connection Refused
 
 If `mold run` cannot reach the server:

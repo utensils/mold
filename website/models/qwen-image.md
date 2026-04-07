@@ -10,7 +10,8 @@ flow-matching with classifier-free guidance.
   [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512)
 - **GGUF sources**:
   [city96/Qwen-Image-gguf](https://huggingface.co/city96/Qwen-Image-gguf),
-  [unsloth/Qwen-Image-2512-GGUF](https://huggingface.co/unsloth/Qwen-Image-2512-GGUF)
+  [unsloth/Qwen-Image-2512-GGUF](https://huggingface.co/unsloth/Qwen-Image-2512-GGUF),
+  [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF)
 
 ## Stable GGUF Variants
 
@@ -18,6 +19,15 @@ flow-matching with classifier-free guidance.
 
 - `qwen-image:*` uses the base `Qwen/Qwen-Image` release with GGUF transformers from `city96/Qwen-Image-gguf`
 - `qwen-image-2512:*` uses `Qwen/Qwen-Image-2512` with GGUF transformers from `unsloth/Qwen-Image-2512-GGUF`
+
+The Qwen-Image text encoder itself is also selectable now:
+
+- `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
+- `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
+
+On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders
+(`q6`, then `q4`) to avoid the BF16 text-encoder memory spike. CUDA `auto`
+stays on the existing BF16 path unless you explicitly select a Qwen2 variant.
 
 ### Base Qwen-Image
 
@@ -52,6 +62,23 @@ mold run qwen-image:q4 "your prompt here"
 
 mold pull qwen-image-2512:q4
 mold run qwen-image-2512:q4 "your prompt here"
+```
+
+:::
+
+::: tip Apple Silicon
+On Apple Silicon, leave `--qwen2-variant` unset first. Metal `auto` will prefer
+the quantized Qwen2.5-VL text encoder path for Qwen-Image automatically.
+
+```bash
+mold run qwen-image:q2 "your prompt here" --preview
+```
+
+To compare explicitly:
+
+```bash
+mold run qwen-image:q2 "your prompt here" --qwen2-variant q6
+mold run qwen-image:q2 "your prompt here" --qwen2-variant q4
 ```
 
 :::
