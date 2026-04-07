@@ -505,7 +505,7 @@ impl QwenImageEngine {
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
             Ok(QwenImageTransformer::Quantized(
-                QuantizedQwenImageTransformer2DModel::new(cfg, vb)?,
+                QuantizedQwenImageTransformer2DModel::new(cfg, vb, device)?,
             ))
         } else {
             let xformer_paths = self.transformer_paths();

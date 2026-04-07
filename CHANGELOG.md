@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Qwen-Image CUDA black images**: reverted Metal GGUF denoising optimization (#207) that replaced the per-forward BF16 dequantization path with QMatMul/F32 globally, breaking CUDA inference. Restores `DequantLinear` BF16 path that works on both CUDA and Metal
+
 ## [0.6.0] - 2026-04-07
 
 ### Added
