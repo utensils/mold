@@ -144,7 +144,17 @@ testing alternative weight files without editing `config.toml`.
 | ---------------------------------- | ------- | -------------------------------------------------- |
 | `MOLD_SD3_DEBUG`                   | —       | Enable verbose SD3.5 pipeline logging              |
 | `MOLD_QWEN_DEBUG`                  | —       | Enable verbose Qwen-Image pipeline logging         |
+| `MOLD_LTX_DEBUG`                   | —       | Enable verbose LTX Video pipeline logging          |
 | `MOLD_WUERSTCHEN_DEBUG`            | —       | Enable verbose Wuerstchen pipeline logging         |
 | `MOLD_WUERSTCHEN_DECODER_GUIDANCE` | `0.0`   | Override decoder-stage CFG guidance for Wuerstchen |
 
 These are intended for troubleshooting and development rather than normal use.
+
+### Build-Time Metadata
+
+| Variable            | Default | Description                                                 |
+| ------------------- | ------- | ----------------------------------------------------------- |
+| `MOLD_FULL_VERSION` | —       | Internal build-time version string embedded into CLI output |
+
+This variable is set during the build and is not normally configured by users at
+runtime.

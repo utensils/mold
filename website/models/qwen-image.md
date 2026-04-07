@@ -21,25 +21,25 @@ flow-matching with classifier-free guidance.
 
 ### Base Qwen-Image
 
-| Model | Steps | Size | Validated On 24 GB | Notes |
-| ----- | ----- | ---- | ------------------ | ----- |
-| `qwen-image:q8` | 50 | 21.8 GB | `768x768` | Highest-quality GGUF tier |
-| `qwen-image:q6` | 50 | 16.8 GB | `1024x1024` | Quality/size trade-off |
-| `qwen-image:q5` | 50 | 14.9 GB | `1024x1024` | Dynamic `K_M` quant |
-| `qwen-image:q4` | 50 | 13.1 GB | `1024x1024` | Stable 24 GB choice |
-| `qwen-image:q3` | 50 | 9.7 GB | `1024x1024` | Lower bitrate, still prompt-faithful |
-| `qwen-image:q2` | 50 | 7.1 GB | `1024x1024` | Smallest published base GGUF |
+| Model           | Steps | Size    | Validated On 24 GB | Notes                                |
+| --------------- | ----- | ------- | ------------------ | ------------------------------------ |
+| `qwen-image:q8` | 50    | 21.8 GB | `768x768`          | Highest-quality GGUF tier            |
+| `qwen-image:q6` | 50    | 16.8 GB | `1024x1024`        | Quality/size trade-off               |
+| `qwen-image:q5` | 50    | 14.9 GB | `1024x1024`        | Dynamic `K_M` quant                  |
+| `qwen-image:q4` | 50    | 13.1 GB | `1024x1024`        | Stable 24 GB choice                  |
+| `qwen-image:q3` | 50    | 9.7 GB  | `1024x1024`        | Lower bitrate, still prompt-faithful |
+| `qwen-image:q2` | 50    | 7.1 GB  | `1024x1024`        | Smallest published base GGUF         |
 
 ### Qwen-Image-2512
 
-| Model | Steps | Size | Validated On 24 GB | Notes |
-| ----- | ----- | ---- | ------------------ | ----- |
-| `qwen-image-2512:q8` | 50 | 21.8 GB | `768x768` | Highest-quality 2512 GGUF tier |
-| `qwen-image-2512:q6` | 50 | 16.8 GB | `1024x1024` | Quality/size trade-off |
-| `qwen-image-2512:q5` | 50 | 15.0 GB | `1024x1024` | Dynamic `K_M` quant |
-| `qwen-image-2512:q4` | 50 | 13.2 GB | `1024x1024` | Stable 24 GB choice |
-| `qwen-image-2512:q3` | 50 | 9.9 GB | `1024x1024` | Lower bitrate, still prompt-faithful |
-| `qwen-image-2512:q2` | 50 | 7.3 GB | `1024x1024` | Smallest published 2512 GGUF |
+| Model                | Steps | Size    | Validated On 24 GB | Notes                                |
+| -------------------- | ----- | ------- | ------------------ | ------------------------------------ |
+| `qwen-image-2512:q8` | 50    | 21.8 GB | `768x768`          | Highest-quality 2512 GGUF tier       |
+| `qwen-image-2512:q6` | 50    | 16.8 GB | `1024x1024`        | Quality/size trade-off               |
+| `qwen-image-2512:q5` | 50    | 15.0 GB | `1024x1024`        | Dynamic `K_M` quant                  |
+| `qwen-image-2512:q4` | 50    | 13.2 GB | `1024x1024`        | Stable 24 GB choice                  |
+| `qwen-image-2512:q3` | 50    | 9.9 GB  | `1024x1024`        | Lower bitrate, still prompt-faithful |
+| `qwen-image-2512:q2` | 50    | 7.3 GB  | `1024x1024`        | Smallest published 2512 GGUF         |
 
 ::: tip Recommended Stable Quant Paths
 On a 24 GB card, `qwen-image:q4` and `qwen-image-2512:q4` are the safest
@@ -53,6 +53,7 @@ mold run qwen-image:q4 "your prompt here"
 mold pull qwen-image-2512:q4
 mold run qwen-image-2512:q4 "your prompt here"
 ```
+
 :::
 
 ## Defaults

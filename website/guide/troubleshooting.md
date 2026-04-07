@@ -21,13 +21,13 @@ mold run z-image-turbo:q4 "a city at dusk" --width 768 --height 768
 
 ## Which Model Fits My GPU?
 
-| GPU VRAM | Good Starting Choices                                                       |
-| -------- | --------------------------------------------------------------------------- |
-| 4-6 GB   | `flux2-klein:q4`, `sd15:fp16`                                               |
-| 8-10 GB  | `flux-dev:q4`, `flux-schnell:q4`, `z-image-turbo:q4`, `sdxl-turbo:fp16`     |
+| GPU VRAM | Good Starting Choices                                                                       |
+| -------- | ------------------------------------------------------------------------------------------- |
+| 4-6 GB   | `flux2-klein:q4`, `sd15:fp16`                                                               |
+| 8-10 GB  | `flux-dev:q4`, `flux-schnell:q4`, `z-image-turbo:q4`, `sdxl-turbo:fp16`                     |
 | 12-16 GB | `flux-schnell:q8`, `flux-dev:q6`, `z-image-turbo:q8`, `qwen-image:q4`, `qwen-image-2512:q4` |
-| 24 GB    | `qwen-image:q4`, `qwen-image-2512:q4`, `flux-dev:bf16`, most quantized variants |
-| 48 GB+   | Full BF16 variants with more room for eager loading                         |
+| 24 GB    | `qwen-image:q4`, `qwen-image-2512:q4`, `flux-dev:bf16`, most quantized variants             |
+| 48 GB+   | Full BF16 variants with more room for eager loading                                         |
 
 As a rule, quantized FLUX and Z-Image variants are the easiest place to start.
 For Qwen-Image on a 24 GB card, start with `qwen-image:q4` or
