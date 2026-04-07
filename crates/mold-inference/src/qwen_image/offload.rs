@@ -514,52 +514,20 @@ impl OffloadedQwenImageTransformer {
         let rope_embedder =
             QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, vb.dtype())?;
 
-        // Load all blocks on CPU first
-        let mut cpu_blocks = Vec::with_capacity(cfg.num_layers);
+        // Load all blocks on CPU. GPU placement happens later via
+        // promote_blocks_to_gpu() after the text encoder frees its VRAM.
+        let mut blocks = Vec::with_capacity(cfg.num_layers);
         let vb_blocks = vb.pp("transformer_blocks");
         for i in 0..cfg.num_layers {
-            cpu_blocks.push(OffloadedQwenBlock::load(cfg, vb_blocks.pp(i))?);
+            blocks.push(BlockResidency::Cpu(
+                OffloadedQwenBlock::load(cfg, vb_blocks.pp(i))?,
+            ));
         }
+        let gpu_count = 0;
 
-        // Measure free VRAM and move as many blocks to GPU as fit.
-        // Reserve headroom for attention workspace (~2GB for 1328×1328).
-        let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention + activations
-        let available = free_vram.saturating_sub(VRAM_HEADROOM);
-
-        // Estimate block size from first block's weight tensors
-        let block_size_estimate = {
-            let b = &cpu_blocks[0];
-            let mod_bytes = b.img_mod.weight().elem_count() * 2; // BF16 = 2 bytes
-            // img_mod + txt_mod + attn (8 linears + 4 norms) + 2 MLPs ≈ 30× mod_bytes
-            (mod_bytes * 30) as u64
-        };
-
-        let gpu_count = if block_size_estimate > 0 {
-            let max_fit = (available / block_size_estimate) as usize;
-            max_fit.min(cfg.num_layers)
-        } else {
-            0
-        };
-
-        // Move blocks to GPU/CPU based on budget
-        let mut blocks = Vec::with_capacity(cfg.num_layers);
-        for (i, block) in cpu_blocks.into_iter().enumerate() {
-            if i < gpu_count {
-                blocks.push(BlockResidency::Gpu(block.to_device(gpu_device)?));
-            } else {
-                blocks.push(BlockResidency::Cpu(block));
-            }
-        }
-
-        // Sync to ensure GPU memory is allocated before reporting
-        gpu_device.synchronize()?;
-        let gpu_mb = (gpu_count as u64 * block_size_estimate) / (1024 * 1024);
         progress.info(&format!(
-            "Offloading: {} blocks on GPU ({} MB), {} blocks streaming from CPU",
-            gpu_count,
-            gpu_mb,
-            cfg.num_layers - gpu_count,
+            "Loaded {} blocks on CPU, will promote to GPU after text encoder frees VRAM",
+            blocks.len(),
         ));
 
         Ok(Self {
@@ -576,23 +544,52 @@ impl OffloadedQwenImageTransformer {
         })
     }
 
+    /// Compute actual block size in bytes by summing all weight tensors.
+    fn block_size_bytes(block: &OffloadedQwenBlock) -> u64 {
+        let lb = |l: &Linear| -> u64 {
+            let w = (l.weight().elem_count() * l.weight().dtype().size_in_bytes()) as u64;
+            let b = l.bias().map(|b| (b.elem_count() * b.dtype().size_in_bytes()) as u64).unwrap_or(0);
+            w + b
+        };
+        let rb = |r: &candle_nn::RmsNorm| -> u64 {
+            let w = r.clone().into_inner().weight().clone();
+            (w.elem_count() * w.dtype().size_in_bytes()) as u64
+        };
+        lb(&block.img_mod) + lb(&block.txt_mod)
+            + lb(&block.attn.to_q) + lb(&block.attn.to_k) + lb(&block.attn.to_v)
+            + lb(&block.attn.to_out) + lb(&block.attn.add_q_proj) + lb(&block.attn.add_k_proj)
+            + lb(&block.attn.add_v_proj) + lb(&block.attn.add_out_proj)
+            + rb(&block.attn.norm_q) + rb(&block.attn.norm_k)
+            + rb(&block.attn.norm_added_q) + rb(&block.attn.norm_added_k)
+            + lb(&block.img_mlp.proj) + lb(&block.img_mlp.out)
+            + lb(&block.txt_mlp.proj) + lb(&block.txt_mlp.out)
+    }
+
     /// Promote CPU-resident blocks to GPU if more VRAM is now available.
     ///
     /// Call after dropping the text encoder to reclaim its VRAM for blocks.
-    /// This reduces per-step CPU→GPU transfers during denoising.
     pub fn promote_blocks_to_gpu(&mut self) -> Result<()> {
+        // Force CUDA to reclaim freed memory before measuring
+        self.gpu_device.synchronize()?;
+
         let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 2_500_000_000;
+        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention workspace
         let available = free_vram.saturating_sub(VRAM_HEADROOM);
 
-        // Estimate per-block size from first GPU block or first CPU block
+        // Compute actual block size from weights
         let block_size = {
             let b = match &self.blocks[0] {
                 BlockResidency::Gpu(b) | BlockResidency::Cpu(b) => b,
             };
-            let mod_bytes = b.img_mod.weight().elem_count() * 2;
-            (mod_bytes * 30) as u64
+            Self::block_size_bytes(b)
         };
+
+        tracing::info!(
+            free_vram_mb = free_vram / (1024 * 1024),
+            available_mb = available / (1024 * 1024),
+            block_size_mb = block_size / (1024 * 1024),
+            "measuring VRAM for block promotion"
+        );
 
         let can_promote = if block_size > 0 {
             (available / block_size) as usize
