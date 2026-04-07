@@ -1,6 +1,6 @@
 //! LTX Video inference engine — text-to-video generation.
 //!
-//! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → GIF
+//! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → APNG/GIF/WebP/MP4
 //! Follows the same patterns as Flux2Engine (drop-and-reload, VRAM management, progress).
 
 use std::sync::{Arc, Mutex};
@@ -40,12 +40,14 @@ const LATENT_CHANNELS: usize = 128;
 const PATCH_SIZE: usize = 1;
 const PATCH_SIZE_T: usize = 1;
 
-const LTX_2B_098_DISTILLED_SIGMAS: &[f32] =
-    &[1.0000, 0.9937, 0.9875, 0.9812, 0.9750, 0.9094, 0.7250];
-const LTX_13B_098_DISTILLED_SIGMAS: &[f32] =
+const LTX_098_DISTILLED_FIRST_PASS_SIGMAS: &[f32] =
     &[1.0000, 0.9937, 0.9875, 0.9812, 0.9750, 0.9094, 0.7250];
 const LTX_096_DEV_SKIP_BLOCKS: &[usize] = &[19];
-const LTX_098_2B_DISTILLED_SKIP_BLOCKS: &[usize] = &[42];
+// The upstream 2B 0.9.8 distilled YAML uses skip block 42 for both passes, but
+// Candle skip blocks map directly to transformer layer indices and the 2B model
+// only exposes 28 layers. Keep the effective first-pass behavior explicit until
+// multiscale/STG parity work lands.
+const LTX_098_2B_DISTILLED_SKIP_BLOCKS: &[usize] = &[];
 const LTX_098_13B_DISTILLED_SKIP_BLOCKS: &[usize] = &[42];
 const LTX_098_13B_DEV_SKIP_BLOCKS: &[usize] = &[28];
 
@@ -121,7 +123,7 @@ impl LtxModelPreset {
                 default_steps: 7,
                 decode_timestep: 0.05,
                 decode_noise_scale: 0.025,
-                custom_sigmas: Some(LTX_2B_098_DISTILLED_SIGMAS),
+                custom_sigmas: Some(LTX_098_DISTILLED_FIRST_PASS_SIGMAS),
                 skip_block_list: LTX_098_2B_DISTILLED_SKIP_BLOCKS,
                 mode: LtxPipelineMode::MultiscaleFirstPassFallback,
             })
@@ -133,7 +135,7 @@ impl LtxModelPreset {
                 default_steps: 7,
                 decode_timestep: 0.05,
                 decode_noise_scale: 0.025,
-                custom_sigmas: Some(LTX_13B_098_DISTILLED_SIGMAS),
+                custom_sigmas: Some(LTX_098_DISTILLED_FIRST_PASS_SIGMAS),
                 skip_block_list: LTX_098_13B_DISTILLED_SKIP_BLOCKS,
                 mode: LtxPipelineMode::MultiscaleFirstPassFallback,
             })
@@ -294,24 +296,10 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
         let latent_h = height as usize / VAE_SPATIAL_COMPRESSION;
         let latent_w = width as usize / VAE_SPATIAL_COMPRESSION;
         let latent_f = (num_frames as usize - 1) / VAE_TEMPORAL_COMPRESSION + 1;
-        let video_seq_len = latent_f * latent_h * latent_w;
-
         // Always use sequential mode for video (high VRAM usage)
         self.generate_sequential(
-            req,
-            &preset,
-            seed,
-            num_frames,
-            fps,
-            steps,
-            guidance,
-            width,
-            height,
-            latent_h,
-            latent_w,
-            latent_f,
-            video_seq_len,
-            start,
+            req, &preset, seed, num_frames, fps, steps, guidance, width, height, latent_h,
+            latent_w, latent_f, start,
         )
     }
 
@@ -365,7 +353,6 @@ impl LtxVideoEngine {
         latent_h: usize,
         latent_w: usize,
         latent_f: usize,
-        _video_seq_len: usize,
         start: Instant,
     ) -> Result<GenerateResponse> {
         let progress = &self.base.progress;
@@ -939,7 +926,9 @@ fn build_video_coords(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_official_ltx_transformer_checkpoint, remap_official_ltx_transformer_key};
+    use super::{
+        is_official_ltx_transformer_checkpoint, remap_official_ltx_transformer_key, LtxModelPreset,
+    };
     use std::path::Path;
 
     #[test]
@@ -976,5 +965,25 @@ mod tests {
             remap_official_ltx_transformer_key("caption_projection.linear_2.bias"),
             "model.diffusion_model.caption_projection.linear_2.bias"
         );
+    }
+
+    #[test]
+    fn ltx_presets_only_reference_in_range_skip_blocks() {
+        for model_name in [
+            "ltx-video-0.9.6:bf16",
+            "ltx-video-0.9.6-distilled:bf16",
+            "ltx-video-0.9.8-2b-distilled:bf16",
+            "ltx-video-0.9.8-13b-dev:bf16",
+            "ltx-video-0.9.8-13b-distilled:bf16",
+        ] {
+            let preset = LtxModelPreset::for_model(model_name).expect("preset should exist");
+            for &skip_block in preset.skip_block_list {
+                assert!(
+                    skip_block < preset.transformer_config.num_layers,
+                    "{model_name} skip block {skip_block} is out of range for {} layers",
+                    preset.transformer_config.num_layers
+                );
+            }
+        }
     }
 }

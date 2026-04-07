@@ -19,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
 - **Video metadata**: APNG output embeds generation parameters (prompt, model, seed, steps, guidance, dimensions, fps) in PNG tEXt/iTXt chunks
 - **GIF preview cache**: animated GIF preview cached in `~/.mold/cache/previews/` for TUI gallery detail view and generation viewport
-- **Matched v0.9.5 model pair**: v0.9.5 transformer (3.8 GB, single file) + v0.9.5 VAE (2.3 GB, 1024-ch, timestep conditioning) from `Lightricks/LTX-Video-0.9.5` — sharp, photorealistic output
 - **Custom MP4 muxer**: minimal QuickTime-compatible MP4 writer with correct ftyp brands (isom, iso2, avc1, mp41), colr/pasp atoms, faststart layout. Replaces muxide dependency
 - **Hidden manifest support**: `ModelManifest.hidden` field excludes models from user-facing lists (CLI, TUI) while keeping them usable via config.toml
 - **Upscaler CLI color**: upscaler models display in bright purple in `mold list`, consistent with per-family color scheme
@@ -67,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile. Aligned SPS VUI and colr atom to BT.601 limited range (matching openh264's RGB→YUV conversion), added edts/elst edit list box ([#181](https://github.com/utensils/mold/issues/181))
 - **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
 - **LTX inference quality path**: the LTX engine now selects versioned transformer/VAE presets, uses the current improved VAE for supported checkpoints, applies the published `decode_noise_scale` before timestep-conditioned VAE decode, and stops guessing model behavior from legacy VAE file sizes
+- **LTX VAE source validation**: verified that the current `Lightricks/LTX-Video` VAE is not yet compatible with Candle's ported LTX VAE layout, so the manifest intentionally keeps using the published `Lightricks/LTX-Video-0.9.5` VAE until that follow-up architecture work lands
 
 ### Removed
 

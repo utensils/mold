@@ -843,6 +843,7 @@ mod tests {
             models_dir: tmp.to_string_lossy().to_string(),
             ..Config::default()
         };
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
 
         // The model is not in config.models — only discoverable via manifest
         assert!(!config.models.contains_key("flux-schnell:q8"));
@@ -863,6 +864,7 @@ mod tests {
             "resolved config should produce file paths for deletion"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

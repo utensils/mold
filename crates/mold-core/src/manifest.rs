@@ -3522,6 +3522,11 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             sha256: Some("812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7"),
         },
     ];
+    // Current Candle LTX VAE support still targets the published legacy VAE
+    // layout from LTX-Video-0.9.5. The newer LTX-Video repo ships a different
+    // VAE checkpoint that fails local decode with the current port
+    // (`decoder.conv_in.conv.weight` shape mismatch) and needs a follow-up
+    // architecture update before we can switch repos.
     let shared_vae_file = ModelFile {
         hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
         hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
@@ -4365,6 +4370,25 @@ mod tests {
                     .iter()
                     .any(|file| file.component == ModelComponent::SpatialUpscaler),
                 "{model} missing spatial upscaler component"
+            );
+        }
+    }
+
+    #[test]
+    fn ltx_manifests_use_the_compatible_legacy_vae_source() {
+        for manifest in known_manifests()
+            .iter()
+            .filter(|manifest| manifest.family == "ltx-video")
+        {
+            let vae = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Vae)
+                .expect("ltx manifest should include a VAE");
+            assert_eq!(
+                vae.hf_repo, "Lightricks/LTX-Video-0.9.5",
+                "{} should keep using the compatible legacy LTX VAE until the newer VAE layout is ported",
+                manifest.name
             );
         }
     }
