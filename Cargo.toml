@@ -30,11 +30,4 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# Local candle fork — native FP8 matmul via cuBLASLt + F8E4M3 CUDA cast fix.
-# Comment out [patch] section and bump versions once published to crates.io.
-[patch.crates-io]
-candle-core-mold = { path = "../candle/candle-core" }
-candle-nn-mold = { path = "../candle/candle-nn" }
-candle-transformers-mold = { path = "../candle/candle-transformers" }
-
 

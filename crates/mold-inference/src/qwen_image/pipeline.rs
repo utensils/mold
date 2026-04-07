@@ -12,7 +12,7 @@
 //! - 60 identical dual-stream blocks (no noise_refiner/context_refiner)
 //! - Qwen2.5-VL text encoder (hidden_size=3584) instead of Qwen3 (2560)
 //! - Custom VAE with per-channel latent normalization
-//! - ComfyUI-style SNR time shift scheduling (shift=3.1)
+//! - Official diffusers-style exponential time shift with dynamic per-image stretch
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
