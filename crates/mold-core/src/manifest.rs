@@ -2682,6 +2682,16 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
     names
 }
 
+/// True if a family string identifies a generation model (not upscaler, utility, or auxiliary).
+///
+/// Used by `all_generation_model_names` to classify config-only models whose family
+/// is a plain string rather than a `ModelManifest` with methods.
+pub fn is_generation_family(family: &str) -> bool {
+    !UPSCALER_FAMILIES.contains(&family)
+        && !UTILITY_FAMILIES.contains(&family)
+        && !AUXILIARY_FAMILIES.contains(&family)
+}
+
 /// All known generation model names (excludes upscalers, utility, and auxiliary models),
 /// deduplicated and sorted.
 pub fn all_generation_model_names(config: &crate::Config) -> Vec<String> {
@@ -2695,10 +2705,7 @@ pub fn all_generation_model_names(config: &crate::Config) -> Vec<String> {
         // Use resolved config to get the correct family (inherits from manifest if present).
         let resolved = config.resolved_model_config(key);
         let family = resolved.family.as_deref().unwrap_or("flux");
-        if !UPSCALER_FAMILIES.contains(&family)
-            && !UTILITY_FAMILIES.contains(&family)
-            && !AUXILIARY_FAMILIES.contains(&family)
-        {
+        if is_generation_family(family) {
             seen.insert(key.clone());
         }
     }
@@ -3827,7 +3834,7 @@ mod tests {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
             // All diffusion models need VAE (except ControlNet, utility models, and upscalers)
-            if !manifest.is_utility() && !manifest.is_upscaler() && manifest.family != "controlnet"
+            if !manifest.is_utility() && !manifest.is_upscaler() && !manifest.is_auxiliary()
             {
                 assert!(
                     components.contains(&ModelComponent::Vae),
@@ -4430,7 +4437,7 @@ mod tests {
     fn total_size_includes_shared_components() {
         // Models with shared files must have total > transformer-only size
         for manifest in known_manifests() {
-            if manifest.family == "controlnet" || manifest.is_upscaler() {
+            if manifest.is_auxiliary() || manifest.is_upscaler() {
                 continue; // ControlNet and upscalers are single-file models
             }
             let transformer_bytes: u64 = manifest
