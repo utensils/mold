@@ -50,8 +50,9 @@ impl Module for QwenLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dequant { weight, bias } => {
-                let x = x.to_dtype(DType::BF16)?;
-                let w = weight.dequantize(x.device())?.to_dtype(DType::BF16)?;
+                let dtype = working_dtype(x.device());
+                let x = x.to_dtype(dtype)?;
+                let w = weight.dequantize(x.device())?.to_dtype(dtype)?;
                 candle_nn::Linear::new(w, bias.clone()).forward(&x)
             }
             Self::QMatMul(inner) => inner.forward(x),
