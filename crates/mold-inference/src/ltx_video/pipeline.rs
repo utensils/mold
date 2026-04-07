@@ -49,7 +49,7 @@ const LTX_098_DEV_FIRST_PASS_RESCALING_SCALE: &[f32] = &[1.0, 1.0, 0.5, 0.5, 1.0
 const LTX_098_DEV_FIRST_PASS_GUIDANCE_TIMESTEPS: &[f32] =
     &[1.0, 0.996, 0.9933, 0.9850, 0.9767, 0.9008, 0.6180];
 const LTX_096_DEV_SKIP_BLOCKS: &[usize] = &[19];
-const LTX_098_2B_DISTILLED_SKIP_BLOCKS: &[usize] = &[42];
+const LTX_098_2B_DISTILLED_SKIP_BLOCKS: &[usize] = &[];
 const LTX_098_13B_DISTILLED_SKIP_BLOCKS: &[usize] = &[42];
 const LTX_098_13B_DEV_FIRST_PASS_SKIP_BLOCKS: &[&[usize]] = &[
     &[],
@@ -1021,6 +1021,18 @@ impl LtxVideoEngine {
         ));
         if preset.mode == LtxPipelineMode::Multiscale {
             progress.info("Using the full 0.9.8 multiscale refinement path.");
+            if steps != preset.base_pass.num_inference_steps {
+                progress.info(&format!(
+                    "Ignoring --steps={} for multiscale LTX preset {}; using the preset schedule instead.",
+                    steps, self.base.model_name
+                ));
+            }
+            if guidance != preset.base_pass.guidance.guidance_scale[0] as f64 {
+                progress.info(&format!(
+                    "Ignoring --guidance={guidance:.2} for multiscale LTX preset {}; using the preset guidance schedule instead.",
+                    self.base.model_name
+                ));
+            }
         }
 
         // ---------------------------------------------------------------
@@ -1579,10 +1591,7 @@ mod tests {
                 for skip_list in skip_list_group {
                     for skip_block in skip_list {
                         assert!(
-                            skip_block < preset.transformer_config.num_layers
-                                || model_name.contains("0.9.8")
-                                    && skip_block == 42
-                                    && preset.transformer_config.num_layers < 43,
+                            skip_block < preset.transformer_config.num_layers,
                             "{model_name} skip block {skip_block} is out of range for {} layers",
                             preset.transformer_config.num_layers
                         );
