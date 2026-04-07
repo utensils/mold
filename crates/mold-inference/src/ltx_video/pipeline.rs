@@ -840,9 +840,7 @@ impl LtxVideoEngine {
         let video_coords = build_video_coords(1, latent_f, latent_h, latent_w, fps, device)?;
 
         let mut latents = match initial_latents {
-            Some(latents) => {
-                pack_latents(&latents.to_dtype(DType::F32)?, PATCH_SIZE, PATCH_SIZE_T)?
-            }
+            Some(latents) => pack_initial_latents_for_second_pass(&latents)?,
             None => {
                 let noise = seeded_randn(
                     seed,
@@ -1176,8 +1174,10 @@ impl LtxVideoEngine {
 
                 progress.stage_start("Refining multiscale pass");
                 let refine_start = Instant::now();
-                let first_pass_denorm =
-                    denormalize_latents_with_vae(&first_pass_latents, &vae)?.to_dtype(dtype)?;
+                let first_pass_denorm = cast_latents_for_multiscale_upsampler(
+                    &denormalize_latents_with_vae(&first_pass_latents, &vae)?,
+                    dtype,
+                )?;
                 let upsampled_latents =
                     normalize_latents_with_vae(&upsampler.forward(&first_pass_denorm)?, &vae)?;
                 let upsampled_latents =
@@ -1453,6 +1453,14 @@ fn unpack_latents(
     ))?)
 }
 
+fn pack_initial_latents_for_second_pass(latents: &Tensor) -> Result<Tensor> {
+    pack_latents(&latents.to_dtype(DType::F32)?, PATCH_SIZE, PATCH_SIZE_T)
+}
+
+fn cast_latents_for_multiscale_upsampler(latents: &Tensor, dtype: DType) -> Result<Tensor> {
+    Ok(latents.to_dtype(dtype)?)
+}
+
 /// Build video coordinates for 3D RoPE: [B, seq, 3] with (frame, height, width).
 fn build_video_coords(
     batch_size: usize,
@@ -1507,9 +1515,12 @@ fn build_video_coords(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_official_ltx_transformer_checkpoint, remap_official_ltx_transformer_key, LtxModelPreset,
-        LtxPipelineMode, LTX_098_DISTILLED_SECOND_PASS_SIGMAS,
+        cast_latents_for_multiscale_upsampler, is_official_ltx_transformer_checkpoint,
+        pack_initial_latents_for_second_pass, remap_official_ltx_transformer_key, unpack_latents,
+        LtxModelPreset, LtxPipelineMode, LATENT_CHANNELS, LTX_098_DISTILLED_SECOND_PASS_SIGMAS,
+        PATCH_SIZE, PATCH_SIZE_T,
     };
+    use candle_core::{DType, Device, Tensor};
     use std::path::Path;
 
     #[test]
@@ -1607,5 +1618,51 @@ mod tests {
                 "{model_name}"
             );
         }
+    }
+
+    #[test]
+    fn multiscale_handoff_normalizes_dtypes_for_upsampler_and_second_pass() {
+        let device = Device::Cpu;
+        let second_pass_latents =
+            Tensor::arange(0f32, (LATENT_CHANNELS * 2 * 4 * 6) as f32, &device)
+                .expect("tensor")
+                .reshape((1, LATENT_CHANNELS, 2, 4, 6))
+                .expect("reshape")
+                .to_dtype(DType::BF16)
+                .expect("bf16");
+
+        let packed = pack_initial_latents_for_second_pass(&second_pass_latents)
+            .expect("second-pass repack should succeed");
+        assert_eq!(packed.dtype(), DType::F32);
+
+        let unpacked = unpack_latents(&packed, 2, 4, 6, PATCH_SIZE, PATCH_SIZE_T)
+            .expect("unpack should round-trip");
+        assert_eq!(unpacked.dtype(), DType::F32);
+        assert_eq!(
+            unpacked.dims5().expect("dims"),
+            (1, LATENT_CHANNELS, 2, 4, 6)
+        );
+        assert_eq!(
+            unpacked
+                .flatten_all()
+                .expect("flatten")
+                .to_vec1::<f32>()
+                .expect("vec"),
+            second_pass_latents
+                .to_dtype(DType::F32)
+                .expect("f32")
+                .flatten_all()
+                .expect("flatten")
+                .to_vec1::<f32>()
+                .expect("vec")
+        );
+
+        let upsampler_input =
+            cast_latents_for_multiscale_upsampler(&unpacked, DType::BF16).expect("cast");
+        assert_eq!(upsampler_input.dtype(), DType::BF16);
+        assert_eq!(
+            upsampler_input.dims5().expect("dims"),
+            (1, LATENT_CHANNELS, 2, 4, 6)
+        );
     }
 }
