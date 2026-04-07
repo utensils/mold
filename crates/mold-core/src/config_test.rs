@@ -442,12 +442,27 @@ is_schnell = false
     fn manifest_model_is_downloaded_respects_component_env_overrides() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_MODELS_DIR");
-        std::env::set_var("MOLD_TRANSFORMER_PATH", "/env/transformer.gguf");
-        std::env::set_var("MOLD_VAE_PATH", "/env/vae.safetensors");
-        std::env::set_var("MOLD_T5_PATH", "/env/t5.safetensors");
-        std::env::set_var("MOLD_CLIP_PATH", "/env/clip.safetensors");
-        std::env::set_var("MOLD_T5_TOKENIZER_PATH", "/env/t5.tokenizer.json");
-        std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", "/env/clip.tokenizer.json");
+        let dir = test_models_dir("manifest-env-overrides");
+        for rel in [
+            "transformer.gguf",
+            "vae.safetensors",
+            "t5.safetensors",
+            "clip.safetensors",
+            "t5.tokenizer.json",
+            "clip.tokenizer.json",
+        ] {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"test").unwrap();
+        }
+        std::env::set_var("MOLD_TRANSFORMER_PATH", dir.join("transformer.gguf"));
+        std::env::set_var("MOLD_VAE_PATH", dir.join("vae.safetensors"));
+        std::env::set_var("MOLD_T5_PATH", dir.join("t5.safetensors"));
+        std::env::set_var("MOLD_CLIP_PATH", dir.join("clip.safetensors"));
+        std::env::set_var("MOLD_T5_TOKENIZER_PATH", dir.join("t5.tokenizer.json"));
+        std::env::set_var("MOLD_CLIP_TOKENIZER_PATH", dir.join("clip.tokenizer.json"));
 
         let cfg = Config::default();
         assert!(cfg.manifest_model_is_downloaded("flux-schnell:q8"));
@@ -462,6 +477,7 @@ is_schnell = false
         ] {
             std::env::remove_var(var);
         }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2418,6 +2434,59 @@ qwen3_variant = "iq4"
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_ltx_config_paths_do_not_mask_missing_manifest_files() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("MOLD_MODELS_DIR");
+
+        let dir = test_models_dir("stale-ltx-config");
+        let mut models = HashMap::new();
+        models.insert(
+            "ltx-video-0.9.6-distilled:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(
+                    dir.join(
+                        "ltx-video-0.9.6-distilled-bf16/ltxv-2b-0.9.6-distilled-04-25.safetensors",
+                    )
+                    .display()
+                    .to_string(),
+                ),
+                vae: Some(
+                    dir.join("shared/ltx-video/vae/diffusion_pytorch_model.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                t5_encoder: Some(
+                    dir.join("shared/ltx-video/t5xxl_fp16.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                t5_tokenizer: Some(
+                    dir.join("shared/ltx-video/t5-v1_1-xxl.tokenizer.json")
+                        .display()
+                        .to_string(),
+                ),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models_dir: dir.display().to_string(),
+            models,
+            ..Config::default()
+        };
+
+        assert!(
+            !cfg.manifest_model_is_downloaded("ltx-video-0.9.6-distilled:bf16"),
+            "nonexistent stale config paths must not count as a downloaded manifest install"
+        );
+        assert!(
+            cfg.manifest_model_needs_download("ltx-video-0.9.6-distilled:bf16"),
+            "stale LTX config paths should trigger a repair pull"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

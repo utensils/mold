@@ -974,7 +974,15 @@ impl Config {
 
     fn resolved_local_manifest_model_config(&self, name: &str) -> Option<ModelConfig> {
         let manifest = crate::manifest::find_manifest(name)?;
-        let paths = ModelPaths::resolve(name, self)?;
+        let paths = if let Some(paths) = self.discovered_manifest_paths(name) {
+            paths
+        } else {
+            let paths = ModelPaths::resolve(name, self)?;
+            if !resolved_manifest_paths_exist(manifest, &paths) {
+                return None;
+            }
+            paths
+        };
         Some(manifest.to_model_config(&paths))
     }
 }
@@ -1014,4 +1022,60 @@ fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
     if source.decoder.is_some() {
         target.decoder = source.decoder.clone();
     }
+}
+
+fn resolved_manifest_paths_exist(
+    manifest: &crate::manifest::ModelManifest,
+    paths: &ModelPaths,
+) -> bool {
+    use crate::manifest::ModelComponent;
+
+    let mut transformer_shard_idx = 0usize;
+    let mut text_encoder_idx = 0usize;
+
+    manifest.files.iter().all(|file| match file.component {
+        ModelComponent::Transformer => paths.transformer.exists(),
+        ModelComponent::TransformerShard => {
+            let path = paths.transformer_shards.get(transformer_shard_idx);
+            transformer_shard_idx += 1;
+            path.is_some_and(|path| path.exists())
+        }
+        ModelComponent::Vae => paths.vae.exists(),
+        ModelComponent::SpatialUpscaler => paths
+            .spatial_upscaler
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::T5Encoder => paths.t5_encoder.as_ref().is_some_and(|path| path.exists()),
+        ModelComponent::ClipEncoder => paths
+            .clip_encoder
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::T5Tokenizer => paths
+            .t5_tokenizer
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::ClipTokenizer => paths
+            .clip_tokenizer
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::ClipEncoder2 => paths
+            .clip_encoder_2
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::ClipTokenizer2 => paths
+            .clip_tokenizer_2
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::TextEncoder => {
+            let path = paths.text_encoder_files.get(text_encoder_idx);
+            text_encoder_idx += 1;
+            path.is_some_and(|path| path.exists())
+        }
+        ModelComponent::TextTokenizer => paths
+            .text_tokenizer
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
+        ModelComponent::Upscaler => paths.transformer.exists(),
+    })
 }
