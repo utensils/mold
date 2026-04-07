@@ -120,7 +120,11 @@ pub(crate) async fn check_model_available(
 
     let paths = {
         let config = state.config.read().await;
-        ModelPaths::resolve(model_name, &config)
+        if config.manifest_model_needs_download(model_name) {
+            None
+        } else {
+            ModelPaths::resolve(model_name, &config)
+        }
     };
     if let Some(paths) = paths {
         return Ok(Some(paths));
@@ -129,9 +133,17 @@ pub(crate) async fn check_model_available(
     {
         let current = state.config.read().await.clone();
         let fresh_config = current.reload_from_disk_preserving_runtime();
-        if let Some(paths) = ModelPaths::resolve(model_name, &fresh_config) {
+        let needs_download = fresh_config.manifest_model_needs_download(model_name);
+        let paths = if needs_download {
+            None
+        } else {
+            ModelPaths::resolve(model_name, &fresh_config)
+        };
+        {
             let mut config = state.config.write().await;
             *config = fresh_config;
+        }
+        if let Some(paths) = paths {
             return Ok(Some(paths));
         }
     }
@@ -275,7 +287,7 @@ pub(crate) async fn pull_model(
 
     {
         let config = refresh_config(state).await;
-        if ModelPaths::resolve(model, &config).is_some() {
+        if config.manifest_model_is_downloaded(model) {
             return Ok(PullStatus::AlreadyAvailable);
         }
     }

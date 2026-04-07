@@ -799,6 +799,14 @@ impl Config {
         self.resolved_local_manifest_model_config(name).is_some()
     }
 
+    /// Return true when a known manifest-backed model is missing any required
+    /// downloadable asset and should be repaired with `mold pull`.
+    pub fn manifest_model_needs_download(&self, name: &str) -> bool {
+        let canonical = crate::manifest::resolve_model_name(name);
+        crate::manifest::find_manifest(&canonical).is_some()
+            && !self.manifest_model_is_downloaded(&canonical)
+    }
+
     /// Check whether all files for a manifest exist on disk.
     fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
         let models_dir = self.resolved_models_dir();

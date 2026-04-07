@@ -612,10 +612,20 @@ mod tests {
 
     #[test]
     fn clean_orphaned_shared_files_noop_when_no_shared_dir() {
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("no-shared-dir");
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
         // Should not panic when shared/ doesn't exist
-        let config = Config::default();
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().to_string();
         // This should be a no-op, not a crash
         clean_orphaned_shared_files(&config);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

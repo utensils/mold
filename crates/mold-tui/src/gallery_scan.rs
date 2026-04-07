@@ -322,10 +322,12 @@ mod tests {
     #[test]
     fn default_gallery_dir_under_mold() {
         let dir = default_gallery_dir();
-        let dir_str = dir.to_string_lossy();
+        let mold_dir = mold_core::Config::mold_dir().expect("mold dir should resolve in tests");
         assert!(
-            dir_str.contains(".mold") || dir_str.contains("mold"),
-            "default_gallery_dir should be under mold dir: {dir_str}"
+            dir.starts_with(&mold_dir),
+            "default_gallery_dir should be under mold dir: {} (mold dir: {})",
+            dir.display(),
+            mold_dir.display()
         );
     }
 

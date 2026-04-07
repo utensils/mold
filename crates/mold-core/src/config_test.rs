@@ -55,7 +55,13 @@ mod tests {
 
     #[test]
     fn config_load_or_default_missing_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("missing-config");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
         let cfg = Config::load_or_default();
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
         assert!(!cfg.default_model.is_empty());
     }
 
@@ -2365,6 +2371,48 @@ qwen3_variant = "iq4"
         assert!(
             !crate::download::has_pulling_marker("qwen-image:fp8"),
             "stale marker should be self-healed after successful manifest discovery"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_model_needs_download_for_partial_qwen_image_install() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("partial-qwen-image-2512");
+        populate_manifest_files(&dir, "qwen-image-2512:q4");
+
+        std::fs::remove_file(dir.join("shared/qwen-image/tokenizer.json")).unwrap();
+        std::fs::remove_file(
+            dir.join("shared/qwen-image/text_encoder/model-00002-of-00004.safetensors"),
+        )
+        .unwrap();
+
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+
+        let mut models = HashMap::new();
+        models.insert(
+            "qwen-image-2512:q4".to_string(),
+            ModelConfig {
+                transformer: Some("/cfg/qwen-image-2512-q4.gguf".to_string()),
+                vae: Some("/cfg/vae.safetensors".to_string()),
+                text_encoder_files: Some(vec![
+                    "/cfg/text-encoder-1.safetensors".to_string(),
+                    "/cfg/text-encoder-2.safetensors".to_string(),
+                ]),
+                text_tokenizer: Some("/cfg/tokenizer.json".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+
+        assert!(
+            cfg.manifest_model_needs_download("qwen-image-2512:q4"),
+            "partial manifest installs must trigger a repair pull instead of falling back to stale config"
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");
