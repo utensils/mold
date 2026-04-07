@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -245,9 +245,14 @@ pub fn pulling_marker_rel_path(model_name: &str) -> PathBuf {
     PathBuf::from(canonical.replace(':', "-")).join(".pulling")
 }
 
+/// Path to the `.pulling` marker for a model under an explicit models dir.
+pub fn pulling_marker_path_in(models_dir: &Path, model_name: &str) -> PathBuf {
+    models_dir.join(pulling_marker_rel_path(model_name))
+}
+
 /// Path to the `.pulling` marker for a model: `<models_dir>/<sanitized-name>/.pulling`.
 fn pulling_marker_path(model_name: &str) -> PathBuf {
-    models_dir().join(pulling_marker_rel_path(model_name))
+    pulling_marker_path_in(&models_dir(), model_name)
 }
 
 /// Write a `.pulling` marker to signal an in-progress download.

@@ -823,12 +823,14 @@ impl Config {
     /// remove it and continue with manifest-derived paths instead of falling
     /// back to potentially stale config entries.
     fn incomplete_pull_blocks_manifest(&self, manifest: &crate::manifest::ModelManifest) -> bool {
-        if !crate::download::has_pulling_marker(&manifest.name) {
+        let marker_path =
+            crate::download::pulling_marker_path_in(&self.resolved_models_dir(), &manifest.name);
+        if !marker_path.exists() {
             return false;
         }
 
         if self.manifest_files_exist(manifest) {
-            crate::download::remove_pulling_marker(&manifest.name);
+            let _ = std::fs::remove_file(&marker_path);
             return false;
         }
 
