@@ -1,50 +1,33 @@
-//! Quantized (GGUF) Qwen-Image transformer with per-forward BF16 dequantization.
+//! Quantized (GGUF) Qwen-Image transformer with QMatMul-backed inference.
 //!
-//! Keeps GGUF Q4K/Q5K weights on GPU (~10GB) and dequantizes each linear layer
-//! to BF16 during forward (temporary ~72MB peak). All computation runs in BF16,
-//! matching the model's training dtype. Dequantized tensors are dropped after
-//! each matmul so only one exists at a time.
+//! Large projection weights stay quantized in device memory and dequantize on
+//! demand inside candle's quantized matmul kernels. That avoids the previous
+//! per-forward full-weight dequantization path that was especially slow on
+//! Metal. Small norm and bias tensors are still dequantized at load time.
 
-use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::RmsNorm;
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
+use candle_transformers::quantized_nn::Linear;
 use candle_transformers::quantized_var_builder::VarBuilder;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
 
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 pub(crate) const ROPE_CACHE_LEN: usize = 4096;
 
-#[derive(Debug, Clone)]
-struct DequantLinear {
-    weight: Arc<QTensor>,
-    bias: Option<Tensor>,
-}
+type QwenLinear = Linear;
 
-impl DequantLinear {
-    fn new(weight: Arc<QTensor>, bias: Option<Tensor>) -> Self {
-        Self { weight, bias }
-    }
-}
-
-impl Module for DequantLinear {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.to_dtype(DType::BF16)?;
-        let w = self.weight.dequantize(x.device())?.to_dtype(DType::BF16)?;
-        candle_nn::Linear::new(w, self.bias.clone()).forward(&x)
-    }
-}
-
-fn qlinear(vb: &VarBuilder, name: &str) -> Result<DequantLinear> {
+fn qlinear(vb: &VarBuilder, name: &str) -> Result<QwenLinear> {
     let vb = vb.pp(name);
     let weight = vb.get_no_shape("weight")?;
     let bias = match vb.get_no_shape("bias") {
-        Ok(b) => Some(b.dequantize(vb.device())?.to_dtype(DType::BF16)?),
+        Ok(b) => Some(b.dequantize(vb.device())?.to_dtype(DType::F32)?),
         Err(_) => None,
     };
-    Ok(DequantLinear::new(weight, bias))
+    Linear::from_arc(weight, bias)
 }
 
 /// Dequantize a small 1D weight vector for RmsNorm (norm weights are tiny).
@@ -53,7 +36,7 @@ fn dequant_rms_norm(vb: &VarBuilder, name: &str, eps: f64) -> Result<RmsNorm> {
         .pp(name)
         .get_no_shape("weight")?
         .dequantize(vb.device())?
-        .to_dtype(DType::BF16)?;
+        .to_dtype(DType::F32)?;
     Ok(RmsNorm::new(weight, eps))
 }
 
@@ -85,7 +68,37 @@ impl Module for LayerNormNoParams {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RopeCacheDevice {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RopeCacheKey {
+    frame: usize,
+    height: usize,
+    width: usize,
+    max_txt_seq_len: usize,
+    device: RopeCacheDevice,
+}
+
+impl RopeCacheDevice {
+    fn from_device(device: &Device) -> Self {
+        if device.is_cuda() {
+            Self::Cuda
+        } else if device.is_metal() {
+            Self::Metal
+        } else {
+            Self::Cpu
+        }
+    }
+}
+
+type RopeCacheValue = (Tensor, Tensor, Tensor, Tensor);
+
+#[derive(Debug)]
 pub(crate) struct QwenRopeEmbedder {
     axes_dims: Vec<usize>,
     axis_half_dims: Vec<usize>,
@@ -95,6 +108,23 @@ pub(crate) struct QwenRopeEmbedder {
     neg_cos: Tensor,
     neg_sin: Tensor,
     dtype: DType,
+    cache: Mutex<HashMap<RopeCacheKey, RopeCacheValue>>,
+}
+
+impl Clone for QwenRopeEmbedder {
+    fn clone(&self) -> Self {
+        Self {
+            axes_dims: self.axes_dims.clone(),
+            axis_half_dims: self.axis_half_dims.clone(),
+            axis_offsets: self.axis_offsets.clone(),
+            pos_cos: self.pos_cos.clone(),
+            pos_sin: self.pos_sin.clone(),
+            neg_cos: self.neg_cos.clone(),
+            neg_sin: self.neg_sin.clone(),
+            dtype: self.dtype,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl QwenRopeEmbedder {
@@ -145,6 +175,7 @@ impl QwenRopeEmbedder {
             neg_cos: Tensor::cat(&neg_cos_parts, D::Minus1)?,
             neg_sin: Tensor::cat(&neg_sin_parts, D::Minus1)?,
             dtype,
+            cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -221,6 +252,17 @@ impl QwenRopeEmbedder {
             );
         }
 
+        let key = RopeCacheKey {
+            frame,
+            height,
+            width,
+            max_txt_seq_len,
+            device: RopeCacheDevice::from_device(device),
+        };
+        if let Some(cached) = self.cache.lock().unwrap().get(&key) {
+            return Ok(cached.clone());
+        }
+
         let frame_cos = self.leading_axis_freqs(&self.pos_cos, 0, frame)?;
         let frame_sin = self.leading_axis_freqs(&self.pos_sin, 0, frame)?;
         let height_cos = self.centered_axis_freqs(&self.pos_cos, &self.neg_cos, 1, height)?;
@@ -283,18 +325,20 @@ impl QwenRopeEmbedder {
         let txt_cos = self.pos_cos.narrow(0, max_vid_index, max_txt_seq_len)?;
         let txt_sin = self.pos_sin.narrow(0, max_vid_index, max_txt_seq_len)?;
 
-        Ok((
+        let value = (
             self.to_target(img_cos, device)?,
             self.to_target(img_sin, device)?,
             self.to_target(txt_cos, device)?,
             self.to_target(txt_sin, device)?,
-        ))
+        );
+        self.cache.lock().unwrap().insert(key, value.clone());
+        Ok(value)
     }
 }
 
 struct TimestepProjEmbeddings {
-    linear1: DequantLinear,
-    linear2: DequantLinear,
+    linear1: QwenLinear,
+    linear2: QwenLinear,
 }
 
 impl TimestepProjEmbeddings {
@@ -320,7 +364,7 @@ impl TimestepProjEmbeddings {
 }
 
 struct ApproximateGelu {
-    proj: DequantLinear,
+    proj: QwenLinear,
 }
 
 impl ApproximateGelu {
@@ -340,7 +384,7 @@ impl Module for ApproximateGelu {
 
 struct FeedForward {
     act: ApproximateGelu,
-    out: DequantLinear,
+    out: QwenLinear,
 }
 
 impl FeedForward {
@@ -377,14 +421,14 @@ impl QkNorm {
 }
 
 struct JointAttention {
-    to_q: DequantLinear,
-    to_k: DequantLinear,
-    to_v: DequantLinear,
-    to_out: DequantLinear,
-    add_q_proj: DequantLinear,
-    add_k_proj: DequantLinear,
-    add_v_proj: DequantLinear,
-    add_out_proj: DequantLinear,
+    to_q: QwenLinear,
+    to_k: QwenLinear,
+    to_v: QwenLinear,
+    to_out: QwenLinear,
+    add_q_proj: QwenLinear,
+    add_k_proj: QwenLinear,
+    add_v_proj: QwenLinear,
+    add_out_proj: QwenLinear,
     qk_norm: QkNorm,
     added_qk_norm: QkNorm,
     n_heads: usize,
@@ -479,19 +523,11 @@ impl JointAttention {
         let v = v.transpose(1, 2)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
         let img_mask = Tensor::ones((batch, img_seq_len), DType::U8, img_hidden.device())?;
         let key_mask = Tensor::cat(&[txt_mask, &img_mask], 1)?
             .unsqueeze(1)?
             .unsqueeze(1)?;
-        let on_true = key_mask.zeros_like()?.to_dtype(attn_weights.dtype())?;
-        let on_false = Tensor::new(f32::NEG_INFINITY, attn_weights.device())?
-            .broadcast_as(key_mask.shape())?
-            .to_dtype(attn_weights.dtype())?;
-        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
-        attn_weights = attn_weights.broadcast_add(&key_mask)?;
-        attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        let attn = attn_weights.matmul(&v)?;
+        let attn = self.attention_dispatch(&q, &k, &v, &key_mask, scale)?;
 
         let total_seq_len = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((batch, total_seq_len, ()))?;
@@ -505,6 +541,46 @@ impl JointAttention {
             txt_attn.apply(&self.add_out_proj)?,
         ))
     }
+
+    fn attention_dispatch(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        key_mask: &Tensor,
+        scale: f64,
+    ) -> Result<Tensor> {
+        if q.device().is_metal() {
+            let sdpa_mask = self.prepare_sdpa_mask(key_mask, q)?;
+            candle_nn::ops::sdpa(q, k, v, Some(&sdpa_mask), false, scale as f32, 1.0)
+        } else {
+            self.attention_basic(q, k, v, key_mask, scale)
+        }
+    }
+
+    fn attention_basic(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        key_mask: &Tensor,
+        scale: f64,
+    ) -> Result<Tensor> {
+        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let key_mask = key_mask.to_dtype(attn_weights.dtype())?;
+        let key_mask = ((key_mask - 1.0)? * 1e9)?;
+        attn_weights = attn_weights.broadcast_add(&key_mask)?;
+        attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        attn_weights.matmul(v)
+    }
+
+    fn prepare_sdpa_mask(&self, key_mask: &Tensor, q: &Tensor) -> Result<Tensor> {
+        let (batch, _, seq_len, _) = q.dims4()?;
+        let key_len = key_mask.dim(3)?;
+        let mask = key_mask.to_dtype(q.dtype())?;
+        let mask = ((mask - 1.0)? * 1e9)?;
+        mask.broadcast_as((batch, self.n_heads, seq_len, key_len))
+    }
 }
 
 struct QwenImageTransformerBlock {
@@ -515,8 +591,8 @@ struct QwenImageTransformerBlock {
     attn: JointAttention,
     img_mlp: FeedForward,
     txt_mlp: FeedForward,
-    img_mod: DequantLinear,
-    txt_mod: DequantLinear,
+    img_mod: QwenLinear,
+    txt_mod: QwenLinear,
 }
 
 impl QwenImageTransformerBlock {
@@ -547,7 +623,9 @@ impl QwenImageTransformerBlock {
         txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
-        let txt_mask_bf16 = txt_mask.unsqueeze(D::Minus1)?.to_dtype(DType::BF16)?;
+        let txt_mask_expanded = txt_mask
+            .unsqueeze(D::Minus1)?
+            .to_dtype(txt_hidden.dtype())?;
         let temb = temb.silu()?;
         let img_mod = temb.apply(&self.img_mod)?.unsqueeze(1)?;
         let txt_mod = temb.apply(&self.txt_mod)?.unsqueeze(1)?;
@@ -606,8 +684,8 @@ impl QwenImageTransformerBlock {
         )?;
 
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden =
-            (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?.broadcast_mul(&txt_mask_bf16)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
+            .broadcast_mul(&txt_mask_expanded)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -624,7 +702,7 @@ impl QwenImageTransformerBlock {
         let img_hidden = (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
         let txt_hidden = (&txt_hidden
             + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-        .broadcast_mul(&txt_mask_bf16)?;
+        .broadcast_mul(&txt_mask_expanded)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -632,8 +710,8 @@ impl QwenImageTransformerBlock {
 
 struct OutputLayer {
     norm_final: LayerNormNoParams,
-    adaln_linear: DequantLinear,
-    linear: DequantLinear,
+    adaln_linear: QwenLinear,
+    linear: QwenLinear,
 }
 
 impl OutputLayer {
@@ -661,8 +739,8 @@ impl OutputLayer {
 
 pub(crate) struct QuantizedQwenImageTransformer2DModel {
     time_embed: TimestepProjEmbeddings,
-    img_in: DequantLinear,
-    txt_in: DequantLinear,
+    img_in: QwenLinear,
+    txt_in: QwenLinear,
     txt_norm: RmsNorm,
     blocks: Vec<QwenImageTransformerBlock>,
     rope_embedder: QwenRopeEmbedder,
@@ -683,12 +761,12 @@ impl QuantizedQwenImageTransformer2DModel {
             blocks.push(QwenImageTransformerBlock::new(cfg, vb_blocks.pp(i))?);
         }
 
-        // RoPE tables stay on CPU — they're small and moved to GPU per forward call.
+        // RoPE source tables stay on CPU and device-local views are cached by shape.
         let rope_embedder = QwenRopeEmbedder::new(
             10000.0,
             cfg.axes_dims_rope.clone(),
             &Device::Cpu,
-            DType::BF16,
+            DType::F32,
         )?;
         let output_layer = OutputLayer::new(vb)?;
 
@@ -714,10 +792,10 @@ impl QuantizedQwenImageTransformer2DModel {
         let out_dtype = x.dtype();
         let device = x.device();
 
-        // Cast inputs to BF16 — matches the model's training dtype.
-        let x = x.to_dtype(DType::BF16)?;
-        let t = t.to_dtype(DType::BF16)?;
-        let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::BF16)?;
+        // QMatMul-backed quantized inference runs in F32 internally.
+        let x = x.to_dtype(DType::F32)?;
+        let t = t.to_dtype(DType::F32)?;
+        let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::F32)?;
         let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
 
         let (batch, channels, height, width) = x.dims4()?;
@@ -783,5 +861,38 @@ impl QuantizedQwenImageTransformer2DModel {
             .contiguous()?;
 
         x_out.to_dtype(out_dtype)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RopeCacheDevice, RopeCacheKey};
+    use candle_core::Device;
+
+    #[test]
+    fn rope_cache_device_detects_cpu() {
+        assert!(matches!(
+            RopeCacheDevice::from_device(&Device::Cpu),
+            RopeCacheDevice::Cpu
+        ));
+    }
+
+    #[test]
+    fn rope_cache_key_includes_shape_and_device() {
+        let a = RopeCacheKey {
+            frame: 1,
+            height: 64,
+            width: 64,
+            max_txt_seq_len: 512,
+            device: RopeCacheDevice::Cpu,
+        };
+        let b = RopeCacheKey {
+            frame: 1,
+            height: 64,
+            width: 64,
+            max_txt_seq_len: 512,
+            device: RopeCacheDevice::Metal,
+        };
+        assert_ne!(a, b);
     }
 }
