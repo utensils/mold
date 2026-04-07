@@ -521,9 +521,14 @@ impl ModelInfoExtended {
         crate::manifest::UTILITY_FAMILIES.contains(&self.family.as_str())
     }
 
-    /// True if this is a diffusion/generation model (not an upscaler or utility).
+    /// True if this is an auxiliary model (e.g., ControlNet) not a standalone generator.
+    pub fn is_auxiliary(&self) -> bool {
+        crate::manifest::AUXILIARY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is a standalone generation model (not an upscaler, utility, or auxiliary).
     pub fn is_generation_model(&self) -> bool {
-        !self.is_upscaler() && !self.is_utility()
+        !self.is_upscaler() && !self.is_utility() && !self.is_auxiliary()
     }
 }
 

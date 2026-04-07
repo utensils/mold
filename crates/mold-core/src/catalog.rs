@@ -313,6 +313,11 @@ mod tests {
                 "generation model filter should exclude utility model '{}'",
                 m.name
             );
+            assert!(
+                !m.is_auxiliary(),
+                "generation model filter should exclude auxiliary model '{}'",
+                m.name
+            );
         }
     }
 
