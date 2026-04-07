@@ -14,15 +14,15 @@ loaded.
 
 Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 
-| Model              | Typical Steps | Ballpark Time | Notes                               |
-| ------------------ | ------------- | ------------- | ----------------------------------- |
-| `flux-schnell:q8`  | 4             | ~8-12s        | Fastest high-quality default        |
-| `flux-dev:q4`      | 25            | ~20-40s       | Better quality, slower denoising    |
-| `z-image-turbo:q8` | 9             | ~10-20s       | Strong quality/speed trade-off      |
-| `sdxl-turbo:fp16`  | 4             | ~3-8s         | Very fast when you want 1024 output |
-| `sd15:fp16`        | 25            | ~5-15s        | Lightest full-featured family       |
-| `ltx-video-0.9.6-distilled:bf16` | 8 | ~30-90s | Recommended current video default |
-| `ltx-video-0.9.8-2b-distilled:bf16` | 7 | ~15-60s | Newer checkpoint family, first-pass only today |
+| Model                               | Typical Steps | Ballpark Time | Notes                                          |
+| ----------------------------------- | ------------- | ------------- | ---------------------------------------------- |
+| `flux-schnell:q8`                   | 4             | ~8-12s        | Fastest high-quality default                   |
+| `flux-dev:q4`                       | 25            | ~20-40s       | Better quality, slower denoising               |
+| `z-image-turbo:q8`                  | 9             | ~10-20s       | Strong quality/speed trade-off                 |
+| `sdxl-turbo:fp16`                   | 4             | ~3-8s         | Very fast when you want 1024 output            |
+| `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                  |
+| `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default              |
+| `ltx-video-0.9.8-2b-distilled:bf16` | 7             | ~15-60s       | Newer checkpoint family, first-pass only today |
 
 ## What Slows Things Down
 

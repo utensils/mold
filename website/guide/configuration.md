@@ -121,19 +121,20 @@ Environment variables take precedence over config file values.
 
 ### Device and Path Overrides
 
-| Variable                    | Default | Description                                           |
-| --------------------------- | ------- | ----------------------------------------------------- |
-| `MOLD_DEVICE`               | —       | Force device placement, currently `cpu` for debugging |
-| `MOLD_TRANSFORMER_PATH`     | —       | Override transformer weights path                     |
-| `MOLD_VAE_PATH`             | —       | Override VAE weights path                             |
-| `MOLD_T5_PATH`              | —       | Override T5 encoder path                              |
-| `MOLD_CLIP_PATH`            | —       | Override CLIP-L encoder path                          |
-| `MOLD_CLIP2_PATH`           | —       | Override CLIP-G encoder path for SDXL                 |
-| `MOLD_T5_TOKENIZER_PATH`    | —       | Override T5 tokenizer path                            |
-| `MOLD_CLIP_TOKENIZER_PATH`  | —       | Override CLIP-L tokenizer path                        |
-| `MOLD_CLIP2_TOKENIZER_PATH` | —       | Override CLIP-G tokenizer path for SDXL               |
-| `MOLD_TEXT_TOKENIZER_PATH`  | —       | Override generic text tokenizer path for Qwen/Z-Image |
-| `MOLD_DECODER_PATH`         | —       | Override Wuerstchen decoder weights path              |
+| Variable                     | Default | Description                                           |
+| ---------------------------- | ------- | ----------------------------------------------------- |
+| `MOLD_DEVICE`                | —       | Force device placement, currently `cpu` for debugging |
+| `MOLD_TRANSFORMER_PATH`      | —       | Override transformer weights path                     |
+| `MOLD_VAE_PATH`              | —       | Override VAE weights path                             |
+| `MOLD_SPATIAL_UPSCALER_PATH` | —       | Override LTX spatial upscaler path                    |
+| `MOLD_T5_PATH`               | —       | Override T5 encoder path                              |
+| `MOLD_CLIP_PATH`             | —       | Override CLIP-L encoder path                          |
+| `MOLD_CLIP2_PATH`            | —       | Override CLIP-G encoder path for SDXL                 |
+| `MOLD_T5_TOKENIZER_PATH`     | —       | Override T5 tokenizer path                            |
+| `MOLD_CLIP_TOKENIZER_PATH`   | —       | Override CLIP-L tokenizer path                        |
+| `MOLD_CLIP2_TOKENIZER_PATH`  | —       | Override CLIP-G tokenizer path for SDXL               |
+| `MOLD_TEXT_TOKENIZER_PATH`   | —       | Override generic text tokenizer path for Qwen/Z-Image |
+| `MOLD_DECODER_PATH`          | —       | Override Wuerstchen decoder weights path              |
 
 These are mainly useful for custom local model layouts, manual debugging, or
 testing alternative weight files without editing `config.toml`.
