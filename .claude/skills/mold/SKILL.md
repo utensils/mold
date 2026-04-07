@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # mold — Local AI Image Generation CLI
 
-Generate images from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, and other diffusion models running on local GPU hardware.
+Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, LTX Video, and Wuerstchen diffusion models running on local GPU hardware.
 
 ## Quick Reference
 
@@ -403,6 +403,8 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_RATE_LIMIT` | unset | Per-IP rate limit for generation endpoints (e.g., `10/min`) |
 | `MOLD_RATE_LIMIT_BURST` | unset | Burst allowance override (defaults to 2x rate) |
 | `MOLD_CORS_ORIGIN` | unset | Restrict server CORS to specific origin |
+| `MOLD_UPSCALE_MODEL` | unset | Default upscaler model for `mold upscale` |
+| `MOLD_UPSCALE_TILE_SIZE` | unset | Tile size for memory-efficient upscaling (0 to disable) |
 | `MOLD_EXPAND` | unset | Set `1` to enable prompt expansion by default |
 | `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
 | `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |

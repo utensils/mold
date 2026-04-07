@@ -160,6 +160,7 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 ## Features
 
 - **txt2img, img2img, inpainting** — full generation pipeline
+- **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via `mold upscale`, server API, or TUI
 - **LoRA adapters** — FLUX BF16 and GGUF quantized
 - **ControlNet** — canny, depth, openpose (SD1.5)
 - **Prompt expansion** — local LLM (Qwen3-1.7B) enriches short prompts
