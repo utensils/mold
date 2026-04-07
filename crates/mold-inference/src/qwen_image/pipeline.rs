@@ -567,10 +567,6 @@ impl QwenImageEngine {
                         tag
                     )
                 })?;
-                let path = crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
-                    &self.base.progress,
-                    variant,
-                )?;
                 let threshold = qwen2_vram_threshold(variant.size_bytes);
                 let auto_use_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
                 self.base.progress.info(&format!(
@@ -579,13 +575,7 @@ impl QwenImageEngine {
                     fmt_gb(variant.size_bytes),
                     if auto_use_gpu { "GPU" } else { "CPU" },
                 ));
-                Ok(ResolvedQwen2TextEncoder {
-                    paths: vec![path],
-                    is_gguf: true,
-                    variant_label: variant.tag.to_string(),
-                    size_bytes: variant.size_bytes,
-                    auto_use_gpu,
-                })
+                resolve_quant(tag, auto_use_gpu)
             }
             Some("bf16") => Ok(ResolvedQwen2TextEncoder {
                 paths: self.base.paths.text_encoder_files.clone(),

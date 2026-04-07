@@ -1094,6 +1094,7 @@ compdef _clap_dynamic_completer_mold mold
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use clap::Parser;
 
     /// Parse CLI args from a vector (simulates command-line invocation).
@@ -1172,6 +1173,7 @@ mod tests {
 
     #[test]
     fn run_qwen2_text_encoder_mode() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cli = parse(&[
             "run",
             "qwen-image:q2",
@@ -1190,6 +1192,7 @@ mod tests {
 
     #[test]
     fn run_qwen2_variant() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cli = parse(&["run", "qwen-image:q2", "test", "--qwen2-variant", "q6"]);
         match cli.command {
             Commands::Run { qwen2_variant, .. } => {

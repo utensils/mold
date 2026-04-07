@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+const MAX_ROPE_POSITIONS: usize = 1024;
+
 struct RmsNorm {
     weight: Tensor,
     eps: f64,
@@ -279,9 +281,10 @@ impl GgufQwen2TextEncoder {
         ])
         .unwrap_or(1_000_000.0);
 
+        let rope_positions = context_length.min(MAX_ROPE_POSITIONS);
         let head_dim = hidden_size / num_heads;
         let kv_repeat = num_heads / num_kv_heads;
-        let (cos, sin) = compute_rope(head_dim, rope_theta, context_length, device)?;
+        let (cos, sin) = compute_rope(head_dim, rope_theta, rope_positions, device)?;
 
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
