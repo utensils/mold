@@ -17,9 +17,6 @@ use super::transformer::{QwenImageConfig, MAX_PERIOD};
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 pub(crate) const ROPE_CACHE_LEN: usize = 4096;
 
-/// Linear layer that stores weights as quantized Q4K/Q5K on GPU and dequantizes
-/// to BF16 on each forward call. The dequantized tensor is temporary (~72MB max
-/// for the largest MLP layer) and dropped after matmul.
 #[derive(Debug, Clone)]
 struct DequantLinear {
     weight: Arc<QTensor>,
@@ -34,18 +31,12 @@ impl DequantLinear {
 
 impl Module for DequantLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Cast input to BF16 (some callers like TimestepProjEmbeddings compute in F32
-        // internally) and dequantize weight Q4K → F32 → BF16 on GPU.
-        // Wraps in candle_nn::Linear to handle batched (3D+) input correctly.
-        // The dequantized tensor is dropped when this function returns.
         let x = x.to_dtype(DType::BF16)?;
         let w = self.weight.dequantize(x.device())?.to_dtype(DType::BF16)?;
         candle_nn::Linear::new(w, self.bias.clone()).forward(&x)
     }
 }
 
-/// Load a quantized linear layer from GGUF, returning a DequantLinear that
-/// dequantizes to BF16 on each forward call.
 fn qlinear(vb: &VarBuilder, name: &str) -> Result<DequantLinear> {
     let vb = vb.pp(name);
     let weight = vb.get_no_shape("weight")?;
@@ -342,8 +333,8 @@ impl ApproximateGelu {
 
 impl Module for ApproximateGelu {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.apply(&self.proj)?;
-        x.broadcast_mul(&candle_nn::ops::sigmoid(&(x.clone() * 1.702)?)?)
+        x.apply(&self.proj)?
+            .apply(&candle_nn::Activation::GeluPytorchTanh)
     }
 }
 
@@ -724,8 +715,6 @@ impl QuantizedQwenImageTransformer2DModel {
         let device = x.device();
 
         // Cast inputs to BF16 — matches the model's training dtype.
-        // DequantLinear dequantizes Q4K → BF16 per matmul, so all computation
-        // stays in BF16 throughout the 60 transformer blocks.
         let x = x.to_dtype(DType::BF16)?;
         let t = t.to_dtype(DType::BF16)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(DType::BF16)?;

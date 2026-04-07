@@ -14,11 +14,153 @@
 //! FeedForward, QkNorm, etc.) since the core components are identical.
 
 use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::{linear, linear_no_bias, VarBuilder};
+use candle_nn::VarBuilder;
 use candle_transformers::models::with_tracing::RmsNorm;
-use candle_transformers::models::z_image::transformer::{apply_rotary_emb, FeedForward};
+use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 
 use super::quantized_transformer::QwenRopeEmbedder;
+
+// ==================== FP8 Linear (per-layer dequant) ====================
+
+/// Linear layer supporting both standard BF16 and FP8 with per-layer dequantization.
+///
+/// For FP8 models, weights stay as F8E4M3 in VRAM (~1 byte/param). On each
+/// forward call, the weight is cast to the activation dtype (BF16), optionally
+/// multiplied by a scale factor, used for matmul, and the transient BF16 copy
+/// is immediately freed. This matches ComfyUI's "manual_cast" FP8 inference.
+#[derive(Debug, Clone)]
+enum QwenLinear {
+    Standard(candle_nn::Linear),
+    Fp8 {
+        weight: Tensor,
+        scale: Option<Tensor>,
+        bias: Option<Tensor>,
+    },
+}
+
+impl QwenLinear {
+    /// Load a linear layer, auto-detecting FP8 vs standard from weight dtype.
+    fn load(
+        in_dim: usize,
+        out_dim: usize,
+        has_bias: bool,
+        vb: VarBuilder,
+    ) -> candle_core::Result<Self> {
+        let weight = vb.get((out_dim, in_dim), "weight")?;
+        if weight.dtype() == DType::F8E4M3 {
+            let scale = vb.get_unchecked("scale_weight").ok();
+            let bias = if has_bias {
+                vb.get_unchecked("bias").ok()
+            } else {
+                None
+            };
+            Ok(Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            })
+        } else {
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            Ok(Self::Standard(candle_nn::Linear::new(weight, bias)))
+        }
+    }
+}
+
+impl Module for QwenLinear {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Standard(l) => l.forward(x),
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => {
+                let dtype = x.dtype();
+                let w = weight.to_dtype(dtype)?;
+                let w = match scale {
+                    Some(s) => w.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    None => w,
+                };
+                // Handle multi-dim inputs like nn::Linear (reshape → matmul → reshape back)
+                let w = w.t()?;
+                let out = match *x.dims() {
+                    [b1, b2, m, k] => {
+                        x.reshape((b1 * b2 * m, k))?
+                            .matmul(&w)?
+                            .reshape((b1, b2, m, ()))?
+                    }
+                    [bsize, m, k] => {
+                        x.reshape((bsize * m, k))?
+                            .matmul(&w)?
+                            .reshape((bsize, m, ()))?
+                    }
+                    _ => x.matmul(&w)?,
+                };
+                match bias {
+                    Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
+                    None => Ok(out),
+                }
+            }
+        }
+    }
+}
+
+// ==================== Feed Forward ====================
+
+/// Feed-forward network supporting both official (SwiGLU w1/w2/w3) and
+/// ComfyUI/diffusers (GELU net.0.proj + net.2) tensor naming.
+/// Uses `QwenLinear` for FP8-aware per-layer dequantization.
+#[derive(Debug, Clone)]
+enum FeedForward {
+    SwiGlu {
+        w1: QwenLinear,
+        w2: QwenLinear,
+        w3: QwenLinear,
+    },
+    Gelu {
+        proj: QwenLinear,
+        out: QwenLinear,
+    },
+}
+
+impl FeedForward {
+    fn new(dim: usize, hidden_dim: usize, vb: VarBuilder) -> candle_core::Result<Self> {
+        if vb.contains_tensor("net.0.proj.weight") {
+            let has_bias = vb.contains_tensor("net.0.proj.bias");
+            let proj =
+                QwenLinear::load(dim, hidden_dim, has_bias, vb.pp("net").pp("0").pp("proj"))?;
+            let out = QwenLinear::load(hidden_dim, dim, has_bias, vb.pp("net").pp("2"))?;
+            Ok(Self::Gelu { proj, out })
+        } else {
+            let w1 = QwenLinear::load(dim, hidden_dim, false, vb.pp("w1"))?;
+            let w2 = QwenLinear::load(hidden_dim, dim, false, vb.pp("w2"))?;
+            let w3 = QwenLinear::load(dim, hidden_dim, false, vb.pp("w3"))?;
+            Ok(Self::SwiGlu { w1, w2, w3 })
+        }
+    }
+}
+
+impl Module for FeedForward {
+    fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::SwiGlu { w1, w2, w3 } => {
+                let gate = w1.forward(x)?.silu()?;
+                let x = (gate * w3.forward(x)?)?;
+                w2.forward(&x)
+            }
+            Self::Gelu { proj, out } => {
+                let x = proj
+                    .forward(x)?
+                    .apply(&candle_nn::Activation::GeluPytorchTanh)?;
+                out.forward(&x)
+            }
+        }
+    }
+}
 
 // ==================== Layer Norm (No Params) ====================
 
@@ -120,8 +262,8 @@ impl QwenImageConfig {
 ///   2. Linear -> SiLU -> Linear -> inner_dim
 #[derive(Debug, Clone)]
 struct TimestepProjEmbeddings {
-    linear1: candle_nn::Linear,
-    linear2: candle_nn::Linear,
+    linear1: QwenLinear,
+    linear2: QwenLinear,
     frequency_embedding_size: usize,
 }
 
@@ -130,8 +272,19 @@ pub(crate) const MAX_PERIOD: f64 = 10000.0;
 
 impl TimestepProjEmbeddings {
     fn new(inner_dim: usize, vb: VarBuilder) -> candle_core::Result<Self> {
-        let linear1 = linear(FREQUENCY_EMBEDDING_SIZE, inner_dim, vb.pp("linear_1"))?;
-        let linear2 = linear(inner_dim, inner_dim, vb.pp("linear_2"))?;
+        let vb = if vb.contains_tensor("timestep_embedder.linear_1.weight") {
+            vb.pp("timestep_embedder")
+        } else {
+            vb
+        };
+        let has_bias = vb.contains_tensor("linear_1.bias");
+        let linear1 = QwenLinear::load(
+            FREQUENCY_EMBEDDING_SIZE,
+            inner_dim,
+            has_bias,
+            vb.pp("linear_1"),
+        )?;
+        let linear2 = QwenLinear::load(inner_dim, inner_dim, has_bias, vb.pp("linear_2"))?;
         Ok(Self {
             linear1,
             linear2,
@@ -156,11 +309,13 @@ impl TimestepProjEmbeddings {
         embedding.to_dtype(dtype)
     }
 
-    fn forward(&self, t: &Tensor) -> candle_core::Result<Tensor> {
+    fn forward(&self, t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
         let device = t.device();
-        let dtype = self.linear1.weight().dtype();
         let t_freq = self.timestep_embedding(t, device, dtype)?;
-        t_freq.apply(&self.linear1)?.silu()?.apply(&self.linear2)
+        self.linear1
+            .forward(&t_freq)?
+            .silu()
+            .and_then(|x| self.linear2.forward(&x))
     }
 }
 
@@ -176,22 +331,18 @@ impl TimestepProjEmbeddings {
 /// 5. Separate output projections
 #[derive(Debug, Clone)]
 struct JointAttention {
-    // Image stream projections
-    to_q: candle_nn::Linear,
-    to_k: candle_nn::Linear,
-    to_v: candle_nn::Linear,
-    to_out: candle_nn::Linear,
-    // Text stream projections
-    add_q_proj: candle_nn::Linear,
-    add_k_proj: candle_nn::Linear,
-    add_v_proj: candle_nn::Linear,
-    add_out_proj: candle_nn::Linear,
-    // QK normalization
+    to_q: QwenLinear,
+    to_k: QwenLinear,
+    to_v: QwenLinear,
+    to_out: QwenLinear,
+    add_q_proj: QwenLinear,
+    add_k_proj: QwenLinear,
+    add_v_proj: QwenLinear,
+    add_out_proj: QwenLinear,
     norm_q: RmsNorm,
     norm_k: RmsNorm,
     norm_added_q: RmsNorm,
     norm_added_k: RmsNorm,
-    // Dimensions
     n_heads: usize,
     head_dim: usize,
 }
@@ -204,17 +355,21 @@ impl JointAttention {
         let head_dim = cfg.attention_head_dim;
         let qkv_dim = n_heads * head_dim; // 3072
 
-        // Image projections
-        let to_q = linear_no_bias(dim, qkv_dim, vb.pp("to_q"))?;
-        let to_k = linear_no_bias(dim, qkv_dim, vb.pp("to_k"))?;
-        let to_v = linear_no_bias(dim, qkv_dim, vb.pp("to_v"))?;
-        let to_out = linear_no_bias(qkv_dim, dim, vb.pp("to_out_0"))?;
+        let has_bias = vb.contains_tensor("to_q.bias");
+        let to_q = QwenLinear::load(dim, qkv_dim, has_bias, vb.pp("to_q"))?;
+        let to_k = QwenLinear::load(dim, qkv_dim, has_bias, vb.pp("to_k"))?;
+        let to_v = QwenLinear::load(dim, qkv_dim, has_bias, vb.pp("to_v"))?;
+        let to_out_key = if vb.contains_tensor("to_out.0.weight") {
+            "to_out.0"
+        } else {
+            "to_out_0"
+        };
+        let to_out = QwenLinear::load(qkv_dim, dim, has_bias, vb.pp(to_out_key))?;
 
-        // Text projections
-        let add_q_proj = linear_no_bias(text_dim, qkv_dim, vb.pp("add_q_proj"))?;
-        let add_k_proj = linear_no_bias(text_dim, qkv_dim, vb.pp("add_k_proj"))?;
-        let add_v_proj = linear_no_bias(text_dim, qkv_dim, vb.pp("add_v_proj"))?;
-        let add_out_proj = linear_no_bias(qkv_dim, text_dim, vb.pp("to_add_out"))?;
+        let add_q_proj = QwenLinear::load(text_dim, qkv_dim, has_bias, vb.pp("add_q_proj"))?;
+        let add_k_proj = QwenLinear::load(text_dim, qkv_dim, has_bias, vb.pp("add_k_proj"))?;
+        let add_v_proj = QwenLinear::load(text_dim, qkv_dim, has_bias, vb.pp("add_v_proj"))?;
+        let add_out_proj = QwenLinear::load(qkv_dim, text_dim, has_bias, vb.pp("to_add_out"))?;
 
         // QK normalization
         let norm_q = RmsNorm::new(head_dim, 1e-6, vb.pp("norm_q"))?;
@@ -388,16 +543,22 @@ struct QwenImageTransformerBlock {
     norm2: LayerNormNoParams,
     norm2_context: LayerNormNoParams,
     // AdaLN modulation: 6 values (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
-    adaln_modulation: candle_nn::Linear,
+    adaln_modulation: QwenLinear,
     // AdaLN modulation for text stream
-    adaln_context_modulation: candle_nn::Linear,
+    adaln_context_modulation: QwenLinear,
 }
 
 impl QwenImageTransformerBlock {
     fn new(cfg: &QwenImageConfig, vb: VarBuilder) -> candle_core::Result<Self> {
         let dim = cfg.inner_dim;
         let text_dim = cfg.joint_attention_dim;
-        let hidden_dim = cfg.hidden_dim();
+        let is_comfyui = vb.contains_tensor("img_mlp.net.0.proj.weight");
+        // FP8/ComfyUI uses 4x expansion; BF16 official uses int(dim/3)*8.
+        let hidden_dim = if is_comfyui {
+            dim * 4
+        } else {
+            cfg.hidden_dim()
+        };
 
         // Block norms: parameterless LayerNorm (scale/shift come from AdaLN modulation)
         let norm1 = LayerNormNoParams::new(cfg.norm_eps);
@@ -405,16 +566,35 @@ impl QwenImageTransformerBlock {
 
         let attn = JointAttention::new(cfg, vb.pp("attn"))?;
 
-        let ff = FeedForward::new(dim, hidden_dim, vb.pp("ff"))?;
-        let ff_context = FeedForward::new(text_dim, text_dim * 4, vb.pp("ff_context"))?;
+        let ff_key = if is_comfyui { "img_mlp" } else { "ff" };
+        let ff_ctx_key = if is_comfyui { "txt_mlp" } else { "ff_context" };
+        let ff = FeedForward::new(dim, hidden_dim, vb.pp(ff_key))?;
+        let ff_context = FeedForward::new(text_dim, text_dim * 4, vb.pp(ff_ctx_key))?;
 
         let norm2 = LayerNormNoParams::new(cfg.norm_eps);
         let norm2_context = LayerNormNoParams::new(cfg.norm_eps);
 
         // AdaLN: 6 modulation values per stream (shift, scale, gate for attention + MLP)
-        let adaln_modulation = linear(dim, 6 * dim, vb.pp("norm1").pp("linear"))?;
-        let adaln_context_modulation =
-            linear(dim, 6 * text_dim, vb.pp("norm1_context").pp("linear"))?;
+        // FP8/ComfyUI uses "img_mod.1"/"txt_mod.1"; BF16 official uses "norm1.linear"/"norm1_context.linear".
+        let has_bias =
+            vb.contains_tensor("img_mod.1.bias") || vb.contains_tensor("norm1.linear.bias");
+        let (adaln_modulation, adaln_context_modulation) = if vb.contains_tensor("img_mod.1.weight")
+        {
+            (
+                QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("img_mod").pp("1"))?,
+                QwenLinear::load(dim, 6 * text_dim, has_bias, vb.pp("txt_mod").pp("1"))?,
+            )
+        } else {
+            (
+                QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("norm1").pp("linear"))?,
+                QwenLinear::load(
+                    dim,
+                    6 * text_dim,
+                    has_bias,
+                    vb.pp("norm1_context").pp("linear"),
+                )?,
+            )
+        };
 
         Ok(Self {
             norm1,
@@ -555,8 +735,8 @@ impl QwenImageTransformerBlock {
 #[derive(Debug, Clone)]
 struct OutputLayer {
     norm_final: LayerNormNoParams,
-    linear: candle_nn::Linear,
-    adaln_linear: candle_nn::Linear,
+    linear: QwenLinear,
+    adaln_linear: QwenLinear,
 }
 
 impl OutputLayer {
@@ -568,8 +748,14 @@ impl OutputLayer {
     ) -> candle_core::Result<Self> {
         let output_dim = patch_size * patch_size * out_channels;
         let norm_final = LayerNormNoParams::new(1e-6);
-        let proj_out = linear(inner_dim, output_dim, vb.pp("proj_out"))?;
-        let adaln_linear = linear(inner_dim, 2 * inner_dim, vb.pp("norm_out").pp("linear"))?;
+        let has_bias = vb.contains_tensor("proj_out.bias");
+        let proj_out = QwenLinear::load(inner_dim, output_dim, has_bias, vb.pp("proj_out"))?;
+        let adaln_linear = QwenLinear::load(
+            inner_dim,
+            2 * inner_dim,
+            has_bias,
+            vb.pp("norm_out").pp("linear"),
+        )?;
 
         Ok(Self {
             norm_final,
@@ -609,9 +795,9 @@ pub(crate) struct QwenImageTransformer2DModel {
     /// Timestep embedding
     time_embed: TimestepProjEmbeddings,
     /// Patch (image) input projection: patch_dim -> inner_dim
-    img_in: candle_nn::Linear,
+    img_in: QwenLinear,
     /// Text input projection: joint_attention_dim -> joint_attention_dim (identity dim)
-    txt_in: candle_nn::Linear,
+    txt_in: QwenLinear,
     /// Text encoder output normalization
     txt_norm: RmsNorm,
     /// Transformer blocks
@@ -629,27 +815,48 @@ impl QwenImageTransformer2DModel {
         let device = vb.device();
         let dtype = vb.dtype();
 
+        // Detect FP8/ComfyUI format vs BF16 official format.
+        // FP8 projects text from 3584 → 3072 (inner_dim) and uses inner_dim throughout blocks.
+        // BF16 keeps text at 3584 (joint_attention_dim) throughout.
+        let is_comfyui = vb.contains_tensor("img_in.weight");
+        let block_text_dim = if is_comfyui {
+            cfg.inner_dim
+        } else {
+            cfg.joint_attention_dim
+        };
+
         // Timestep embedding
         let time_embed = TimestepProjEmbeddings::new(cfg.inner_dim, vb.pp("time_text_embed"))?;
 
         // Patch embedding: in_channels (64) -> inner_dim (3072)
-        let img_in = linear(cfg.in_channels, cfg.inner_dim, vb.pp("x_embedder"))?;
-
-        // Text input projection: joint_attention_dim -> joint_attention_dim
-        let txt_in = linear(
-            cfg.joint_attention_dim,
-            cfg.joint_attention_dim,
-            vb.pp("context_embedder"),
+        let img_in_key = if is_comfyui { "img_in" } else { "x_embedder" };
+        let has_stem_bias = vb.contains_tensor(&format!("{img_in_key}.bias"));
+        let img_in = QwenLinear::load(
+            cfg.in_channels,
+            cfg.inner_dim,
+            has_stem_bias,
+            vb.pp(img_in_key),
         )?;
+
+        // Text input projection.
+        let (txt_in_key, txt_in_in) = if is_comfyui {
+            ("txt_in", cfg.joint_attention_dim) // 3584 → 3072
+        } else {
+            ("context_embedder", cfg.joint_attention_dim) // 3584 → 3584
+        };
+        let txt_in = QwenLinear::load(txt_in_in, block_text_dim, has_stem_bias, vb.pp(txt_in_key))?;
 
         // Text normalization
         let txt_norm = RmsNorm::new(cfg.joint_attention_dim, cfg.norm_eps, vb.pp("txt_norm"))?;
 
         // Transformer blocks
+        // For blocks, use block_text_dim as the effective joint_attention_dim.
+        let mut block_cfg = cfg.clone();
+        block_cfg.joint_attention_dim = block_text_dim;
         let mut blocks = Vec::with_capacity(cfg.num_layers);
         let vb_blocks = vb.pp("transformer_blocks");
         for i in 0..cfg.num_layers {
-            blocks.push(QwenImageTransformerBlock::new(cfg, vb_blocks.pp(i))?);
+            blocks.push(QwenImageTransformerBlock::new(&block_cfg, vb_blocks.pp(i))?);
         }
 
         // 3D RoPE embedder with Qwen centered positions (scale_rope=True).
@@ -695,7 +902,9 @@ impl QwenImageTransformer2DModel {
         let patch_size = self.cfg.patch_size;
 
         // 1. Timestep embedding -> (B, inner_dim)
-        let temb = self.time_embed.forward(t)?;
+        let temb = self
+            .time_embed
+            .forward(t, crate::engine::gpu_dtype(device))?;
 
         // 2. Pack latents like diffusers `_pack_latents`:
         //    (B, C, H, W) -> (B, (H/p)*(W/p), C*p*p)

@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Prometheus metrics endpoint**: `GET /metrics` exposes Prometheus-format metrics for HTTP request rates/latency, generation duration, queue depth, model load tracking, GPU memory usage, and server uptime. Gated behind `metrics` feature flag (zero overhead when disabled). Endpoint is excluded from auth and rate limiting for monitoring scrapers ([#142](https://github.com/utensils/mold/issues/142))
+- **Qwen-Image FP8 support**: new `qwen-image:fp8` variant using ComfyUI-compatible FP8 E4M3 safetensors from Comfy-Org/Qwen-Image_ComfyUI ([#178](https://github.com/utensils/mold/issues/178))
+- **Qwen-Image block-level offloading**: CPU↔GPU block streaming for BF16/FP8 Qwen-Image transformers, enabling native 1328×1328 generation on 24GB cards. Auto-detects when VRAM is insufficient; force with `--offload` or `MOLD_OFFLOAD=1`. Peak VRAM ~10GB during denoising ([#178](https://github.com/utensils/mold/issues/178))
+- **Qwen-Image negative prompt support**: `req.negative_prompt` now flows through CFG conditioning (was hardcoded to empty string). Use `--negative-prompt` on CLI ([#178](https://github.com/utensils/mold/issues/178))
+- **Qwen-Image GGUF tier coverage**: added validated `q5`, `q3`, and `q2` variants for both `qwen-image:*` and `qwen-image-2512:*`, completing the published Q2-Q8 quantized matrix in mold ([#178](https://github.com/utensils/mold/issues/178))
 - **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using LTX Video 0.9.5 2B (Lightricks). 28-layer DiT with T5-XXL encoder (shared with FLUX), 3D causal VAE, flow-matching denoising. Default: 768×512, 25 frames @ 24fps, 40 steps, guidance 3.0 ([#172](https://github.com/utensils/mold/issues/172))
 - **Multiple video output formats**: APNG (default, lossless, metadata in tEXt chunks), GIF (256-color, pipe-friendly), WebP (feature-gated `webp`), MP4/H.264 (feature-gated `mp4`, QuickTime-compatible). Use `--format apng|gif|webp|mp4`
 - **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
@@ -37,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Qwen-Image model sources**: base `qwen-image:*` GGUF models now map to `Qwen/Qwen-Image` companion files plus `city96/Qwen-Image-gguf`, while `qwen-image-2512:*` maps to `Qwen/Qwen-Image-2512` plus `unsloth/Qwen-Image-2512-GGUF` ([#178](https://github.com/utensils/mold/issues/178))
+- **Qwen-Image documentation and skills**: README, website docs, and `.claude/skills/mold/SKILL.md` now document the validated base and 2512 GGUF variants, upstream sources, and current 24 GB validation limits ([#178](https://github.com/utensils/mold/issues/178))
 - **`OutputFormat` enum**: added `Apng`, `Webp`, `Mp4` variants with `extension()`, `content_type()`, `is_video()` helper methods
 - **`VideoData` struct**: added `gif_preview` field for cached animated previews
 - **`GenerateResponse`**: `video: Option<VideoData>` field for video model output
@@ -52,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))
+- **Qwen-Image GGUF prompt adherence**: restored correct combined padding + causal attention masking in the Qwen2 text encoder, fixing the quantized Q4/Q6 regression that produced coherent but prompt-incorrect images on this branch ([#178](https://github.com/utensils/mold/issues/178))
 - **Server queue video handling**: queue worker no longer panics on video-only responses (`images: []` + `video: Some(...)`)
 - **Video file not saved in CLI**: batch loop discarded `response.video` — now captured and passed through
 - **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation

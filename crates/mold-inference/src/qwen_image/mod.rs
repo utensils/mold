@@ -1,3 +1,4 @@
+pub(crate) mod offload;
 mod pipeline;
 pub(crate) mod quantized_transformer;
 pub(crate) mod sampling;

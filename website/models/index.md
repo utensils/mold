@@ -28,7 +28,9 @@ and VRAM requirements — including both image and video generation.
 | `z-image-turbo:q8`     | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                    |
 | `sdxl-turbo:fp16`      | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
 | `sd15:fp16`            | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
-| `qwen-image:q4`        | Q4      | ~14 GB       | Slow, 50 steps     | Strong                       |
+| `qwen-image:q4`        | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
+| `qwen-image-2512:q4`   | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
+| `qwen-image:q8`        | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768  |
 | `ltx-video-0.9.5:bf16` | BF16    | ~10 GB       | Slow, 40 steps     | Video, sharp (1024-ch VAE)   |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
@@ -36,19 +38,21 @@ activation headroom. The **default** column is sequential mode (drop-and-reload)
 which loads components one at a time. **Eager** mode keeps everything on GPU
 simultaneously for faster inference but needs more VRAM.
 
-| Model              | Variant | Default VRAM | Eager VRAM | Speed              | Quality                      |
-| ------------------ | ------- | ------------ | ---------- | ------------------ | ---------------------------- |
-| `flux-schnell:q8`  | Q8      | ~15 GB       | ~25 GB     | Fast, 4 steps      | Good                         |
-| `flux-dev:q4`      | Q4      | ~10 GB       | ~15 GB     | Slow, 25 steps     | Excellent                    |
-| `flux-dev:q6`      | Q6      | ~12 GB       | ~20 GB     | Slow, 25 steps     | Best FLUX quality/size trade |
-| `flux-dev:bf16`    | BF16    | ~26 GB       | ~36 GB     | Slow, 25 steps     | Best FLUX quality            |
-| `flux2-klein:q4`   | Q4      | ~5 GB        | ~11 GB     | Fast, 4 steps      | Good for very small GPUs     |
-| `flux2-klein:q8`   | Q8      | ~6 GB        | ~13 GB     | Fast, 4 steps      | Good                         |
-| `z-image-turbo:q8` | Q8      | ~9 GB        | ~13 GB     | Fast, 9 steps      | Excellent                    |
-| `sdxl-turbo:fp16`  | FP16    | ~8 GB        | ~11 GB     | Very fast, 4 steps | Good                         |
-| `sd15:fp16`        | FP16    | ~6 GB        | ~6 GB      | Medium, 25 steps   | Good, broad ecosystem        |
-| `sd35-large:q8`    | Q8      | ~12 GB       | ~22 GB     | Medium, 28 steps   | Excellent                    |
-| `qwen-image:q4`    | Q4      | ~22 GB       | ~41 GB     | Slow, 50 steps     | Strong                       |
+| Model                | Variant | Default VRAM | Eager VRAM | Speed              | Quality                      |
+| -------------------- | ------- | ------------ | ---------- | ------------------ | ---------------------------- |
+| `flux-schnell:q8`    | Q8      | ~15 GB       | ~25 GB     | Fast, 4 steps      | Good                         |
+| `flux-dev:q4`        | Q4      | ~10 GB       | ~15 GB     | Slow, 25 steps     | Excellent                    |
+| `flux-dev:q6`        | Q6      | ~12 GB       | ~20 GB     | Slow, 25 steps     | Best FLUX quality/size trade |
+| `flux-dev:bf16`      | BF16    | ~26 GB       | ~36 GB     | Slow, 25 steps     | Best FLUX quality            |
+| `flux2-klein:q4`     | Q4      | ~5 GB        | ~11 GB     | Fast, 4 steps      | Good for very small GPUs     |
+| `flux2-klein:q8`     | Q8      | ~6 GB        | ~13 GB     | Fast, 4 steps      | Good                         |
+| `z-image-turbo:q8`   | Q8      | ~9 GB        | ~13 GB     | Fast, 9 steps      | Excellent                    |
+| `sdxl-turbo:fp16`    | FP16    | ~8 GB        | ~11 GB     | Very fast, 4 steps | Good                         |
+| `sd15:fp16`          | FP16    | ~6 GB        | ~6 GB      | Medium, 25 steps   | Good, broad ecosystem        |
+| `sd35-large:q8`      | Q8      | ~12 GB       | ~22 GB     | Medium, 28 steps   | Excellent                    |
+| `qwen-image:q4`      | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1024      |
+| `qwen-image-2512:q4` | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1024      |
+| `qwen-image:q8`      | Q8      | ~22 GB       | ~24+ GB    | Slow, 50 steps     | Best GGUF, validated at 768  |
 
 ::: tip Sequential vs Eager
 In **sequential mode** (the default), mold loads each component (encoder →
@@ -138,7 +142,7 @@ for more options.
 | [SD 3.5](/models/sd35)           | 1024x1024         | Triple encoder, MMDiT          |
 | [Z-Image](/models/z-image)       | 1024x1024         | Qwen3 encoder, 3D RoPE         |
 | [Wuerstchen](/models/wuerstchen) | 1024x1024         | 3-stage cascade, 42x compress  |
-| [Qwen-Image](/models/qwen-image) | 1024x1024         | Qwen2.5-VL, flow-matching, CFG |
+| [Qwen-Image](/models/qwen-image) | 1328x1328         | Qwen2.5-VL, flow-matching, CFG |
 | [LTX Video](/models/ltx-video)   | 768x512           | T5-XXL, DiT, 3D causal VAE     |
 
 Each family page lists recommended dimensions for non-square aspect ratios.

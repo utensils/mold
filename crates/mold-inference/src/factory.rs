@@ -141,6 +141,7 @@ pub fn create_engine_with_pool(
             model_name,
             paths,
             load_strategy,
+            offload,
         ))),
         "ltx-video" | "ltx_video" => {
             let t5_variant = std::env::var("MOLD_T5_VARIANT")

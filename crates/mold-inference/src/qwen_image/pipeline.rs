@@ -12,18 +12,19 @@
 //! - 60 identical dual-stream blocks (no noise_refiner/context_refiner)
 //! - Qwen2.5-VL text encoder (hidden_size=3584) instead of Qwen3 (2560)
 //! - Custom VAE with per-channel latent normalization
-//! - ComfyUI-style SNR time shift scheduling (shift=3.1)
+//! - Official diffusers-style exponential time shift with dynamic per-image stretch
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
-use super::sampling::{QwenImageScheduler, DEFAULT_SHIFT};
+use super::sampling::{image_seq_len, QwenImageScheduler};
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
 use super::vae::QwenImageVae;
 use crate::cache::{
@@ -41,10 +42,61 @@ use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
+const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
 const QWEN2_FP16_VRAM_THRESHOLD: u64 = 16_000_000_000;
+
+/// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
+/// Uses filename pattern first, then dtype probing as fallback.
+fn safetensors_is_fp8(path: &Path) -> bool {
+    // Filename-based detection
+    if path.to_str().map(|s| s.contains("fp8")).unwrap_or(false) {
+        return true;
+    }
+    // Dtype probing — try both ComfyUI and diffusers key names
+    let Ok(tensors) = (unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path]) })
+    else {
+        return false;
+    };
+    for key in ["x_embedder.weight", "img_in.weight"] {
+        if let Ok(t) = tensors.load(key, &Device::Cpu) {
+            return t.dtype() == DType::F8E4M3;
+        }
+    }
+    false
+}
+
+/// Check if text encoder safetensors contain FP8 weights.
+/// Uses filename pattern first (reliable for known ComfyUI FP8 models),
+/// then falls back to dtype probing.
+fn text_encoder_is_fp8(paths: &[std::path::PathBuf]) -> bool {
+    // Filename-based detection (ComfyUI FP8 models have "fp8" in name)
+    if paths
+        .iter()
+        .any(|p| p.to_str().map(|s| s.contains("fp8")).unwrap_or(false))
+    {
+        return true;
+    }
+    // Dtype probing fallback — try common key names
+    let Some(first) = paths.first() else {
+        return false;
+    };
+    let Ok(tensors) = (unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[first]) })
+    else {
+        return false;
+    };
+    for key in [
+        "model.embed_tokens.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+    ] {
+        if let Ok(t) = tensors.load(key, &Device::Cpu) {
+            return t.dtype() == DType::F8E4M3;
+        }
+    }
+    false
+}
 
 /// Loaded Qwen-Image model components, ready for inference.
 struct LoadedQwenImage {
@@ -60,10 +112,11 @@ struct LoadedQwenImage {
     dtype: DType,
 }
 
-#[allow(clippy::large_enum_variant)] // both variants heap-allocate (Vec<Block>)
+#[allow(clippy::large_enum_variant)]
 enum QwenImageTransformer {
     BF16(QwenImageTransformer2DModel),
     Quantized(QuantizedQwenImageTransformer2DModel),
+    Offloaded(super::offload::OffloadedQwenImageTransformer),
 }
 
 #[derive(Clone)]
@@ -91,6 +144,50 @@ impl CachedPromptConditioning {
     }
 }
 
+fn pad_text_conditioning(
+    hidden_states: &Tensor,
+    attention_mask: &Tensor,
+    target_len: usize,
+) -> Result<(Tensor, Tensor)> {
+    let seq_len = hidden_states.dim(1)?;
+    if seq_len == target_len {
+        return Ok((hidden_states.clone(), attention_mask.clone()));
+    }
+    if seq_len > target_len {
+        bail!("cannot shrink text conditioning from {seq_len} to {target_len}");
+    }
+
+    let hidden_dim = hidden_states.dim(2)?;
+    let pad_len = target_len - seq_len;
+    let pad_hs = Tensor::zeros(
+        (hidden_states.dim(0)?, pad_len, hidden_dim),
+        hidden_states.dtype(),
+        hidden_states.device(),
+    )?;
+    let pad_mask = Tensor::zeros(
+        (attention_mask.dim(0)?, pad_len),
+        attention_mask.dtype(),
+        attention_mask.device(),
+    )?;
+
+    Ok((
+        Tensor::cat(&[hidden_states, &pad_hs], 1)?,
+        Tensor::cat(&[attention_mask, &pad_mask], 1)?,
+    ))
+}
+
+fn align_cfg_conditioning(
+    cond_hs: &Tensor,
+    cond_mask: &Tensor,
+    uncond_hs: &Tensor,
+    uncond_mask: &Tensor,
+) -> Result<((Tensor, Tensor), (Tensor, Tensor))> {
+    let target_len = cond_hs.dim(1)?.max(uncond_hs.dim(1)?);
+    let cond = pad_text_conditioning(cond_hs, cond_mask, target_len)?;
+    let uncond = pad_text_conditioning(uncond_hs, uncond_mask, target_len)?;
+    Ok((cond, uncond))
+}
+
 impl QwenImageTransformer {
     fn forward(
         &self,
@@ -106,6 +203,9 @@ impl QwenImageTransformer {
             Self::Quantized(model) => {
                 Ok(model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)?)
             }
+            Self::Offloaded(model) => {
+                model.forward(latents, t, encoder_hidden_states, encoder_attention_mask)
+            }
         }
     }
 }
@@ -114,6 +214,7 @@ impl QwenImageTransformer {
 pub struct QwenImageEngine {
     base: EngineBase<LoadedQwenImage>,
     prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
+    offload: bool,
 }
 
 impl QwenImageEngine {
@@ -150,10 +251,16 @@ impl QwenImageEngine {
         }
     }
 
-    pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        offload: bool,
+    ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            offload,
         }
     }
 
@@ -254,16 +361,94 @@ impl QwenImageEngine {
             ))
         } else {
             let xformer_paths = self.transformer_paths();
-            let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
-                &xformer_paths,
-                dtype,
-                device,
-                "Qwen-Image transformer",
-                &self.base.progress,
-            )?;
-            Ok(QwenImageTransformer::BF16(
-                QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
-            ))
+            let is_fp8 = xformer_paths
+                .first()
+                .map(|p| safetensors_is_fp8(p))
+                .unwrap_or(false);
+
+            // FP8 weights stay as F8E4M3 in VRAM (~19.5GB, 1 byte/param).
+            // Per-layer dequant to BF16 during forward adds ~113MB transient.
+            // BF16 weights are 2 bytes/param (~40GB).
+            let mem_size: u64 = xformer_paths
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum();
+            let free = free_vram_bytes().unwrap_or(0);
+            let use_offload = self.offload || crate::device::should_offload(mem_size, free);
+
+            if is_fp8 {
+                self.base
+                    .progress
+                    .info("Detected FP8 safetensors — loading with scale dequantization");
+            }
+
+            if use_offload {
+                // Create TWO VarBuilders: GPU for blocks that fit, CPU for overflow.
+                let (gpu_vb, cpu_vb) = if is_fp8 {
+                    let gpu = crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
+                        device,
+                        "Qwen-Image transformer (offload, GPU)",
+                        &self.base.progress,
+                    )?;
+                    let cpu = crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
+                        &Device::Cpu,
+                        "Qwen-Image transformer (offload, CPU)",
+                        &self.base.progress,
+                    )?;
+                    (gpu, cpu)
+                } else {
+                    let gpu = crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        dtype,
+                        device,
+                        "Qwen-Image transformer (offload, GPU)",
+                        &self.base.progress,
+                    )?;
+                    let cpu = unsafe {
+                        candle_nn::VarBuilder::from_mmaped_safetensors(
+                            &xformer_paths
+                                .iter()
+                                .map(|p| p.as_path())
+                                .collect::<Vec<_>>(),
+                            DType::BF16,
+                            &Device::Cpu,
+                        )?
+                    };
+                    (gpu, cpu)
+                };
+                Ok(QwenImageTransformer::Offloaded(
+                    super::offload::OffloadedQwenImageTransformer::load(
+                        gpu_vb,
+                        cpu_vb,
+                        cfg,
+                        device,
+                        &self.base.progress,
+                    )?,
+                ))
+            } else {
+                let xformer_vb = if is_fp8 {
+                    crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
+                        device,
+                        "Qwen-Image transformer",
+                        &self.base.progress,
+                    )?
+                } else {
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        dtype,
+                        device,
+                        "Qwen-Image transformer",
+                        &self.base.progress,
+                    )?
+                };
+                Ok(QwenImageTransformer::BF16(
+                    QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
+                ))
+            }
         }
     }
 
@@ -278,6 +463,9 @@ impl QwenImageEngine {
     }
 
     /// Load text encoder from disk.
+    ///
+    /// FP8 text encoders are loaded on GPU with BF16 dtype — candle's CUDA cast
+    /// kernel handles F8E4M3→BF16 conversion during tensor loading.
     fn load_text_encoder(
         &self,
         tokenizer_path: &std::path::PathBuf,
@@ -285,6 +473,14 @@ impl QwenImageEngine {
         dtype: DType,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
         let encoder_paths: Vec<std::path::PathBuf> = self.base.paths.text_encoder_files.clone();
+        let is_fp8 = text_encoder_is_fp8(&encoder_paths);
+        if is_fp8 {
+            self.base
+                .progress
+                .info("Detected FP8 text encoder — loading as BF16 on GPU");
+        }
+        // FP8 and BF16 both load on the target device with the target dtype.
+        // The VarBuilder handles F8E4M3→BF16 casting during tensor loading.
         encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
             &encoder_paths,
             tokenizer_path,
@@ -329,9 +525,12 @@ impl QwenImageEngine {
 
         let text_tokenizer_path = self.validate_paths()?;
         let device = crate::device::create_device(&self.base.progress)?;
-        let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = QwenImageConfig::qwen_image_2512();
         let transformer_is_quantized = self.detect_is_quantized();
+        // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
+        // prevents direct F8E4M3→BF16 on GPU; CPU cast works fine). All paths
+        // use BF16 as runtime dtype since the model trains and computes in BF16.
+        let dtype = crate::engine::gpu_dtype(&device);
 
         // Load transformer
         let xformer_paths = self.transformer_paths();
@@ -452,7 +651,7 @@ impl QwenImageEngine {
         // --- Phase 1: Text encoding (check cache first to skip encoder load) ---
         let use_cfg = req.guidance > 1.0;
         let prompt_key = prompt_text_key(&req.prompt);
-        let uncond_key = prompt_text_key("");
+        let uncond_key = prompt_text_key(QWEN_EMPTY_NEGATIVE_PROMPT);
         let prompt_cached = self
             .prompt_cache
             .lock()
@@ -468,82 +667,103 @@ impl QwenImageEngine {
         };
         let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
 
-        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if both_cached
-        {
-            self.base.progress.cache_hit("prompt conditioning");
-            let cached = prompt_cached.unwrap();
-            let (hs, mask) = cached.restore(&device, dtype)?;
-            let (u_hs, u_mask) = if use_cfg {
-                let ucached = uncond_cached.unwrap();
-                let (u_hs, u_mask) = ucached.restore(&device, dtype)?;
-                (Some(u_hs), Some(u_mask))
+        let (mut encoder_hidden_states, mut encoder_attention_mask, mut uncond_hs, mut uncond_mask) =
+            if both_cached {
+                self.base.progress.cache_hit("prompt conditioning");
+                let cached = prompt_cached.unwrap();
+                let (hs, mask) = cached.restore(&device, dtype)?;
+                let (u_hs, u_mask) = if use_cfg {
+                    let ucached = uncond_cached.unwrap();
+                    let (u_hs, u_mask) = ucached.restore(&device, dtype)?;
+                    (Some(u_hs), Some(u_mask))
+                } else {
+                    (None, None)
+                };
+                (hs, mask, u_hs, u_mask)
             } else {
-                (None, None)
-            };
-            (hs, mask, u_hs, u_mask)
-        } else {
-            let free = free_vram_bytes().unwrap_or(0);
-            let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
-            let te_device = if te_on_gpu {
-                device.clone()
-            } else {
-                Device::Cpu
-            };
-            let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
+                let free = free_vram_bytes().unwrap_or(0);
+                let (te_on_gpu, te_device_label) = self.resolve_text_encoder_device(&device, free);
+                let te_device = if te_on_gpu {
+                    device.clone()
+                } else {
+                    Device::Cpu
+                };
+                let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
 
-            let te_label = format!(
-                "Loading Qwen2.5 text encoder ({} shards, {})",
-                self.base.paths.text_encoder_files.len(),
-                te_device_label,
-            );
-            let te_size: u64 = self
-                .base
-                .paths
-                .text_encoder_files
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len())
-                .sum();
-            preflight_memory_check("Qwen2.5 text encoder", te_size)?;
+                let te_label = format!(
+                    "Loading Qwen2.5 text encoder ({} shards, {})",
+                    self.base.paths.text_encoder_files.len(),
+                    te_device_label,
+                );
+                let te_size: u64 = self
+                    .base
+                    .paths
+                    .text_encoder_files
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .sum();
+                preflight_memory_check("Qwen2.5 text encoder", te_size)?;
 
-            if let Some(status) = memory_status_string() {
-                self.base.progress.info(&status);
-            }
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
 
-            self.base.progress.stage_start(&te_label);
-            let te_start = Instant::now();
-            let mut text_encoder =
-                self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
-            self.base.progress.stage_done(&te_label, te_start.elapsed());
+                self.base.progress.stage_start(&te_label);
+                let te_start = Instant::now();
+                let mut text_encoder =
+                    self.load_text_encoder(&text_tokenizer_path, &te_device, te_dtype)?;
+                self.base.progress.stage_done(&te_label, te_start.elapsed());
 
-            let (hs, mask) = Self::encode_prompt_cached(
-                &self.base.progress,
-                &self.prompt_cache,
-                &mut text_encoder,
-                &req.prompt,
-                &device,
-                dtype,
-            )?;
-
-            let (u_hs, u_mask) = if use_cfg {
                 let (hs, mask) = Self::encode_prompt_cached(
                     &self.base.progress,
                     &self.prompt_cache,
                     &mut text_encoder,
-                    "",
+                    &req.prompt,
                     &device,
                     dtype,
                 )?;
-                (Some(hs), Some(mask))
-            } else {
-                (None, None)
+
+                let (u_hs, u_mask) = if use_cfg {
+                    let (hs, mask) = Self::encode_prompt_cached(
+                        &self.base.progress,
+                        &self.prompt_cache,
+                        &mut text_encoder,
+                        QWEN_EMPTY_NEGATIVE_PROMPT,
+                        &device,
+                        dtype,
+                    )?;
+                    (Some(hs), Some(mask))
+                } else {
+                    (None, None)
+                };
+
+                drop(text_encoder);
+                // Force CUDA to finish async work, then report actual free VRAM.
+                device.synchronize()?;
+                if let Some(status) = crate::device::memory_status_string() {
+                    self.base
+                        .progress
+                        .info(&format!("Freed Qwen2.5 text encoder — {status}"));
+                } else {
+                    self.base.progress.info("Freed Qwen2.5 text encoder");
+                }
+
+                (hs, mask, u_hs, u_mask)
             };
 
-            drop(text_encoder);
-            self.base.progress.info("Freed Qwen2.5 text encoder");
-
-            (hs, mask, u_hs, u_mask)
-        };
+        if use_cfg {
+            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
+                &encoder_hidden_states,
+                &encoder_attention_mask,
+                uncond_hs.as_ref().expect("unconditional prompt missing"),
+                uncond_mask.as_ref().expect("unconditional mask missing"),
+            )?;
+            encoder_hidden_states = cond_hs;
+            encoder_attention_mask = cond_mask;
+            uncond_hs = Some(neg_hs);
+            uncond_mask = Some(neg_mask);
+        }
 
         // --- Phase 2: Load transformer and denoise ---
         let xformer_paths = self.transformer_paths();
@@ -578,10 +798,10 @@ impl QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
+        let image_seq_len = image_seq_len(latent_h, latent_w, transformer_cfg.patch_size);
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, image_seq_len);
 
-        // Initial noise scaled by sigma[0] — matches ComfyUI's CONST noise scaling.
-        // For txt2img: initial_sample = sigma[0] * randn()
+        // Initial noise scaled by sigma[0], matching the official Qwen diffusers path.
         let mut latents =
             crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
         latents = (latents * scheduler.initial_sigma())?;
@@ -593,10 +813,10 @@ impl QwenImageEngine {
 
         if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
             eprintln!(
-                "[qwen-debug] cfg={} guidance={:.1} shift={:.2} sigmas[0]={:.4} sigmas[last]={:.4}",
+                "[qwen-debug] cfg={} guidance={:.1} image_seq_len={} sigmas[0]={:.4} sigmas[last]={:.4}",
                 use_cfg,
                 req.guidance,
-                DEFAULT_SHIFT,
+                image_seq_len,
                 scheduler.sigmas[0],
                 scheduler.sigmas[num_steps],
             );
@@ -636,9 +856,6 @@ impl QwenImageEngine {
                 let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                 let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
                 let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
-                // Rescale: comb * (norm(cond) / norm(comb)) per-pixel along channels.
-                // Diffusers computes dim=-1 on token-format [B, seq, C*P*P]; our output
-                // is spatial [B, C, H, W] so we norm across C (dim=1).
                 let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
                 let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
                 let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
@@ -849,20 +1066,38 @@ impl InferenceEngine for QwenImageEngine {
             loaded.dtype,
         )?;
 
-        // Encode unconditional (empty) prompt for classifier-free guidance
+        // Encode unconditional prompt for classifier-free guidance.
+        // Qwen's published examples use a single space rather than a truly
+        // empty string for the negative prompt baseline.
         let use_cfg = req.guidance > 1.0;
         let (uncond_hs, uncond_mask) = if use_cfg {
             let (hs, mask) = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
                 &mut loaded.text_encoder,
-                "",
+                QWEN_EMPTY_NEGATIVE_PROMPT,
                 &loaded.device,
                 loaded.dtype,
             )?;
             (Some(hs), Some(mask))
         } else {
             (None, None)
+        };
+        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
+            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
+                &encoder_hidden_states,
+                &encoder_attention_mask,
+                uncond_hs.as_ref().expect("unconditional prompt missing"),
+                uncond_mask.as_ref().expect("unconditional mask missing"),
+            )?;
+            (cond_hs, cond_mask, Some(neg_hs), Some(neg_mask))
+        } else {
+            (
+                encoder_hidden_states,
+                encoder_attention_mask,
+                uncond_hs,
+                uncond_mask,
+            )
         };
 
         // Drop text encoder from GPU to free VRAM for denoising
@@ -876,10 +1111,11 @@ impl InferenceEngine for QwenImageEngine {
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
 
-        // 4. Initialize scheduler (ComfyUI-style SNR shift)
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, DEFAULT_SHIFT);
+        // 4. Initialize scheduler using the official Qwen diffusers FlowMatch schedule.
+        let image_seq_len = image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size);
+        let mut scheduler = QwenImageScheduler::new(req.steps as usize, image_seq_len);
 
-        // 5. Generate initial noise scaled by sigma[0] (ComfyUI CONST noise scaling)
+        // 5. Generate initial noise scaled by sigma[0].
         let mut latents = crate::engine::seeded_randn(
             seed,
             &[1, 16, latent_h, latent_w],
@@ -1070,6 +1306,7 @@ mod tests {
                 decoder: None,
             },
             LoadStrategy::Sequential,
+            false,
         );
 
         assert!(engine.detect_is_quantized());
