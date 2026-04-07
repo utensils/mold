@@ -7,7 +7,7 @@ and a 3D causal video VAE. Generates short video clips from text prompts.
 - **Developer**: [Lightricks](https://huggingface.co/Lightricks)
 - **License**: LTXV Open Weights License (custom, revenue-gated at $10M)
 - **HuggingFace**:
-  [Lightricks/LTX-Video-0.9.5](https://huggingface.co/Lightricks/LTX-Video-0.9.5)
+  [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video)
 
 > **Note**: Video output defaults to APNG format (lossless, with embedded
 > metadata). Also supports GIF, WebP, and MP4 via `--format`.
@@ -16,21 +16,29 @@ and a 3D causal video VAE. Generates short video clips from text prompts.
 
 ## Variants
 
-| Model                  | Steps | Size    | Notes                                    |
-| ---------------------- | ----- | ------- | ---------------------------------------- |
-| `ltx-video-0.9.5:bf16` | 40    | ~6.3 GB | v0.9.5 transformer + 1024-ch VAE (sharp) |
+| Model | Steps | Size | Notes |
+| ----- | ----- | ---- | ----- |
+| `ltx-video-0.9.6:bf16` | 40 | ~18 GB | Higher-quality 2B path, 30 FPS defaults |
+| `ltx-video-0.9.6-distilled:bf16` | 8 | ~18 GB | Fast default single-pass path |
+| `ltx-video-0.9.8-2b-distilled:bf16` | 7 | ~18.5 GB | 0.9.8 checkpoint plus spatial upscaler asset |
+| `ltx-video-0.9.8-13b-dev:bf16` | 30 | ~39 GB | Highest-quality 13B checkpoint |
+| `ltx-video-0.9.8-13b-distilled:bf16` | 7 | ~39 GB | Faster 13B checkpoint |
 
-GGUF quantized transformer variants (Q3-Q8) exist on HuggingFace via
-[city96/LTX-Video-0.9.5-gguf](https://huggingface.co/city96/LTX-Video-0.9.5-gguf)
-but are not yet supported.
+The 0.9.8 variants require the published spatial upscaler asset. mold pulls and
+tracks that file explicitly.
+
+Today, mold runs the `0.9.8` first pass correctly and resolves the upscaler
+asset, but it does not yet execute the second multiscale refinement pass. That
+means `0.9.8` is usable and materially better wired than before, but still not
+at full upstream quality parity.
 
 ## Defaults
 
-- **Resolution**: 768x512
-- **Frames**: 25 (approximately 1 second at 24 fps)
-- **FPS**: 24
-- **Guidance**: 3.0
-- **Steps**: 40
+- **Resolution**: 1216x704
+- **Frames**: 25
+- **FPS**: 30
+- **Default model**: `ltx-video-0.9.6-distilled:bf16`
+- **Steps**: 8 on distilled models, 40 on `0.9.6`, 7 on current `0.9.8` first-pass presets
 - **Output format**: APNG (animated PNG with metadata)
 
 ## Output Formats
@@ -46,7 +54,9 @@ but are not yet supported.
 
 | Width | Height | Aspect Ratio   |
 | ----- | ------ | -------------- |
-| 768   | 512    | 3:2 (default)  |
+| 1216  | 704    | current mold default |
+| 1024  | 576    | 16:9           |
+| 768   | 512    | 3:2            |
 | 512   | 768    | 2:3 (portrait) |
 | 512   | 512    | 1:1 (square)   |
 
@@ -68,24 +78,30 @@ The T5-XXL encoder is shared with FLUX via mold's shared component cache.
 
 ## VRAM Usage
 
-The sequential pipeline keeps peak VRAM manageable on 24GB cards:
+The sequential pipeline keeps peak VRAM manageable on 24GB cards for the 2B
+checkpoints:
 
 - T5-XXL FP16: ~10 GB (dropped after encoding)
-- Transformer BF16: ~3.8 GB (dropped after denoising)
-- VAE v0.9.5: ~2.5 GB (dropped after decoding)
+- Transformer BF16: model-dependent; 2B fits comfortably, 13B requires much more VRAM
+- VAE: ~2.5 GB (dropped after decoding)
 
 ## Example
 
 ```bash
-# Default: 25 frames, APNG output
-mold run ltx-video-0.9.5:bf16 "A cat walking across a sunlit windowsill" --frames 25
+# Fast default path
+mold run ltx-video-0.9.6-distilled:bf16 "A cat walking across a sunlit windowsill" --frames 25
 
-# Higher quality with more steps
-mold run ltx-video-0.9.5:bf16 "waves crashing on a rocky coastline at sunset" --frames 17 --steps 50
+# Higher-quality 2B path
+mold run ltx-video-0.9.6:bf16 "waves crashing on a rocky coastline at sunset" --frames 17 --steps 40
 
 # GIF output for piping
-mold run ltx-video-0.9.5:bf16 "a campfire at night" --format gif | mpv -
+mold run ltx-video-0.9.6-distilled:bf16 "a campfire at night" --format gif | mpv -
 
-# Longer video (49 frames ≈ 2 seconds)
-mold run ltx-video-0.9.5:bf16 "a humanoid robot walking" --frames 49 --steps 40
+# 0.9.8 checkpoint family
+mold run ltx-video-0.9.8-2b-distilled:bf16 "a humanoid robot walking" --frames 49
 ```
+
+If you want the safest current quality path in mold, start with
+`ltx-video-0.9.6-distilled:bf16`. If you want to evaluate the newer checkpoint
+family and are comfortable with the current first-pass-only limitation, try
+`ltx-video-0.9.8-2b-distilled:bf16`.

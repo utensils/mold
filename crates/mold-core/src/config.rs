@@ -41,6 +41,8 @@ pub struct ModelConfig {
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
     pub transformer_shards: Option<Vec<String>>,
     pub vae: Option<String>,
+    /// LTX latent upsampler / spatial upscaler weights.
+    pub spatial_upscaler: Option<String>,
     pub t5_encoder: Option<String>,
     pub clip_encoder: Option<String>,
     pub t5_tokenizer: Option<String>,
@@ -97,6 +99,7 @@ impl ModelConfig {
         let singles = [
             &self.transformer,
             &self.vae,
+            &self.spatial_upscaler,
             &self.t5_encoder,
             &self.clip_encoder,
             &self.t5_tokenizer,
@@ -188,6 +191,7 @@ pub struct ModelPaths {
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
     pub transformer_shards: Vec<PathBuf>,
     pub vae: PathBuf,
+    pub spatial_upscaler: Option<PathBuf>,
     pub t5_encoder: Option<PathBuf>,
     pub clip_encoder: Option<PathBuf>,
     pub t5_tokenizer: Option<PathBuf>,
@@ -232,6 +236,10 @@ impl ModelPaths {
             .map(|shards| shards.iter().map(PathBuf::from).collect())
             .unwrap_or_default();
         let vae = Self::resolve_path(model_cfg.and_then(|m| m.vae.as_deref()), "MOLD_VAE_PATH")?;
+        let spatial_upscaler = Self::resolve_path(
+            model_cfg.and_then(|m| m.spatial_upscaler.as_deref()),
+            "MOLD_SPATIAL_UPSCALER_PATH",
+        );
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
             "MOLD_T5_PATH",
@@ -273,6 +281,7 @@ impl ModelPaths {
             transformer,
             transformer_shards,
             vae,
+            spatial_upscaler,
             t5_encoder,
             clip_encoder,
             t5_tokenizer,
@@ -940,6 +949,9 @@ fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
     target.transformer = source.transformer.clone();
     target.transformer_shards = source.transformer_shards.clone();
     target.vae = source.vae.clone();
+    if source.spatial_upscaler.is_some() {
+        target.spatial_upscaler = source.spatial_upscaler.clone();
+    }
 
     if source.t5_encoder.is_some() {
         target.t5_encoder = source.t5_encoder.clone();

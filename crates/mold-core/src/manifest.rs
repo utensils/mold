@@ -22,6 +22,7 @@ pub enum ModelComponent {
     Transformer,
     TransformerShard, // One shard of a multi-file transformer (Z-Image BF16)
     Vae,
+    SpatialUpscaler, // LTX latent upsampler / spatial upscaler weights
     T5Encoder,
     ClipEncoder,
     T5Tokenizer,
@@ -154,6 +155,10 @@ impl ModelManifest {
                 )
             },
             vae: Some(paths.vae.to_string_lossy().to_string()),
+            spatial_upscaler: paths
+                .spatial_upscaler
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             t5_encoder: paths
                 .t5_encoder
                 .as_ref()
@@ -3409,6 +3414,7 @@ pub fn paths_from_downloads(
             transformer,
             transformer_shards: Vec::new(),
             vae: PathBuf::new(),
+            spatial_upscaler: None,
             t5_encoder: None,
             clip_encoder: None,
             t5_tokenizer: None,
@@ -3438,6 +3444,7 @@ pub fn paths_from_downloads(
         transformer,
         transformer_shards,
         vae,
+        spatial_upscaler: find(ModelComponent::SpatialUpscaler),
         t5_encoder: find(ModelComponent::T5Encoder),
         clip_encoder: find(ModelComponent::ClipEncoder),
         t5_tokenizer: find(ModelComponent::T5Tokenizer),
@@ -3451,16 +3458,49 @@ pub fn paths_from_downloads(
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
-    let defaults = ManifestDefaults {
+    let dev_defaults = ManifestDefaults {
         steps: 40,
         guidance: 3.0,
-        width: 768,
-        height: 512,
+        width: 1216,
+        height: 704,
         is_schnell: false,
         scheduler: None,
         negative_prompt: None,
         frames: Some(25),
-        fps: Some(24),
+        fps: Some(30),
+    };
+    let distilled_defaults = ManifestDefaults {
+        steps: 8,
+        guidance: 1.0,
+        width: 1216,
+        height: 704,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: Some(25),
+        fps: Some(30),
+    };
+    let multiscale_distilled_defaults = ManifestDefaults {
+        steps: 7,
+        guidance: 1.0,
+        width: 1216,
+        height: 704,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: Some(25),
+        fps: Some(30),
+    };
+    let multiscale_dev_defaults = ManifestDefaults {
+        steps: 30,
+        guidance: 8.0,
+        width: 1216,
+        height: 704,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: Some(25),
+        fps: Some(30),
     };
     let shared_t5_files = vec![
         // T5-XXL FP16 text encoder (shared with FLUX)
@@ -3482,86 +3522,140 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             sha256: Some("812ebb1f7bcb9ec5b9b0efcd45e72fbd2ef5f46ec8c4b29d3b07dc1505ca5af7"),
         },
     ];
+    let shared_vae_file = ModelFile {
+        hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
+        hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+        component: ModelComponent::Vae,
+        size_bytes: 2_493_855_612,
+        gated: false,
+        sha256: Some("7eb65b16cf8ddfd70ccb1c541384ae49ffd6639d754c6b713a11cb72d097233f"),
+    };
+    let spatial_upscaler_file = ModelFile {
+        hf_repo: "Lightricks/LTX-Video".to_string(),
+        hf_filename: "ltxv-spatial-upscaler-0.9.8.safetensors".to_string(),
+        component: ModelComponent::SpatialUpscaler,
+        size_bytes: 505_024_432,
+        gated: false,
+        sha256: None,
+    };
     vec![
-        // v0.9.5: matched transformer + VAE pair (1024-ch VAE, sharp output)
         ModelManifest {
-            name: "ltx-video-0.9.5:bf16".to_string(),
+            name: "ltx-video-0.9.6:bf16".to_string(),
             family: "ltx-video".to_string(),
-            description: "LTX Video 0.9.5 2B BF16 — text-to-video, 24fps, flow-matching"
+            description: "LTX Video 0.9.6 2B BF16 — improved quality, 30fps, text-to-video"
                 .to_string(),
             files: {
                 let mut f = vec![
-                    // v0.9.5 diffusers-format transformer (single file)
                     ModelFile {
-                        hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
-                        hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                        hf_repo: "Lightricks/LTX-Video".to_string(),
+                        hf_filename: "ltxv-2b-0.9.6-dev-04-25.safetensors".to_string(),
                         component: ModelComponent::Transformer,
-                        size_bytes: 3_846_852_608,
+                        size_bytes: 6_340_743_924,
                         gated: false,
                         sha256: None,
                     },
-                    // v0.9.5 VAE (1024-ch decoder, timestep conditioning)
-                    ModelFile {
-                        hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
-                        hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
-                        component: ModelComponent::Vae,
-                        size_bytes: 2_493_855_612,
-                        gated: false,
-                        sha256: Some(
-                            "7eb65b16cf8ddfd70ccb1c541384ae49ffd6639d754c6b713a11cb72d097233f",
-                        ),
-                    },
+                    shared_vae_file.clone(),
                 ];
                 f.extend(shared_t5_files.clone());
                 f
             },
-            defaults: defaults.clone(),
+            defaults: dev_defaults,
             hidden: false,
         },
-        // v0.9: original transformer + VAE pair (512-ch VAE, lower quality)
         ModelManifest {
-            name: "ltx-video-0.9:bf16".to_string(),
+            name: "ltx-video-0.9.6-distilled:bf16".to_string(),
             family: "ltx-video".to_string(),
-            description: "LTX Video 0.9 2B BF16 — text-to-video, 24fps, flow-matching (legacy)"
+            description: "LTX Video 0.9.6 distilled 2B BF16 — fast 8-step text-to-video"
                 .to_string(),
             files: {
                 let mut f = vec![
-                    // v0.9 diffusers-format transformer (2 shards)
                     ModelFile {
                         hf_repo: "Lightricks/LTX-Video".to_string(),
-                        hf_filename:
-                            "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
-                                .to_string(),
-                        component: ModelComponent::TransformerShard,
-                        size_bytes: 4_940_691_048,
+                        hf_filename: "ltxv-2b-0.9.6-distilled-04-25.safetensors".to_string(),
+                        component: ModelComponent::Transformer,
+                        size_bytes: 6_340_744_028,
                         gated: false,
                         sha256: None,
                     },
+                    shared_vae_file.clone(),
+                ];
+                f.extend(shared_t5_files.clone());
+                f
+            },
+            defaults: distilled_defaults,
+            hidden: false,
+        },
+        ModelManifest {
+            name: "ltx-video-0.9.8-2b-distilled:bf16".to_string(),
+            family: "ltx-video".to_string(),
+            description: "LTX Video 0.9.8 distilled 2B BF16 — multiscale-ready low-VRAM path"
+                .to_string(),
+            files: {
+                let mut f = vec![
                     ModelFile {
                         hf_repo: "Lightricks/LTX-Video".to_string(),
-                        hf_filename:
-                            "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
-                                .to_string(),
-                        component: ModelComponent::TransformerShard,
-                        size_bytes: 2_749_648_664,
+                        hf_filename: "ltxv-2b-0.9.8-distilled.safetensors".to_string(),
+                        component: ModelComponent::Transformer,
+                        size_bytes: 6_340_744_492,
                         gated: false,
                         sha256: None,
                     },
-                    // v0.9 VAE (512-ch decoder)
+                    shared_vae_file.clone(),
+                    spatial_upscaler_file.clone(),
+                ];
+                f.extend(shared_t5_files.clone());
+                f
+            },
+            defaults: multiscale_distilled_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "ltx-video-0.9.8-13b-dev:bf16".to_string(),
+            family: "ltx-video".to_string(),
+            description: "LTX Video 0.9.8 13B dev BF16 — highest-quality LTX checkpoint"
+                .to_string(),
+            files: {
+                let mut f = vec![
                     ModelFile {
                         hf_repo: "Lightricks/LTX-Video".to_string(),
-                        hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
-                        component: ModelComponent::Vae,
-                        size_bytes: 1_676_798_532,
+                        hf_filename: "ltxv-13b-0.9.8-dev.safetensors".to_string(),
+                        component: ModelComponent::Transformer,
+                        size_bytes: 28_579_183_340,
                         gated: false,
                         sha256: None,
                     },
+                    shared_vae_file.clone(),
+                    spatial_upscaler_file.clone(),
+                ];
+                f.extend(shared_t5_files.clone());
+                f
+            },
+            defaults: multiscale_dev_defaults,
+            hidden: false,
+        },
+        ModelManifest {
+            name: "ltx-video-0.9.8-13b-distilled:bf16".to_string(),
+            family: "ltx-video".to_string(),
+            description: "LTX Video 0.9.8 13B distilled BF16 — faster 13B-quality LTX video"
+                .to_string(),
+            files: {
+                let mut f = vec![
+                    ModelFile {
+                        hf_repo: "Lightricks/LTX-Video".to_string(),
+                        hf_filename: "ltxv-13b-0.9.8-distilled.safetensors".to_string(),
+                        component: ModelComponent::Transformer,
+                        size_bytes: 28_579_183_564,
+                        gated: false,
+                        sha256: None,
+                    },
+                    shared_vae_file,
+                    spatial_upscaler_file,
                 ];
                 f.extend(shared_t5_files);
                 f
             },
-            defaults,
-            hidden: true, // v0.9 produces blurry output — hidden until resolved
+            defaults: multiscale_distilled_defaults,
+            hidden: false,
         },
     ]
 }
@@ -4238,8 +4332,41 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 17 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 83
-        assert_eq!(known_manifests().len(), 83);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 17 Qwen-Image + 1 Wuerstchen + 5 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 86
+        assert_eq!(known_manifests().len(), 86);
+    }
+
+    #[test]
+    fn legacy_ltx_manifests_removed() {
+        assert!(find_manifest("ltx-video-0.9:bf16").is_none());
+        assert!(find_manifest("ltx-video-0.9.5:bf16").is_none());
+    }
+
+    #[test]
+    fn current_ltx_manifests_present() {
+        assert!(find_manifest("ltx-video-0.9.6:bf16").is_some());
+        assert!(find_manifest("ltx-video-0.9.6-distilled:bf16").is_some());
+        assert!(find_manifest("ltx-video-0.9.8-2b-distilled:bf16").is_some());
+        assert!(find_manifest("ltx-video-0.9.8-13b-dev:bf16").is_some());
+        assert!(find_manifest("ltx-video-0.9.8-13b-distilled:bf16").is_some());
+    }
+
+    #[test]
+    fn ltx_098_manifests_include_spatial_upscaler() {
+        for model in [
+            "ltx-video-0.9.8-2b-distilled:bf16",
+            "ltx-video-0.9.8-13b-dev:bf16",
+            "ltx-video-0.9.8-13b-distilled:bf16",
+        ] {
+            let manifest = find_manifest(model).expect("manifest should exist");
+            assert!(
+                manifest
+                    .files
+                    .iter()
+                    .any(|file| file.component == ModelComponent::SpatialUpscaler),
+                "{model} missing spatial upscaler component"
+            );
+        }
     }
 
     #[test]

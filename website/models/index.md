@@ -13,7 +13,7 @@ and VRAM requirements — including both image and video generation.
 | Classic ecosystem | `sd15:fp16` or `dreamshaper-v8` | Huge model library, ControlNet |
 | Fast + great      | `z-image-turbo:q8`              | 9 steps, excellent quality     |
 | SDXL              | `sdxl-turbo:fp16`               | 4 steps, 1024x1024             |
-| **Video**         | `ltx-video-0.9.5:bf16`          | Text-to-video, 24fps, APNG/MP4 |
+| **Video**         | `ltx-video-0.9.6-distilled:bf16` | Text-to-video, 30fps, APNG/MP4, best-supported default |
 
 ## VRAM Guide
 
@@ -31,7 +31,8 @@ and VRAM requirements — including both image and video generation.
 | `qwen-image:q4`        | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
 | `qwen-image-2512:q4`   | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
 | `qwen-image:q8`        | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768  |
-| `ltx-video-0.9.5:bf16` | BF16    | ~10 GB       | Slow, 40 steps     | Video, sharp (1024-ch VAE)   |
+| `ltx-video-0.9.6-distilled:bf16` | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default      |
+| `ltx-video-0.9.8-2b-distilled:bf16` | BF16 | ~10-12 GB    | Fast, 7 steps      | Newer video checkpoint, first pass today |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),

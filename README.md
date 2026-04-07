@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue.svg)](https://nixos.wiki/wiki/Flakes)
 
-Generate images from text on your own GPU. No cloud, no Python, no fuss.
+Generate images and short video clips on your own GPU. No cloud, no Python, no fuss.
 
 **[Documentation](https://utensils.github.io/mold/)** | **[Getting Started](https://utensils.github.io/mold/guide/)** | **[Models](https://utensils.github.io/mold/models/)** | **[API](https://utensils.github.io/mold/api/)**
 
@@ -57,6 +57,7 @@ mold run flux-dev:q4 "a turtle in the desert"         # Pick a model
 mold run "a portrait" --width 768 --height 1024       # Custom size
 mold run "a sunset" --batch 4 --seed 42               # Batch with reproducible seeds
 mold run "oil painting" --image photo.png              # img2img
+mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 mold run "a cat" --expand                              # LLM prompt expansion
 mold run flux-dev:bf16 "portrait" --lora style.safetensors  # LoRA adapter
 ```
@@ -131,11 +132,28 @@ Supports 9 model families with 80+ variants:
 | **Z-Image** | turbo | Fast 9-step, Qwen3 encoder |
 | **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
 | **Wuerstchen** | v2 | 42x latent compression |
-| **LTX Video** | 0.9.5 | Text-to-video with APNG/GIF/WebP/MP4 output |
+| **LTX Video** | 0.9.6, 0.9.8 | Text-to-video with APNG/GIF/WebP/MP4 output |
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 
 See the full [model catalog](https://utensils.github.io/mold/models/) for sizes, VRAM requirements, and recommended settings.
+
+### LTX Video
+
+Current supported LTX checkpoints are:
+
+- `ltx-video-0.9.6:bf16`
+- `ltx-video-0.9.6-distilled:bf16`
+- `ltx-video-0.9.8-2b-distilled:bf16`
+- `ltx-video-0.9.8-13b-dev:bf16`
+- `ltx-video-0.9.8-13b-distilled:bf16`
+
+Recommended default today: `ltx-video-0.9.6-distilled:bf16`.
+
+The `0.9.8` models pull the required spatial-upscaler asset automatically. mold
+currently runs the `0.9.8` first pass correctly, but does not yet execute the
+second multiscale refinement pass, so `0.9.8` is not at full intended upstream
+quality yet.
 
 ## Features
 

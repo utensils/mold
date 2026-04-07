@@ -43,6 +43,9 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
             info!(model = %model_name, "configured model");
             info!(transformer = %paths.transformer.display());
             info!(vae = %paths.vae.display());
+            if let Some(spatial_upscaler) = &paths.spatial_upscaler {
+                info!(spatial_upscaler = %spatial_upscaler.display());
+            }
             if let Some(t5) = &paths.t5_encoder {
                 info!(t5 = %t5.display());
             }
