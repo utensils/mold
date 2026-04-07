@@ -108,6 +108,9 @@ pub(crate) struct QwenRopeEmbedder {
     neg_cos: Tensor,
     neg_sin: Tensor,
     dtype: DType,
+    // Qwen-Image uses a small set of request shapes in practice, so a simple
+    // process-local cache is enough here. If we add variable-resolution sweeps
+    // or long-lived heterogeneous workloads, this should grow an eviction policy.
     cache: Mutex<HashMap<RopeCacheKey, RopeCacheValue>>,
 }
 
@@ -579,7 +582,8 @@ impl JointAttention {
         let key_len = key_mask.dim(3)?;
         let mask = key_mask.to_dtype(q.dtype())?;
         let mask = ((mask - 1.0)? * 1e9)?;
-        mask.broadcast_as((batch, self.n_heads, seq_len, key_len))
+        mask.broadcast_as((batch, self.n_heads, seq_len, key_len))?
+            .contiguous()
     }
 }
 
@@ -749,7 +753,7 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
 }
 
 impl QuantizedQwenImageTransformer2DModel {
-    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder, _device: &Device) -> Result<Self> {
+    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder) -> Result<Self> {
         let time_embed = TimestepProjEmbeddings::new(vb.clone())?;
         let img_in = qlinear(&vb, "img_in")?;
         let txt_in = qlinear(&vb, "txt_in")?;
