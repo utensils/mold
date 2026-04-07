@@ -92,7 +92,10 @@ impl GeluMlp {
         })
     }
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(x.apply(&self.proj)?.gelu()?.apply(&self.out)?)
+        Ok(x
+            .apply(&self.proj)?
+            .apply(&candle_nn::Activation::GeluPytorchTanh)?
+            .apply(&self.out)?)
     }
 }
 

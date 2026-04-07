@@ -42,6 +42,7 @@ use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
+const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
@@ -608,9 +609,8 @@ impl QwenImageEngine {
 
         // --- Phase 1: Text encoding (check cache first to skip encoder load) ---
         let use_cfg = req.guidance > 1.0;
-        let negative = req.negative_prompt.as_deref().unwrap_or("");
         let prompt_key = prompt_text_key(&req.prompt);
-        let uncond_key = prompt_text_key(negative);
+        let uncond_key = prompt_text_key(QWEN_EMPTY_NEGATIVE_PROMPT);
         let prompt_cached = self
             .prompt_cache
             .lock()
@@ -688,7 +688,7 @@ impl QwenImageEngine {
                     &self.base.progress,
                     &self.prompt_cache,
                     &mut text_encoder,
-                    negative,
+                    QWEN_EMPTY_NEGATIVE_PROMPT,
                     &device,
                     dtype,
                 )?;
@@ -732,15 +732,10 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
-        let mut transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
-
-        // Promote offloaded blocks to GPU now that text encoder VRAM is freed
-        if let QwenImageTransformer::Offloaded(ref mut offloaded) = transformer {
-            offloaded.promote_blocks_to_gpu()?;
-        }
 
         // Calculate latent dimensions: image_size / 8 (VAE downsample factor)
         let vae_downsample = 8;
@@ -771,30 +766,9 @@ impl QwenImageEngine {
             );
         }
 
-        // Pad cond/uncond to matching sequence lengths for CFG batching.
-        // Variable-length text encoding produces different lengths for cond vs uncond.
-        if use_cfg {
-            let cond_len = encoder_hidden_states.dim(1)?;
-            let uncond_len = uncond_hs.as_ref().unwrap().dim(1)?;
-            if cond_len != uncond_len {
-                let target = cond_len.max(uncond_len);
-                let pad_to = |hs: &Tensor, mask: &Tensor, len: usize, tgt: usize| -> Result<(Tensor, Tensor)> {
-                    if len == tgt { return Ok((hs.clone(), mask.clone())); }
-                    let pad_len = tgt - len;
-                    let hs_pad = Tensor::zeros((1, pad_len, hs.dim(2)?), hs.dtype(), hs.device())?;
-                    let mask_pad = Tensor::zeros((1, pad_len), DType::U8, mask.device())?;
-                    Ok((Tensor::cat(&[hs, &hs_pad], 1)?, Tensor::cat(&[mask, &mask_pad], 1)?))
-                };
-                let (chs, cmask) = pad_to(&encoder_hidden_states, &encoder_attention_mask, cond_len, target)?;
-                let (uhs, umask) = pad_to(uncond_hs.as_ref().unwrap(), uncond_mask.as_ref().unwrap(), uncond_len, target)?;
-                encoder_hidden_states = chs;
-                encoder_attention_mask = cmask;
-                uncond_hs = Some(uhs);
-                uncond_mask = Some(umask);
-            }
-        }
-
         // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
+        // Each forward pass streams 60 blocks CPU→GPU; batching cond+uncond avoids
+        // doing that twice per step.
         let (batched_hs, batched_mask) = if use_cfg {
             let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
             let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
@@ -810,47 +784,26 @@ impl QwenImageEngine {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let noise_pred = if use_cfg {
-                // For offloaded transformer: separate cond/uncond passes to halve peak VRAM
-                let is_offloaded = matches!(transformer, QwenImageTransformer::Offloaded(_));
-                let (cond_pred, uncond_pred) = if is_offloaded {
-                    let t_tensor =
-                        Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
-                    let cond_pred = transformer.forward(
-                        &latents,
-                        &t_tensor,
-                        &encoder_hidden_states,
-                        &encoder_attention_mask,
-                    )?;
-                    let uncond_pred = transformer.forward(
-                        &latents,
-                        &t_tensor,
-                        uncond_hs.as_ref().unwrap(),
-                        uncond_mask.as_ref().unwrap(),
-                    )?;
-                    (cond_pred, uncond_pred)
-                } else {
-                    let t_tensor =
-                        Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
-                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                    let batched_pred = transformer.forward(
-                        &batched_latents,
-                        &t_tensor,
-                        &batched_hs,
-                        &batched_mask,
-                    )?;
-                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
-                    (cond_pred, uncond_pred)
-                };
+                let t_tensor =
+                    Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
+                let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                let batched_pred =
+                    transformer.forward(&batched_latents, &t_tensor, &batched_hs, &batched_mask)?;
+                let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                let uncond_pred = batched_pred.narrow(0, 1, 1)?;
                 if step == 0 {
                     Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
                     Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
                 }
-                // CFG in F32 to avoid BF16 cancellation error
+                // CFG in F32 to avoid BF16 cancellation error, then norm rescale
+                // to match diffusers' Qwen-Image pipeline.
                 let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                 let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
-                let noise_pred = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
-                noise_pred.to_dtype(dtype)?
+                let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                rescaled.to_dtype(dtype)?
             } else {
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
                 transformer.forward(
@@ -1048,7 +1001,7 @@ impl InferenceEngine for QwenImageEngine {
         }
 
         // 2. Encode prompt
-        let (mut encoder_hidden_states, mut encoder_attention_mask) = Self::encode_prompt_cached(
+        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
             progress,
             &self.prompt_cache,
             &mut loaded.text_encoder,
@@ -1057,15 +1010,16 @@ impl InferenceEngine for QwenImageEngine {
             loaded.dtype,
         )?;
 
-        // Encode unconditional (negative) prompt for classifier-free guidance
+        // Encode unconditional prompt for classifier-free guidance.
+        // Qwen's published examples use a single space rather than a truly
+        // empty string for the negative prompt baseline.
         let use_cfg = req.guidance > 1.0;
-        let negative = req.negative_prompt.as_deref().unwrap_or("");
-        let (mut uncond_hs, mut uncond_mask) = if use_cfg {
+        let (uncond_hs, uncond_mask) = if use_cfg {
             let (hs, mask) = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
                 &mut loaded.text_encoder,
-                negative,
+                QWEN_EMPTY_NEGATIVE_PROMPT,
                 &loaded.device,
                 loaded.dtype,
             )?;
@@ -1078,13 +1032,6 @@ impl InferenceEngine for QwenImageEngine {
         if loaded.text_encoder.on_gpu {
             loaded.text_encoder.drop_weights();
             tracing::info!("Qwen2.5 text encoder dropped from GPU");
-        }
-
-        // Promote offloaded blocks to GPU now that text encoder VRAM is freed
-        if let Some(QwenImageTransformer::Offloaded(ref mut offloaded)) =
-            loaded.transformer
-        {
-            offloaded.promote_blocks_to_gpu()?;
         }
 
         // 3. Calculate latent dimensions
@@ -1116,28 +1063,6 @@ impl InferenceEngine for QwenImageEngine {
                 .as_ref()
                 .expect("transformer must be loaded for denoising");
 
-            // Pad cond/uncond to matching sequence lengths for CFG batching
-            if use_cfg {
-                let cond_len = encoder_hidden_states.dim(1)?;
-                let uncond_len = uncond_hs.as_ref().unwrap().dim(1)?;
-                if cond_len != uncond_len {
-                    let target = cond_len.max(uncond_len);
-                    let pad_to = |hs: &Tensor, mask: &Tensor, len: usize, tgt: usize| -> Result<(Tensor, Tensor)> {
-                        if len == tgt { return Ok((hs.clone(), mask.clone())); }
-                        let pad_len = tgt - len;
-                        let hs_pad = Tensor::zeros((1, pad_len, hs.dim(2)?), hs.dtype(), hs.device())?;
-                        let mask_pad = Tensor::zeros((1, pad_len), DType::U8, mask.device())?;
-                        Ok((Tensor::cat(&[hs, &hs_pad], 1)?, Tensor::cat(&[mask, &mask_pad], 1)?))
-                    };
-                    let (chs, cmask) = pad_to(&encoder_hidden_states, &encoder_attention_mask, cond_len, target)?;
-                    let (uhs, umask) = pad_to(uncond_hs.as_ref().unwrap(), uncond_mask.as_ref().unwrap(), uncond_len, target)?;
-                    encoder_hidden_states = chs;
-                    encoder_attention_mask = cmask;
-                    uncond_hs = Some(uhs);
-                    uncond_mask = Some(umask);
-                }
-            }
-
             // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
             let (batched_hs, batched_mask) = if use_cfg {
                 let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
@@ -1155,45 +1080,25 @@ impl InferenceEngine for QwenImageEngine {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let noise_pred = if use_cfg {
-                    // For offloaded transformer: separate cond/uncond passes to halve peak VRAM
-                    let is_offloaded = matches!(transformer, QwenImageTransformer::Offloaded(_));
-                    let (cond_pred, uncond_pred) = if is_offloaded {
-                        let t_tensor =
-                            Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
-                                .to_dtype(loaded.dtype)?;
-                        let cond_pred = transformer.forward(
-                            &latents,
-                            &t_tensor,
-                            &encoder_hidden_states,
-                            &encoder_attention_mask,
-                        )?;
-                        let uncond_pred = transformer.forward(
-                            &latents,
-                            &t_tensor,
-                            uncond_hs.as_ref().unwrap(),
-                            uncond_mask.as_ref().unwrap(),
-                        )?;
-                        (cond_pred, uncond_pred)
-                    } else {
-                        let t_tensor =
-                            Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
-                                .to_dtype(loaded.dtype)?;
-                        let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                        let batched_pred = transformer.forward(
-                            &batched_latents,
-                            &t_tensor,
-                            &batched_hs,
-                            &batched_mask,
-                        )?;
-                        let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                        let uncond_pred = batched_pred.narrow(0, 1, 1)?;
-                        (cond_pred, uncond_pred)
-                    };
-                    // CFG in F32 to avoid BF16 cancellation error
+                    let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?;
+                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                    let batched_pred = transformer.forward(
+                        &batched_latents,
+                        &t_tensor,
+                        &batched_hs,
+                        &batched_mask,
+                    )?;
+                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
+                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                    // CFG in F32 + norm rescale (matches diffusers Qwen-Image pipeline)
                     let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                     let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
-                    let noise_pred = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
-                    noise_pred.to_dtype(loaded.dtype)?
+                    let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                    let cond_norm = cond_f32.sqr()?.sum_keepdim(1)?.sqrt()?;
+                    let comb_norm = comb.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-8, f64::MAX)?;
+                    let rescaled = comb.broadcast_mul(&(cond_norm / comb_norm)?)?;
+                    rescaled.to_dtype(loaded.dtype)?
                 } else {
                     let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                         .to_dtype(loaded.dtype)?;

@@ -139,7 +139,9 @@ impl Module for FeedForward {
                 w2.forward(&x)
             }
             Self::Gelu { proj, out } => {
-                let x = proj.forward(x)?.gelu()?;
+                let x = proj
+                    .forward(x)?
+                    .apply(&candle_nn::Activation::GeluPytorchTanh)?;
                 out.forward(&x)
             }
         }

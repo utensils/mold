@@ -342,7 +342,8 @@ impl ApproximateGelu {
 
 impl Module for ApproximateGelu {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.apply(&self.proj)?.gelu()
+        x.apply(&self.proj)?
+            .apply(&candle_nn::Activation::GeluPytorchTanh)
     }
 }
 
