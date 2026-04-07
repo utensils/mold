@@ -113,8 +113,8 @@ Environment variables take precedence over config file values.
 
 ### Upscaling
 
-| Variable               | Default | Description                                                    |
-| ---------------------- | ------- | -------------------------------------------------------------- |
+| Variable                 | Default | Description                                                    |
+| ------------------------ | ------- | -------------------------------------------------------------- |
 | `MOLD_UPSCALE_MODEL`     | —       | Default upscaler model for `mold upscale`                      |
 | `MOLD_UPSCALE_TILE_SIZE` | —       | Tile size for memory-efficient upscaling (0 to disable tiling) |
 
