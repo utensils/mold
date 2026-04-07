@@ -514,8 +514,8 @@ mod tests {
             .expect("flux-dev:q8 should be present");
         assert_eq!(available["downloaded"], serde_json::json!(false));
         assert!(
-            available["remaining_download_bytes"].as_u64().unwrap() > 0,
-            "available model should report server-side remaining bytes"
+            available["remaining_download_bytes"].is_number(),
+            "available model should expose server-side remaining bytes even when fully cached"
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");

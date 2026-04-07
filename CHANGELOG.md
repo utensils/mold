@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Stale `.pulling` markers masking completed installs**: manifest-backed models now self-heal stale pull markers when all files are already present, so `mold run` prefers current manifest paths instead of falling back to stale config entries. Fixes Qwen-Image FP8/base shared-asset path regressions after interrupted or partially cleaned pulls
+- **Partial manifest installs now auto-repair on use**: local `mold run` detects missing downloadable assets even when stale config paths still resolve, runs the equivalent of `mold pull`, and only then loads the engine. This prevents low-level `file not found` failures when shared Qwen-Image assets were partially deleted
+- **Test isolation for live `MOLD_HOME` installs**: config and cleanup regressions now run under temp `MOLD_HOME`/`MOLD_MODELS_DIR`, and TUI gallery path tests follow the resolved mold dir instead of assuming `~/.mold`. This prevents workspace tests from touching live model caches
 - **Qwen-Image Metal text encoding**: Apple Metal/MPS `auto` now prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) on GPU, with real GGUF inference support and CUDA defaults left unchanged
 - **Qwen-Image BF16 sequential pressure on Metal**: when BF16 is still selected on Apple Metal/MPS, sequential mode keeps the existing CPU staging path after encoding to reduce unified-memory pressure during denoising
 - **Upscaler and utility models shown as installed**: `mold list` now correctly shows upscaler (Real-ESRGAN) and utility (qwen3-expand) models in the "Installed" section instead of "Available to pull" with a "cached" label. Root cause: `paths_from_downloads()` required a VAE component, which non-diffusion models don't have ([#184](https://github.com/utensils/mold/issues/184), [#186](https://github.com/utensils/mold/pull/186))

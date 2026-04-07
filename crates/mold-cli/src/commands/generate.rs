@@ -683,82 +683,135 @@ async fn prepare_local_engine(
     let (paths, auto_config);
     let effective_config: &Config;
     let mut req = req.clone();
-    match ModelPaths::resolve(&model_name, config) {
-        Some(p) => {
-            paths = p;
-            effective_config = config;
-        }
-        None => {
-            // Auto-pull: if a manifest exists, download the model automatically
-            if find_manifest(&model_name).is_some() {
-                status!(
-                    "{} Model '{}' not found locally, pulling...",
-                    theme::icon_info(),
-                    model_name.bold(),
-                );
-                let updated_config = super::pull::pull_and_configure(
-                    &model_name,
-                    &mold_core::download::PullOptions::default(),
-                )
-                .await?;
-                paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model '{}' was pulled but paths could not be resolved",
-                        model_name,
-                    )
-                })?;
-                auto_config = updated_config;
-                effective_config = &auto_config;
+    if config.manifest_model_needs_download(&model_name) {
+        status!(
+            "{} Model '{}' is missing local assets, pulling repair...",
+            theme::icon_info(),
+            model_name.bold(),
+        );
+        let updated_config = super::pull::pull_and_configure(
+            &model_name,
+            &mold_core::download::PullOptions::default(),
+        )
+        .await?;
+        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
+            anyhow::anyhow!(
+                "model '{}' was pulled but paths could not be resolved",
+                model_name,
+            )
+        })?;
+        auto_config = updated_config;
+        effective_config = &auto_config;
 
-                let model_cfg = effective_config.resolved_model_config(&model_name);
-                let new_model_w = model_cfg.effective_width(effective_config);
-                let new_model_h = model_cfg.effective_height(effective_config);
-                if cli_width.is_none() && cli_height.is_none() {
-                    if let Some(src_bytes) = &req.source_image {
-                        // img2img with auto-pull: fit source to newly-discovered model defaults
-                        if let Ok(img) = image::load_from_memory(src_bytes) {
-                            let (w, h) = fit_to_model_dimensions(
-                                img.width(),
-                                img.height(),
-                                new_model_w,
-                                new_model_h,
-                            );
-                            req.width = w;
-                            req.height = h;
-                        }
-                    }
-                } else {
-                    if cli_width.is_none() {
-                        req.width = new_model_w;
-                    }
-                    if cli_height.is_none() {
-                        req.height = new_model_h;
-                    }
+        let model_cfg = effective_config.resolved_model_config(&model_name);
+        let new_model_w = model_cfg.effective_width(effective_config);
+        let new_model_h = model_cfg.effective_height(effective_config);
+        if cli_width.is_none() && cli_height.is_none() {
+            if let Some(src_bytes) = &req.source_image {
+                // img2img with auto-pull: fit source to newly-discovered model defaults
+                if let Ok(img) = image::load_from_memory(src_bytes) {
+                    let (w, h) = fit_to_model_dimensions(
+                        img.width(),
+                        img.height(),
+                        new_model_w,
+                        new_model_h,
+                    );
+                    req.width = w;
+                    req.height = h;
                 }
-                if cli_steps.is_none() {
-                    req.steps = model_cfg.effective_steps(effective_config);
-                }
-                if cli_guidance.is_none() {
-                    req.guidance = model_cfg.effective_guidance();
-                }
-                status!(
-                    "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
-                    theme::icon_info(),
-                    req.width,
-                    req.height,
-                    req.steps,
-                    req.guidance,
-                );
-            } else {
-                anyhow::bail!(
-                    "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
-                     or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
-                     / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
-                    model_name,
-                    model_name,
-                );
+            }
+        } else {
+            if cli_width.is_none() {
+                req.width = new_model_w;
+            }
+            if cli_height.is_none() {
+                req.height = new_model_h;
             }
         }
+        if cli_steps.is_none() {
+            req.steps = model_cfg.effective_steps(effective_config);
+        }
+        if cli_guidance.is_none() {
+            req.guidance = model_cfg.effective_guidance();
+        }
+        status!(
+            "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
+            theme::icon_info(),
+            req.width,
+            req.height,
+            req.steps,
+            req.guidance,
+        );
+    } else if let Some(p) = ModelPaths::resolve(&model_name, config) {
+        paths = p;
+        effective_config = config;
+    } else if find_manifest(&model_name).is_some() {
+        status!(
+            "{} Model '{}' not found locally, pulling...",
+            theme::icon_info(),
+            model_name.bold(),
+        );
+        let updated_config = super::pull::pull_and_configure(
+            &model_name,
+            &mold_core::download::PullOptions::default(),
+        )
+        .await?;
+        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
+            anyhow::anyhow!(
+                "model '{}' was pulled but paths could not be resolved",
+                model_name,
+            )
+        })?;
+        auto_config = updated_config;
+        effective_config = &auto_config;
+
+        let model_cfg = effective_config.resolved_model_config(&model_name);
+        let new_model_w = model_cfg.effective_width(effective_config);
+        let new_model_h = model_cfg.effective_height(effective_config);
+        if cli_width.is_none() && cli_height.is_none() {
+            if let Some(src_bytes) = &req.source_image {
+                // img2img with auto-pull: fit source to newly-discovered model defaults
+                if let Ok(img) = image::load_from_memory(src_bytes) {
+                    let (w, h) = fit_to_model_dimensions(
+                        img.width(),
+                        img.height(),
+                        new_model_w,
+                        new_model_h,
+                    );
+                    req.width = w;
+                    req.height = h;
+                }
+            }
+        } else {
+            if cli_width.is_none() {
+                req.width = new_model_w;
+            }
+            if cli_height.is_none() {
+                req.height = new_model_h;
+            }
+        }
+        if cli_steps.is_none() {
+            req.steps = model_cfg.effective_steps(effective_config);
+        }
+        if cli_guidance.is_none() {
+            req.guidance = model_cfg.effective_guidance();
+        }
+        status!(
+            "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
+            theme::icon_info(),
+            req.width,
+            req.height,
+            req.steps,
+            req.guidance,
+        );
+    } else {
+        anyhow::bail!(
+            "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
+             or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
+             / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
+            model_name,
+            model_name,
+        );
     }
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;

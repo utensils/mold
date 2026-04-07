@@ -3,7 +3,7 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use crate::config::{Config, ModelConfig, ModelPaths};
-    use crate::manifest::{find_manifest, storage_path};
+    use crate::manifest::{find_manifest, known_manifests, storage_path};
     use crate::test_support::ENV_LOCK;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -31,6 +31,14 @@ mod tests {
         }
     }
 
+    fn create_pulling_marker(root: &std::path::Path, model: &str) {
+        let path = root.join(crate::download::pulling_marker_rel_path(model));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"pulling").unwrap();
+    }
+
     // ── Config deserialization ────────────────────────────────────────────────
 
     #[test]
@@ -47,7 +55,13 @@ mod tests {
 
     #[test]
     fn config_load_or_default_missing_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("missing-config");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
         let cfg = Config::load_or_default();
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
         assert!(!cfg.default_model.is_empty());
     }
 
@@ -2304,6 +2318,142 @@ qwen3_variant = "iq4"
             paths.is_some(),
             "utility model with files on disk should produce ModelPaths"
         );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn qwen_image_fp8_stale_marker_does_not_fall_back_to_stale_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("qwen-image-fp8-stale-marker");
+        populate_manifest_files(&dir, "qwen-image:fp8");
+        create_pulling_marker(&dir, "qwen-image:fp8");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+
+        let mut models = HashMap::new();
+        models.insert(
+            "qwen-image:fp8".to_string(),
+            ModelConfig {
+                transformer: Some("/cfg/stale-transformer.safetensors".to_string()),
+                vae: Some("/cfg/stale-vae.safetensors".to_string()),
+                text_encoder_files: Some(vec!["/cfg/stale-text-encoder.safetensors".to_string()]),
+                text_tokenizer: Some("/cfg/stale-tokenizer.json".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+
+        let paths = ModelPaths::resolve("qwen-image:fp8", &cfg).unwrap();
+        assert!(
+            paths.transformer.starts_with(&dir),
+            "resolver should prefer manifest-discovered transformer over stale config"
+        );
+        assert_eq!(
+            paths.vae,
+            dir.join("shared/qwen-image-base/vae/diffusion_pytorch_model.safetensors")
+        );
+        assert_eq!(
+            paths.text_encoder_files,
+            vec![
+                dir.join("shared/qwen-image-base/text_encoder/model-00001-of-00004.safetensors"),
+                dir.join("shared/qwen-image-base/text_encoder/model-00002-of-00004.safetensors"),
+                dir.join("shared/qwen-image-base/text_encoder/model-00003-of-00004.safetensors"),
+                dir.join("shared/qwen-image-base/text_encoder/model-00004-of-00004.safetensors"),
+            ]
+        );
+        assert_eq!(
+            paths.text_tokenizer,
+            Some(dir.join("shared/qwen-image/tokenizer.json"))
+        );
+        let marker_path = dir.join(crate::download::pulling_marker_rel_path("qwen-image:fp8"));
+        assert!(
+            !marker_path.exists(),
+            "stale marker should be self-healed after successful manifest discovery: {}",
+            marker_path.display()
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_model_needs_download_for_partial_qwen_image_install() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("partial-qwen-image-2512");
+        populate_manifest_files(&dir, "qwen-image-2512:q4");
+
+        std::fs::remove_file(dir.join("shared/qwen-image/tokenizer.json")).unwrap();
+        std::fs::remove_file(
+            dir.join("shared/qwen-image/text_encoder/model-00002-of-00004.safetensors"),
+        )
+        .unwrap();
+
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+
+        let mut models = HashMap::new();
+        models.insert(
+            "qwen-image-2512:q4".to_string(),
+            ModelConfig {
+                transformer: Some("/cfg/qwen-image-2512-q4.gguf".to_string()),
+                vae: Some("/cfg/vae.safetensors".to_string()),
+                text_encoder_files: Some(vec![
+                    "/cfg/text-encoder-1.safetensors".to_string(),
+                    "/cfg/text-encoder-2.safetensors".to_string(),
+                ]),
+                text_tokenizer: Some("/cfg/tokenizer.json".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let cfg = Config {
+            models,
+            ..Config::default()
+        };
+
+        assert!(
+            cfg.manifest_model_needs_download("qwen-image-2512:q4"),
+            "partial manifest installs must trigger a repair pull instead of falling back to stale config"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_pull_markers_self_heal_for_all_manifests_with_complete_files() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("all-manifests-stale-marker");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+
+        for manifest in known_manifests() {
+            if manifest.is_auxiliary() {
+                continue;
+            }
+            populate_manifest_files(&dir, &manifest.name);
+            create_pulling_marker(&dir, &manifest.name);
+
+            assert!(
+                cfg.manifest_model_is_downloaded(&manifest.name),
+                "{} should be treated as downloaded when all files exist",
+                manifest.name
+            );
+            assert!(
+                cfg.discovered_manifest_paths(&manifest.name).is_some(),
+                "{} should resolve manifest paths even with a stale marker",
+                manifest.name
+            );
+            let marker_path = dir.join(crate::download::pulling_marker_rel_path(&manifest.name));
+            assert!(
+                !marker_path.exists(),
+                "{} stale marker should be removed: {}",
+                manifest.name,
+                marker_path.display()
+            );
+        }
+
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(dir);
     }
