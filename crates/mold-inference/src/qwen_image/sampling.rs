@@ -29,6 +29,9 @@ fn time_shift_exponential(mu: f64, sigma: f64, t: f64) -> f64 {
 fn stretch_shift_to_terminal(sigmas: &mut [f64]) {
     let one_minus_terminal = 1.0 - SHIFT_TERMINAL;
     let one_minus_z = 1.0 - sigmas[sigmas.len() - 1];
+    if one_minus_z.abs() < 1e-12 {
+        return;
+    }
     let scale_factor = one_minus_z / one_minus_terminal;
     for sigma in sigmas.iter_mut() {
         *sigma = 1.0 - ((1.0 - *sigma) / scale_factor);
@@ -148,5 +151,12 @@ mod tests {
         let mut sigmas: Vec<f64> = vec![1.0, 0.5];
         stretch_shift_to_terminal(&mut sigmas);
         assert!((sigmas[1] - SHIFT_TERMINAL).abs() < 1e-10);
+    }
+
+    #[test]
+    fn stretch_shift_handles_single_step_schedule() {
+        let mut sigmas = vec![1.0];
+        stretch_shift_to_terminal(&mut sigmas);
+        assert_eq!(sigmas, vec![1.0]);
     }
 }

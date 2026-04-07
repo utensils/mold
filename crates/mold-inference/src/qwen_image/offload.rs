@@ -30,10 +30,14 @@ fn linear_to_device(l: &Linear, dev: &Device) -> Result<Linear> {
     Ok(Linear::new(w, b))
 }
 
-fn rms_norm_to_device(rn: &candle_nn::RmsNorm, dev: &Device) -> Result<candle_nn::RmsNorm> {
+fn rms_norm_to_device(
+    rn: &candle_nn::RmsNorm,
+    eps: f64,
+    dev: &Device,
+) -> Result<candle_nn::RmsNorm> {
     let cloned = rn.clone();
     let w = cloned.into_inner().weight().to_device(dev)?;
-    Ok(candle_nn::RmsNorm::new(w, 1e-6))
+    Ok(candle_nn::RmsNorm::new(w, eps))
 }
 
 fn load_rms_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<candle_nn::RmsNorm> {
@@ -115,6 +119,7 @@ struct JointAttention {
     norm_added_k: candle_nn::RmsNorm,
     n_heads: usize,
     head_dim: usize,
+    norm_eps: f64,
 }
 
 impl JointAttention {
@@ -141,6 +146,7 @@ impl JointAttention {
             norm_added_k: load_rms_norm(head_dim, 1e-6, vb.pp("norm_added_k"))?,
             n_heads,
             head_dim,
+            norm_eps: cfg.norm_eps,
         })
     }
 
@@ -154,12 +160,13 @@ impl JointAttention {
             add_k_proj: linear_to_device(&self.add_k_proj, dev)?,
             add_v_proj: linear_to_device(&self.add_v_proj, dev)?,
             add_out_proj: linear_to_device(&self.add_out_proj, dev)?,
-            norm_q: rms_norm_to_device(&self.norm_q, dev)?,
-            norm_k: rms_norm_to_device(&self.norm_k, dev)?,
-            norm_added_q: rms_norm_to_device(&self.norm_added_q, dev)?,
-            norm_added_k: rms_norm_to_device(&self.norm_added_k, dev)?,
+            norm_q: rms_norm_to_device(&self.norm_q, self.norm_eps, dev)?,
+            norm_k: rms_norm_to_device(&self.norm_k, self.norm_eps, dev)?,
+            norm_added_q: rms_norm_to_device(&self.norm_added_q, self.norm_eps, dev)?,
+            norm_added_k: rms_norm_to_device(&self.norm_added_k, self.norm_eps, dev)?,
             n_heads: self.n_heads,
             head_dim: self.head_dim,
+            norm_eps: self.norm_eps,
         })
     }
 

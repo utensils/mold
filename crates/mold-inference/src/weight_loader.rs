@@ -18,7 +18,6 @@ use crate::progress::ProgressReporter;
 /// per-layer FP8→BF16 dequantization (with optional scale) during forward.
 pub(crate) struct NativeFp8Backend {
     inner: candle_core::safetensors::MmapedSafetensors,
-    device: Device,
 }
 
 impl candle_nn::var_builder::SimpleBackend for NativeFp8Backend {
@@ -28,10 +27,10 @@ impl candle_nn::var_builder::SimpleBackend for NativeFp8Backend {
         path: &str,
         _: candle_nn::Init,
         _dtype: DType,
-        _dev: &Device,
+        dev: &Device,
     ) -> candle_core::Result<Tensor> {
         // Load at native dtype — no casting
-        let tensor = self.inner.load(path, &self.device)?;
+        let tensor = self.inner.load(path, dev)?;
         if tensor.shape() != &s {
             Err(candle_core::Error::UnexpectedShape {
                 msg: format!("shape mismatch for {path}"),
@@ -77,10 +76,7 @@ pub fn load_fp8_safetensors<'a>(
     progress.weight_load(component, 0, bytes_total);
 
     let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&path_refs)? };
-    let backend = NativeFp8Backend {
-        inner: tensors,
-        device: device.clone(),
-    };
+    let backend = NativeFp8Backend { inner: tensors };
     let vb = VarBuilder::from_backend(Box::new(backend), DType::BF16, device.clone());
 
     progress.weight_load(component, bytes_total, bytes_total);
