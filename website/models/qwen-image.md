@@ -3,6 +3,12 @@
 Qwen2.5-VL text encoder with a 3D causal VAE (2D temporal-slice) and
 flow-matching with classifier-free guidance.
 
+![Winter cabin — Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
+_"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_ — **qwen-image-2512:q4**, 50 steps, seed 888
+
+![Hot air balloon — Qwen-Image 2512 Q4](/gallery/qwen-image-balloon.png)
+_"A colorful hot air balloon floating over a misty valley at sunrise, the balloon has the word MOLD written on the side"_ — **qwen-image-2512:q4**, 50 steps, seed 314
+
 - **Developer**: [Alibaba / Qwen Team](https://huggingface.co/Qwen)
 - **License**: Apache 2.0
 - **Upstream releases**:

@@ -4,6 +4,12 @@ A text-to-video generation model from [Lightricks](https://lightricks.com),
 based on a DiT (Diffusion Transformer) architecture with T5-XXL text encoding
 and a 3D causal video VAE. Generates short video clips from text prompts.
 
+![Northern lights — LTX Video 0.9.6 distilled](/gallery/ltx-aurora.webp)
+_"Northern lights dancing over a frozen lake in Iceland, green and purple aurora ribbons reflected in the ice"_ — **ltx-video-0.9.6-distilled:bf16**, 8 steps, 33 frames, seed 1234
+
+![Jellyfish — LTX Video 0.9.6 distilled](/gallery/ltx-jellyfish.webp)
+_"Underwater footage of a jellyfish pulsing through deep blue water, bioluminescent glow, particles floating"_ — **ltx-video-0.9.6-distilled:bf16**, 8 steps, 33 frames, seed 707
+
 - **Developer**: [Lightricks](https://huggingface.co/Lightricks)
 - **License**: LTXV Open Weights License (custom, revenue-gated at $10M)
 - **HuggingFace**:
