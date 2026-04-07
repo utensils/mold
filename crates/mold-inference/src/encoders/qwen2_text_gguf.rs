@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-const MAX_ROPE_POSITIONS: usize = 1024;
+// Qwen-Image tokenization pads to TOKENIZER_WINDOW + template strip prefix,
+// so the GGUF path must support sequences comfortably above 1024 tokens.
+const MAX_ROPE_POSITIONS: usize = 2048;
 
 struct RmsNorm {
     weight: Tensor,
@@ -196,6 +198,22 @@ pub(crate) struct GgufQwen2TextEncoder {
     sin: Tensor,
     device: Device,
     dtype: DType,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rope_cache_covers_qwen_image_padded_sequence_window() {
+        let device = Device::Cpu;
+        let head_dim = 64;
+        let seq_len = 1056;
+        let (cos, sin) = compute_rope(head_dim, 1_000_000.0, MAX_ROPE_POSITIONS, &device).unwrap();
+        let x = Tensor::zeros((1, 2, seq_len, head_dim), DType::F32, &device).unwrap();
+        let rotated = apply_rotary_emb(&x, &cos, &sin, head_dim).unwrap();
+        assert_eq!(rotated.dims4().unwrap(), (1, 2, seq_len, head_dim));
+    }
 }
 
 impl GgufQwen2TextEncoder {
