@@ -506,7 +506,7 @@ impl OffloadedQwenImageTransformer {
         // Measure free VRAM after stem layers and decide how many blocks fit
         gpu_device.synchronize()?;
         let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention workspace
+        const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
         let vram_budget = free_vram.saturating_sub(VRAM_HEADROOM);
 
         // Load first block on CPU to measure actual size
@@ -602,7 +602,7 @@ impl OffloadedQwenImageTransformer {
         self.gpu_device.synchronize()?;
 
         let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention workspace
+        const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
         let available = free_vram.saturating_sub(VRAM_HEADROOM);
 
         // Compute actual block size from weights
