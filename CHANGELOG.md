@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Qwen-Image CUDA black images**: reverted Metal GGUF denoising optimization (#207) that replaced the per-forward BF16 dequantization path with QMatMul/F32 globally, breaking CUDA inference. Restores `DequantLinear` BF16 path that works on both CUDA and Metal
-
 ## [0.6.0] - 2026-04-07
 
 ### Added
@@ -36,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Qwen-Image CUDA black images**: Metal GGUF denoising optimization (#207) replaced per-forward BF16 dequantization with QMatMul/F32 globally, breaking CUDA inference. Fixed with device-gated dispatch — BF16 dequant on CUDA, QMatMul on Metal, F32 on CPU ([#207](https://github.com/utensils/mold/pull/207))
 - **Qwen-Image Metal performance**: quantized GGUF transformer uses Candle's quantized linear path and caches RoPE tensors, improving Q4 denoising from ~0.03 it/s to ~0.15 it/s on M4 Max ([#202](https://github.com/utensils/mold/issues/202))
 - **Qwen-Image GGUF prompt adherence**: restored combined padding + causal attention masking in Qwen2 text encoder ([#178](https://github.com/utensils/mold/issues/178))
 - **Qwen-Image Metal text encoding**: `auto` now prefers quantized GGUF encoders on Metal/MPS
