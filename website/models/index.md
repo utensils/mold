@@ -17,21 +17,21 @@ and VRAM requirements — including both image and video generation.
 
 ## VRAM Guide
 
-| Model                               | Variant | Approx. VRAM | Speed              | Quality                                  |
-| ----------------------------------- | ------- | ------------ | ------------------ | ---------------------------------------- |
-| `flux-schnell:q8`                   | Q8      | ~12 GB       | Fast, 4 steps      | Good                                     |
-| `flux-schnell:q6`                   | Q6      | ~14 GB       | Fast, 4 steps      | Better than Q8                           |
-| `flux-dev:q4`                       | Q4      | ~8 GB        | Slow, 25 steps     | Excellent                                |
-| `flux-dev:q6`                       | Q6      | ~10 GB       | Slow, 25 steps     | Best FLUX quality/size trade             |
-| `flux-dev:bf16`                     | BF16    | ~24 GB       | Slow, 25 steps     | Best FLUX quality                        |
-| `flux2-klein:q4`                    | Q4      | ~4 GB        | Fast, 4 steps      | Good for very small GPUs                 |
-| `z-image-turbo:q8`                  | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                                |
-| `sdxl-turbo:fp16`                   | FP16    | ~10 GB       | Very fast, 4 steps | Good                                     |
-| `sd15:fp16`                         | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem                    |
-| `qwen-image:q4`                     | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                |
-| `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                |
-| `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768              |
-| `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default                  |
+| Model                               | Variant | Approx. VRAM | Speed              | Quality                                   |
+| ----------------------------------- | ------- | ------------ | ------------------ | ----------------------------------------- |
+| `flux-schnell:q8`                   | Q8      | ~12 GB       | Fast, 4 steps      | Good                                      |
+| `flux-schnell:q6`                   | Q6      | ~14 GB       | Fast, 4 steps      | Better than Q8                            |
+| `flux-dev:q4`                       | Q4      | ~8 GB        | Slow, 25 steps     | Excellent                                 |
+| `flux-dev:q6`                       | Q6      | ~10 GB       | Slow, 25 steps     | Best FLUX quality/size trade              |
+| `flux-dev:bf16`                     | BF16    | ~24 GB       | Slow, 25 steps     | Best FLUX quality                         |
+| `flux2-klein:q4`                    | Q4      | ~4 GB        | Fast, 4 steps      | Good for very small GPUs                  |
+| `z-image-turbo:q8`                  | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                                 |
+| `sdxl-turbo:fp16`                   | FP16    | ~10 GB       | Very fast, 4 steps | Good                                      |
+| `sd15:fp16`                         | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem                     |
+| `qwen-image:q4`                     | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                 |
+| `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                 |
+| `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768               |
+| `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default                   |
 | `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7+3 steps    | Newer video checkpoint, multiscale refine |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB

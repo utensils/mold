@@ -779,6 +779,7 @@ impl LtxVideoEngine {
         Ok(AutoencoderKLLtxVideo::new(preset.vae_config.clone(), vb)?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn denoise_pass(
         &self,
         transformer: &mut LtxVideoTransformer3DModel,
