@@ -189,7 +189,7 @@ Default model if none specified: `flux2-klein:q8`
 | `qwen-image` | 50 | 4.0 | 1328x1328 |
 | `qwen-image-2512` | 50 | 4.0 | 1328x1328 |
 | `ltx-video-0.9.6-distilled` | 8 | 1.0 | 1216x704 (25 frames, 30fps) |
-| `ltx-video-0.9.8-2b-distilled` | 7 | 1.0 | 1216x704 (25 frames, 30fps, multiscale refine) |
+| `ltx-video-0.9.8-2b-distilled` | 7+3 | 1.0 | 1216x704 (25 frames, 30fps, multiscale refine) |
 
 ### Available Models
 
