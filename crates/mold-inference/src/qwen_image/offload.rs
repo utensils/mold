@@ -382,12 +382,6 @@ impl TimestepProjEmbeddings {
             linear2: linear(inner_dim, inner_dim, vb.pp("linear_2"))?,
         })
     }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            linear1: linear_to_device(&self.linear1, dev)?,
-            linear2: linear_to_device(&self.linear2, dev)?,
-        })
-    }
     fn forward(&self, t: &Tensor) -> Result<Tensor> {
         let device = t.device();
         let dtype = self.linear1.weight().dtype();
@@ -418,13 +412,6 @@ impl OutputLayer {
             norm_final: LayerNormNoParams::new(1e-6),
             proj_out: linear(inner_dim, output_dim, vb.pp("proj_out"))?,
             adaln_linear: linear(inner_dim, 2 * inner_dim, vb.pp("norm_out").pp("linear"))?,
-        })
-    }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            norm_final: self.norm_final.clone(),
-            proj_out: linear_to_device(&self.proj_out, dev)?,
-            adaln_linear: linear_to_device(&self.adaln_linear, dev)?,
         })
     }
     fn forward(&self, x: &Tensor, temb: &Tensor) -> Result<Tensor> {
