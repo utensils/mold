@@ -1217,6 +1217,7 @@ is_schnell = false
             transformer: PathBuf::from("/tmp/transformer.gguf"),
             transformer_shards: Vec::new(),
             vae: PathBuf::from("/tmp/vae.safetensors"),
+            spatial_upscaler: None,
             t5_encoder: None,
             clip_encoder: None,
             t5_tokenizer: None,

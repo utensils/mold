@@ -67,6 +67,11 @@ Video output defaults to APNG (lossless, metadata-rich). Also supports GIF
 Use `--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
 Dimensions must be multiples of 32.
 
+The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
+`0.9.8` family is available and pulls its spatial upscaler asset, but mold
+currently runs only the first `0.9.8` pass rather than the full multiscale
+refinement path.
+
 ## Notes
 
 - ControlNet is currently available only for SD 1.5.

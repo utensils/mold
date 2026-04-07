@@ -5,33 +5,34 @@ and VRAM requirements — including both image and video generation.
 
 ## Choosing a Model
 
-| Need              | Recommended                     | Why                            |
-| ----------------- | ------------------------------- | ------------------------------ |
-| Fast iterations   | `flux2-klein:q8`                | 4 steps, ungated, Apache 2.0   |
-| Best quality      | `flux-dev:q4`                   | 25 steps, excellent detail     |
-| Low VRAM (<8 GB)  | `flux2-klein:q4`                | 2.6 GB, 4 steps                |
-| Classic ecosystem | `sd15:fp16` or `dreamshaper-v8` | Huge model library, ControlNet |
-| Fast + great      | `z-image-turbo:q8`              | 9 steps, excellent quality     |
-| SDXL              | `sdxl-turbo:fp16`               | 4 steps, 1024x1024             |
-| **Video**         | `ltx-video-0.9.5:bf16`          | Text-to-video, 24fps, APNG/MP4 |
+| Need              | Recommended                      | Why                                                    |
+| ----------------- | -------------------------------- | ------------------------------------------------------ |
+| Fast iterations   | `flux2-klein:q8`                 | 4 steps, ungated, Apache 2.0                           |
+| Best quality      | `flux-dev:q4`                    | 25 steps, excellent detail                             |
+| Low VRAM (<8 GB)  | `flux2-klein:q4`                 | 2.6 GB, 4 steps                                        |
+| Classic ecosystem | `sd15:fp16` or `dreamshaper-v8`  | Huge model library, ControlNet                         |
+| Fast + great      | `z-image-turbo:q8`               | 9 steps, excellent quality                             |
+| SDXL              | `sdxl-turbo:fp16`                | 4 steps, 1024x1024                                     |
+| **Video**         | `ltx-video-0.9.6-distilled:bf16` | Text-to-video, 30fps, APNG/MP4, best-supported default |
 
 ## VRAM Guide
 
-| Model                  | Variant | Approx. VRAM | Speed              | Quality                      |
-| ---------------------- | ------- | ------------ | ------------------ | ---------------------------- |
-| `flux-schnell:q8`      | Q8      | ~12 GB       | Fast, 4 steps      | Good                         |
-| `flux-schnell:q6`      | Q6      | ~14 GB       | Fast, 4 steps      | Better than Q8               |
-| `flux-dev:q4`          | Q4      | ~8 GB        | Slow, 25 steps     | Excellent                    |
-| `flux-dev:q6`          | Q6      | ~10 GB       | Slow, 25 steps     | Best FLUX quality/size trade |
-| `flux-dev:bf16`        | BF16    | ~24 GB       | Slow, 25 steps     | Best FLUX quality            |
-| `flux2-klein:q4`       | Q4      | ~4 GB        | Fast, 4 steps      | Good for very small GPUs     |
-| `z-image-turbo:q8`     | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                    |
-| `sdxl-turbo:fp16`      | FP16    | ~10 GB       | Very fast, 4 steps | Good                         |
-| `sd15:fp16`            | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem        |
-| `qwen-image:q4`        | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
-| `qwen-image-2512:q4`   | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024    |
-| `qwen-image:q8`        | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768  |
-| `ltx-video-0.9.5:bf16` | BF16    | ~10 GB       | Slow, 40 steps     | Video, sharp (1024-ch VAE)   |
+| Model                               | Variant | Approx. VRAM | Speed              | Quality                                  |
+| ----------------------------------- | ------- | ------------ | ------------------ | ---------------------------------------- |
+| `flux-schnell:q8`                   | Q8      | ~12 GB       | Fast, 4 steps      | Good                                     |
+| `flux-schnell:q6`                   | Q6      | ~14 GB       | Fast, 4 steps      | Better than Q8                           |
+| `flux-dev:q4`                       | Q4      | ~8 GB        | Slow, 25 steps     | Excellent                                |
+| `flux-dev:q6`                       | Q6      | ~10 GB       | Slow, 25 steps     | Best FLUX quality/size trade             |
+| `flux-dev:bf16`                     | BF16    | ~24 GB       | Slow, 25 steps     | Best FLUX quality                        |
+| `flux2-klein:q4`                    | Q4      | ~4 GB        | Fast, 4 steps      | Good for very small GPUs                 |
+| `z-image-turbo:q8`                  | Q8      | ~10 GB       | Fast, 9 steps      | Excellent                                |
+| `sdxl-turbo:fp16`                   | FP16    | ~10 GB       | Very fast, 4 steps | Good                                     |
+| `sd15:fp16`                         | FP16    | ~6 GB        | Medium, 25 steps   | Good, broad ecosystem                    |
+| `qwen-image:q4`                     | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                |
+| `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps     | Good, stable at 1024x1024                |
+| `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768              |
+| `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default                  |
+| `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7 steps      | Newer video checkpoint, first pass today |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),

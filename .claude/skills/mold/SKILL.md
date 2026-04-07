@@ -130,22 +130,24 @@ Generate video clips with LTX Video models. Output defaults to APNG (lossless, w
 
 ```bash
 # Basic video generation (25 frames, APNG output)
-mold run ltx-video-0.9.5:bf16 "a cat walking across a windowsill" --frames 25
+mold run ltx-video-0.9.6-distilled:bf16 "a cat walking across a windowsill" --frames 25
 
 # Custom frame count (must be 8n+1: 9, 17, 25, 33, 49, ...)
-mold run ltx-video-0.9.5:bf16 "ocean waves at sunset" --frames 49 --steps 40
+mold run ltx-video-0.9.8-2b-distilled:bf16 "ocean waves at sunset" --frames 49
 
 # MP4 output (QuickTime compatible)
-mold run ltx-video-0.9.5:bf16 "a campfire at night" --frames 17 --format mp4
+mold run ltx-video-0.9.6-distilled:bf16 "a campfire at night" --frames 17 --format mp4
 
 # GIF for pipe-friendly output
-mold run ltx-video-0.9.5:bf16 "a sunset" --format gif | mpv -
+mold run ltx-video-0.9.6-distilled:bf16 "a sunset" --format gif | mpv -
 
 # WebP animated output
-mold run ltx-video-0.9.5:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
+mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```
 
-**Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Default: 768x512, 25 frames, 24 fps, 40 steps, guidance 3.0.
+**Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Current LTX defaults are 1216x704, 25 frames, 30 fps. Distilled models use fewer steps.
+
+**Current status:** `ltx-video-0.9.6-distilled:bf16` is the safest default. The `0.9.8` models require a spatial upscaler asset, which mold now pulls and resolves explicitly. mold currently runs the `0.9.8` first pass, but not the second multiscale refinement pass, so `0.9.8` is not yet at full upstream quality parity.
 
 **Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
 
@@ -165,7 +167,8 @@ Pick the right model for the task:
 | `qwen-image:q4` | Slow (50 steps) | Good | Stable base Qwen GGUF on 24 GB cards |
 | `qwen-image-2512:q4` | Slow (50 steps) | Good | Stable 2512 GGUF on 24 GB cards |
 | `qwen-image:q8` | Slow (50 steps) | Better | Best base GGUF quality, validated at 768x768 on 24 GB |
-| `ltx-video-0.9.5:bf16` | Slow (40 steps) | Good | Text-to-video, 24fps |
+| `ltx-video-0.9.6-distilled:bf16` | Fast (8 steps) | Good | Text-to-video, 30fps |
+| `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7 steps) | Better first pass | Newer checkpoint family, first-pass only today |
 
 Default model if none specified: `flux2-klein:q8`
 
@@ -184,7 +187,8 @@ Default model if none specified: `flux2-klein:q8`
 | `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
 | `qwen-image` | 50 | 4.0 | 1328x1328 |
 | `qwen-image-2512` | 50 | 4.0 | 1328x1328 |
-| `ltx-video-0.9.5` | 40 | 3.0 | 768x512 (25 frames, 24fps) |
+| `ltx-video-0.9.6-distilled` | 8 | 1.0 | 1216x704 (25 frames, 30fps) |
+| `ltx-video-0.9.8-2b-distilled` | 7 | 1.0 | 1216x704 (25 frames, 30fps, first pass) |
 
 ### Available Models
 
@@ -209,6 +213,8 @@ Default model if none specified: `flux2-klein:q8`
 **Qwen-Image**: `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q5`, `qwen-image:q4`, `qwen-image:q3`, `qwen-image:q2`, `qwen-image:fp8`, `qwen-image:bf16`
 
 **Qwen-Image-2512**: `qwen-image-2512:q8`, `qwen-image-2512:q6`, `qwen-image-2512:q5`, `qwen-image-2512:q4`, `qwen-image-2512:q3`, `qwen-image-2512:q2`, `qwen-image-lightning:fp8`, `qwen-image-lightning:fp8-8step`, `qwen-image-2512:bf16`
+
+**LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
 
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 

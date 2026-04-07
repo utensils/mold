@@ -1295,6 +1295,7 @@ mod tests {
                 transformer: PathBuf::from("/tmp/qwen-image-Q4_K_S.gguf"),
                 transformer_shards: vec![],
                 vae: PathBuf::from("/tmp/vae.safetensors"),
+                spatial_upscaler: None,
                 t5_encoder: None,
                 clip_encoder: None,
                 t5_tokenizer: None,

@@ -56,25 +56,29 @@ dimensions and aspect ratios.
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video model family. Video
-output is encoded as animated GIF.
+output defaults to APNG, with GIF, WebP, and MP4 also supported.
 
 ```bash
-# Generate a 25-frame video clip (default for LTX Video)
-mold run ltx-video-0.9.5:bf16 "A cat walking across a sunlit windowsill"
+# Generate a 25-frame video clip with the fast distilled path
+mold run ltx-video-0.9.6-distilled:bf16 "A cat walking across a sunlit windowsill"
 
 # Custom frame count (must be 8n+1: 9, 17, 25, 33, 49, 97, ...)
-mold run ltx-video-0.9.5:bf16 "Ocean waves at sunset" --frames 33
+mold run ltx-video-0.9.8-2b-distilled:bf16 "Ocean waves at sunset" --frames 33
 
-# Custom FPS (default: 24)
-mold run ltx-video-0.9.5:bf16 "A timelapse of clouds" --frames 49 --fps 30
+# Custom FPS (current LTX defaults use 30 FPS)
+mold run ltx-video-0.9.6:bf16 "A timelapse of clouds" --frames 49 --fps 30
 
 # Pipe to a video player
-mold run ltx-video-0.9.5:bf16 "A robot dancing" | mpv -
+mold run ltx-video-0.9.6-distilled:bf16 "A robot dancing" | mpv -
 
-# Convert GIF to MP4 via ffmpeg
-mold run ltx-video-0.9.5:bf16 "A waterfall" -o waterfall.gif
-ffmpeg -i waterfall.gif -movflags faststart -pix_fmt yuv420p waterfall.mp4
+# Direct MP4 output
+mold run ltx-video-0.9.6-distilled:bf16 "A waterfall" --format mp4 -o waterfall.mp4
 ```
+
+`ltx-video-0.9.6-distilled:bf16` is the recommended default today. The
+`0.9.8` family is available and now pulls the required spatial upscaler asset,
+but mold currently runs only the first `0.9.8` pass rather than the full
+multiscale refinement path.
 
 ::: tip Frame count constraint
 LTX Video requires frame counts of the form **8n+1** (9, 17, 25, 33, 49, 97,
@@ -85,11 +89,11 @@ with a helpful error message.
 ::: warning VRAM usage
 LTX Video uses sequential load-use-drop to manage VRAM: T5 encoder loads first,
 then drops before the transformer loads, then the transformer drops before VAE
-decode. Peak VRAM is ~10-12 GB for the BF16 pipeline at 768×512 resolution.
+decode. Peak VRAM depends heavily on the selected LTX checkpoint.
 :::
 
-Video dimensions must be multiples of 32 (not 16 like images). Recommended:
-768×512, 512×768, or 512×512.
+Video dimensions must be multiples of 32 (not 16 like images). Current LTX
+defaults use 1216×704 at 30 FPS.
 
 ## Negative Prompts
 

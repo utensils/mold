@@ -1,6 +1,6 @@
 //! LTX Video inference engine — text-to-video generation.
 //!
-//! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → GIF
+//! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → APNG/GIF/WebP/MP4
 //! Follows the same patterns as Flux2Engine (drop-and-reload, VRAM management, progress).
 
 use std::sync::{Arc, Mutex};
@@ -10,6 +10,9 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::{
+    sampling::{
+        FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+    },
     transformer::{LtxVideoTransformer3DModel, LtxVideoTransformer3DModelConfig},
     vae::{AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig},
 };
@@ -33,9 +36,183 @@ const VAE_SPATIAL_COMPRESSION: usize = 32;
 const VAE_TEMPORAL_COMPRESSION: usize = 8;
 /// Latent channels in the VAE.
 const LATENT_CHANNELS: usize = 128;
-/// Patch sizes (both 1 for LTX Video v0.9.5).
+/// Patch sizes (both 1 for current LTX Video checkpoints).
 const PATCH_SIZE: usize = 1;
 const PATCH_SIZE_T: usize = 1;
+
+const LTX_098_DISTILLED_FIRST_PASS_SIGMAS: &[f32] =
+    &[1.0000, 0.9937, 0.9875, 0.9812, 0.9750, 0.9094, 0.7250];
+const LTX_096_DEV_SKIP_BLOCKS: &[usize] = &[19];
+// The upstream 2B 0.9.8 distilled YAML uses skip block 42 for both passes, but
+// Candle skip blocks map directly to transformer layer indices and the 2B model
+// only exposes 28 layers. Keep the effective first-pass behavior explicit until
+// multiscale/STG parity work lands.
+const LTX_098_2B_DISTILLED_SKIP_BLOCKS: &[usize] = &[];
+const LTX_098_13B_DISTILLED_SKIP_BLOCKS: &[usize] = &[42];
+const LTX_098_13B_DEV_SKIP_BLOCKS: &[usize] = &[28];
+
+fn is_official_ltx_transformer_checkpoint(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".safetensors")
+                && name.starts_with("ltx")
+                && !name.starts_with("diffusion_pytorch_model")
+        })
+}
+
+fn remap_official_ltx_transformer_key(key: &str) -> String {
+    let key = key
+        .replace("proj_in", "patchify_proj")
+        .replace("time_embed", "adaln_single")
+        .replace("norm_q", "q_norm")
+        .replace("norm_k", "k_norm");
+    format!("model.diffusion_model.{key}")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LtxPipelineMode {
+    Base,
+    MultiscaleFirstPassFallback,
+}
+
+#[derive(Clone, Debug)]
+struct LtxModelPreset {
+    transformer_config: LtxVideoTransformer3DModelConfig,
+    vae_config: AutoencoderKLLtxVideoConfig,
+    scheduler_config: FlowMatchEulerDiscreteSchedulerConfig,
+    default_steps: u32,
+    decode_timestep: f32,
+    decode_noise_scale: f32,
+    custom_sigmas: Option<&'static [f32]>,
+    skip_block_list: &'static [usize],
+    mode: LtxPipelineMode,
+}
+
+impl LtxModelPreset {
+    fn for_model(model_name: &str) -> Result<Self> {
+        if model_name.contains("ltx-video-0.9.6-distilled") {
+            Ok(Self {
+                transformer_config: transformer_2b_config(),
+                vae_config: improved_vae_config(),
+                scheduler_config: scheduler_config(true),
+                default_steps: 8,
+                decode_timestep: 0.05,
+                decode_noise_scale: 0.025,
+                custom_sigmas: None,
+                skip_block_list: &[],
+                mode: LtxPipelineMode::Base,
+            })
+        } else if model_name.contains("ltx-video-0.9.6") {
+            Ok(Self {
+                transformer_config: transformer_2b_config(),
+                vae_config: improved_vae_config(),
+                scheduler_config: scheduler_config(false),
+                default_steps: 40,
+                decode_timestep: 0.05,
+                decode_noise_scale: 0.025,
+                custom_sigmas: None,
+                skip_block_list: LTX_096_DEV_SKIP_BLOCKS,
+                mode: LtxPipelineMode::Base,
+            })
+        } else if model_name.contains("ltx-video-0.9.8-2b-distilled") {
+            Ok(Self {
+                transformer_config: transformer_2b_config(),
+                vae_config: improved_vae_config(),
+                scheduler_config: scheduler_config(false),
+                default_steps: 7,
+                decode_timestep: 0.05,
+                decode_noise_scale: 0.025,
+                custom_sigmas: Some(LTX_098_DISTILLED_FIRST_PASS_SIGMAS),
+                skip_block_list: LTX_098_2B_DISTILLED_SKIP_BLOCKS,
+                mode: LtxPipelineMode::MultiscaleFirstPassFallback,
+            })
+        } else if model_name.contains("ltx-video-0.9.8-13b-distilled") {
+            Ok(Self {
+                transformer_config: transformer_13b_config(),
+                vae_config: improved_vae_config(),
+                scheduler_config: scheduler_config(false),
+                default_steps: 7,
+                decode_timestep: 0.05,
+                decode_noise_scale: 0.025,
+                custom_sigmas: Some(LTX_098_DISTILLED_FIRST_PASS_SIGMAS),
+                skip_block_list: LTX_098_13B_DISTILLED_SKIP_BLOCKS,
+                mode: LtxPipelineMode::MultiscaleFirstPassFallback,
+            })
+        } else if model_name.contains("ltx-video-0.9.8-13b-dev") {
+            Ok(Self {
+                transformer_config: transformer_13b_config(),
+                vae_config: improved_vae_config(),
+                scheduler_config: scheduler_config(false),
+                default_steps: 30,
+                decode_timestep: 0.05,
+                decode_noise_scale: 0.025,
+                custom_sigmas: None,
+                skip_block_list: LTX_098_13B_DEV_SKIP_BLOCKS,
+                mode: LtxPipelineMode::MultiscaleFirstPassFallback,
+            })
+        } else {
+            bail!("unsupported LTX model preset for {}", model_name);
+        }
+    }
+}
+
+fn transformer_2b_config() -> LtxVideoTransformer3DModelConfig {
+    LtxVideoTransformer3DModelConfig {
+        num_layers: 28,
+        num_attention_heads: 32,
+        attention_head_dim: 64,
+        cross_attention_dim: 2048,
+        caption_channels: 4096,
+        ..Default::default()
+    }
+}
+
+fn transformer_13b_config() -> LtxVideoTransformer3DModelConfig {
+    LtxVideoTransformer3DModelConfig {
+        num_layers: 48,
+        num_attention_heads: 32,
+        attention_head_dim: 128,
+        cross_attention_dim: 4096,
+        caption_channels: 4096,
+        ..Default::default()
+    }
+}
+
+fn improved_vae_config() -> AutoencoderKLLtxVideoConfig {
+    AutoencoderKLLtxVideoConfig {
+        block_out_channels: vec![128, 256, 512, 1024, 2048],
+        decoder_block_out_channels: vec![256, 512, 1024],
+        spatiotemporal_scaling: vec![true, true, true, true],
+        decoder_spatiotemporal_scaling: vec![true, true, true],
+        layers_per_block: vec![4, 6, 6, 2, 2],
+        decoder_layers_per_block: vec![5, 5, 5, 5],
+        decoder_inject_noise: vec![false, false, false, false],
+        decoder_upsample_residual: vec![true, true, true],
+        decoder_upsample_factor: vec![2, 2, 2],
+        timestep_conditioning: true,
+        ..Default::default()
+    }
+}
+
+fn scheduler_config(stochastic_sampling: bool) -> FlowMatchEulerDiscreteSchedulerConfig {
+    FlowMatchEulerDiscreteSchedulerConfig {
+        num_train_timesteps: 1000,
+        shift: 1.0,
+        use_dynamic_shifting: false,
+        base_shift: Some(0.5),
+        max_shift: Some(1.15),
+        base_image_seq_len: Some(256),
+        max_image_seq_len: Some(4096),
+        invert_sigmas: false,
+        shift_terminal: None,
+        use_karras_sigmas: false,
+        use_exponential_sigmas: false,
+        use_beta_sigmas: false,
+        time_shift_type: TimeShiftType::Exponential,
+        stochastic_sampling,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Loaded state
@@ -83,6 +260,7 @@ impl LtxVideoEngine {
 impl crate::engine::InferenceEngine for LtxVideoEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let start = Instant::now();
+        let preset = LtxModelPreset::for_model(&self.base.model_name)?;
 
         // Video parameters with defaults
         let num_frames = req.frames.unwrap_or(25);
@@ -118,23 +296,10 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
         let latent_h = height as usize / VAE_SPATIAL_COMPRESSION;
         let latent_w = width as usize / VAE_SPATIAL_COMPRESSION;
         let latent_f = (num_frames as usize - 1) / VAE_TEMPORAL_COMPRESSION + 1;
-        let video_seq_len = latent_f * latent_h * latent_w;
-
         // Always use sequential mode for video (high VRAM usage)
         self.generate_sequential(
-            req,
-            seed,
-            num_frames,
-            fps,
-            steps,
-            guidance,
-            width,
-            height,
-            latent_h,
-            latent_w,
-            latent_f,
-            video_seq_len,
-            start,
+            req, &preset, seed, num_frames, fps, steps, guidance, width, height, latent_h,
+            latent_w, latent_f, start,
         )
     }
 
@@ -177,22 +342,28 @@ impl LtxVideoEngine {
     fn generate_sequential(
         &mut self,
         req: &GenerateRequest,
+        preset: &LtxModelPreset,
         seed: u64,
         num_frames: u32,
         fps: u32,
         steps: u32,
-        _guidance: f64,
+        guidance: f64,
         width: u32,
         height: u32,
         latent_h: usize,
         latent_w: usize,
         latent_f: usize,
-        video_seq_len: usize,
         start: Instant,
     ) -> Result<GenerateResponse> {
         let progress = &self.base.progress;
         let paths = &self.base.paths;
         let ltx_debug = std::env::var("MOLD_LTX_DEBUG").is_ok_and(|v| v == "1");
+
+        if preset.mode == LtxPipelineMode::MultiscaleFirstPassFallback
+            && paths.spatial_upscaler.is_none()
+        {
+            bail!("LTX 0.9.8 requires a spatial upscaler asset in the pulled model files");
+        }
 
         // Select device
         let device = crate::device::create_device(progress)?;
@@ -202,6 +373,11 @@ impl LtxVideoEngine {
             "LTX Video: {}×{} × {} frames, {} steps, seed {}",
             width, height, num_frames, steps, seed
         ));
+        if preset.mode == LtxPipelineMode::MultiscaleFirstPassFallback {
+            progress.info(
+                "Using the 0.9.8 first-pass schedule. The spatial upscaler asset is present, but mold does not yet run the second refinement pass.",
+            );
+        }
 
         // ---------------------------------------------------------------
         // Step 1: Encode prompt with T5-XXL
@@ -239,7 +415,6 @@ impl LtxVideoEngine {
             Tensor::ones((1, prompt_seq_len), DType::F32, &device)?.to_dtype(dtype)?;
 
         // Encode empty prompt for CFG (classifier-free guidance)
-        let guidance = req.guidance;
         let do_cfg = guidance > 1.0;
         let (uncond_embeds, uncond_mask) = if do_cfg {
             progress.stage_start("Encoding negative prompt (CFG)");
@@ -283,10 +458,17 @@ impl LtxVideoEngine {
         // The files are read-only model weights from the HuggingFace cache.
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, &device)? };
-        // Diffusers-format weights use the same key names as our candle model
-        // (proj_in, time_embed, norm_q, norm_k, etc.) — no remapping needed.
-        let config = LtxVideoTransformer3DModelConfig::default();
-        let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
+        let vb = if transformer_files.len() == 1
+            && is_official_ltx_transformer_checkpoint(&transformer_files[0])
+        {
+            vb.rename_f(remap_official_ltx_transformer_key)
+        } else {
+            vb
+        };
+        let mut transformer = LtxVideoTransformer3DModel::new(&preset.transformer_config, vb)?;
+        if !preset.skip_block_list.is_empty() {
+            transformer.set_skip_block_list(preset.skip_block_list.to_vec());
+        }
         progress.stage_done("Loading LTX Video transformer", xformer_start.elapsed());
 
         // Generate initial noise (raw, std≈1 — no normalization needed for v0.9 transformer)
@@ -300,34 +482,27 @@ impl LtxVideoEngine {
         // Pack latents: [B,C,F,H,W] → [B,S,D]
         let latents = pack_latents(&noise, PATCH_SIZE, PATCH_SIZE_T)?;
 
-        // Build sigma schedule matching ComfyUI's LTXVScheduler exactly:
-        // 1. linspace(1.0, 0.0, steps+1) — steps+1 points including terminal
-        // 2. Exponential time shift with mu
-        // 3. Stretch to terminal=0.1
-        let mu = calculate_shift(video_seq_len, 1024, 4096, 0.95, 2.05);
-
-        let raw = linspace(1.0, 0.0, steps as usize + 1);
-        let mu_exp = mu.exp();
-        let mut sched_sigmas: Vec<f32> = raw
-            .iter()
-            .map(|&s| {
-                if s == 0.0 {
-                    0.0
-                } else {
-                    mu_exp / (mu_exp + (1.0 / s - 1.0))
-                }
-            })
-            .collect();
-        // Stretch so last non-zero sigma → terminal=0.1
-        {
-            let nz_last = sched_sigmas[sched_sigmas.len() - 2];
-            let scale = (1.0 - nz_last) / (1.0 - 0.1);
-            for s in sched_sigmas.iter_mut() {
-                if *s != 0.0 {
-                    *s = 1.0 - (1.0 - *s) / scale;
-                }
-            }
-        }
+        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(preset.scheduler_config.clone())?;
+        scheduler.set_timesteps(
+            if preset.custom_sigmas.is_some() && steps == preset.default_steps {
+                None
+            } else {
+                Some(steps as usize)
+            },
+            &device,
+            if preset.custom_sigmas.is_some() && steps == preset.default_steps {
+                preset.custom_sigmas
+            } else {
+                None
+            },
+            None,
+            None,
+        )?;
+        scheduler.set_begin_index(0);
+        let sched_sigmas = scheduler
+            .sigmas()
+            .to_device(&Device::Cpu)?
+            .to_vec1::<f32>()?;
         let total_steps = sched_sigmas.len() - 1;
 
         // Build video coordinates for 3D RoPE (critical for proper positional encoding)
@@ -341,10 +516,8 @@ impl LtxVideoEngine {
 
         let mut latents = latents;
 
-        for step in 0..total_steps {
+        for (step, sigma) in sched_sigmas.iter().copied().enumerate().take(total_steps) {
             let step_start = Instant::now();
-            let sigma = sched_sigmas[step];
-            let sigma_next = sched_sigmas[step + 1];
 
             let b = latents.dim(0)?;
             // Pass raw sigma to model — it internally multiplies by 1000
@@ -415,10 +588,10 @@ impl LtxVideoEngine {
                 }
             }
 
-            // Euler step: x_{t-1} = x_t + (sigma_next - sigma) * model_output
-            let dt = (sigma_next - sigma) as f64;
             let noise_pred_f32 = noise_pred.to_dtype(DType::F32)?;
-            latents = (&latents + noise_pred_f32 * dt)?;
+            latents = scheduler
+                .step(&noise_pred_f32, sigma, &latents, None)?
+                .prev_sample;
 
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
@@ -431,10 +604,7 @@ impl LtxVideoEngine {
         if ltx_debug {
             let first_5: Vec<f32> = sched_sigmas.iter().take(5).copied().collect();
             let last_3: Vec<f32> = sched_sigmas.iter().rev().take(3).rev().copied().collect();
-            progress.info(&format!(
-                "Sigmas: {:?}...{:?} (mu={:.3})",
-                first_5, last_3, mu
-            ));
+            progress.info(&format!("Sigmas: {:?}...{:?}", first_5, last_3));
             let l_f32 = latents.to_dtype(DType::F32)?;
             let mean = l_f32.mean_all()?.to_scalar::<f32>()?;
             let var = l_f32
@@ -473,43 +643,29 @@ impl LtxVideoEngine {
         progress.stage_start("Loading VAE decoder");
         let vae_start = Instant::now();
 
-        // Auto-detect VAE version by file size: v0.9.5 ≈ 2.5GB, v0.9 ≈ 1.7GB
-        let vae_file_size = std::fs::metadata(&paths.vae)?.len();
-        let is_v095_vae = vae_file_size > 2_000_000_000;
-
         // SAFETY: mmap'd safetensors file is not modified while mapped.
         let vae_vb = unsafe {
             VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&paths.vae), dtype, &device)?
         };
-
-        let vae_config = if is_v095_vae {
-            progress.info("Using v0.9.5 VAE (1024-ch, timestep conditioning)");
-            AutoencoderKLLtxVideoConfig::default()
-        } else {
-            progress.info("Using v0.9 VAE (512-ch, no timestep conditioning)");
-            AutoencoderKLLtxVideoConfig {
-                block_out_channels: vec![128, 256, 512, 512],
-                decoder_block_out_channels: vec![128, 256, 512, 512],
-                spatiotemporal_scaling: vec![true, true, true, false],
-                decoder_spatiotemporal_scaling: vec![true, true, true, false],
-                layers_per_block: vec![4, 3, 3, 3, 4],
-                decoder_layers_per_block: vec![4, 3, 3, 3, 4],
-                decoder_inject_noise: vec![false, false, false, false, false],
-                decoder_upsample_residual: vec![false, false, false, false, false],
-                decoder_upsample_factor: vec![1, 1, 1, 1, 1],
-                timestep_conditioning: false,
-                ..Default::default()
-            }
-        };
-        let vae = AutoencoderKLLtxVideo::new(vae_config, vae_vb)?;
+        let vae = AutoencoderKLLtxVideo::new(preset.vae_config.clone(), vae_vb)?;
         progress.stage_done("Loading VAE decoder", vae_start.elapsed());
 
         progress.stage_start("Decoding video frames");
         let decode_start = Instant::now();
 
-        // Un-normalize latents before VAE decode (matches official Python _decode()).
-        // For v0.9.5: latents * std + mean (std≈0.15 per channel)
-        // For v0.9: identity (std=1, mean=0 from config defaults)
+        let decode_timestep = if vae.config().timestep_conditioning {
+            if preset.decode_noise_scale > 0.0 {
+                let noise =
+                    seeded_randn(seed ^ 0xdec0de, latents.shape().dims(), &device, DType::F32)?;
+                latents = (&latents * (1.0 - preset.decode_noise_scale as f64))?
+                    .broadcast_add(&(noise * preset.decode_noise_scale as f64)?)?;
+            }
+            Some(Tensor::full(preset.decode_timestep, (1,), &device)?.to_dtype(dtype)?)
+        } else {
+            None
+        };
+
+        // Un-normalize latents immediately before VAE decode.
         let latents_mean = vae.latents_mean();
         let latents_std = vae.latents_std();
         {
@@ -535,11 +691,6 @@ impl LtxVideoEngine {
         }
 
         latents = latents.to_dtype(dtype)?;
-        let decode_timestep = if vae.config().timestep_conditioning {
-            Some(Tensor::full(0.05f32, (1,), &device)?.to_dtype(dtype)?)
-        } else {
-            None
-        };
         let (_dec_output, video) = vae.decode(&latents, decode_timestep.as_ref(), false, false)?;
         // video: [B, 3, F, H, W] in model dtype
         if ltx_debug {
@@ -722,19 +873,6 @@ fn unpack_latents(
     ))?)
 }
 
-/// Calculate the dynamic shift mu for the scheduler (SD3-style).
-fn calculate_shift(
-    image_seq_len: usize,
-    base_seq_len: usize,
-    max_seq_len: usize,
-    base_shift: f32,
-    max_shift: f32,
-) -> f32 {
-    let m = (max_shift - base_shift) / (max_seq_len - base_seq_len) as f32;
-    let b = base_shift - m * base_seq_len as f32;
-    image_seq_len as f32 * m + b
-}
-
 /// Build video coordinates for 3D RoPE: [B, seq, 3] with (frame, height, width).
 fn build_video_coords(
     batch_size: usize,
@@ -786,12 +924,66 @@ fn build_video_coords(
     }
 }
 
-fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
-    if steps <= 1 {
-        return vec![start];
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_official_ltx_transformer_checkpoint, remap_official_ltx_transformer_key, LtxModelPreset,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn detects_official_ltx_single_file_checkpoints() {
+        assert!(is_official_ltx_transformer_checkpoint(Path::new(
+            "ltxv-2b-0.9.6-distilled-04-25.safetensors"
+        )));
+        assert!(is_official_ltx_transformer_checkpoint(Path::new(
+            "ltxv-13b-0.9.8-dev.safetensors"
+        )));
+        assert!(!is_official_ltx_transformer_checkpoint(Path::new(
+            "diffusion_pytorch_model-00001-of-00002.safetensors"
+        )));
+        assert!(!is_official_ltx_transformer_checkpoint(Path::new(
+            "transformer.gguf"
+        )));
     }
-    let d = (steps - 1) as f32;
-    (0..steps)
-        .map(|i| start + (end - start) * i as f32 / d)
-        .collect()
+
+    #[test]
+    fn remaps_official_transformer_keys_to_upstream_checkpoint_names() {
+        assert_eq!(
+            remap_official_ltx_transformer_key("proj_in.weight"),
+            "model.diffusion_model.patchify_proj.weight"
+        );
+        assert_eq!(
+            remap_official_ltx_transformer_key("time_embed.emb.timestep_embedder.linear_1.weight"),
+            "model.diffusion_model.adaln_single.emb.timestep_embedder.linear_1.weight"
+        );
+        assert_eq!(
+            remap_official_ltx_transformer_key("transformer_blocks.0.attn1.norm_q.weight"),
+            "model.diffusion_model.transformer_blocks.0.attn1.q_norm.weight"
+        );
+        assert_eq!(
+            remap_official_ltx_transformer_key("caption_projection.linear_2.bias"),
+            "model.diffusion_model.caption_projection.linear_2.bias"
+        );
+    }
+
+    #[test]
+    fn ltx_presets_only_reference_in_range_skip_blocks() {
+        for model_name in [
+            "ltx-video-0.9.6:bf16",
+            "ltx-video-0.9.6-distilled:bf16",
+            "ltx-video-0.9.8-2b-distilled:bf16",
+            "ltx-video-0.9.8-13b-dev:bf16",
+            "ltx-video-0.9.8-13b-distilled:bf16",
+        ] {
+            let preset = LtxModelPreset::for_model(model_name).expect("preset should exist");
+            for &skip_block in preset.skip_block_list {
+                assert!(
+                    skip_block < preset.transformer_config.num_layers,
+                    "{model_name} skip block {skip_block} is out of range for {} layers",
+                    preset.transformer_config.num_layers
+                );
+            }
+        }
+    }
 }

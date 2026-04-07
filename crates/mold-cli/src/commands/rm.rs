@@ -829,6 +829,9 @@ mod tests {
         // Regression: `mold rm` only checked config.models.contains_key(),
         // so manifest-backed models that were pulled but not in config
         // were reported as "not installed".
+        use crate::test_support::ENV_LOCK;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = make_tmp_dir("rm-manifest");
         let manifest = mold_core::manifest::find_manifest("flux-schnell:q8").unwrap();
         for file in &manifest.files {
@@ -843,6 +846,7 @@ mod tests {
             models_dir: tmp.to_string_lossy().to_string(),
             ..Config::default()
         };
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
 
         // The model is not in config.models — only discoverable via manifest
         assert!(!config.models.contains_key("flux-schnell:q8"));
@@ -863,6 +867,7 @@ mod tests {
             "resolved config should produce file paths for deletion"
         );
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

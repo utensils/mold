@@ -14,12 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Qwen-Image block-level offloading**: CPU↔GPU block streaming for BF16/FP8 Qwen-Image transformers, enabling native 1328×1328 generation on 24GB cards. Auto-detects when VRAM is insufficient; force with `--offload` or `MOLD_OFFLOAD=1`. Peak VRAM ~10GB during denoising ([#178](https://github.com/utensils/mold/issues/178))
 - **Qwen-Image negative prompt support**: `req.negative_prompt` now flows through CFG conditioning (was hardcoded to empty string). Use `--negative-prompt` on CLI ([#178](https://github.com/utensils/mold/issues/178))
 - **Qwen-Image GGUF tier coverage**: added validated `q5`, `q3`, and `q2` variants for both `qwen-image:*` and `qwen-image-2512:*`, completing the published Q2-Q8 quantized matrix in mold ([#178](https://github.com/utensils/mold/issues/178))
-- **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using LTX Video 0.9.5 2B (Lightricks). 28-layer DiT with T5-XXL encoder (shared with FLUX), 3D causal VAE, flow-matching denoising. Default: 768×512, 25 frames @ 24fps, 40 steps, guidance 3.0 ([#172](https://github.com/utensils/mold/issues/172))
+- **LTX Video — text-to-video generation**: first video model family in mold. Generate animated video clips from text prompts using current LTX 0.9.6 and 0.9.8 checkpoints (Lightricks), with 2B and 13B variants plus the published 0.9.8 spatial upscaler asset ([#172](https://github.com/utensils/mold/issues/172))
 - **Multiple video output formats**: APNG (default, lossless, metadata in tEXt chunks), GIF (256-color, pipe-friendly), WebP (feature-gated `webp`), MP4/H.264 (feature-gated `mp4`, QuickTime-compatible). Use `--format apng|gif|webp|mp4`
 - **Video CLI flags**: `--frames <N>` (must be 8n+1), `--fps <N>` (default 24) on `mold run` for video models
 - **Video metadata**: APNG output embeds generation parameters (prompt, model, seed, steps, guidance, dimensions, fps) in PNG tEXt/iTXt chunks
 - **GIF preview cache**: animated GIF preview cached in `~/.mold/cache/previews/` for TUI gallery detail view and generation viewport
-- **Matched v0.9.5 model pair**: v0.9.5 transformer (3.8 GB, single file) + v0.9.5 VAE (2.3 GB, 1024-ch, timestep conditioning) from `Lightricks/LTX-Video-0.9.5` — sharp, photorealistic output
 - **Custom MP4 muxer**: minimal QuickTime-compatible MP4 writer with correct ftyp brands (isom, iso2, avc1, mp41), colr/pasp atoms, faststart layout. Replaces muxide dependency
 - **Hidden manifest support**: `ModelManifest.hidden` field excludes models from user-facing lists (CLI, TUI) while keeping them usable via config.toml
 - **Upscaler CLI color**: upscaler models display in bright purple in `mold list`, consistent with per-family color scheme
@@ -54,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ModelComponent` enum**: added `Upscaler` variant for upscaler model weights
 - **Default model selection**: upscaler models excluded from auto-selection as default generation model
 - **`UpscaleEngine` trait**: new inference trait parallel to `InferenceEngine`, with `upscale()`, `load()`, `unload()`, `scale_factor()` methods
+- **LTX model catalog**: replaced the broken legacy `ltx-video-0.9` and `ltx-video-0.9.5` manifests with `ltx-video-0.9.6`, `ltx-video-0.9.6-distilled`, `ltx-video-0.9.8-2b-distilled`, `ltx-video-0.9.8-13b-dev`, and `ltx-video-0.9.8-13b-distilled`
+- **LTX asset wiring**: `ModelConfig` and `ModelPaths` now carry an explicit `spatial_upscaler` component for the 0.9.8 family
 
 ### Fixed
 
@@ -64,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-32-aligned LTX dimensions**: rejects invalid dimensions with clear error instead of silent truncation
 - **MP4 QuickTime compatibility**: custom muxer with correct ftyp brands, colr/pasp atoms, H.264 High Profile. Aligned SPS VUI and colr atom to BT.601 limited range (matching openh264's RGB→YUV conversion), added edts/elst edit list box ([#181](https://github.com/utensils/mold/issues/181))
 - **Gallery scanner**: `.apng`/`.webp`/`.mp4` files now included in TUI gallery; WebP/MP4 get minimal metadata entries instead of being routed through JPEG parser
+- **LTX inference quality path**: the LTX engine now selects versioned transformer/VAE presets, uses the current improved VAE for supported checkpoints, applies the published `decode_noise_scale` before timestep-conditioned VAE decode, and stops guessing model behavior from legacy VAE file sizes
+- **LTX VAE source validation**: verified that the current `Lightricks/LTX-Video` VAE is not yet compatible with Candle's ported LTX VAE layout, so the manifest intentionally keeps using the published `Lightricks/LTX-Video-0.9.5` VAE until that follow-up architecture work lands
+
+### Removed
+
+- **Legacy LTX manifests**: removed `ltx-video-0.9:bf16` and `ltx-video-0.9.5:bf16` from the published model list
 
 ## [0.5.3] - 2026-04-04
 

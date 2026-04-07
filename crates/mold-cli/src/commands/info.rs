@@ -51,6 +51,7 @@ fn resolve_file_path(
     match component {
         ModelComponent::Transformer => mcfg.transformer.clone(),
         ModelComponent::Vae => mcfg.vae.clone(),
+        ModelComponent::SpatialUpscaler => mcfg.spatial_upscaler.clone(),
         ModelComponent::T5Encoder => mcfg.t5_encoder.clone(),
         ModelComponent::ClipEncoder => mcfg.clip_encoder.clone(),
         ModelComponent::T5Tokenizer => mcfg.t5_tokenizer.clone(),
@@ -75,6 +76,7 @@ fn resolve_verify_path(
         let path = match component {
             ModelComponent::Transformer => Some(&paths.transformer),
             ModelComponent::Vae => Some(&paths.vae),
+            ModelComponent::SpatialUpscaler => paths.spatial_upscaler.as_ref(),
             ModelComponent::T5Encoder => paths.t5_encoder.as_ref(),
             ModelComponent::ClipEncoder => paths.clip_encoder.as_ref(),
             ModelComponent::T5Tokenizer => paths.t5_tokenizer.as_ref(),
@@ -101,6 +103,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::Transformer => "Transformer",
         ModelComponent::TransformerShard => "Transformer Shard",
         ModelComponent::Vae => "VAE",
+        ModelComponent::SpatialUpscaler => "Spatial Upscaler",
         ModelComponent::T5Encoder => "T5 Encoder",
         ModelComponent::ClipEncoder => "CLIP-L Encoder",
         ModelComponent::T5Tokenizer => "T5 Tokenizer",

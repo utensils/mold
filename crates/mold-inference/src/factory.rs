@@ -178,6 +178,7 @@ mod tests {
             transformer: PathBuf::from("/tmp/transformer"),
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/vae"),
+            spatial_upscaler: None,
             t5_encoder: Some(PathBuf::from("/tmp/t5")),
             clip_encoder: Some(PathBuf::from("/tmp/clip")),
             t5_tokenizer: Some(PathBuf::from("/tmp/t5_tok")),
