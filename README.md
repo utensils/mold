@@ -151,10 +151,11 @@ Current supported LTX checkpoints are:
 
 Recommended default today: `ltx-video-0.9.6-distilled:bf16`.
 
-The `0.9.8` models pull the required spatial-upscaler asset automatically. mold
-currently runs the `0.9.8` first pass correctly, but does not yet execute the
-second multiscale refinement pass, so `0.9.8` is not at full intended upstream
-quality yet.
+The `0.9.8` models pull the required spatial-upscaler asset automatically and
+now run the full multiscale refinement path. mold keeps the shared T5 assets
+under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
+`shared/LTX-Video/...`, and intentionally continues using the compatible
+`LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 
 ## Features
 

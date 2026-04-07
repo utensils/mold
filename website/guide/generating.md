@@ -76,9 +76,10 @@ mold run ltx-video-0.9.6-distilled:bf16 "A waterfall" --format mp4 -o waterfall.
 ```
 
 `ltx-video-0.9.6-distilled:bf16` is the recommended default today. The
-`0.9.8` family is available and now pulls the required spatial upscaler asset,
-but mold currently runs only the first `0.9.8` pass rather than the full
-multiscale refinement path.
+`0.9.8` family is also supported end to end: mold pulls the required spatial
+upscaler asset, runs the full multiscale refinement path, and keeps the current
+compatible VAE on the published `LTX-Video-0.9.5` source until the newer VAE
+layout is ported.
 
 ::: tip Frame count constraint
 LTX Video requires frame counts of the form **8n+1** (9, 17, 25, 33, 49, 97,
