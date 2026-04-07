@@ -2521,6 +2521,71 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults,
             hidden: false,
         },
+        // Lightning distilled variants (step-distilled, no CFG needed)
+        ModelManifest {
+            name: "qwen-image-lightning:fp8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Lightning FP8 — 4-step distilled, 12-25x faster"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "lightx2v/Qwen-Image-2512-Lightning".to_string(),
+                    hf_filename:
+                        "qwen_image_2512_fp8_e4m3fn_scaled_comfyui_4steps_v1.0.safetensors"
+                            .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 20_400_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 4,
+                guidance: 1.0,
+                width: 1328,
+                height: 1328,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-lightning:fp8-8step".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Lightning FP8 — 8-step distilled, higher quality"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_files();
+                files.push(ModelFile {
+                    hf_repo: "lightx2v/Qwen-Image-2512-Lightning".to_string(),
+                    hf_filename:
+                        "qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors"
+                            .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 20_400_000_000,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: ManifestDefaults {
+                steps: 8,
+                guidance: 1.0,
+                width: 1328,
+                height: 1328,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: false,
+        },
     ]
 }
 
@@ -3849,8 +3914,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 5 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 71
-        assert_eq!(known_manifests().len(), 71);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 7 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 73
+        assert_eq!(known_manifests().len(), 73);
     }
 
     #[test]

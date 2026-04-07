@@ -326,37 +326,56 @@ impl QwenImageEngine {
                 .map(|p| safetensors_is_fp8(p))
                 .unwrap_or(false);
 
-            // For offload detection, use the in-memory size (BF16 = 2× FP8 on disk)
-            let disk_size: u64 = xformer_paths
+            // FP8 weights stay as F8E4M3 in VRAM (~19.5GB, 1 byte/param).
+            // Per-layer dequant to BF16 during forward adds ~113MB transient.
+            // BF16 weights are 2 bytes/param (~40GB).
+            let mem_size: u64 = xformer_paths
                 .iter()
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            let mem_size = if is_fp8 { disk_size * 2 } else { disk_size };
             let free = free_vram_bytes().unwrap_or(0);
             let use_offload =
                 self.offload || crate::device::should_offload(mem_size, free);
 
             if is_fp8 {
-                self.base.progress.info("Detected FP8 safetensors — loading as BF16");
+                self.base
+                    .progress
+                    .info("Detected FP8 safetensors — loading with scale dequantization");
             }
 
             if use_offload {
                 // Create TWO VarBuilders: GPU for blocks that fit, CPU for overflow.
-                // The offloaded transformer measures free VRAM and decides placement.
-                let gpu_vb = crate::weight_loader::load_safetensors_with_progress(
-                    &xformer_paths,
-                    dtype,
-                    device,
-                    "Qwen-Image transformer (offload, GPU)",
-                    &self.base.progress,
-                )?;
-                let cpu_vb = unsafe {
-                    candle_nn::VarBuilder::from_mmaped_safetensors(
-                        &xformer_paths.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
-                        DType::BF16,
+                let (gpu_vb, cpu_vb) = if is_fp8 {
+                    let gpu = crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
+                        device,
+                        "Qwen-Image transformer (offload, GPU)",
+                        &self.base.progress,
+                    )?;
+                    let cpu = crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
                         &Device::Cpu,
-                    )?
+                        "Qwen-Image transformer (offload, CPU)",
+                        &self.base.progress,
+                    )?;
+                    (gpu, cpu)
+                } else {
+                    let gpu = crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        dtype,
+                        device,
+                        "Qwen-Image transformer (offload, GPU)",
+                        &self.base.progress,
+                    )?;
+                    let cpu = unsafe {
+                        candle_nn::VarBuilder::from_mmaped_safetensors(
+                            &xformer_paths.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
+                            DType::BF16,
+                            &Device::Cpu,
+                        )?
+                    };
+                    (gpu, cpu)
                 };
                 Ok(QwenImageTransformer::Offloaded(
                     super::offload::OffloadedQwenImageTransformer::load(
@@ -368,13 +387,22 @@ impl QwenImageEngine {
                     )?,
                 ))
             } else {
-                let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
-                    &xformer_paths,
-                    dtype,
-                    device,
-                    "Qwen-Image transformer",
-                    &self.base.progress,
-                )?;
+                let xformer_vb = if is_fp8 {
+                    crate::weight_loader::load_fp8_safetensors(
+                        &xformer_paths,
+                        device,
+                        "Qwen-Image transformer",
+                        &self.base.progress,
+                    )?
+                } else {
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        dtype,
+                        device,
+                        "Qwen-Image transformer",
+                        &self.base.progress,
+                    )?
+                };
                 Ok(QwenImageTransformer::BF16(
                     QwenImageTransformer2DModel::new(cfg, xformer_vb)?,
                 ))
