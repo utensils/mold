@@ -2368,9 +2368,11 @@ qwen3_variant = "iq4"
             paths.text_tokenizer,
             Some(dir.join("shared/qwen-image/tokenizer.json"))
         );
+        let marker_path = dir.join(crate::download::pulling_marker_rel_path("qwen-image:fp8"));
         assert!(
-            !crate::download::has_pulling_marker("qwen-image:fp8"),
-            "stale marker should be self-healed after successful manifest discovery"
+            !marker_path.exists(),
+            "stale marker should be self-healed after successful manifest discovery: {}",
+            marker_path.display()
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");
@@ -2443,10 +2445,12 @@ qwen3_variant = "iq4"
                 "{} should resolve manifest paths even with a stale marker",
                 manifest.name
             );
+            let marker_path = dir.join(crate::download::pulling_marker_rel_path(&manifest.name));
             assert!(
-                !crate::download::has_pulling_marker(&manifest.name),
-                "{} stale marker should be removed",
-                manifest.name
+                !marker_path.exists(),
+                "{} stale marker should be removed: {}",
+                manifest.name,
+                marker_path.display()
             );
         }
 
