@@ -469,8 +469,7 @@ impl OffloadedQwenImageTransformer {
     /// Load the transformer with dynamic GPU/CPU block placement.
     ///
     /// Loads as many blocks directly on GPU as VRAM allows, with remaining
-    /// blocks loaded on CPU for per-step streaming. After the text encoder
-    /// is freed, `promote_blocks_to_gpu()` can move more blocks to GPU.
+    /// blocks loaded on CPU for per-step streaming.
     pub fn load(
         gpu_vb: VarBuilder,
         cpu_vb: VarBuilder,
@@ -602,62 +601,6 @@ impl OffloadedQwenImageTransformer {
             + lb(&block.img_mlp.out)
             + lb(&block.txt_mlp.proj)
             + lb(&block.txt_mlp.out)
-    }
-
-    /// Promote CPU-resident blocks to GPU if more VRAM is now available.
-    ///
-    /// Call after dropping the text encoder to reclaim its VRAM for blocks.
-    pub fn promote_blocks_to_gpu(&mut self) -> Result<()> {
-        // Force CUDA to reclaim freed memory before measuring
-        self.gpu_device.synchronize()?;
-
-        let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
-        let available = free_vram.saturating_sub(VRAM_HEADROOM);
-
-        // Compute actual block size from weights
-        let block_size = {
-            let b = match &self.blocks[0] {
-                BlockResidency::Gpu(b) | BlockResidency::Cpu(b) => b,
-            };
-            Self::block_size_bytes(b)
-        };
-
-        tracing::info!(
-            free_vram_mb = free_vram / (1024 * 1024),
-            available_mb = available / (1024 * 1024),
-            block_size_mb = block_size / (1024 * 1024),
-            "measuring VRAM for block promotion"
-        );
-
-        let can_promote = if block_size > 0 {
-            (available / block_size) as usize
-        } else {
-            0
-        };
-
-        let mut promoted = 0;
-        for block in &mut self.blocks {
-            if promoted >= can_promote {
-                break;
-            }
-            if let BlockResidency::Cpu(cpu_block) = block {
-                *block = BlockResidency::Gpu(cpu_block.to_device(&self.gpu_device)?);
-                promoted += 1;
-            }
-        }
-
-        if promoted > 0 {
-            self.gpu_device.synchronize()?;
-            self.gpu_resident_count += promoted;
-            tracing::info!(
-                promoted,
-                total_gpu = self.gpu_resident_count,
-                total_cpu = self.blocks.len() - self.gpu_resident_count,
-                "promoted CPU blocks to GPU after text encoder freed"
-            );
-        }
-        Ok(())
     }
 
     /// Run the full forward pass with block-level streaming.

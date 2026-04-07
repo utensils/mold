@@ -5223,9 +5223,11 @@ mod tests {
     /// Config mutations are tested in-memory; save_config() may fail
     /// (save_error is set) but that's fine for mutation tests.
     fn make_settings_test_app() -> App {
-        let mut config = Config::default();
-        // Pin default model so the test doesn't depend on downloaded models
-        config.default_model = "flux2-klein:q8".to_string();
+        let mut config = Config {
+            // Pin default model so the test doesn't depend on downloaded models
+            default_model: "flux2-klein:q8".to_string(),
+            ..Default::default()
+        };
         // Insert a test model so the Model Defaults section appears
         config.models.insert(
             "test-model:q8".to_string(),
@@ -6288,7 +6290,7 @@ mod tests {
     fn model_list_sorts_downloaded_first() {
         // Simulate the sorting logic used by open_model_selector / available_upscaler_models
         let config = Config::default();
-        let mut models = vec![
+        let mut models = [
             "not-downloaded-model:q8".to_string(),
             "also-not-downloaded:fp16".to_string(),
         ];
@@ -6319,7 +6321,7 @@ mod tests {
             },
         );
 
-        let mut models = vec![
+        let mut models = [
             "first-model:q8".to_string(),
             "second-model:fp16".to_string(),
             "third-model:q4".to_string(),

@@ -723,9 +723,9 @@ mod tests {
         };
         assert_eq!(status, "default");
 
-        let status2 = if true && !true {
+        let status2 = if false {
             "default · pull"
-        } else if true && true {
+        } else if true {
             "default"
         } else {
             ""

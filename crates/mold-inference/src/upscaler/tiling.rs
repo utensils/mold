@@ -389,15 +389,15 @@ mod tests {
         // Every pixel in the image should be covered by at least one tile
         let mut covered = vec![vec![false; img_w]; img_h];
         for tile in &tiles {
-            for y in tile.y..tile.y + tile.h {
-                for x in tile.x..tile.x + tile.w {
-                    covered[y][x] = true;
+            for row in covered.iter_mut().skip(tile.y).take(tile.h) {
+                for cell in row.iter_mut().skip(tile.x).take(tile.w) {
+                    *cell = true;
                 }
             }
         }
-        for y in 0..img_h {
-            for x in 0..img_w {
-                assert!(covered[y][x], "pixel ({x}, {y}) not covered by any tile");
+        for (y, row) in covered.iter().enumerate().take(img_h) {
+            for (x, cell) in row.iter().enumerate().take(img_w) {
+                assert!(*cell, "pixel ({x}, {y}) not covered by any tile");
             }
         }
     }
