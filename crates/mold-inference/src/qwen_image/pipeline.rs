@@ -258,6 +258,90 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn choose_text_encoder_source(
+        preference: Option<&str>,
+        is_cuda: bool,
+        is_metal: bool,
+        free_vram: u64,
+        bf16_size_bytes: u64,
+    ) -> Result<ResolvedQwen2TextEncoder> {
+        match preference {
+            Some(tag) if tag != "auto" && tag != "bf16" => {
+                let variant = mold_core::manifest::find_qwen2_vl_variant(tag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown Qwen2.5-VL variant '{}'. Valid: bf16, auto, q8, q6, q5, q4, q3, q2",
+                        tag
+                    )
+                })?;
+                Ok(ResolvedQwen2TextEncoder {
+                    paths: vec![],
+                    is_gguf: true,
+                    variant_label: variant.tag.to_string(),
+                    size_bytes: variant.size_bytes,
+                    auto_use_gpu: should_use_gpu(
+                        is_cuda,
+                        is_metal,
+                        free_vram,
+                        qwen2_vram_threshold(variant.size_bytes),
+                    ),
+                })
+            }
+            Some("bf16") => Ok(ResolvedQwen2TextEncoder {
+                paths: vec![],
+                is_gguf: false,
+                variant_label: "bf16".to_string(),
+                size_bytes: bf16_size_bytes,
+                auto_use_gpu: should_use_gpu(
+                    is_cuda,
+                    is_metal,
+                    free_vram,
+                    QWEN2_FP16_VRAM_THRESHOLD,
+                ),
+            }),
+            _ if is_metal => {
+                for tag in ["q6", "q4"] {
+                    let variant = mold_core::manifest::find_qwen2_vl_variant(tag)
+                        .expect("known Metal auto qwen2 variant missing");
+                    if fits_in_memory(
+                        is_cuda,
+                        is_metal,
+                        free_vram,
+                        qwen2_vram_threshold(variant.size_bytes),
+                    ) {
+                        return Ok(ResolvedQwen2TextEncoder {
+                            paths: vec![],
+                            is_gguf: true,
+                            variant_label: variant.tag.to_string(),
+                            size_bytes: variant.size_bytes,
+                            auto_use_gpu: true,
+                        });
+                    }
+                }
+                let fallback = mold_core::manifest::find_qwen2_vl_variant("q4")
+                    .expect("known Metal fallback qwen2 variant missing");
+                Ok(ResolvedQwen2TextEncoder {
+                    paths: vec![],
+                    is_gguf: true,
+                    variant_label: fallback.tag.to_string(),
+                    size_bytes: fallback.size_bytes,
+                    auto_use_gpu: true,
+                })
+            }
+            _ => Ok(ResolvedQwen2TextEncoder {
+                paths: vec![],
+                is_gguf: false,
+                variant_label: "bf16".to_string(),
+                size_bytes: bf16_size_bytes,
+                auto_use_gpu: should_use_gpu(
+                    is_cuda,
+                    is_metal,
+                    free_vram,
+                    QWEN2_FP16_VRAM_THRESHOLD,
+                ),
+            }),
+        }
+    }
+
     fn debug_tensor_stats(name: &str, tensor: &Tensor) {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
             return;
@@ -538,110 +622,62 @@ impl QwenImageEngine {
         let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
+        let bf16_size_bytes = self
+            .base
+            .paths
+            .text_encoder_files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let mut resolved = Self::choose_text_encoder_source(
+            preference.as_deref(),
+            is_cuda,
+            is_metal,
+            free_vram,
+            bf16_size_bytes,
+        )?;
 
-        let resolve_quant = |tag: &str, auto_use_gpu: bool| -> Result<ResolvedQwen2TextEncoder> {
-            let variant = mold_core::manifest::find_qwen2_vl_variant(tag).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown Qwen2.5-VL variant '{}'. Valid: bf16, auto, q8, q6, q5, q4, q3, q2",
-                    tag
-                )
-            })?;
-            let path = crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
-                &self.base.progress,
-                variant,
-            )?;
-            Ok(ResolvedQwen2TextEncoder {
-                paths: vec![path],
-                is_gguf: true,
-                variant_label: variant.tag.to_string(),
-                size_bytes: variant.size_bytes,
-                auto_use_gpu,
-            })
-        };
+        if resolved.is_gguf {
+            let variant = mold_core::manifest::find_qwen2_vl_variant(&resolved.variant_label)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
+                })?;
+            resolved.paths = vec![
+                crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
+                    &self.base.progress,
+                    variant,
+                )?,
+            ];
+        } else {
+            resolved.paths = self.base.paths.text_encoder_files.clone();
+        }
 
         match preference.as_deref() {
-            Some(tag) if tag != "auto" && tag != "bf16" => {
-                let variant = mold_core::manifest::find_qwen2_vl_variant(tag).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown Qwen2.5-VL variant '{}'. Valid: bf16, auto, q8, q6, q5, q4, q3, q2",
-                        tag
-                    )
-                })?;
-                let threshold = qwen2_vram_threshold(variant.size_bytes);
-                let auto_use_gpu = should_use_gpu(is_cuda, is_metal, free_vram, threshold);
-                self.base.progress.info(&format!(
-                    "Using quantized Qwen2.5-VL {} ({}) on {} (explicit)",
-                    variant.tag,
-                    fmt_gb(variant.size_bytes),
-                    if auto_use_gpu { "GPU" } else { "CPU" },
-                ));
-                resolve_quant(tag, auto_use_gpu)
-            }
-            Some("bf16") => Ok(ResolvedQwen2TextEncoder {
-                paths: self.base.paths.text_encoder_files.clone(),
-                is_gguf: false,
-                variant_label: "bf16".to_string(),
-                size_bytes: self
-                    .base
-                    .paths
-                    .text_encoder_files
-                    .iter()
-                    .filter_map(|p| std::fs::metadata(p).ok())
-                    .map(|m| m.len())
-                    .sum(),
-                auto_use_gpu: should_use_gpu(
-                    is_cuda,
-                    is_metal,
-                    free_vram,
-                    QWEN2_FP16_VRAM_THRESHOLD,
-                ),
-            }),
-            _ => {
-                if is_metal {
-                    for tag in ["q6", "q4"] {
-                        let variant = mold_core::manifest::find_qwen2_vl_variant(tag)
-                            .expect("known Metal auto qwen2 variant missing");
-                        let threshold = qwen2_vram_threshold(variant.size_bytes);
-                        if fits_in_memory(is_cuda, is_metal, free_vram, threshold) {
-                            self.base.progress.info(&format!(
-                                "Metal auto mode selected quantized Qwen2.5-VL {} ({}) for lower memory pressure",
-                                variant.tag,
-                                fmt_gb(variant.size_bytes),
-                            ));
-                            return resolve_quant(variant.tag, true);
-                        }
-                    }
-                    let fallback = mold_core::manifest::find_qwen2_vl_variant("q4")
-                        .expect("known Metal fallback qwen2 variant missing");
-                    self.base.progress.info(&format!(
-                        "Metal auto mode forcing quantized Qwen2.5-VL {} ({}) to avoid BF16 memory pressure",
-                        fallback.tag,
-                        fmt_gb(fallback.size_bytes),
-                    ));
-                    return resolve_quant(fallback.tag, true);
-                }
-
-                Ok(ResolvedQwen2TextEncoder {
-                    paths: self.base.paths.text_encoder_files.clone(),
-                    is_gguf: false,
-                    variant_label: "bf16".to_string(),
-                    size_bytes: self
-                        .base
-                        .paths
-                        .text_encoder_files
-                        .iter()
-                        .filter_map(|p| std::fs::metadata(p).ok())
-                        .map(|m| m.len())
-                        .sum(),
-                    auto_use_gpu: should_use_gpu(
-                        is_cuda,
-                        is_metal,
-                        free_vram,
-                        QWEN2_FP16_VRAM_THRESHOLD,
-                    ),
-                })
-            }
+            Some(tag) if tag != "auto" && tag != "bf16" => self.base.progress.info(&format!(
+                "Using quantized Qwen2.5-VL {} ({}) on {} (explicit)",
+                resolved.variant_label,
+                fmt_gb(resolved.size_bytes),
+                if resolved.auto_use_gpu { "GPU" } else { "CPU" },
+            )),
+            Some("bf16") => {}
+            _ if is_metal && resolved.is_gguf && resolved.variant_label == "q6" => self
+                .base
+                .progress
+                .info(&format!(
+                    "Metal auto mode selected quantized Qwen2.5-VL {} ({}) for lower memory pressure",
+                    resolved.variant_label,
+                    fmt_gb(resolved.size_bytes),
+                )),
+            _ if is_metal && resolved.is_gguf => self.base.progress.info(&format!(
+                "Metal auto mode forcing quantized Qwen2.5-VL {} ({}) to avoid BF16 memory pressure",
+                resolved.variant_label,
+                fmt_gb(resolved.size_bytes),
+            )),
+            _ => {}
         }
+
+        Ok(resolved)
     }
 
     fn load_text_encoder(
@@ -1677,5 +1713,60 @@ mod tests {
         );
         assert!(plan.use_gpu);
         assert!(!plan.use_cpu_staging);
+    }
+
+    #[test]
+    fn qwen_image_auto_prefers_q6_on_metal_with_headroom() {
+        let q6 = mold_core::manifest::find_qwen2_vl_variant("q6").unwrap();
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            false,
+            true,
+            qwen2_vram_threshold(q6.size_bytes) + 1,
+            16_600_000_000,
+        )
+        .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q6");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_falls_back_to_q4_on_metal_when_q6_does_not_fit() {
+        let q4 = mold_core::manifest::find_qwen2_vl_variant("q4").unwrap();
+        let q6 = mold_core::manifest::find_qwen2_vl_variant("q6").unwrap();
+        let free_vram = qwen2_vram_threshold(q4.size_bytes);
+        assert!(free_vram < qwen2_vram_threshold(q6.size_bytes));
+
+        let resolved =
+            QwenImageEngine::choose_text_encoder_source(Some("auto"), false, true, free_vram, 0)
+                .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_keeps_bf16_default_on_cuda() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD + 1,
+            16_600_000_000,
+        )
+        .unwrap();
+        assert!(!resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "bf16");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_explicit_q6_respects_cpu_fallback_on_cuda() {
+        let resolved =
+            QwenImageEngine::choose_text_encoder_source(Some("q6"), true, false, 1, 0).unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q6");
+        assert!(!resolved.auto_use_gpu);
     }
 }

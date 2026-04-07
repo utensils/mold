@@ -49,6 +49,24 @@ fn template_strip_index(tokens: &[u32]) -> usize {
     strip_at
 }
 
+fn window_qwen_image_tokens(
+    mut input_ids: Vec<u32>,
+    strip_idx: usize,
+    pad_id: u32,
+) -> (Vec<u32>, usize) {
+    let total_window = TOKENIZER_WINDOW + strip_idx;
+    if input_ids.len() > total_window {
+        input_ids.truncate(total_window);
+    }
+    let valid_len = input_ids
+        .len()
+        .saturating_sub(strip_idx)
+        .min(TOKENIZER_WINDOW)
+        .min(MAX_SEQUENCE_LENGTH);
+    input_ids.resize(total_window, pad_id);
+    (input_ids, valid_len)
+}
+
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     sin: Tensor,
@@ -517,14 +535,13 @@ impl Qwen2TextEncoder {
 
     fn encode_ids(&self, prompt: &str) -> Result<(Vec<u32>, usize, usize)> {
         let formatted = format_qwen_image_prompt(prompt);
-        let mut input_ids = self
+        let input_ids = self
             .tokenizer
             .encode(formatted, false)
             .map_err(|e| anyhow::anyhow!("Qwen2.5 tokenization failed: {e}"))?
             .get_ids()
             .to_vec();
         let strip_idx = template_strip_index(&input_ids);
-        let total_window = TOKENIZER_WINDOW + strip_idx;
 
         let pad_id = *self
             .tokenizer
@@ -532,15 +549,7 @@ impl Qwen2TextEncoder {
             .get("<|endoftext|>")
             .ok_or_else(|| anyhow::anyhow!("Qwen2.5 tokenizer missing <|endoftext|>"))?;
 
-        if input_ids.len() > total_window {
-            input_ids.truncate(total_window);
-        }
-        let valid_len = input_ids
-            .len()
-            .saturating_sub(strip_idx)
-            .min(TOKENIZER_WINDOW)
-            .min(MAX_SEQUENCE_LENGTH);
-        input_ids.resize(total_window, pad_id);
+        let (input_ids, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, pad_id);
         Ok((input_ids, strip_idx, valid_len))
     }
 
@@ -602,5 +611,46 @@ impl Qwen2TextEncoder {
             )?))
         };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen_image_prompt_format_includes_chat_template() {
+        let formatted = format_qwen_image_prompt("a red apple");
+        assert!(formatted.starts_with("<|im_start|>system\n"));
+        assert!(formatted.contains(SYSTEM_PROMPT));
+        assert!(formatted.contains("<|im_start|>user\na red apple<|im_end|>"));
+        assert!(formatted.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn template_strip_index_skips_second_im_start_user_prefix() {
+        let tokens = vec![1, 2, 151644, 999, 151644, 872, 198, 77, 88];
+        assert_eq!(template_strip_index(&tokens), 7);
+    }
+
+    #[test]
+    fn window_qwen_image_tokens_truncates_to_1024_and_caps_valid_len_at_512() {
+        let strip_idx = 4;
+        let input_ids = (0..2_000).collect::<Vec<u32>>();
+        let (windowed, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, 42);
+        assert_eq!(windowed.len(), TOKENIZER_WINDOW + strip_idx);
+        assert_eq!(valid_len, MAX_SEQUENCE_LENGTH);
+        assert_eq!(windowed[TOKENIZER_WINDOW + strip_idx - 1], 1027);
+    }
+
+    #[test]
+    fn window_qwen_image_tokens_pads_short_sequences_after_template_strip() {
+        let strip_idx = 3;
+        let input_ids = vec![10, 11, 12, 13, 14];
+        let (windowed, valid_len) = window_qwen_image_tokens(input_ids, strip_idx, 99);
+        assert_eq!(valid_len, 2);
+        assert_eq!(windowed.len(), TOKENIZER_WINDOW + strip_idx);
+        assert_eq!(&windowed[..5], &[10, 11, 12, 13, 14]);
+        assert!(windowed[5..].iter().all(|&id| id == 99));
     }
 }
