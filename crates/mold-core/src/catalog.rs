@@ -281,4 +281,82 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn catalog_contains_upscaler_models() {
+        // The full catalog should still include upscaler models (for mold list / Models tab).
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        assert!(
+            catalog.iter().any(|m| m.is_upscaler()),
+            "catalog should include upscaler models"
+        );
+    }
+
+    #[test]
+    fn generation_model_filter_excludes_upscalers() {
+        // When filtering for generation models, upscalers must not appear.
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let generation: Vec<_> = catalog.iter().filter(|m| m.is_generation_model()).collect();
+
+        assert!(
+            !generation.is_empty(),
+            "there should be generation models in the catalog"
+        );
+        for m in &generation {
+            assert!(
+                !m.is_upscaler(),
+                "generation model filter should exclude upscaler '{}'",
+                m.name
+            );
+            assert!(
+                !m.is_utility(),
+                "generation model filter should exclude utility model '{}'",
+                m.name
+            );
+        }
+    }
+
+    #[test]
+    fn generation_model_filter_excludes_utility_models() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let utility_in_generation: Vec<_> = catalog
+            .iter()
+            .filter(|m| m.is_generation_model() && m.is_utility())
+            .collect();
+        assert!(
+            utility_in_generation.is_empty(),
+            "no utility models should pass is_generation_model(): {:?}",
+            utility_in_generation
+                .iter()
+                .map(|m| &m.name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn upscaler_config_only_model_excluded_from_generation() {
+        // A config-only model with upscaler family should not be a generation model.
+        let mut models = HashMap::new();
+        models.insert(
+            "my-custom-upscaler".to_string(),
+            ModelConfig {
+                family: Some("upscaler".to_string()),
+                description: Some("Custom upscaler".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let config = Config {
+            models,
+            ..Config::default()
+        };
+
+        let catalog = build_model_catalog(&config, None, false);
+        let entry = catalog
+            .iter()
+            .find(|m| m.name == "my-custom-upscaler")
+            .expect("config-only upscaler should be in catalog");
+
+        assert!(entry.is_upscaler());
+        assert!(!entry.is_generation_model());
+    }
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use mold_core::manifest::{
-    all_model_names, is_known_model, looks_like_model_name, resolve_model_name,
+    all_generation_model_names, is_known_model, looks_like_model_name, resolve_model_name,
     suggest_similar_models,
 };
 use mold_core::{Config, LoraWeight, OutputFormat, Scheduler};
@@ -13,7 +13,7 @@ use super::generate;
 /// Provide model name completions for shell tab-completion.
 pub fn complete_model_name() -> Vec<CompletionCandidate> {
     let config = Config::load_or_default();
-    all_model_names(&config)
+    all_generation_model_names(&config)
         .into_iter()
         .map(CompletionCandidate::new)
         .collect()
@@ -960,5 +960,40 @@ mod tests {
         let local = false;
         let defer = should_expand && !local;
         assert!(!defer, "should not defer when expansion is disabled");
+    }
+
+    #[test]
+    fn complete_model_name_excludes_upscalers() {
+        let candidates = super::complete_model_name();
+        let names: Vec<String> = candidates
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().to_string())
+            .collect();
+        for name in &names {
+            assert!(
+                !name.starts_with("real-esrgan"),
+                "run model completions should not include upscaler '{name}'"
+            );
+        }
+        // Should still have generation models
+        assert!(
+            !names.is_empty(),
+            "should have generation model completions"
+        );
+    }
+
+    #[test]
+    fn complete_model_name_excludes_utility_models() {
+        let candidates = super::complete_model_name();
+        let names: Vec<String> = candidates
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().to_string())
+            .collect();
+        for name in &names {
+            assert!(
+                !name.starts_with("qwen3-expand"),
+                "run model completions should not include utility model '{name}'"
+            );
+        }
     }
 }

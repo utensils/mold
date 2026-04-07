@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap_complete::engine::CompletionCandidate;
 use colored::Colorize;
 use mold_core::config::{Config, DefaultModelSource};
-use mold_core::manifest::{all_model_names, is_known_model, resolve_model_name};
+use mold_core::manifest::{all_generation_model_names, is_known_model, resolve_model_name};
 
 use crate::theme;
 use crate::AlreadyReported;
@@ -104,10 +104,10 @@ fn set_default(name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Completion candidates for the model argument (all known models).
+/// Completion candidates for the model argument (generation models only).
 pub fn complete_model_name() -> Vec<CompletionCandidate> {
     let config = Config::load_or_default();
-    all_model_names(&config)
+    all_generation_model_names(&config)
         .into_iter()
         .map(CompletionCandidate::new)
         .collect()
@@ -238,5 +238,20 @@ mod tests {
             None => std::env::remove_var("MOLD_HOME"),
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn complete_model_name_excludes_upscalers() {
+        let candidates = super::complete_model_name();
+        let names: Vec<String> = candidates
+            .into_iter()
+            .map(|c| c.get_value().to_string_lossy().to_string())
+            .collect();
+        for name in &names {
+            assert!(
+                !name.starts_with("real-esrgan"),
+                "default model completions should not include upscaler '{name}'"
+            );
+        }
     }
 }
