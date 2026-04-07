@@ -2078,7 +2078,7 @@ impl App {
                 .models
                 .catalog
                 .iter()
-                .filter(|m| m.name.to_lowercase().contains(&query))
+                .filter(|m| m.is_generation_model() && m.name.to_lowercase().contains(&query))
                 .map(|m| m.name.clone())
                 .collect();
             if *selected >= filtered.len() {
@@ -2764,7 +2764,13 @@ impl App {
     }
 
     fn open_model_selector(&mut self) {
-        let mut models: Vec<String> = self.models.catalog.iter().map(|m| m.name.clone()).collect();
+        let mut models: Vec<String> = self
+            .models
+            .catalog
+            .iter()
+            .filter(|m| m.is_generation_model())
+            .map(|m| m.name.clone())
+            .collect();
         // Sort: downloaded first, then undownloaded (preserving order within each group)
         let config = &self.config;
         models.sort_by_key(|name| {
@@ -6479,5 +6485,56 @@ mod tests {
         assert_eq!(progress.download_batch_bytes, 0);
         assert_eq!(progress.download_batch_total, 0);
         assert!(progress.download_filename.is_empty());
+    }
+
+    #[test]
+    fn model_selector_excludes_upscalers() {
+        // The generation model selector should never include upscaler models.
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        let generation_models: Vec<String> = catalog
+            .iter()
+            .filter(|m| m.is_generation_model())
+            .map(|m| m.name.clone())
+            .collect();
+
+        for name in &generation_models {
+            assert!(
+                !name.starts_with("real-esrgan"),
+                "model selector should not include upscaler model '{name}'"
+            );
+        }
+        // Verify we actually have generation models
+        assert!(
+            !generation_models.is_empty(),
+            "should have generation models after filtering"
+        );
+    }
+
+    #[test]
+    fn model_selector_excludes_utility_models() {
+        // The generation model selector should never include utility models like qwen3-expand.
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        let generation_models: Vec<String> = catalog
+            .iter()
+            .filter(|m| m.is_generation_model())
+            .map(|m| m.name.clone())
+            .collect();
+
+        for name in &generation_models {
+            assert!(
+                !name.starts_with("qwen3-expand"),
+                "model selector should not include utility model '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn full_catalog_still_includes_upscalers_and_utility() {
+        // The full catalog (for Models tab / mold list) should still include everything.
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        assert!(
+            catalog.iter().any(|m| m.is_upscaler()),
+            "full catalog should include upscaler models"
+        );
     }
 }

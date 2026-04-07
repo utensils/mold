@@ -13,6 +13,10 @@ pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand"];
 /// These are excluded from default-model selection and use a simplified config path.
 pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
 
+/// Model families that are auxiliary (not standalone generators).
+/// ControlNet models are used via `--control-model`, not as the primary model.
+pub const AUXILIARY_FAMILIES: &[&str] = &["controlnet"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
     Transformer,
@@ -104,6 +108,19 @@ impl ModelManifest {
     /// and are not eligible as default generation models.
     pub fn is_upscaler(&self) -> bool {
         UPSCALER_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is an auxiliary model (e.g., ControlNet) not a standalone generator.
+    ///
+    /// Auxiliary models are used as modifiers (via `--control-model`) rather than
+    /// as the primary generation model.
+    pub fn is_auxiliary(&self) -> bool {
+        AUXILIARY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this model can be used as a primary generation model.
+    pub fn is_generation_model(&self) -> bool {
+        !self.is_upscaler() && !self.is_utility() && !self.is_auxiliary()
     }
 
     /// True if any file in this model requires HuggingFace authentication.
@@ -2665,6 +2682,38 @@ pub fn all_model_names(config: &crate::Config) -> Vec<String> {
     names
 }
 
+/// True if a family string identifies a generation model (not upscaler, utility, or auxiliary).
+///
+/// Used by `all_generation_model_names` to classify config-only models whose family
+/// is a plain string rather than a `ModelManifest` with methods.
+pub fn is_generation_family(family: &str) -> bool {
+    !UPSCALER_FAMILIES.contains(&family)
+        && !UTILITY_FAMILIES.contains(&family)
+        && !AUXILIARY_FAMILIES.contains(&family)
+}
+
+/// All known generation model names (excludes upscalers, utility, and auxiliary models),
+/// deduplicated and sorted.
+pub fn all_generation_model_names(config: &crate::Config) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    for m in known_manifests() {
+        if m.is_generation_model() {
+            seen.insert(m.name.clone());
+        }
+    }
+    for key in config.models.keys() {
+        // Use resolved config to get the correct family (inherits from manifest if present).
+        let resolved = config.resolved_model_config(key);
+        let family = resolved.family.as_deref().unwrap_or("flux");
+        if is_generation_family(family) {
+            seen.insert(key.clone());
+        }
+    }
+    let mut names: Vec<String> = seen.into_iter().collect();
+    names.sort();
+    names
+}
+
 /// Check if a string structurally resembles a model name without being a known one.
 ///
 /// Returns true if the input contains explicit tag syntax (colon), shares a family
@@ -2737,8 +2786,8 @@ pub fn looks_like_model_name(input: &str, config: &crate::Config) -> bool {
 pub fn suggest_similar_models(input: &str, config: &crate::Config, max: usize) -> Vec<String> {
     let input_base = input.split(':').next().unwrap_or(input);
 
-    // all_model_names already deduplicates via HashSet, so no explicit dedup needed
-    let mut scored: Vec<(f64, String)> = all_model_names(config)
+    // all_generation_model_names already deduplicates via HashSet, so no explicit dedup needed
+    let mut scored: Vec<(f64, String)> = all_generation_model_names(config)
         .into_iter()
         .map(|name| {
             let base = name.split(':').next().unwrap_or(&name);
@@ -3785,8 +3834,7 @@ mod tests {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
             // All diffusion models need VAE (except ControlNet, utility models, and upscalers)
-            if !manifest.is_utility() && !manifest.is_upscaler() && manifest.family != "controlnet"
-            {
+            if !manifest.is_utility() && !manifest.is_upscaler() && !manifest.is_auxiliary() {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",
@@ -4388,7 +4436,7 @@ mod tests {
     fn total_size_includes_shared_components() {
         // Models with shared files must have total > transformer-only size
         for manifest in known_manifests() {
-            if manifest.family == "controlnet" || manifest.is_upscaler() {
+            if manifest.is_auxiliary() || manifest.is_upscaler() {
                 continue; // ControlNet and upscalers are single-file models
             }
             let transformer_bytes: u64 = manifest
@@ -4570,6 +4618,98 @@ mod tests {
             suggestions.is_empty(),
             "unrelated string should have no suggestions"
         );
+    }
+
+    #[test]
+    fn all_generation_model_names_excludes_upscalers() {
+        let config = crate::Config::default();
+        let gen_names = super::all_generation_model_names(&config);
+        for name in &gen_names {
+            if let Some(manifest) = find_manifest(name) {
+                assert!(
+                    !manifest.is_upscaler(),
+                    "all_generation_model_names should not contain upscaler '{name}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_generation_model_names_excludes_utility_models() {
+        let config = crate::Config::default();
+        let gen_names = super::all_generation_model_names(&config);
+        for name in &gen_names {
+            if let Some(manifest) = find_manifest(name) {
+                assert!(
+                    !manifest.is_utility(),
+                    "all_generation_model_names should not contain utility model '{name}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_generation_model_names_contains_diffusion_models() {
+        let config = crate::Config::default();
+        let gen_names = super::all_generation_model_names(&config);
+        // Should contain at least some well-known diffusion models.
+        assert!(
+            gen_names.iter().any(|n| n.starts_with("flux-schnell")),
+            "generation names should include flux-schnell variants"
+        );
+        assert!(
+            gen_names.iter().any(|n| n.starts_with("flux-dev")),
+            "generation names should include flux-dev variants"
+        );
+    }
+
+    #[test]
+    fn all_generation_model_names_excludes_controlnet() {
+        let config = crate::Config::default();
+        let gen_names = super::all_generation_model_names(&config);
+        for name in &gen_names {
+            if let Some(manifest) = find_manifest(name) {
+                assert!(
+                    !manifest.is_auxiliary(),
+                    "all_generation_model_names should not contain auxiliary model '{name}'"
+                );
+            }
+        }
+        // Verify controlnet models exist in the full list but not generation list.
+        let all_names = super::all_model_names(&config);
+        assert!(
+            all_names.iter().any(|n| n.starts_with("controlnet-")),
+            "all_model_names should include controlnet models"
+        );
+        assert!(
+            !gen_names.iter().any(|n| n.starts_with("controlnet-")),
+            "all_generation_model_names should not include controlnet models"
+        );
+    }
+
+    #[test]
+    fn all_model_names_includes_upscalers() {
+        let config = crate::Config::default();
+        let all_names = super::all_model_names(&config);
+        assert!(
+            all_names.iter().any(|n| n.starts_with("real-esrgan")),
+            "all_model_names should still include upscaler models"
+        );
+    }
+
+    #[test]
+    fn suggest_similar_models_excludes_upscalers() {
+        let config = crate::Config::default();
+        // Suggestions for any input should never include upscaler models.
+        let suggestions = super::suggest_similar_models("flux-schnell", &config, 50);
+        for s in &suggestions {
+            if let Some(m) = find_manifest(s) {
+                assert!(
+                    !m.is_upscaler(),
+                    "suggest_similar_models should not suggest upscaler '{s}'"
+                );
+            }
+        }
     }
 
     #[test]

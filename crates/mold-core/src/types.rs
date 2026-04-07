@@ -510,6 +510,28 @@ pub struct ModelInfoExtended {
     pub remaining_download_bytes: Option<u64>,
 }
 
+impl ModelInfoExtended {
+    /// True if this is an upscaler model (Real-ESRGAN, etc.) not a diffusion generator.
+    pub fn is_upscaler(&self) -> bool {
+        crate::manifest::UPSCALER_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is a utility model (e.g., prompt expansion LLM).
+    pub fn is_utility(&self) -> bool {
+        crate::manifest::UTILITY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is an auxiliary model (e.g., ControlNet) not a standalone generator.
+    pub fn is_auxiliary(&self) -> bool {
+        crate::manifest::AUXILIARY_FAMILIES.contains(&self.family.as_str())
+    }
+
+    /// True if this is a standalone generation model (not an upscaler, utility, or auxiliary).
+    pub fn is_generation_model(&self) -> bool {
+        !self.is_upscaler() && !self.is_utility() && !self.is_auxiliary()
+    }
+}
+
 impl std::ops::Deref for ModelInfoExtended {
     type Target = ModelInfo;
 
