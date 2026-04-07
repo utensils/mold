@@ -73,8 +73,8 @@ impl Module for LayerNormNoParams {
 // ── GELU MLP (diffusers format: net.0.proj + net.2) ──────────────────────────
 
 struct GeluMlp {
-    proj: Linear,   // net.0.proj — GELU gate projection
-    out: Linear,    // net.2 — output projection
+    proj: Linear, // net.0.proj — GELU gate projection
+    out: Linear,  // net.2 — output projection
 }
 
 impl GeluMlp {
@@ -92,8 +92,7 @@ impl GeluMlp {
         })
     }
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(x
-            .apply(&self.proj)?
+        Ok(x.apply(&self.proj)?
             .apply(&candle_nn::Activation::GeluPytorchTanh)?
             .apply(&self.out)?)
     }
@@ -105,11 +104,11 @@ struct JointAttention {
     to_q: Linear,
     to_k: Linear,
     to_v: Linear,
-    to_out: Linear,          // safetensors: attn.to_out.0
+    to_out: Linear, // safetensors: attn.to_out.0
     add_q_proj: Linear,
     add_k_proj: Linear,
     add_v_proj: Linear,
-    add_out_proj: Linear,    // safetensors: attn.to_add_out
+    add_out_proj: Linear, // safetensors: attn.to_add_out
     norm_q: candle_nn::RmsNorm,
     norm_k: candle_nn::RmsNorm,
     norm_added_q: candle_nn::RmsNorm,
@@ -255,12 +254,12 @@ struct OffloadedQwenBlock {
     norm1: LayerNormNoParams,
     norm1_context: LayerNormNoParams,
     attn: JointAttention,
-    img_mlp: GeluMlp,           // safetensors: img_mlp.net.{0.proj,2}
-    txt_mlp: GeluMlp,           // safetensors: txt_mlp.net.{0.proj,2}
+    img_mlp: GeluMlp, // safetensors: img_mlp.net.{0.proj,2}
+    txt_mlp: GeluMlp, // safetensors: txt_mlp.net.{0.proj,2}
     norm2: LayerNormNoParams,
     norm2_context: LayerNormNoParams,
-    img_mod: Linear,             // safetensors: img_mod.1
-    txt_mod: Linear,             // safetensors: txt_mod.1
+    img_mod: Linear, // safetensors: img_mod.1
+    txt_mod: Linear, // safetensors: txt_mod.1
 }
 
 impl OffloadedQwenBlock {
@@ -404,12 +403,17 @@ impl TimestepProjEmbeddings {
 
 struct OutputLayer {
     norm_final: LayerNormNoParams,
-    proj_out: Linear,        // safetensors: proj_out
-    adaln_linear: Linear,    // safetensors: norm_out.linear
+    proj_out: Linear,     // safetensors: proj_out
+    adaln_linear: Linear, // safetensors: norm_out.linear
 }
 
 impl OutputLayer {
-    fn load(inner_dim: usize, out_channels: usize, patch_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        inner_dim: usize,
+        out_channels: usize,
+        patch_size: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let output_dim = patch_size * patch_size * out_channels;
         Ok(Self {
             norm_final: LayerNormNoParams::new(1e-6),
@@ -449,9 +453,9 @@ enum BlockResidency {
 pub(crate) struct OffloadedQwenImageTransformer {
     // Stem layers on GPU permanently
     time_embed: TimestepProjEmbeddings,
-    img_in: Linear,          // safetensors: img_in
-    txt_in: Linear,          // safetensors: txt_in
-    txt_norm: candle_nn::RmsNorm,  // safetensors: txt_norm
+    img_in: Linear,               // safetensors: img_in
+    txt_in: Linear,               // safetensors: txt_in
+    txt_norm: candle_nn::RmsNorm, // safetensors: txt_norm
     output_layer: OutputLayer,
     rope_embedder: QwenRopeEmbedder,
     cfg: QwenImageConfig,
@@ -477,8 +481,7 @@ impl OffloadedQwenImageTransformer {
         progress.info("Loading transformer with dynamic GPU/CPU placement…");
 
         // Stem layers: load directly on GPU
-        let time_embed =
-            TimestepProjEmbeddings::load(cfg.inner_dim, gpu_vb.pp("time_text_embed"))?;
+        let time_embed = TimestepProjEmbeddings::load(cfg.inner_dim, gpu_vb.pp("time_text_embed"))?;
         let img_in = linear(cfg.in_channels, cfg.inner_dim, gpu_vb.pp("img_in"))?;
         let txt_in = linear(cfg.joint_attention_dim, cfg.inner_dim, gpu_vb.pp("txt_in"))?;
         let txt_norm = load_rms_norm(cfg.joint_attention_dim, cfg.norm_eps, gpu_vb.pp("txt_norm"))?;
@@ -490,8 +493,12 @@ impl OffloadedQwenImageTransformer {
         )?;
 
         // RoPE embedder (frequency tables on CPU, sliced per-forward to GPU)
-        let rope_embedder =
-            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), &Device::Cpu, DType::F32)?;
+        let rope_embedder = QwenRopeEmbedder::new(
+            10000.0,
+            cfg.axes_dims_rope.clone(),
+            &Device::Cpu,
+            DType::F32,
+        )?;
 
         // Measure free VRAM after stem layers and decide how many blocks fit
         gpu_device.synchronize()?;
@@ -567,21 +574,34 @@ impl OffloadedQwenImageTransformer {
     fn block_size_bytes(block: &OffloadedQwenBlock) -> u64 {
         let lb = |l: &Linear| -> u64 {
             let w = (l.weight().elem_count() * l.weight().dtype().size_in_bytes()) as u64;
-            let b = l.bias().map(|b| (b.elem_count() * b.dtype().size_in_bytes()) as u64).unwrap_or(0);
+            let b = l
+                .bias()
+                .map(|b| (b.elem_count() * b.dtype().size_in_bytes()) as u64)
+                .unwrap_or(0);
             w + b
         };
         let rb = |r: &candle_nn::RmsNorm| -> u64 {
             let w = r.clone().into_inner().weight().clone();
             (w.elem_count() * w.dtype().size_in_bytes()) as u64
         };
-        lb(&block.img_mod) + lb(&block.txt_mod)
-            + lb(&block.attn.to_q) + lb(&block.attn.to_k) + lb(&block.attn.to_v)
-            + lb(&block.attn.to_out) + lb(&block.attn.add_q_proj) + lb(&block.attn.add_k_proj)
-            + lb(&block.attn.add_v_proj) + lb(&block.attn.add_out_proj)
-            + rb(&block.attn.norm_q) + rb(&block.attn.norm_k)
-            + rb(&block.attn.norm_added_q) + rb(&block.attn.norm_added_k)
-            + lb(&block.img_mlp.proj) + lb(&block.img_mlp.out)
-            + lb(&block.txt_mlp.proj) + lb(&block.txt_mlp.out)
+        lb(&block.img_mod)
+            + lb(&block.txt_mod)
+            + lb(&block.attn.to_q)
+            + lb(&block.attn.to_k)
+            + lb(&block.attn.to_v)
+            + lb(&block.attn.to_out)
+            + lb(&block.attn.add_q_proj)
+            + lb(&block.attn.add_k_proj)
+            + lb(&block.attn.add_v_proj)
+            + lb(&block.attn.add_out_proj)
+            + rb(&block.attn.norm_q)
+            + rb(&block.attn.norm_k)
+            + rb(&block.attn.norm_added_q)
+            + rb(&block.attn.norm_added_k)
+            + lb(&block.img_mlp.proj)
+            + lb(&block.img_mlp.out)
+            + lb(&block.txt_mlp.proj)
+            + lb(&block.txt_mlp.out)
     }
 
     /// Promote CPU-resident blocks to GPU if more VRAM is now available.
@@ -698,16 +718,28 @@ impl OffloadedQwenImageTransformer {
                 BlockResidency::Gpu(block) => {
                     // Already on GPU — execute directly, no transfer
                     (txt, img) = block.forward(
-                        &img, &txt, encoder_attention_mask, &temb,
-                        &img_cos, &img_sin, &txt_cos, &txt_sin,
+                        &img,
+                        &txt,
+                        encoder_attention_mask,
+                        &temb,
+                        &img_cos,
+                        &img_sin,
+                        &txt_cos,
+                        &txt_sin,
                     )?;
                 }
                 BlockResidency::Cpu(block) => {
                     // Stream CPU → GPU, execute, drop GPU copy
                     let gpu_block = block.to_device(device)?;
                     (txt, img) = gpu_block.forward(
-                        &img, &txt, encoder_attention_mask, &temb,
-                        &img_cos, &img_sin, &txt_cos, &txt_sin,
+                        &img,
+                        &txt,
+                        encoder_attention_mask,
+                        &temb,
+                        &img_cos,
+                        &img_sin,
+                        &txt_cos,
+                        &txt_sin,
                     )?;
                     device.synchronize()?;
                     drop(gpu_block);

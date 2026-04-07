@@ -42,7 +42,12 @@ impl candle_nn::var_builder::SimpleBackend for NativeFp8Backend {
         Ok(tensor)
     }
 
-    fn get_unchecked(&self, path: &str, _dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+    fn get_unchecked(
+        &self,
+        path: &str,
+        _dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
         self.inner.load(path, dev)
     }
 

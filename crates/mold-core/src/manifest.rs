@@ -224,7 +224,7 @@ impl ModelManifest {
 /// a family so that full-precision appears first and smaller quantizations
 /// appear last.
 ///
-/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7)
+/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7) > q2 (8)
 ///
 /// Unknown tags get rank 100 (sorted last).
 pub fn variant_quality_rank(model_name: &str) -> u32 {
@@ -238,6 +238,7 @@ pub fn variant_quality_rank(model_name: &str) -> u32 {
         "q5" => 5,
         "q4" => 6,
         "q3" => 7,
+        "q2" => 8,
         _ => 100,
     }
 }
@@ -270,6 +271,21 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
     } else {
+        if manifest.family == "qwen-image" {
+            match file.hf_repo.as_str() {
+                "Qwen/Qwen-Image" => {
+                    return PathBuf::from("shared")
+                        .join("qwen-image-base")
+                        .join(&file.hf_filename);
+                }
+                "Qwen/Qwen-Image-2512" => {
+                    return PathBuf::from("shared")
+                        .join("qwen-image")
+                        .join(&file.hf_filename);
+                }
+                _ => {}
+            }
+        }
         // Check if this filename collides with another file in the same
         // manifest from a different HF repo. If so, use the repo name
         // as a subfolder to disambiguate (e.g. Wuerstchen has two
@@ -2306,10 +2322,66 @@ fn shared_flux2_9b_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Shared Qwen-Image component files (VAE, text encoder shards, tokenizer).
-fn shared_qwen_image_files() -> Vec<ModelFile> {
+/// Shared base Qwen-Image component files (VAE, text encoder shards, tokenizer).
+fn shared_qwen_image_base_files() -> Vec<ModelFile> {
     vec![
         // VAE
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 253_806_966,
+            gated: false,
+            sha256: None,
+        },
+        // Qwen2.5-VL text encoder shards
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_968_243_304,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_991_495_816,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_932_751_040,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 1_691_924_384,
+            gated: false,
+            sha256: None,
+        },
+        // Tokenizer shared across both Qwen-Image releases.
+        ModelFile {
+            hf_repo: "Qwen/Qwen2.5-7B".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 7_031_645,
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
+/// Shared Qwen-Image-2512 component files (VAE, text encoder shards, tokenizer).
+fn shared_qwen_image_2512_files() -> Vec<ModelFile> {
+    vec![
         ModelFile {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
@@ -2318,7 +2390,6 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             gated: false,
             sha256: None,
         },
-        // Qwen2.5-VL text encoder shards
         ModelFile {
             hf_repo: "Qwen/Qwen-Image-2512".to_string(),
             hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
@@ -2351,8 +2422,6 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
             gated: false,
             sha256: None,
         },
-        // Tokenizer (Qwen2.5 tokenizer — Qwen-Image-2512 repo only ships
-        // split BPE files; the compiled tokenizer.json lives in the base model repo)
         ModelFile {
             hf_repo: "Qwen/Qwen2.5-7B".to_string(),
             hf_filename: "tokenizer.json".to_string(),
@@ -2366,7 +2435,7 @@ fn shared_qwen_image_files() -> Vec<ModelFile> {
 
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
-    let defaults = ManifestDefaults {
+    let base_defaults = ManifestDefaults {
         steps: 50,
         guidance: 4.0,
         width: 1328,
@@ -2377,15 +2446,217 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         frames: None,
         fps: None,
     };
+    let qwen_2512_defaults = base_defaults.clone();
 
     vec![
-        // BF16 full precision (sharded safetensors from official repo)
+        // Base Qwen-Image.
         ModelManifest {
             name: "qwen-image:bf16".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 BF16 — 60-block flow-matching transformer".to_string(),
+            description: "Qwen-Image BF16 — base model, 60-block flow-matching transformer"
+                .to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_base_files();
+                let shards: &[(&str, u64)] = &[
+                    (
+                        "transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
+                        4_989_364_312,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00002-of-00009.safetensors",
+                        4_984_214_160,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00003-of-00009.safetensors",
+                        4_946_470_000,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00004-of-00009.safetensors",
+                        4_984_213_736,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00005-of-00009.safetensors",
+                        4_946_471_896,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00006-of-00009.safetensors",
+                        4_946_451_560,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00007-of-00009.safetensors",
+                        4_908_690_520,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00008-of-00009.safetensors",
+                        4_984_232_856,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00009-of-00009.safetensors",
+                        1_170_918_840,
+                    ),
+                ];
+                for (filename, size) in shards {
+                    files.push(ModelFile {
+                        hf_repo: "Qwen/Qwen-Image".to_string(),
+                        hf_filename: filename.to_string(),
+                        component: ModelComponent::TransformerShard,
+                        size_bytes: *size,
+                        gated: false,
+                        sha256: None,
+                    });
+                }
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        // Base Qwen-Image FP8 E4M3 (ComfyUI-compatible transformer, BF16 text encoder)
+        // NOTE: The FP8 text encoder (qwen_2.5_vl_7b_fp8_scaled.safetensors)
+        // requires scale_input/scale_weight dequantization that candle doesn't
+        // support. We use the BF16 text encoder shared with GGUF variants instead.
+        ModelManifest {
+            name: "qwen-image:fp8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image FP8 — base model, ComfyUI-compatible transformer".to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
+                    hf_filename: "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 20_442_787_688,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q8 — base model quantized transformer, best quality"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_761_817_120,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q6".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q6 — base model quantized, quality/size trade-off".to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 16_824_990_240,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q5".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q5 — base model quantized, dynamic K_M variant".to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q5_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 14_934_899_232,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q4 — base model quantized, dynamic K_M variant".to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 13_065_746_976,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q3".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q3 — base model quantized, dynamic K_M variant".to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q3_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_679_567_392,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image:q2".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Q2 — base model quantized, smallest published K variant"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
+                    hf_filename: "qwen-image-Q2_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_062_518_304,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: base_defaults.clone(),
+            hidden: false,
+        },
+        // Qwen-Image-2512.
+        ModelManifest {
+            name: "qwen-image-2512:bf16".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 BF16 — December update, strongest quality".to_string(),
+            files: {
+                let mut files = shared_qwen_image_2512_files();
                 let shards: &[(&str, u64)] = &[
                     (
                         "transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
@@ -2436,43 +2707,18 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 }
                 files
             },
-            defaults: defaults.clone(),
+            defaults: qwen_2512_defaults.clone(),
             hidden: false,
         },
-        // FP8 E4M3 (ComfyUI-compatible transformer, BF16 text encoder)
-        // NOTE: The FP8 text encoder (qwen_2.5_vl_7b_fp8_scaled.safetensors)
-        // requires scale_input/scale_weight dequantization that candle doesn't
-        // support. We use the BF16 text encoder shared with GGUF variants instead.
         ModelManifest {
-            name: "qwen-image:fp8".to_string(),
+            name: "qwen-image-2512:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 FP8 — ComfyUI-compatible, smaller download".to_string(),
+            description: "Qwen-Image-2512 Q8 — Unsloth GGUF, best quality".to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_2512_files();
                 files.push(ModelFile {
-                    hf_repo: "Comfy-Org/Qwen-Image_ComfyUI".to_string(),
-                    hf_filename: "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors"
-                        .to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 20_442_787_688,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: defaults.clone(),
-            hidden: false,
-        },
-        // GGUF quantized variants (transformer only; shared components stay BF16)
-        ModelManifest {
-            name: "qwen-image:q8".to_string(),
-            family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q8 — quantized transformer, best quality".to_string(),
-            files: {
-                let mut files = shared_qwen_image_files();
-                files.push(ModelFile {
-                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
-                    hf_filename: "qwen-image-Q8_0.gguf".to_string(),
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q8_0.gguf".to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 21_761_817_120,
                     gated: false,
@@ -2480,18 +2726,18 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 });
                 files
             },
-            defaults: defaults.clone(),
+            defaults: qwen_2512_defaults.clone(),
             hidden: false,
         },
         ModelManifest {
-            name: "qwen-image:q6".to_string(),
+            name: "qwen-image-2512:q6".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q6 — quantized, best quality/size trade-off".to_string(),
+            description: "Qwen-Image-2512 Q6 — Unsloth GGUF, quality/size trade-off".to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_2512_files();
                 files.push(ModelFile {
-                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
-                    hf_filename: "qwen-image-Q6_K.gguf".to_string(),
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q6_K.gguf".to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 16_824_990_240,
                     gated: false,
@@ -2499,26 +2745,83 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 });
                 files
             },
-            defaults: defaults.clone(),
+            defaults: qwen_2512_defaults.clone(),
             hidden: false,
         },
         ModelManifest {
-            name: "qwen-image:q4".to_string(),
+            name: "qwen-image-2512:q5".to_string(),
             family: "qwen-image".to_string(),
-            description: "Qwen-Image-2512 Q4 — quantized, smallest practical footprint".to_string(),
+            description: "Qwen-Image-2512 Q5 — Unsloth dynamic K_M GGUF".to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_2512_files();
                 files.push(ModelFile {
-                    hf_repo: "city96/Qwen-Image-gguf".to_string(),
-                    hf_filename: "qwen-image-Q4_K_S.gguf".to_string(),
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q5_K_M.gguf".to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 12_140_608_032,
+                    size_bytes: 15_000_074_784,
                     gated: false,
                     sha256: None,
                 });
                 files
             },
-            defaults,
+            defaults: qwen_2512_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-2512:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q4 — Unsloth dynamic K_M GGUF".to_string(),
+            files: {
+                let mut files = shared_qwen_image_2512_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 13_244_758_560,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_2512_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-2512:q3".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q3 — Unsloth dynamic K_M GGUF".to_string(),
+            files: {
+                let mut files = shared_qwen_image_2512_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q3_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_932_896_800,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_2512_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-2512:q2".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image-2512 Q2 — Unsloth smallest published K variant".to_string(),
+            files: {
+                let mut files = shared_qwen_image_2512_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-2512-GGUF".to_string(),
+                    hf_filename: "qwen-image-2512-Q2_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_333_837_344,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_2512_defaults.clone(),
             hidden: false,
         },
         // Lightning distilled variants (step-distilled, no CFG needed)
@@ -2528,7 +2831,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             description: "Qwen-Image-2512 Lightning FP8 — 4-step distilled, 12-25x faster"
                 .to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_2512_files();
                 files.push(ModelFile {
                     hf_repo: "lightx2v/Qwen-Image-2512-Lightning".to_string(),
                     hf_filename:
@@ -2560,12 +2863,11 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             description: "Qwen-Image-2512 Lightning FP8 — 8-step distilled, higher quality"
                 .to_string(),
             files: {
-                let mut files = shared_qwen_image_files();
+                let mut files = shared_qwen_image_2512_files();
                 files.push(ModelFile {
                     hf_repo: "lightx2v/Qwen-Image-2512-Lightning".to_string(),
-                    hf_filename:
-                        "qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors"
-                            .to_string(),
+                    hf_filename: "qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors"
+                        .to_string(),
                     component: ModelComponent::Transformer,
                     size_bytes: 20_400_000_000,
                     gated: false,
@@ -3560,6 +3862,28 @@ mod tests {
     }
 
     #[test]
+    fn qwen_shared_components_do_not_collapse_base_and_2512() {
+        let base_manifest = find_manifest("qwen-image:q4").unwrap();
+        let base_encoder = base_manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let base_path = storage_path(base_manifest, base_encoder);
+        assert!(base_path.starts_with("shared/qwen-image-base"));
+
+        let q2512_manifest = find_manifest("qwen-image-2512:q4").unwrap();
+        let q2512_encoder = q2512_manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let q2512_path = storage_path(q2512_manifest, q2512_encoder);
+        assert!(q2512_path.starts_with("shared/qwen-image"));
+        assert_ne!(base_path, q2512_path);
+    }
+
+    #[test]
     fn storage_path_zimage_preserves_nested_filenames() {
         let manifest = find_manifest("z-image-turbo:q8").unwrap();
         let encoder_file = manifest
@@ -3914,8 +4238,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 7 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 73
-        assert_eq!(known_manifests().len(), 73);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 17 Qwen-Image + 1 Wuerstchen + 2 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 83
+        assert_eq!(known_manifests().len(), 83);
     }
 
     #[test]

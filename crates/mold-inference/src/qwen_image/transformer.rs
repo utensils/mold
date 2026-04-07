@@ -40,7 +40,12 @@ enum QwenLinear {
 
 impl QwenLinear {
     /// Load a linear layer, auto-detecting FP8 vs standard from weight dtype.
-    fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> candle_core::Result<Self> {
+    fn load(
+        in_dim: usize,
+        out_dim: usize,
+        has_bias: bool,
+        vb: VarBuilder,
+    ) -> candle_core::Result<Self> {
         let weight = vb.get((out_dim, in_dim), "weight")?;
         if weight.dtype() == DType::F8E4M3 {
             let scale = vb.get_unchecked("scale_weight").ok();
@@ -49,7 +54,11 @@ impl QwenLinear {
             } else {
                 None
             };
-            Ok(Self::Fp8 { weight, scale, bias })
+            Ok(Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            })
         } else {
             let bias = if has_bias {
                 Some(vb.get(out_dim, "bias")?)
@@ -65,7 +74,11 @@ impl Module for QwenLinear {
     fn forward(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         match self {
             Self::Standard(l) => l.forward(x),
-            Self::Fp8 { weight, scale, bias } => {
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => {
                 let dtype = x.dtype();
                 let w = weight.to_dtype(dtype)?;
                 let w = match scale {
@@ -118,7 +131,8 @@ impl FeedForward {
     fn new(dim: usize, hidden_dim: usize, vb: VarBuilder) -> candle_core::Result<Self> {
         if vb.contains_tensor("net.0.proj.weight") {
             let has_bias = vb.contains_tensor("net.0.proj.bias");
-            let proj = QwenLinear::load(dim, hidden_dim, has_bias, vb.pp("net").pp("0").pp("proj"))?;
+            let proj =
+                QwenLinear::load(dim, hidden_dim, has_bias, vb.pp("net").pp("0").pp("proj"))?;
             let out = QwenLinear::load(hidden_dim, dim, has_bias, vb.pp("net").pp("2"))?;
             Ok(Self::Gelu { proj, out })
         } else {
@@ -264,7 +278,12 @@ impl TimestepProjEmbeddings {
             vb
         };
         let has_bias = vb.contains_tensor("linear_1.bias");
-        let linear1 = QwenLinear::load(FREQUENCY_EMBEDDING_SIZE, inner_dim, has_bias, vb.pp("linear_1"))?;
+        let linear1 = QwenLinear::load(
+            FREQUENCY_EMBEDDING_SIZE,
+            inner_dim,
+            has_bias,
+            vb.pp("linear_1"),
+        )?;
         let linear2 = QwenLinear::load(inner_dim, inner_dim, has_bias, vb.pp("linear_2"))?;
         Ok(Self {
             linear1,
@@ -293,7 +312,10 @@ impl TimestepProjEmbeddings {
     fn forward(&self, t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
         let device = t.device();
         let t_freq = self.timestep_embedding(t, device, dtype)?;
-        self.linear1.forward(&t_freq)?.silu().and_then(|x| self.linear2.forward(&x))
+        self.linear1
+            .forward(&t_freq)?
+            .silu()
+            .and_then(|x| self.linear2.forward(&x))
     }
 }
 
@@ -532,7 +554,11 @@ impl QwenImageTransformerBlock {
         let text_dim = cfg.joint_attention_dim;
         let is_comfyui = vb.contains_tensor("img_mlp.net.0.proj.weight");
         // FP8/ComfyUI uses 4x expansion; BF16 official uses int(dim/3)*8.
-        let hidden_dim = if is_comfyui { dim * 4 } else { cfg.hidden_dim() };
+        let hidden_dim = if is_comfyui {
+            dim * 4
+        } else {
+            cfg.hidden_dim()
+        };
 
         // Block norms: parameterless LayerNorm (scale/shift come from AdaLN modulation)
         let norm1 = LayerNormNoParams::new(cfg.norm_eps);
@@ -550,25 +576,25 @@ impl QwenImageTransformerBlock {
 
         // AdaLN: 6 modulation values per stream (shift, scale, gate for attention + MLP)
         // FP8/ComfyUI uses "img_mod.1"/"txt_mod.1"; BF16 official uses "norm1.linear"/"norm1_context.linear".
-        let has_bias = vb.contains_tensor("img_mod.1.bias")
-            || vb.contains_tensor("norm1.linear.bias");
-        let (adaln_modulation, adaln_context_modulation) =
-            if vb.contains_tensor("img_mod.1.weight") {
-                (
-                    QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("img_mod").pp("1"))?,
-                    QwenLinear::load(dim, 6 * text_dim, has_bias, vb.pp("txt_mod").pp("1"))?,
-                )
-            } else {
-                (
-                    QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("norm1").pp("linear"))?,
-                    QwenLinear::load(
-                        dim,
-                        6 * text_dim,
-                        has_bias,
-                        vb.pp("norm1_context").pp("linear"),
-                    )?,
-                )
-            };
+        let has_bias =
+            vb.contains_tensor("img_mod.1.bias") || vb.contains_tensor("norm1.linear.bias");
+        let (adaln_modulation, adaln_context_modulation) = if vb.contains_tensor("img_mod.1.weight")
+        {
+            (
+                QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("img_mod").pp("1"))?,
+                QwenLinear::load(dim, 6 * text_dim, has_bias, vb.pp("txt_mod").pp("1"))?,
+            )
+        } else {
+            (
+                QwenLinear::load(dim, 6 * dim, has_bias, vb.pp("norm1").pp("linear"))?,
+                QwenLinear::load(
+                    dim,
+                    6 * text_dim,
+                    has_bias,
+                    vb.pp("norm1_context").pp("linear"),
+                )?,
+            )
+        };
 
         Ok(Self {
             norm1,
@@ -724,8 +750,12 @@ impl OutputLayer {
         let norm_final = LayerNormNoParams::new(1e-6);
         let has_bias = vb.contains_tensor("proj_out.bias");
         let proj_out = QwenLinear::load(inner_dim, output_dim, has_bias, vb.pp("proj_out"))?;
-        let adaln_linear =
-            QwenLinear::load(inner_dim, 2 * inner_dim, has_bias, vb.pp("norm_out").pp("linear"))?;
+        let adaln_linear = QwenLinear::load(
+            inner_dim,
+            2 * inner_dim,
+            has_bias,
+            vb.pp("norm_out").pp("linear"),
+        )?;
 
         Ok(Self {
             norm_final,
@@ -801,7 +831,12 @@ impl QwenImageTransformer2DModel {
         // Patch embedding: in_channels (64) -> inner_dim (3072)
         let img_in_key = if is_comfyui { "img_in" } else { "x_embedder" };
         let has_stem_bias = vb.contains_tensor(&format!("{img_in_key}.bias"));
-        let img_in = QwenLinear::load(cfg.in_channels, cfg.inner_dim, has_stem_bias, vb.pp(img_in_key))?;
+        let img_in = QwenLinear::load(
+            cfg.in_channels,
+            cfg.inner_dim,
+            has_stem_bias,
+            vb.pp(img_in_key),
+        )?;
 
         // Text input projection.
         let (txt_in_key, txt_in_in) = if is_comfyui {
@@ -867,7 +902,9 @@ impl QwenImageTransformer2DModel {
         let patch_size = self.cfg.patch_size;
 
         // 1. Timestep embedding -> (B, inner_dim)
-        let temb = self.time_embed.forward(t, crate::engine::gpu_dtype(device))?;
+        let temb = self
+            .time_embed
+            .forward(t, crate::engine::gpu_dtype(device))?;
 
         // 2. Pack latents like diffusers `_pack_latents`:
         //    (B, C, H, W) -> (B, (H/p)*(W/p), C*p*p)

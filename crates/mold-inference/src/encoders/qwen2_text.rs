@@ -3,8 +3,9 @@
 //! Qwen-Image uses the Qwen2.5-VL text stack, but its image transformer expects
 //! the same conditioning layout as the upstream Diffusers pipeline:
 //! - chat-style prompt formatting
-//! - padded text conditioning to a fixed 1024-token window
-//! - penultimate hidden states (no final RMSNorm)
+//! - tokenizer-side truncation at 1024 post-template tokens
+//! - prompt embeddings truncated to 512 tokens after template stripping
+//! - last hidden states (no final RMSNorm)
 
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
@@ -12,7 +13,8 @@ use candle_nn::VarBuilder;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const TEXT_WINDOW: usize = 1024;
+const TOKENIZER_WINDOW: usize = 1024;
+const MAX_SEQUENCE_LENGTH: usize = 512;
 const SYSTEM_PROMPT: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
 
 fn format_qwen_image_prompt(prompt: &str) -> String {
@@ -354,12 +356,14 @@ impl Qwen2TextModel {
             let token_mask = attn_mask.i((b, ..))?.expand((1, 1, seq_len, seq_len))?;
             mask.push(token_mask);
         }
-        let mask = Tensor::cat(&mask.iter().collect::<Vec<_>>(), 0)?;
-        let on_true = mask.zeros_like()?.to_dtype(self.dtype)?;
+        let pad_mask = Tensor::cat(&mask.iter().collect::<Vec<_>>(), 0)?;
+        let on_true = pad_mask.zeros_like()?.to_dtype(self.dtype)?;
         let on_false = Tensor::new(f32::NEG_INFINITY, &self.device)?
-            .broadcast_as(mask.shape())?
+            .broadcast_as(pad_mask.shape())?
             .to_dtype(self.dtype)?;
-        mask.where_cond(&on_true, &on_false).map_err(Into::into)
+        let pad_mask = pad_mask.where_cond(&on_true, &on_false)?;
+        let causal_mask = self.prepare_causal_attention_mask(b_sz, seq_len, 0)?;
+        causal_mask.broadcast_add(&pad_mask).map_err(Into::into)
     }
 
     fn forward_last_hidden(
@@ -480,7 +484,7 @@ impl Qwen2TextEncoder {
             .get_ids()
             .to_vec();
         let strip_idx = template_strip_index(&input_ids);
-        let total_window = TEXT_WINDOW + strip_idx;
+        let total_window = TOKENIZER_WINDOW + strip_idx;
 
         let pad_id = *self
             .tokenizer
@@ -491,14 +495,17 @@ impl Qwen2TextEncoder {
         if input_ids.len() > total_window {
             input_ids.truncate(total_window);
         }
-        let valid_len = input_ids.len().saturating_sub(strip_idx).min(TEXT_WINDOW);
+        let valid_len = input_ids
+            .len()
+            .saturating_sub(strip_idx)
+            .min(TOKENIZER_WINDOW)
+            .min(MAX_SEQUENCE_LENGTH);
         input_ids.resize(total_window, pad_id);
         Ok((input_ids, strip_idx, valid_len))
     }
 
-    /// Returns fixed-width embeddings and a matching mask after stripping the
-    /// system prefix. The output sequence length remains the model's expected
-    /// 1024 tokens even for short prompts.
+    /// Returns variable-length embeddings and a matching mask after stripping
+    /// the system prefix, matching the upstream diffusers pipeline.
     pub fn encode(
         &mut self,
         prompt: &str,
@@ -520,14 +527,9 @@ impl Qwen2TextEncoder {
 
         let emb = model
             .forward_last_hidden(&input_ids, Some(&attn_mask))?
-            .narrow(1, strip_idx, TEXT_WINDOW)?;
+            .narrow(1, strip_idx, valid_len)?;
 
-        let mut text_mask = vec![0u8; TEXT_WINDOW];
-        for value in &mut text_mask[..valid_len] {
-            *value = 1;
-        }
-        let text_mask = Tensor::from_vec(text_mask, (1, TEXT_WINDOW), &self.device)?;
-        let emb = emb.broadcast_mul(&text_mask.to_dtype(emb.dtype())?.unsqueeze(D::Minus1)?)?;
+        let text_mask = Tensor::ones((1, valid_len), DType::U8, &self.device)?;
 
         Ok((
             emb.to_device(target_device)?.to_dtype(target_dtype)?,
