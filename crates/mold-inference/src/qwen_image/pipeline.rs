@@ -693,10 +693,15 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let mut transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
+
+        // Promote offloaded blocks to GPU now that text encoder VRAM is freed
+        if let QwenImageTransformer::Offloaded(ref mut offloaded) = transformer {
+            offloaded.promote_blocks_to_gpu()?;
+        }
 
         // Calculate latent dimensions: image_size / 8 (VAE downsample factor)
         let vae_downsample = 8;
@@ -1034,6 +1039,13 @@ impl InferenceEngine for QwenImageEngine {
         if loaded.text_encoder.on_gpu {
             loaded.text_encoder.drop_weights();
             tracing::info!("Qwen2.5 text encoder dropped from GPU");
+        }
+
+        // Promote offloaded blocks to GPU now that text encoder VRAM is freed
+        if let Some(QwenImageTransformer::Offloaded(ref mut offloaded)) =
+            loaded.transformer
+        {
+            offloaded.promote_blocks_to_gpu()?;
         }
 
         // 3. Calculate latent dimensions

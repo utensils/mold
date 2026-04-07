@@ -444,7 +444,18 @@ impl OutputLayer {
 
 // ── Main offloaded transformer ───────────────────────────────────────────────
 
-/// BF16/FP8 Qwen-Image transformer with blocks on CPU, streamed to GPU one at a time.
+/// Where a transformer block lives — GPU (no transfer needed) or CPU (streamed per step).
+enum BlockResidency {
+    Gpu(OffloadedQwenBlock),
+    Cpu(OffloadedQwenBlock),
+}
+
+/// BF16/FP8 Qwen-Image transformer with dynamic GPU/CPU block placement.
+///
+/// After loading, measures free VRAM and moves as many blocks to GPU as fit.
+/// During each denoising step, GPU-resident blocks execute in-place (zero transfer
+/// cost) while CPU-resident blocks stream one at a time. This maximizes GPU
+/// utilization instead of leaving VRAM idle during denoising.
 pub(crate) struct OffloadedQwenImageTransformer {
     // Stem layers on GPU permanently
     time_embed: TimestepProjEmbeddings,
@@ -454,9 +465,10 @@ pub(crate) struct OffloadedQwenImageTransformer {
     output_layer: OutputLayer,
     rope_embedder: QwenRopeEmbedder,
     cfg: QwenImageConfig,
-    // 60 blocks on CPU
-    blocks: Vec<OffloadedQwenBlock>,
+    // Blocks: either GPU-resident or CPU-resident
+    blocks: Vec<BlockResidency>,
     gpu_device: Device,
+    gpu_resident_count: usize,
 }
 
 impl OffloadedQwenImageTransformer {
@@ -502,16 +514,52 @@ impl OffloadedQwenImageTransformer {
         let rope_embedder =
             QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, vb.dtype())?;
 
-        // Load blocks on CPU
-        let mut blocks = Vec::with_capacity(cfg.num_layers);
+        // Load all blocks on CPU first
+        let mut cpu_blocks = Vec::with_capacity(cfg.num_layers);
         let vb_blocks = vb.pp("transformer_blocks");
         for i in 0..cfg.num_layers {
-            blocks.push(OffloadedQwenBlock::load(cfg, vb_blocks.pp(i))?);
+            cpu_blocks.push(OffloadedQwenBlock::load(cfg, vb_blocks.pp(i))?);
         }
 
+        // Measure free VRAM and move as many blocks to GPU as fit.
+        // Reserve headroom for attention workspace (~2GB for 1328×1328).
+        let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
+        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention + activations
+        let available = free_vram.saturating_sub(VRAM_HEADROOM);
+
+        // Estimate block size from first block's weight tensors
+        let block_size_estimate = {
+            let b = &cpu_blocks[0];
+            let mod_bytes = b.img_mod.weight().elem_count() * 2; // BF16 = 2 bytes
+            // img_mod + txt_mod + attn (8 linears + 4 norms) + 2 MLPs ≈ 30× mod_bytes
+            (mod_bytes * 30) as u64
+        };
+
+        let gpu_count = if block_size_estimate > 0 {
+            let max_fit = (available / block_size_estimate) as usize;
+            max_fit.min(cfg.num_layers)
+        } else {
+            0
+        };
+
+        // Move blocks to GPU/CPU based on budget
+        let mut blocks = Vec::with_capacity(cfg.num_layers);
+        for (i, block) in cpu_blocks.into_iter().enumerate() {
+            if i < gpu_count {
+                blocks.push(BlockResidency::Gpu(block.to_device(gpu_device)?));
+            } else {
+                blocks.push(BlockResidency::Cpu(block));
+            }
+        }
+
+        // Sync to ensure GPU memory is allocated before reporting
+        gpu_device.synchronize()?;
+        let gpu_mb = (gpu_count as u64 * block_size_estimate) / (1024 * 1024);
         progress.info(&format!(
-            "Offloading: {} blocks on CPU, stem on GPU",
-            blocks.len(),
+            "Offloading: {} blocks on GPU ({} MB), {} blocks streaming from CPU",
+            gpu_count,
+            gpu_mb,
+            cfg.num_layers - gpu_count,
         ));
 
         Ok(Self {
@@ -524,7 +572,56 @@ impl OffloadedQwenImageTransformer {
             cfg: cfg.clone(),
             blocks,
             gpu_device: gpu_device.clone(),
+            gpu_resident_count: gpu_count,
         })
+    }
+
+    /// Promote CPU-resident blocks to GPU if more VRAM is now available.
+    ///
+    /// Call after dropping the text encoder to reclaim its VRAM for blocks.
+    /// This reduces per-step CPU→GPU transfers during denoising.
+    pub fn promote_blocks_to_gpu(&mut self) -> Result<()> {
+        let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
+        const VRAM_HEADROOM: u64 = 2_500_000_000;
+        let available = free_vram.saturating_sub(VRAM_HEADROOM);
+
+        // Estimate per-block size from first GPU block or first CPU block
+        let block_size = {
+            let b = match &self.blocks[0] {
+                BlockResidency::Gpu(b) | BlockResidency::Cpu(b) => b,
+            };
+            let mod_bytes = b.img_mod.weight().elem_count() * 2;
+            (mod_bytes * 30) as u64
+        };
+
+        let can_promote = if block_size > 0 {
+            (available / block_size) as usize
+        } else {
+            0
+        };
+
+        let mut promoted = 0;
+        for block in &mut self.blocks {
+            if promoted >= can_promote {
+                break;
+            }
+            if let BlockResidency::Cpu(cpu_block) = block {
+                *block = BlockResidency::Gpu(cpu_block.to_device(&self.gpu_device)?);
+                promoted += 1;
+            }
+        }
+
+        if promoted > 0 {
+            self.gpu_device.synchronize()?;
+            self.gpu_resident_count += promoted;
+            tracing::info!(
+                promoted,
+                total_gpu = self.gpu_resident_count,
+                total_cpu = self.blocks.len() - self.gpu_resident_count,
+                "promoted CPU blocks to GPU after text encoder freed"
+            );
+        }
+        Ok(())
     }
 
     /// Run the full forward pass with block-level streaming.
@@ -573,22 +670,33 @@ impl OffloadedQwenImageTransformer {
             )
         };
 
-        // 5. Stream blocks CPU → GPU
+        // 5. Execute blocks — GPU-resident run in-place, CPU blocks stream
+        tracing::debug!(
+            gpu_resident = self.gpu_resident_count,
+            cpu_streaming = self.blocks.len() - self.gpu_resident_count,
+            "denoising step"
+        );
         //    Block returns (text, image) — matching ComfyUI convention
-        for (i, block) in self.blocks.iter().enumerate() {
-            let gpu_block = block.to_device(device)?;
-            (txt, img) = gpu_block.forward(
-                &img,
-                &txt,
-                encoder_attention_mask,
-                &temb,
-                &img_cos,
-                &img_sin,
-                &txt_cos,
-                &txt_sin,
-            )?;
-            device.synchronize()?;
-            drop(gpu_block);
+        for (i, residency) in self.blocks.iter().enumerate() {
+            match residency {
+                BlockResidency::Gpu(block) => {
+                    // Already on GPU — execute directly, no transfer
+                    (txt, img) = block.forward(
+                        &img, &txt, encoder_attention_mask, &temb,
+                        &img_cos, &img_sin, &txt_cos, &txt_sin,
+                    )?;
+                }
+                BlockResidency::Cpu(block) => {
+                    // Stream CPU → GPU, execute, drop GPU copy
+                    let gpu_block = block.to_device(device)?;
+                    (txt, img) = gpu_block.forward(
+                        &img, &txt, encoder_attention_mask, &temb,
+                        &img_cos, &img_sin, &txt_cos, &txt_sin,
+                    )?;
+                    device.synchronize()?;
+                    drop(gpu_block);
+                }
+            }
             tracing::trace!("qwen block {i} done");
         }
 
