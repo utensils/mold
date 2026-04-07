@@ -3834,8 +3834,7 @@ mod tests {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
             // All diffusion models need VAE (except ControlNet, utility models, and upscalers)
-            if !manifest.is_utility() && !manifest.is_upscaler() && !manifest.is_auxiliary()
-            {
+            if !manifest.is_utility() && !manifest.is_upscaler() && !manifest.is_auxiliary() {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",
