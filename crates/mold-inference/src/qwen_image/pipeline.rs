@@ -665,7 +665,13 @@ impl QwenImageEngine {
             };
 
             drop(text_encoder);
-            self.base.progress.info("Freed Qwen2.5 text encoder");
+            // Force CUDA to finish async work, then report actual free VRAM.
+            device.synchronize()?;
+            if let Some(status) = crate::device::memory_status_string() {
+                self.base.progress.info(&format!("Freed Qwen2.5 text encoder — {status}"));
+            } else {
+                self.base.progress.info("Freed Qwen2.5 text encoder");
+            }
 
             (hs, mask, u_hs, u_mask)
         };
