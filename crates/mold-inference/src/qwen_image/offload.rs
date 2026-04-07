@@ -472,63 +472,92 @@ pub(crate) struct OffloadedQwenImageTransformer {
 }
 
 impl OffloadedQwenImageTransformer {
-    /// Load the full transformer from safetensors on CPU, then move stem to GPU.
+    /// Load the transformer with dynamic GPU/CPU block placement.
+    ///
+    /// Loads as many blocks directly on GPU as VRAM allows, with remaining
+    /// blocks loaded on CPU for per-step streaming. After the text encoder
+    /// is freed, `promote_blocks_to_gpu()` can move more blocks to GPU.
     pub fn load(
-        vb: VarBuilder,
+        gpu_vb: VarBuilder,
+        cpu_vb: VarBuilder,
         cfg: &QwenImageConfig,
         gpu_device: &Device,
         progress: &ProgressReporter,
     ) -> Result<Self> {
-        progress.info("Loading transformer blocks on CPU for offloading…");
+        progress.info("Loading transformer with dynamic GPU/CPU placement…");
 
-        // Stem layers: load on CPU, move to GPU
+        // Stem layers: load directly on GPU
         let time_embed =
-            TimestepProjEmbeddings::load(cfg.inner_dim, vb.pp("time_text_embed"))?
-                .to_device(gpu_device)?;
-        let img_in = linear_to_device(
-            &linear(cfg.in_channels, cfg.inner_dim, vb.pp("img_in"))?,
-            gpu_device,
-        )?;
-        let txt_in = linear_to_device(
-            &linear(
-                cfg.joint_attention_dim,
-                cfg.inner_dim,
-                vb.pp("txt_in"),
-            )?,
-            gpu_device,
-        )?;
-        let txt_norm = rms_norm_to_device(
-            &load_rms_norm(cfg.joint_attention_dim, cfg.norm_eps, vb.pp("txt_norm"))?,
-            gpu_device,
-        )?;
+            TimestepProjEmbeddings::load(cfg.inner_dim, gpu_vb.pp("time_text_embed"))?;
+        let img_in = linear(cfg.in_channels, cfg.inner_dim, gpu_vb.pp("img_in"))?;
+        let txt_in = linear(cfg.joint_attention_dim, cfg.inner_dim, gpu_vb.pp("txt_in"))?;
+        let txt_norm = load_rms_norm(cfg.joint_attention_dim, cfg.norm_eps, gpu_vb.pp("txt_norm"))?;
         let output_layer = OutputLayer::load(
             cfg.inner_dim,
             cfg.out_channels,
             cfg.patch_size,
-            vb.clone(),
-        )?
-        .to_device(gpu_device)?;
+            gpu_vb.clone(),
+        )?;
 
         // RoPE embedder (frequency tables on CPU, sliced per-forward to GPU)
-        let cpu_device = vb.device();
         let rope_embedder =
-            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), cpu_device, vb.dtype())?;
+            QwenRopeEmbedder::new(10000.0, cfg.axes_dims_rope.clone(), &Device::Cpu, DType::F32)?;
 
-        // Load all blocks on CPU. GPU placement happens later via
-        // promote_blocks_to_gpu() after the text encoder frees its VRAM.
-        let mut blocks = Vec::with_capacity(cfg.num_layers);
-        let vb_blocks = vb.pp("transformer_blocks");
-        for i in 0..cfg.num_layers {
-            blocks.push(BlockResidency::Cpu(
-                OffloadedQwenBlock::load(cfg, vb_blocks.pp(i))?,
-            ));
+        // Measure free VRAM after stem layers and decide how many blocks fit
+        gpu_device.synchronize()?;
+        let free_vram = crate::device::free_vram_bytes().unwrap_or(0);
+        const VRAM_HEADROOM: u64 = 2_500_000_000; // 2.5GB for attention workspace
+        let vram_budget = free_vram.saturating_sub(VRAM_HEADROOM);
+
+        // Load first block on CPU to measure actual size
+        let first_block = OffloadedQwenBlock::load(cfg, cpu_vb.pp("transformer_blocks").pp(0))?;
+        let block_size = Self::block_size_bytes(&first_block);
+        let max_gpu_blocks = if block_size > 0 {
+            (vram_budget / block_size) as usize
+        } else {
+            0
         }
-        let gpu_count = 0;
+        .min(cfg.num_layers);
 
         progress.info(&format!(
-            "Loaded {} blocks on CPU, will promote to GPU after text encoder frees VRAM",
-            blocks.len(),
+            "Block size: {} MB, VRAM budget: {} MB → {} of {} blocks on GPU",
+            block_size / (1024 * 1024),
+            vram_budget / (1024 * 1024),
+            max_gpu_blocks,
+            cfg.num_layers,
         ));
+
+        // Place first block
+        let mut blocks = Vec::with_capacity(cfg.num_layers);
+        if max_gpu_blocks > 0 {
+            // Re-load directly on GPU for GPU-resident blocks
+            let gpu_block = OffloadedQwenBlock::load(cfg, gpu_vb.pp("transformer_blocks").pp(0))?;
+            blocks.push(BlockResidency::Gpu(gpu_block));
+            drop(first_block); // discard CPU copy
+        } else {
+            blocks.push(BlockResidency::Cpu(first_block));
+        }
+
+        // Load remaining blocks — GPU-direct until budget exhausted, then CPU
+        for i in 1..cfg.num_layers {
+            if i < max_gpu_blocks {
+                let block = OffloadedQwenBlock::load(cfg, gpu_vb.pp("transformer_blocks").pp(i))?;
+                blocks.push(BlockResidency::Gpu(block));
+            } else {
+                let block = OffloadedQwenBlock::load(cfg, cpu_vb.pp("transformer_blocks").pp(i))?;
+                blocks.push(BlockResidency::Cpu(block));
+            }
+            if (i + 1) % 10 == 0 || i + 1 == cfg.num_layers {
+                progress.info(&format!(
+                    "Loaded {}/{} blocks ({} GPU, {} CPU)",
+                    i + 1,
+                    cfg.num_layers,
+                    (i + 1).min(max_gpu_blocks),
+                    (i + 1).saturating_sub(max_gpu_blocks),
+                ));
+            }
+        }
+        let gpu_count = max_gpu_blocks;
 
         Ok(Self {
             time_embed,

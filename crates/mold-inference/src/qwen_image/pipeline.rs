@@ -342,20 +342,25 @@ impl QwenImageEngine {
             }
 
             if use_offload {
-                // Load on CPU as BF16 for block-level streaming. For FP8, candle
-                // handles F8E4M3→BF16 cast during tensor loading (no matmul on CPU
-                // during loading — blocks are just stored, not computed).
-                let cpu_dtype = DType::BF16;
-                let label = "Qwen-Image transformer (offload)";
-                let cpu_vb = crate::weight_loader::load_safetensors_with_progress(
+                // Create TWO VarBuilders: GPU for blocks that fit, CPU for overflow.
+                // The offloaded transformer measures free VRAM and decides placement.
+                let gpu_vb = crate::weight_loader::load_safetensors_with_progress(
                     &xformer_paths,
-                    cpu_dtype,
-                    &Device::Cpu,
-                    label,
+                    dtype,
+                    device,
+                    "Qwen-Image transformer (offload, GPU)",
                     &self.base.progress,
                 )?;
+                let cpu_vb = unsafe {
+                    candle_nn::VarBuilder::from_mmaped_safetensors(
+                        &xformer_paths.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
+                        DType::BF16,
+                        &Device::Cpu,
+                    )?
+                };
                 Ok(QwenImageTransformer::Offloaded(
                     super::offload::OffloadedQwenImageTransformer::load(
+                        gpu_vb,
                         cpu_vb,
                         cfg,
                         device,
