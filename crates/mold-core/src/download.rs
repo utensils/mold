@@ -551,6 +551,32 @@ fn is_already_placed(
     verify_file_integrity(clean_path, file, model_name, skip_verify).is_ok()
 }
 
+/// Return an existing valid clean path for a manifest file, migrating from a
+/// legacy location when needed.
+fn find_existing_placed_file(
+    models_dir: &std::path::Path,
+    manifest: &ModelManifest,
+    file: &ModelFile,
+    skip_verify: bool,
+) -> Result<Option<PathBuf>, DownloadError> {
+    let canonical_rel = crate::manifest::storage_path(manifest, file);
+    let canonical_path = models_dir.join(&canonical_rel);
+
+    for candidate_rel in crate::manifest::storage_path_candidates(manifest, file) {
+        let candidate_path = models_dir.join(candidate_rel);
+        if !is_already_placed(&candidate_path, file, &manifest.name, skip_verify) {
+            continue;
+        }
+        if candidate_path != canonical_path {
+            hardlink_or_copy(&candidate_path, &canonical_path)?;
+            verify_file_integrity(&canonical_path, file, &manifest.name, skip_verify)?;
+        }
+        return Ok(Some(canonical_path));
+    }
+
+    Ok(None)
+}
+
 /// Download all files for a model manifest, returning resolved paths.
 ///
 /// Downloads go to a hidden hf-hub cache (`.hf-cache/`) for resume/dedup support,
@@ -584,13 +610,14 @@ pub async fn pull_model(
     let mut downloads: Vec<(ModelComponent, PathBuf)> = Vec::new();
 
     for file in &manifest.files {
-        // Skip files already at their clean path with correct size (resume after partial failure)
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if let Some(clean_path) =
+            find_existing_placed_file(&mdir, manifest, file, opts.skip_verify)?
+        {
             downloads.push((file.component, clean_path));
             continue;
         }
+
+        let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
 
         let bar = multi.add(ProgressBar::new(file.size_bytes));
         bar.set_style(bar_style.clone());
@@ -658,9 +685,9 @@ pub async fn pull_model_with_callback(
                         file.hf_filename
                     ),
                 });
-                let clean_path =
-                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
-                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+                find_existing_placed_file(&mdir_clone, &manifest_clone, file, skip_verify)
+                    .map(|p| p.is_some())
+                    .unwrap_or(false)
             })
             .collect()
     })
@@ -681,8 +708,7 @@ pub async fn pull_model_with_callback(
     for (file_pos, (file, &already_placed)) in
         manifest.files.iter().zip(file_status.iter()).enumerate()
     {
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
+        let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
 
         if already_placed {
             // Emit events for cached files so the TUI shows checkmarks.
@@ -757,12 +783,11 @@ async fn pull_model_files_only(
     let mdir = models_dir();
 
     for file in &manifest.files {
-        // Skip files already at their clean path with correct size (resume after partial failure)
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
-        if is_already_placed(&clean_path, file, &manifest.name, opts.skip_verify) {
+        if find_existing_placed_file(&mdir, manifest, file, opts.skip_verify)?.is_some() {
             continue;
         }
+
+        let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
 
         let bar = multi.add(ProgressBar::new(file.size_bytes));
         bar.set_style(bar_style.clone());
@@ -820,9 +845,9 @@ async fn pull_model_files_only_with_callback(
                         file.hf_filename
                     ),
                 });
-                let clean_path =
-                    mdir_clone.join(crate::manifest::storage_path(&manifest_clone, file));
-                is_already_placed(&clean_path, file, &manifest_clone.name, skip_verify)
+                find_existing_placed_file(&mdir_clone, &manifest_clone, file, skip_verify)
+                    .map(|p| p.is_some())
+                    .unwrap_or(false)
             })
             .collect()
     })
@@ -842,8 +867,7 @@ async fn pull_model_files_only_with_callback(
     for (file_pos, (file, &already_placed)) in
         manifest.files.iter().zip(file_status.iter()).enumerate()
     {
-        let clean_rel = crate::manifest::storage_path(manifest, file);
-        let clean_path = mdir.join(&clean_rel);
+        let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
 
         if already_placed {
             let elapsed = batch_started_at.elapsed().as_millis() as u64;
