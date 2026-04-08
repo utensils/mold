@@ -86,6 +86,7 @@ system user, and manages the data directory at `/var/lib/mold`.
     environment = {
       MOLD_EAGER = "1";        # keep all components loaded
       MOLD_T5_VARIANT = "q4";  # use Q4 T5 encoder
+      # MOLD_THUMBNAIL_WARMUP = "1"; # opt in to startup gallery thumbnail warmup
     };
 
     # Discord bot

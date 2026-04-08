@@ -121,6 +121,7 @@ in
       example = {
         MOLD_EAGER = "1";
         MOLD_T5_VARIANT = "q4";
+        MOLD_THUMBNAIL_WARMUP = "1";
       };
     };
 

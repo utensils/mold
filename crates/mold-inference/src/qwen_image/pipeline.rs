@@ -279,6 +279,8 @@ pub struct QwenImageEngine {
 
 impl QwenImageEngine {
     fn is_oom_error(err: &impl std::fmt::Display) -> bool {
+        // Candle does not currently surface a typed CUDA OOM here, so the
+        // fallback ladder has to key off the backend error text.
         let msg = err.to_string();
         msg.contains("OUT_OF_MEMORY") || msg.contains("out of memory")
     }
@@ -448,10 +450,7 @@ impl QwenImageEngine {
                         });
                     }
 
-                    let fallback_tag = match usage {
-                        Qwen2TextEncoderUsage::Resident => "q4",
-                        Qwen2TextEncoderUsage::Sequential => unreachable!(),
-                    };
+                    let fallback_tag = "q4";
                     let fallback = mold_core::manifest::find_qwen2_vl_variant(fallback_tag)
                         .expect("known CUDA fallback qwen2 variant missing");
                     return Ok(ResolvedQwen2TextEncoder {
@@ -1192,18 +1191,15 @@ impl QwenImageEngine {
         let use_cfg = req.guidance > 1.0;
         let prompt_key = prompt_text_key(&req.prompt);
         let uncond_key = prompt_text_key(QWEN_EMPTY_NEGATIVE_PROMPT);
-        let prompt_cached = self
-            .prompt_cache
-            .lock()
-            .expect("cache poisoned")
-            .get_cloned(&prompt_key);
-        let uncond_cached = if use_cfg {
-            self.prompt_cache
-                .lock()
-                .expect("cache poisoned")
-                .get_cloned(&uncond_key)
-        } else {
-            None
+        let (prompt_cached, uncond_cached) = {
+            let mut cache = self.prompt_cache.lock().expect("cache poisoned");
+            let prompt_cached = cache.get_cloned(&prompt_key);
+            let uncond_cached = if use_cfg {
+                cache.get_cloned(&uncond_key)
+            } else {
+                None
+            };
+            (prompt_cached, uncond_cached)
         };
         let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
 
@@ -1697,7 +1693,7 @@ impl InferenceEngine for QwenImageEngine {
             progress.cache_hit("prompt conditioning");
             let (hs, mask) = cached.restore(&loaded.device, loaded.dtype)?;
             let (u_hs, u_mask) = if use_cfg {
-                progress.cache_hit("prompt conditioning");
+                progress.cache_hit("unconditional conditioning");
                 let ucached =
                     uncond_cached.expect("unconditional prompt cache unexpectedly missing");
                 let (u_hs, u_mask) = ucached.restore(&loaded.device, loaded.dtype)?;

@@ -766,6 +766,9 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
+        // Match the BF16 path and upstream Qwen masking semantics: txt_mask is
+        // consumed inside attention and text-conditioning, not multiplied back
+        // into each residual update.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 

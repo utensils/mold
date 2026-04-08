@@ -106,6 +106,7 @@ Environment variables take precedence over config file values.
 | Variable                | Default          | Description                                                                       |
 | ----------------------- | ---------------- | --------------------------------------------------------------------------------- |
 | `MOLD_OUTPUT_DIR`       | `~/.mold/output` | Image output directory (set empty to disable)                                     |
+| `MOLD_THUMBNAIL_WARMUP` | —                | `1` to prebuild gallery thumbnails at server startup (default: disabled)          |
 | `MOLD_CORS_ORIGIN`      | —                | Restrict CORS to specific origin                                                  |
 | `MOLD_API_KEY`          | —                | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`) |
 | `MOLD_RATE_LIMIT`       | —                | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)  |

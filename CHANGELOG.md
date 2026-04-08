@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Qwen-Image CUDA execution planning**: local sequential runs now preserve the stable load-use-drop path, while hot server mode keeps more of the quantized CUDA stack resident, skips redundant prompt re-encoding on cache hits, and splits CFG passes when batching would overrun VRAM
+
 ### Fixed
 
 - **CLI Ghostty preview escape leak**: `mold run --preview` and `mold upscale --preview` now avoid `viuer`'s Kitty capability probe in Ghostty, preventing visible `^[_Gi=31;OK...` control text before inline previews
+- **Qwen-Image-2512 CUDA black images / OOMs**: quantized CUDA generation now uses a staged fallback ladder for VAE decode (full GPU, tiled GPU, then CPU reload), keeps the quantized transformer resident across decode when that is safe, and aligns BF16/GGUF text masking behavior with upstream Qwen
+- **Server startup thumbnail warmup**: gallery thumbnail generation is now opt-in via `MOLD_THUMBNAIL_WARMUP=1`, preventing avoidable CPU/RAM spikes on startup when large or bad output directories are present
 
 ## [0.6.0] - 2026-04-07
 

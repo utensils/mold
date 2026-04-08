@@ -698,7 +698,9 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
-        // Gate + residual (no tanh on gate)
+        // Gate + residual (no tanh on gate). Upstream Qwen masking happens in
+        // attention and the initial text-conditioning projection, so we do not
+        // reapply txt_mask after each residual block.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
