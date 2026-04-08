@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Img2img denoising strength alignment**: all model families now map `--strength` to scheduler start steps using reference img2img semantics instead of treating the user value as a raw flow sigma. This restores expected source-image retention for low-strength edits and removes washed-out flow-model img2img results.
 - **Img2img VAE source normalization**: Flux.2, Qwen-Image, and SD3 img2img now encode source images in the autoencoder's expected `[-1, 1]` pixel range, eliminating the white, foggy washout that appeared even at `--strength 0.0`.
 - **`--strength 0` validation**: img2img requests now accept `strength = 0.0` as documented, preserving the source image with zero denoise instead of rejecting the request.
+- **Z-Image GGUF inference**: `z-image-turbo:q4/q6/q8` now load GGUF weights into the standard dense Z-Image transformer instead of the broken custom quantized transformer path, restoring coherent txt2img output and fixing sequential img2img by encoding source images before the transformer is loaded.
 
 ## [0.6.1] - 2026-04-07
 

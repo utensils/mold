@@ -9,7 +9,7 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use super::quantized_transformer::QuantizedZImageTransformer2DModel;
+use super::gguf_dense::load_gguf_dense_transformer;
 use super::transformer::ZImageTransformer;
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
@@ -30,16 +30,76 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
-/// Z-Image scheduler shift constants (from reference implementation).
+/// Minimum free VRAM (bytes) required to place Z-Image VAE on GPU.
+/// The VAE itself is small (~160MB), but decode at 1024x1024 needs ~6GB workspace
+/// for conv2d im2col expansions through the upsampling blocks.
+const VAE_DECODE_VRAM_THRESHOLD: u64 = 6_500_000_000;
+
+/// Z-Image scheduler shift constants from the reference implementation.
 const BASE_IMAGE_SEQ_LEN: usize = 256;
 const MAX_IMAGE_SEQ_LEN: usize = 4096;
 const BASE_SHIFT: f64 = 0.5;
 const MAX_SHIFT: f64 = 1.15;
 
-/// Minimum free VRAM (bytes) required to place Z-Image VAE on GPU.
-/// The VAE itself is small (~160MB), but decode at 1024x1024 needs ~6GB workspace
-/// for conv2d im2col expansions through the upsampling blocks.
-const VAE_DECODE_VRAM_THRESHOLD: u64 = 6_500_000_000;
+fn build_zimage_scheduler(
+    num_steps: usize,
+    image_seq_len: usize,
+    strength: Option<f64>,
+) -> (FlowMatchEulerDiscreteScheduler, usize) {
+    let mut scheduler = FlowMatchEulerDiscreteScheduler::new(SchedulerConfig::z_image_turbo());
+    let mu = calculate_shift(
+        image_seq_len,
+        BASE_IMAGE_SEQ_LEN,
+        MAX_IMAGE_SEQ_LEN,
+        BASE_SHIFT,
+        MAX_SHIFT,
+    );
+    let sigmas: Vec<f64> = (0..=num_steps)
+        .map(|v| v as f64 / num_steps as f64)
+        .rev()
+        .map(|t| {
+            if !(0.0..1.0).contains(&t) {
+                t
+            } else {
+                let e_mu = mu.exp();
+                e_mu / (e_mu + (1.0 / t - 1.0))
+            }
+        })
+        .collect();
+    scheduler.timesteps = sigmas[..sigmas.len().saturating_sub(1)]
+        .iter()
+        .map(|sigma| sigma * scheduler.config.num_train_timesteps as f64)
+        .collect();
+    scheduler.sigmas = sigmas;
+    let start_index = strength
+        .map(|strength| crate::img2img::img2img_start_index(num_steps, strength))
+        .unwrap_or(0);
+    if start_index > 0 {
+        scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
+        scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
+    }
+    scheduler.reset();
+    (scheduler, start_index)
+}
+
+fn model_timestep(scheduler: &FlowMatchEulerDiscreteScheduler) -> f64 {
+    1.0 - scheduler.current_sigma()
+}
+
+fn zimage_debug_enabled() -> bool {
+    std::env::var_os("MOLD_ZIMAGE_DEBUG").is_some()
+}
+
+fn tensor_stats_summary(name: &str, tensor: &Tensor) -> Result<String> {
+    let flat = tensor.to_dtype(DType::F32)?.flatten_all()?;
+    let mean = flat.mean_all()?.to_scalar::<f32>()?;
+    let min = flat.min(0)?.to_scalar::<f32>()?;
+    let max = flat.max(0)?.to_scalar::<f32>()?;
+    let rms = flat.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+    Ok(format!(
+        "{name}: mean={mean:.5} min={min:.5} max={max:.5} rms={rms:.5}"
+    ))
+}
 
 /// Loaded Z-Image model components, ready for inference.
 struct LoadedZImage {
@@ -54,8 +114,8 @@ struct LoadedZImage {
     /// Device where the VAE lives (may be CPU if VRAM is extremely tight)
     vae_device: Device,
     dtype: DType,
-    /// Whether the transformer is a GGUF quantized model (needed for reload).
-    is_quantized: bool,
+    /// Whether the transformer source file is GGUF (needed for reload/logging).
+    is_gguf: bool,
     /// Path to the VAE safetensors file (needed for CPU fallback reload on OOM).
     vae_path: std::path::PathBuf,
 }
@@ -167,9 +227,9 @@ impl ZImageEngine {
         if is_gguf {
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
-            Ok(ZImageTransformer::Quantized(
-                QuantizedZImageTransformer2DModel::new(cfg, dtype, vb)?,
-            ))
+            Ok(ZImageTransformer::Dense(load_gguf_dense_transformer(
+                cfg, dtype, vb,
+            )?))
         } else {
             let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
                 &xformer_paths,
@@ -178,7 +238,7 @@ impl ZImageEngine {
                 "Z-Image transformer",
                 &self.base.progress,
             )?;
-            Ok(ZImageTransformer::BF16(ZImageTransformer2DModel::new(
+            Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
                 cfg, xformer_vb,
             )?))
         }
@@ -223,7 +283,7 @@ impl ZImageEngine {
 
         // Load transformer
         let xformer_label = if is_gguf {
-            "Loading Z-Image transformer (GPU, quantized)".to_string()
+            "Loading Z-Image transformer (GPU, GGUF -> dense)".to_string()
         } else {
             let xformer_paths = self.transformer_paths();
             format!(
@@ -353,7 +413,7 @@ impl ZImageEngine {
             device,
             vae_device,
             dtype,
-            is_quantized: is_gguf,
+            is_gguf,
             vae_path: self.base.paths.vae.clone(),
         });
 
@@ -505,57 +565,22 @@ impl ZImageEngine {
             (cap_feats, cap_mask)
         };
 
-        // --- Phase 2: Load transformer and denoise ---
-        let xformer_paths = self.transformer_paths();
-        let xformer_size: u64 = xformer_paths
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        preflight_memory_check("Z-Image transformer", xformer_size)?;
-
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        let xformer_label = if is_gguf {
-            "Loading Z-Image transformer (GPU, quantized)".to_string()
-        } else {
-            format!(
-                "Loading Z-Image transformer ({} shards)",
-                xformer_paths.len()
-            )
-        };
-        self.base.progress.stage_start(&xformer_label);
-        let xformer_start = Instant::now();
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
-        self.base
-            .progress
-            .stage_done(&xformer_label, xformer_start.elapsed());
-
-        // Calculate latent dimensions
+        // Calculate latent dimensions up front so img2img can encode the source image
+        // before the transformer is loaded. This keeps the encode path on GPU and
+        // avoids the multi-minute CPU fallback.
         let vae_align = 16;
         let latent_h = 2 * (height / vae_align);
         let latent_w = 2 * (width / vae_align);
 
         let patch_size = transformer_cfg.all_patch_size[0];
         let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
+        let (mut scheduler, start_index) = build_zimage_scheduler(
+            req.steps as usize,
             image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
+            req.source_image.as_ref().map(|_| req.strength),
         );
 
-        let scheduler_cfg = SchedulerConfig::z_image_turbo();
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
-        scheduler.set_timesteps(req.steps as usize, Some(mu));
-
         if req.source_image.is_some() {
-            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-            scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
-            scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -566,23 +591,33 @@ impl ZImageEngine {
             );
         }
 
-        // --- img2img: encode source image through VAE (load VAE early, then drop) ---
+        // --- Phase 2: Build initial latents ---
         let (mut latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
             let start_sigma = scheduler.sigmas[0];
 
-            // Load VAE for encoding (will be dropped before transformer load)
-            let encode_vae_device = Device::Cpu; // CPU is safe for encode (small workspace)
-            let encode_vae_dtype = DType::F32;
+            // Encode before loading the transformer so we can keep the VAE on GPU.
+            let encode_vae_device = if device.is_cuda() || device.is_metal() {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let encode_vae_dtype = if encode_vae_device.is_cpu() {
+                DType::F32
+            } else {
+                dtype
+            };
+            let encode_label = if encode_vae_device.is_cpu() {
+                "Loading VAE for source encoding (CPU)"
+            } else {
+                "Loading VAE for source encoding (GPU)"
+            };
 
-            self.base
-                .progress
-                .stage_start("Loading VAE for source encoding (CPU)");
+            self.base.progress.stage_start(encode_label);
             let vae_enc_start = Instant::now();
             let encode_vae = self.load_vae(&encode_vae_device, encode_vae_dtype)?;
-            self.base.progress.stage_done(
-                "Loading VAE for source encoding (CPU)",
-                vae_enc_start.elapsed(),
-            );
+            self.base
+                .progress
+                .stage_done(encode_label, vae_enc_start.elapsed());
 
             self.base
                 .progress
@@ -633,6 +668,34 @@ impl ZImageEngine {
             (noise.unsqueeze(2)?, None)
         };
 
+        // --- Phase 3: Load transformer and denoise ---
+        let xformer_paths = self.transformer_paths();
+        let xformer_size: u64 = xformer_paths
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        preflight_memory_check("Z-Image transformer", xformer_size)?;
+
+        if let Some(status) = memory_status_string() {
+            self.base.progress.info(&status);
+        }
+
+        let xformer_label = if is_gguf {
+            "Loading Z-Image transformer (GPU, GGUF -> dense)".to_string()
+        } else {
+            format!(
+                "Loading Z-Image transformer ({} shards)",
+                xformer_paths.len()
+            )
+        };
+        self.base.progress.stage_start(&xformer_label);
+        let xformer_start = Instant::now();
+        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        self.base
+            .progress
+            .stage_done(&xformer_label, xformer_start.elapsed());
+
         let num_steps = scheduler.sigmas.len().saturating_sub(1);
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
@@ -640,14 +703,41 @@ impl ZImageEngine {
 
         for step in 0..num_steps {
             let step_start = Instant::now();
-            let t = scheduler.current_timestep_normalized();
+            let t = model_timestep(&scheduler);
             let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    sigma = scheduler.current_sigma(),
+                    timestep = t,
+                    "{}",
+                    tensor_stats_summary("latents_in", &latents)?
+                );
+            }
             let noise_pred = transformer.forward(&latents, &t_tensor, &cap_feats, &cap_mask)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    "{}",
+                    tensor_stats_summary("noise_pred_raw", &noise_pred)?
+                );
+            }
             let noise_pred = noise_pred.neg()?;
             let noise_pred_4d = noise_pred.squeeze(2)?;
             let latents_4d = latents.squeeze(2)?;
             let prev_latents = scheduler.step(&noise_pred_4d, &latents_4d)?;
             latents = prev_latents.unsqueeze(2)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    sigma_next = scheduler.current_sigma(),
+                    "{}",
+                    tensor_stats_summary("latents_out", &latents)?
+                );
+            }
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ref ctx) = inpaint_ctx {
@@ -791,8 +881,8 @@ impl InferenceEngine for ZImageEngine {
                     .loaded
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
-                let xformer_label = if loaded_mut.is_quantized {
-                    "Reloading Z-Image transformer (GPU, quantized)"
+                let xformer_label = if loaded_mut.is_gguf {
+                    "Reloading Z-Image transformer (GPU, GGUF -> dense)"
                 } else {
                     "Reloading Z-Image transformer (GPU, BF16)"
                 };
@@ -874,26 +964,16 @@ impl InferenceEngine for ZImageEngine {
         let latent_h = 2 * (height / vae_align);
         let latent_w = 2 * (width / vae_align);
 
-        // 4. Calculate scheduler shift
+        // 5. Initialize scheduler
         let patch_size = loaded.transformer_cfg.all_patch_size[0];
         let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
+        let (mut scheduler, start_index) = build_zimage_scheduler(
+            req.steps as usize,
             image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
+            req.source_image.as_ref().map(|_| req.strength),
         );
 
-        // 5. Initialize scheduler
-        let scheduler_cfg = SchedulerConfig::z_image_turbo();
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
-        scheduler.set_timesteps(req.steps as usize, Some(mu));
-
         if req.source_image.is_some() {
-            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-            scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
-            scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -984,12 +1064,30 @@ impl InferenceEngine for ZImageEngine {
 
             for step in 0..num_steps {
                 let step_start = Instant::now();
-                let t = scheduler.current_timestep_normalized();
+                let t = model_timestep(&scheduler);
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                     .to_dtype(loaded.dtype)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        sigma = scheduler.current_sigma(),
+                        timestep = t,
+                        "{}",
+                        tensor_stats_summary("latents_in", &latents)?
+                    );
+                }
 
                 // Forward pass through transformer
                 let noise_pred = transformer.forward(&latents, &t_tensor, &cap_feats, &cap_mask)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        "{}",
+                        tensor_stats_summary("noise_pred_raw", &noise_pred)?
+                    );
+                }
 
                 // Negate prediction (Z-Image specific)
                 let noise_pred = noise_pred.neg()?;
@@ -1003,6 +1101,15 @@ impl InferenceEngine for ZImageEngine {
 
                 // Add back frame dimension
                 latents = prev_latents.unsqueeze(2)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        sigma_next = scheduler.current_sigma(),
+                        "{}",
+                        tensor_stats_summary("latents_out", &latents)?
+                    );
+                }
 
                 // Inpainting: blend preserved regions back at current noise level
                 if let Some(ref ctx) = inpaint_ctx {
@@ -1266,5 +1373,42 @@ mod tests {
         let threshold = std::hint::black_box(VAE_DECODE_VRAM_THRESHOLD);
         assert!(threshold > 160_000_000);
         assert!(threshold < 15_000_000_000);
+    }
+
+    #[test]
+    fn zimage_scheduler_uses_shifted_reference_sigmas() {
+        let image_seq_len = 1024;
+        let (full, _) = build_zimage_scheduler(9, image_seq_len, None);
+        let (scheduler, start_index) = build_zimage_scheduler(9, image_seq_len, Some(0.5));
+        let expected_sigmas = full.sigmas[start_index..].to_vec();
+        let expected_timesteps = expected_sigmas[..expected_sigmas.len() - 1]
+            .iter()
+            .map(|sigma| sigma * 1000.0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(start_index, crate::img2img::img2img_start_index(9, 0.5));
+        assert_eq!(scheduler.sigmas, expected_sigmas);
+        assert_eq!(scheduler.timesteps, expected_timesteps);
+        assert_eq!(scheduler.sigmas.last().copied(), Some(0.0));
+    }
+
+    #[test]
+    fn zimage_model_timestep_matches_scheduler_timesteps() {
+        let (scheduler, _) = build_zimage_scheduler(9, 1024, Some(0.5));
+        let t = model_timestep(&scheduler);
+        assert!(
+            (t - (1.0 - scheduler.sigmas[0])).abs() < 1e-10,
+            "expected model timestep to match 1-sigma semantics, got {t} vs {}",
+            1.0 - scheduler.sigmas[0]
+        );
+    }
+
+    #[test]
+    fn zimage_zero_strength_preserves_terminal_zero_only() {
+        let (scheduler, start_index) = build_zimage_scheduler(9, 1024, Some(0.0));
+
+        assert_eq!(start_index, 9);
+        assert_eq!(scheduler.sigmas, vec![0.0]);
+        assert!(scheduler.timesteps.is_empty());
     }
 }
