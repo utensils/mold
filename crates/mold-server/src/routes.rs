@@ -1574,6 +1574,11 @@ fn query_gpu_info() -> Option<GpuInfo> {
 mod tests {
     use super::*;
 
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &ENV_LOCK
+    }
+
     #[test]
     fn clean_error_message_strips_backtrace() {
         let err = anyhow::anyhow!(
@@ -1717,6 +1722,7 @@ mod tests {
 
     #[test]
     fn thumbnail_warmup_is_disabled_by_default() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }
@@ -1725,6 +1731,7 @@ mod tests {
 
     #[test]
     fn thumbnail_warmup_accepts_truthy_env_values() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var("MOLD_THUMBNAIL_WARMUP", "1");
         }
@@ -1733,6 +1740,22 @@ mod tests {
             std::env::set_var("MOLD_THUMBNAIL_WARMUP", "true");
         }
         assert!(thumbnail_warmup_enabled());
+        unsafe {
+            std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
+        }
+    }
+
+    #[test]
+    fn thumbnail_warmup_rejects_falsey_env_values() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("MOLD_THUMBNAIL_WARMUP", "0");
+        }
+        assert!(!thumbnail_warmup_enabled());
+        unsafe {
+            std::env::set_var("MOLD_THUMBNAIL_WARMUP", "false");
+        }
+        assert!(!thumbnail_warmup_enabled());
         unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }

@@ -107,7 +107,7 @@ impl DynamicRmsNorm {
         let xs = xs_f32.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
         let xs = xs.to_dtype(dtype)?;
         let weight = self.weight.to_device(xs.device())?.to_dtype(dtype)?;
-        xs.broadcast_mul(&weight).map_err(Into::into)
+        xs.broadcast_mul(&weight)
     }
 }
 

@@ -663,6 +663,7 @@ async fn generate_remote_blocking(
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
+#[allow(clippy::too_many_arguments)]
 async fn prepare_local_engine(
     req: &GenerateRequest,
     config: &Config,
@@ -824,7 +825,7 @@ async fn prepare_local_engine(
         qwen2_variant_override.as_deref(),
         qwen2_text_encoder_mode_override.as_deref(),
     );
-    let is_eager = eager || std::env::var("MOLD_EAGER").map_or(false, |v| v == "1");
+    let is_eager = eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
     let load_strategy = if is_eager {
         LoadStrategy::Eager
     } else {
@@ -833,7 +834,7 @@ async fn prepare_local_engine(
     if is_eager {
         std::env::set_var("MOLD_EAGER", "1");
     }
-    let is_offload = offload || std::env::var("MOLD_OFFLOAD").map_or(false, |v| v == "1");
+    let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let engine = mold_inference::create_engine(
         model_name,
         paths,
@@ -845,6 +846,7 @@ async fn prepare_local_engine(
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
+#[allow(clippy::too_many_arguments)]
 async fn generate_local(
     req: &GenerateRequest,
     config: &Config,
@@ -950,7 +952,7 @@ async fn generate_local_batch(
         iter_req.batch_size = 1;
 
         // Use per-batch expanded prompt if available
-        if let Some(ref prompts) = batch_prompts {
+        if let Some(prompts) = batch_prompts {
             if let Some(p) = prompts.get(i as usize) {
                 iter_req.prompt = p.clone();
             }
