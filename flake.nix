@@ -260,10 +260,6 @@
                 value = "1";
               }
               {
-                name = "MOLD_LOG";
-                value = "debug";
-              }
-              {
                 name = "MOLD_LTX_DEBUG";
                 value = "1";
               }
