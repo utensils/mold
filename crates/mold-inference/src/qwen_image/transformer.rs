@@ -700,9 +700,7 @@ impl QwenImageTransformerBlock {
 
         // Gate + residual (no tanh on gate)
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
         // --- Feedforward ---
         // Image: norm + scale + shift + FF + gate + residual
@@ -721,9 +719,7 @@ impl QwenImageTransformerBlock {
             .broadcast_mul(&(txt_scale_mlp + 1.0)?)?
             .broadcast_add(txt_shift_mlp)?;
         let txt_ff = self.ff_context.forward(&txt_mlp_in)?;
-        let txt_dtype = txt_hidden.dtype();
-        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&txt_ff)?)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?.to_dtype(txt_dtype)?)?;
+        let txt_hidden = (txt_hidden + txt_gate_mlp.broadcast_mul(&txt_ff)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -919,12 +915,7 @@ impl QwenImageTransformer2DModel {
 
         // 3. Text embedding: norm + project
         let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
-        let txt_mask = encoder_attention_mask
-            .to_device(device)?
-            .to_dtype(txt_normed.dtype())?;
-        let txt_hidden = txt_normed
-            .apply(&self.txt_in)?
-            .broadcast_mul(&txt_mask.unsqueeze(D::Minus1)?)?;
+        let txt_hidden = txt_normed.apply(&self.txt_in)?;
 
         // 4. RoPE embeddings: centered positions for image (scale_rope=True),
         //    offset-based for text.

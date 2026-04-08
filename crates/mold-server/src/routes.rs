@@ -1333,6 +1333,11 @@ fn generate_server_thumbnail(
 
 /// Pre-generate thumbnails for all gallery images on server startup.
 pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
+    if !thumbnail_warmup_enabled() {
+        tracing::info!("thumbnail warmup disabled; thumbnails will be generated on demand");
+        return;
+    }
+
     let output_dir = config.effective_output_dir();
     std::thread::spawn(move || {
         if !output_dir.is_dir() {
@@ -1365,6 +1370,12 @@ pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
         }
         tracing::info!("thumbnail warmup complete");
     });
+}
+
+fn thumbnail_warmup_enabled() -> bool {
+    std::env::var("MOLD_THUMBNAIL_WARMUP")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 /// Scan a directory for image files with mold metadata.
@@ -1702,5 +1713,28 @@ mod tests {
             1,
         );
         // Test passes if no panic occurred
+    }
+
+    #[test]
+    fn thumbnail_warmup_is_disabled_by_default() {
+        unsafe {
+            std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
+        }
+        assert!(!thumbnail_warmup_enabled());
+    }
+
+    #[test]
+    fn thumbnail_warmup_accepts_truthy_env_values() {
+        unsafe {
+            std::env::set_var("MOLD_THUMBNAIL_WARMUP", "1");
+        }
+        assert!(thumbnail_warmup_enabled());
+        unsafe {
+            std::env::set_var("MOLD_THUMBNAIL_WARMUP", "true");
+        }
+        assert!(thumbnail_warmup_enabled());
+        unsafe {
+            std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
+        }
     }
 }

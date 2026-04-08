@@ -39,11 +39,17 @@ use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
+use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
+const QWEN_NATIVE_WIDTH: usize = 1328;
+const QWEN_NATIVE_HEIGHT: usize = 1328;
+const QWEN_GGUF_NATIVE_CFG_HEADROOM: u64 = 14_000_000_000;
+const QWEN_GGUF_MIN_CFG_HEADROOM: u64 = 3_000_000_000;
+const QWEN_VAE_TILE_SIZES: [u32; 3] = [64, 32, 16];
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
@@ -86,6 +92,12 @@ struct ResolvedQwen2TextEncoder {
     variant_label: String,
     size_bytes: u64,
     auto_use_gpu: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qwen2TextEncoderUsage {
+    Sequential,
+    Resident,
 }
 
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
@@ -144,6 +156,7 @@ struct LoadedQwenImage {
     transformer: Option<QwenImageTransformer>,
     text_encoder: encoders::qwen2_text::Qwen2TextEncoder,
     vae: QwenImageVae,
+    vae_path: std::path::PathBuf,
     transformer_cfg: QwenImageConfig,
     /// GPU device for transformer + denoising
     device: Device,
@@ -229,6 +242,13 @@ fn align_cfg_conditioning(
 }
 
 impl QwenImageTransformer {
+    fn supports_cfg_batching(&self) -> bool {
+        match self {
+            Self::Quantized(model) => model.supports_cfg_batching(),
+            _ => true,
+        }
+    }
+
     fn forward(
         &self,
         latents: &Tensor,
@@ -258,12 +278,89 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn is_oom_error(err: &impl std::fmt::Display) -> bool {
+        let msg = err.to_string();
+        msg.contains("OUT_OF_MEMORY") || msg.contains("out of memory")
+    }
+
+    fn decode_vae_tiled(
+        latents: &Tensor,
+        vae: &QwenImageVae,
+        vae_device: &Device,
+        progress: &ProgressReporter,
+    ) -> Result<Tensor> {
+        for tile_size in QWEN_VAE_TILE_SIZES {
+            let overlap = (tile_size / 4).max(4);
+            progress.info(&format!(
+                "Retrying VAE decode with tiled GPU decode (tile {} overlap {})",
+                tile_size, overlap
+            ));
+            let config = TilingConfig {
+                tile_size,
+                overlap,
+                min_tile_size: 16,
+            };
+            let forward = |tile: &Tensor| {
+                let tile = tile.to_device(vae_device)?.to_dtype(DType::F32)?;
+                vae.decode(&tile).map_err(Into::into)
+            };
+            match upscale_with_tiling(latents, &forward, 8, &config, &Device::Cpu, progress) {
+                Ok(image) => return Ok(image),
+                Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
+                    if let Err(sync_err) = vae_device.synchronize() {
+                        tracing::warn!(
+                            "failed to synchronize CUDA device after tiled VAE OOM: {sync_err}"
+                        );
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        bail!("tiled VAE decode still ran out of memory")
+    }
+
+    fn decode_vae_with_fallback<F>(
+        latents: &Tensor,
+        vae: &QwenImageVae,
+        vae_device: &Device,
+        sync_device: &Device,
+        progress: &ProgressReporter,
+        load_cpu_vae: F,
+    ) -> Result<Tensor>
+    where
+        F: FnOnce() -> Result<QwenImageVae>,
+    {
+        let decode_latents = latents.to_device(vae_device)?.to_dtype(DType::F32)?;
+        Self::debug_tensor_stats("latents_pre_vae", &decode_latents);
+        match vae.decode(&decode_latents) {
+            Ok(image) => Ok(image),
+            Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
+                progress.info("VAE decode OOM on GPU — retrying with tiled GPU decode");
+                sync_device.synchronize()?;
+                match Self::decode_vae_tiled(latents, vae, vae_device, progress) {
+                    Ok(image) => Ok(image),
+                    Err(tile_err) if Self::is_oom_error(&tile_err) => {
+                        progress.info("Tiled GPU VAE decode OOM — retrying on CPU");
+                        sync_device.synchronize()?;
+                        let cpu_vae = load_cpu_vae()?;
+                        let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                        cpu_vae.decode(&cpu_latents).map_err(Into::into)
+                    }
+                    Err(tile_err) => Err(tile_err),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn choose_text_encoder_source(
         preference: Option<&str>,
         is_cuda: bool,
         is_metal: bool,
         free_vram: u64,
         bf16_size_bytes: u64,
+        usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
         match preference {
             Some(tag) if tag != "auto" && tag != "bf16" => {
@@ -327,18 +424,59 @@ impl QwenImageEngine {
                     auto_use_gpu: true,
                 })
             }
-            _ => Ok(ResolvedQwen2TextEncoder {
-                paths: vec![],
-                is_gguf: false,
-                variant_label: "bf16".to_string(),
-                size_bytes: bf16_size_bytes,
-                auto_use_gpu: should_use_gpu(
-                    is_cuda,
-                    is_metal,
-                    free_vram,
-                    QWEN2_FP16_VRAM_THRESHOLD,
-                ),
-            }),
+            _ => {
+                let bf16_on_gpu =
+                    should_use_gpu(is_cuda, is_metal, free_vram, QWEN2_FP16_VRAM_THRESHOLD);
+                if bf16_on_gpu {
+                    return Ok(ResolvedQwen2TextEncoder {
+                        paths: vec![],
+                        is_gguf: false,
+                        variant_label: "bf16".to_string(),
+                        size_bytes: bf16_size_bytes,
+                        auto_use_gpu: true,
+                    });
+                }
+
+                if is_cuda {
+                    if matches!(usage, Qwen2TextEncoderUsage::Sequential) {
+                        return Ok(ResolvedQwen2TextEncoder {
+                            paths: vec![],
+                            is_gguf: false,
+                            variant_label: "bf16".to_string(),
+                            size_bytes: bf16_size_bytes,
+                            auto_use_gpu: false,
+                        });
+                    }
+
+                    let fallback_tag = match usage {
+                        Qwen2TextEncoderUsage::Resident => "q4",
+                        Qwen2TextEncoderUsage::Sequential => unreachable!(),
+                    };
+                    let fallback = mold_core::manifest::find_qwen2_vl_variant(fallback_tag)
+                        .expect("known CUDA fallback qwen2 variant missing");
+                    return Ok(ResolvedQwen2TextEncoder {
+                        paths: vec![],
+                        is_gguf: true,
+                        variant_label: fallback.tag.to_string(),
+                        size_bytes: fallback.size_bytes,
+                        auto_use_gpu: matches!(usage, Qwen2TextEncoderUsage::Resident)
+                            && fits_in_memory(
+                                is_cuda,
+                                is_metal,
+                                free_vram,
+                                qwen2_vram_threshold(fallback.size_bytes),
+                            ),
+                    });
+                }
+
+                Ok(ResolvedQwen2TextEncoder {
+                    paths: vec![],
+                    is_gguf: false,
+                    variant_label: "bf16".to_string(),
+                    size_bytes: bf16_size_bytes,
+                    auto_use_gpu: false,
+                })
+            }
         }
     }
 
@@ -494,18 +632,69 @@ impl QwenImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
+    fn quantized_cuda_cfg_headroom(width: usize, height: usize) -> u64 {
+        let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as f64;
+        let pixels = (width.max(1) * height.max(1)) as f64;
+        let scaled =
+            (QWEN_GGUF_NATIVE_CFG_HEADROOM as f64 * (pixels / native_pixels)).round() as u64;
+        scaled.max(QWEN_GGUF_MIN_CFG_HEADROOM)
+    }
+
+    fn should_split_cfg_quantized_cuda(
+        transformer_size: u64,
+        free_vram: u64,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        if free_vram == 0 {
+            return false;
+        }
+        let estimated_peak =
+            transformer_size.saturating_add(Self::quantized_cuda_cfg_headroom(width, height));
+        estimated_peak > free_vram
+    }
+
     /// Load transformer from disk.
     fn load_transformer(
         &self,
         device: &Device,
         dtype: DType,
         cfg: &QwenImageConfig,
+        width: usize,
+        height: usize,
     ) -> Result<QwenImageTransformer> {
         if self.detect_is_quantized() {
+            let transformer_size = std::fs::metadata(&self.base.paths.transformer)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let free = free_vram_bytes().unwrap_or(0);
+            let split_cfg_for_memory = device.is_cuda()
+                && (self.offload
+                    || Self::should_split_cfg_quantized_cuda(
+                        transformer_size,
+                        free,
+                        width,
+                        height,
+                    ));
+            if self.offload && device.is_cuda() {
+                self.base.progress.info(
+                    "Quantized Qwen CUDA offload requested — using low-memory split-CFG mode until GGUF block offload lands",
+                );
+            } else if split_cfg_for_memory {
+                let estimated_peak = transformer_size
+                    .saturating_add(Self::quantized_cuda_cfg_headroom(width, height));
+                self.base.progress.info(&format!(
+                    "Using low-memory quantized Qwen CUDA path (est. peak {}, {} free at {}x{})",
+                    fmt_gb(estimated_peak),
+                    fmt_gb(free),
+                    width,
+                    height,
+                ));
+            }
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
             Ok(QwenImageTransformer::Quantized(
-                QuantizedQwenImageTransformer2DModel::new(cfg, vb, device)?,
+                QuantizedQwenImageTransformer2DModel::new(cfg, vb, device, !split_cfg_for_memory)?,
             ))
         } else {
             let xformer_paths = self.transformer_paths();
@@ -618,6 +807,7 @@ impl QwenImageEngine {
         &self,
         gpu_device: &Device,
         free_vram: u64,
+        usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
         let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
         let is_cuda = gpu_device.is_cuda();
@@ -636,6 +826,7 @@ impl QwenImageEngine {
             is_metal,
             free_vram,
             bf16_size_bytes,
+            usage,
         )?;
 
         if resolved.is_gguf {
@@ -674,10 +865,52 @@ impl QwenImageEngine {
                 resolved.variant_label,
                 fmt_gb(resolved.size_bytes),
             )),
+            _ if is_cuda && resolved.is_gguf && resolved.auto_use_gpu => self.base.progress.info(
+                &format!(
+                    "CUDA auto mode selected quantized Qwen2.5-VL {} ({}) on GPU",
+                    resolved.variant_label,
+                    fmt_gb(resolved.size_bytes),
+                ),
+            ),
+            _ if is_cuda && resolved.is_gguf => self.base.progress.info(&format!(
+                "CUDA auto mode selected quantized Qwen2.5-VL {} ({}) on CPU to avoid large BF16 host residency",
+                resolved.variant_label,
+                fmt_gb(resolved.size_bytes),
+            )),
             _ => {}
         }
 
         Ok(resolved)
+    }
+
+    fn can_keep_transformer_hot_for_vae(loaded: &LoadedQwenImage) -> bool {
+        loaded.device.is_cuda()
+            && loaded.vae_device.is_cuda()
+            && matches!(
+                loaded.transformer.as_ref(),
+                Some(QwenImageTransformer::Quantized(_))
+            )
+    }
+
+    fn decode_vae_gpu_only(
+        latents: &Tensor,
+        vae: &QwenImageVae,
+        vae_device: &Device,
+        sync_device: &Device,
+        progress: &ProgressReporter,
+    ) -> Result<Tensor> {
+        let decode_latents = latents.to_device(vae_device)?.to_dtype(DType::F32)?;
+        match vae.decode(&decode_latents) {
+            Ok(image) => Ok(image),
+            Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
+                progress.info(
+                    "Resident-transformer VAE decode OOM on GPU — retrying with tiled GPU decode before dropping transformer",
+                );
+                sync_device.synchronize()?;
+                Self::decode_vae_tiled(latents, vae, vae_device, progress)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn load_text_encoder(
@@ -813,7 +1046,13 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let transformer = self.load_transformer(
+            &device,
+            dtype,
+            &transformer_cfg,
+            QWEN_NATIVE_WIDTH,
+            QWEN_NATIVE_HEIGHT,
+        )?;
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
@@ -850,7 +1089,8 @@ impl QwenImageEngine {
             .stage_done(&vae_label, vae_start.elapsed());
 
         // Load text encoder
-        let resolved_text_encoder = self.resolve_text_encoder_source(&device, free)?;
+        let resolved_text_encoder =
+            self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
         let (te_plan, te_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
         let te_device = if te_plan.use_gpu {
@@ -887,6 +1127,7 @@ impl QwenImageEngine {
             transformer: Some(transformer),
             text_encoder,
             vae,
+            vae_path: self.base.paths.vae.clone(),
             transformer_cfg,
             device,
             vae_device,
@@ -898,9 +1139,19 @@ impl QwenImageEngine {
     }
 
     /// Reload the transformer from disk.
-    fn reload_transformer(&self, loaded: &mut LoadedQwenImage) -> Result<()> {
-        let transformer =
-            self.load_transformer(&loaded.device, loaded.dtype, &loaded.transformer_cfg)?;
+    fn reload_transformer(
+        &self,
+        loaded: &mut LoadedQwenImage,
+        width: usize,
+        height: usize,
+    ) -> Result<()> {
+        let transformer = self.load_transformer(
+            &loaded.device,
+            loaded.dtype,
+            &loaded.transformer_cfg,
+            width,
+            height,
+        )?;
         loaded.transformer = Some(transformer);
         Ok(())
     }
@@ -920,7 +1171,8 @@ impl QwenImageEngine {
         let width = req.width as usize;
         let height = req.height as usize;
         let free = free_vram_bytes().unwrap_or(0);
-        let resolved_text_encoder = self.resolve_text_encoder_source(&device, free)?;
+        let resolved_text_encoder =
+            self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Sequential)?;
         let (plan, _device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
         let use_cpu_staging = plan.use_cpu_staging;
@@ -1108,7 +1360,7 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let transformer = self.load_transformer(&device, dtype, &transformer_cfg, width, height)?;
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
@@ -1162,10 +1414,16 @@ impl QwenImageEngine {
             );
         }
 
-        // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
-        // Each forward pass streams 60 blocks CPU→GPU; batching cond+uncond avoids
-        // doing that twice per step.
-        let (batched_hs, batched_mask) = if use_cfg {
+        let use_batched_cfg = use_cfg && transformer.supports_cfg_batching();
+        if use_cfg && !use_batched_cfg {
+            self.base.progress.info(
+                "Low-memory quantized Qwen CUDA path detected — disabling CFG batching to reduce peak CUDA memory",
+            );
+        }
+
+        // Pre-batch CFG inputs when the selected transformer path can handle the
+        // extra batch dimension without exceeding peak memory.
+        let (batched_hs, batched_mask) = if use_batched_cfg {
             let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
             let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
             (hs, mask)
@@ -1180,13 +1438,35 @@ impl QwenImageEngine {
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let noise_pred = if use_cfg {
-                let t_tensor =
-                    Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
-                let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                let batched_pred =
-                    transformer.forward(&batched_latents, &t_tensor, &batched_hs, &batched_mask)?;
-                let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                let (cond_pred, uncond_pred) = if use_batched_cfg {
+                    let t_tensor =
+                        Tensor::from_vec(vec![t as f32; 2], (2,), &device)?.to_dtype(dtype)?;
+                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                    let batched_pred = transformer.forward(
+                        &batched_latents,
+                        &t_tensor,
+                        &batched_hs,
+                        &batched_mask,
+                    )?;
+                    (batched_pred.narrow(0, 0, 1)?, batched_pred.narrow(0, 1, 1)?)
+                } else {
+                    let t_tensor =
+                        Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+                    (
+                        transformer.forward(
+                            &latents,
+                            &t_tensor,
+                            &encoder_hidden_states,
+                            &encoder_attention_mask,
+                        )?,
+                        transformer.forward(
+                            &latents,
+                            &t_tensor,
+                            uncond_hs.as_ref().unwrap(),
+                            uncond_mask.as_ref().unwrap(),
+                        )?,
+                    )
+                };
                 if step == 0 {
                     Self::debug_tensor_stats("cond_pred[0]", &cond_pred);
                     Self::debug_tensor_stats("uncond_pred[0]", &uncond_pred);
@@ -1280,9 +1560,14 @@ impl QwenImageEngine {
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
-        let latents = latents.to_device(&vae_device)?.to_dtype(vae_dtype)?;
-        Self::debug_tensor_stats("latents_pre_vae", &latents);
-        let image = vae.decode(&latents)?;
+        let image = Self::decode_vae_with_fallback(
+            &latents,
+            &vae,
+            &vae_device,
+            &device,
+            &self.base.progress,
+            || self.load_vae(&Device::Cpu, DType::F32),
+        )?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
         Self::debug_tensor_stats("image_postprocess", &image);
@@ -1366,7 +1651,7 @@ impl InferenceEngine for QwenImageEngine {
                 .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
             progress.stage_start("Reloading Qwen-Image transformer");
             let reload_start = Instant::now();
-            self.reload_transformer(&mut loaded_mut)?;
+            self.reload_transformer(&mut loaded_mut, req.width as usize, req.height as usize)?;
             progress.stage_done("Reloading Qwen-Image transformer", reload_start.elapsed());
             self.base.loaded = Some(loaded_mut);
         }
@@ -1388,41 +1673,73 @@ impl InferenceEngine for QwenImageEngine {
             "starting Qwen-Image generation"
         );
 
-        // 1. Reload text encoder if weights were dropped
-        if loaded.text_encoder.model.is_none() {
-            progress.stage_start("Reloading Qwen2.5 encoder");
-            let reload_start = Instant::now();
-            loaded.text_encoder.reload(progress)?;
-            progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
-        }
-
-        // 2. Encode prompt
-        let (encoder_hidden_states, encoder_attention_mask) = Self::encode_prompt_cached(
-            progress,
-            &self.prompt_cache,
-            &mut loaded.text_encoder,
-            &req.prompt,
-            &loaded.device,
-            loaded.dtype,
-        )?;
-
-        // Encode unconditional prompt for classifier-free guidance.
-        // Qwen's published examples use a single space rather than a truly
-        // empty string for the negative prompt baseline.
         let use_cfg = req.guidance > 1.0;
-        let (uncond_hs, uncond_mask) = if use_cfg {
+        let prompt_key = prompt_text_key(&req.prompt);
+        let uncond_key = prompt_text_key(QWEN_EMPTY_NEGATIVE_PROMPT);
+        let prompt_cached = self
+            .prompt_cache
+            .lock()
+            .expect("cache poisoned")
+            .get_cloned(&prompt_key);
+        let uncond_cached = if use_cfg {
+            self.prompt_cache
+                .lock()
+                .expect("cache poisoned")
+                .get_cloned(&uncond_key)
+        } else {
+            None
+        };
+        let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
+
+        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if both_cached
+        {
+            let cached = prompt_cached.expect("prompt cache unexpectedly missing");
+            progress.cache_hit("prompt conditioning");
+            let (hs, mask) = cached.restore(&loaded.device, loaded.dtype)?;
+            let (u_hs, u_mask) = if use_cfg {
+                progress.cache_hit("prompt conditioning");
+                let ucached =
+                    uncond_cached.expect("unconditional prompt cache unexpectedly missing");
+                let (u_hs, u_mask) = ucached.restore(&loaded.device, loaded.dtype)?;
+                (Some(u_hs), Some(u_mask))
+            } else {
+                (None, None)
+            };
+            (hs, mask, u_hs, u_mask)
+        } else {
+            if loaded.text_encoder.model.is_none() {
+                progress.stage_start("Reloading Qwen2.5 encoder");
+                let reload_start = Instant::now();
+                loaded.text_encoder.reload(progress)?;
+                progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+            }
+
             let (hs, mask) = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
                 &mut loaded.text_encoder,
-                QWEN_EMPTY_NEGATIVE_PROMPT,
+                &req.prompt,
                 &loaded.device,
                 loaded.dtype,
             )?;
-            (Some(hs), Some(mask))
-        } else {
-            (None, None)
+
+            let (u_hs, u_mask) = if use_cfg {
+                let (hs, mask) = Self::encode_prompt_cached(
+                    progress,
+                    &self.prompt_cache,
+                    &mut loaded.text_encoder,
+                    QWEN_EMPTY_NEGATIVE_PROMPT,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                (Some(hs), Some(mask))
+            } else {
+                (None, None)
+            };
+
+            (hs, mask, u_hs, u_mask)
         };
+
         let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
             let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
                 &encoder_hidden_states,
@@ -1476,8 +1793,16 @@ impl InferenceEngine for QwenImageEngine {
                 .as_ref()
                 .expect("transformer must be loaded for denoising");
 
-            // Pre-batch CFG inputs to halve block transfers for GGUF streaming.
-            let (batched_hs, batched_mask) = if use_cfg {
+            let use_batched_cfg = use_cfg && transformer.supports_cfg_batching();
+            if use_cfg && !use_batched_cfg {
+                progress.info(
+                    "Low-memory quantized Qwen CUDA path detected — disabling CFG batching to reduce peak CUDA memory",
+                );
+            }
+
+            // Pre-batch CFG inputs when the selected transformer path can handle
+            // the extra batch dimension without exceeding peak memory.
+            let (batched_hs, batched_mask) = if use_batched_cfg {
                 let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
                 let mask =
                     Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
@@ -1493,17 +1818,35 @@ impl InferenceEngine for QwenImageEngine {
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let noise_pred = if use_cfg {
-                    let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
-                        .to_dtype(loaded.dtype)?;
-                    let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
-                    let batched_pred = transformer.forward(
-                        &batched_latents,
-                        &t_tensor,
-                        &batched_hs,
-                        &batched_mask,
-                    )?;
-                    let cond_pred = batched_pred.narrow(0, 0, 1)?;
-                    let uncond_pred = batched_pred.narrow(0, 1, 1)?;
+                    let (cond_pred, uncond_pred) = if use_batched_cfg {
+                        let t_tensor = Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                            .to_dtype(loaded.dtype)?;
+                        let batched_latents = Tensor::cat(&[&latents, &latents], 0)?;
+                        let batched_pred = transformer.forward(
+                            &batched_latents,
+                            &t_tensor,
+                            &batched_hs,
+                            &batched_mask,
+                        )?;
+                        (batched_pred.narrow(0, 0, 1)?, batched_pred.narrow(0, 1, 1)?)
+                    } else {
+                        let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
+                            .to_dtype(loaded.dtype)?;
+                        (
+                            transformer.forward(
+                                &latents,
+                                &t_tensor,
+                                &encoder_hidden_states,
+                                &encoder_attention_mask,
+                            )?,
+                            transformer.forward(
+                                &latents,
+                                &t_tensor,
+                                uncond_hs.as_ref().unwrap(),
+                                uncond_mask.as_ref().unwrap(),
+                            )?,
+                        )
+                    };
                     // CFG in F32 + norm rescale (matches diffusers Qwen-Image pipeline)
                     let cond_f32 = cond_pred.to_dtype(DType::F32)?;
                     let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
@@ -1536,27 +1879,68 @@ impl InferenceEngine for QwenImageEngine {
 
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
-        // Free text embeddings and transformer
+        // Free text embeddings
         drop(encoder_hidden_states);
         drop(encoder_attention_mask);
         drop(uncond_hs);
         drop(uncond_mask);
-        loaded.transformer = None;
-        // Synchronize to ensure CUDA's caching allocator reclaims the freed memory
-        // before VAE decode allocates workspace buffers.
-        loaded.device.synchronize()?;
-        tracing::info!("Qwen-Image transformer dropped to free VRAM for VAE decode");
 
         // 8. VAE decode
         progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
         // Always decode in F32 — matches sequential path and diffusers' force_upcast.
-        let latents = latents
-            .to_device(&loaded.vae_device)?
-            .to_dtype(DType::F32)?;
-        Self::debug_tensor_stats("latents_pre_vae", &latents);
-        let image = loaded.vae.decode(&latents)?;
+        let keep_transformer_hot = Self::can_keep_transformer_hot_for_vae(loaded);
+        let image = if keep_transformer_hot {
+            match Self::decode_vae_gpu_only(
+                &latents,
+                &loaded.vae,
+                &loaded.vae_device,
+                &loaded.device,
+                progress,
+            ) {
+                Ok(image) => {
+                    progress.info(
+                        "Kept quantized Qwen transformer resident across VAE decode for faster hot-path reuse",
+                    );
+                    image
+                }
+                Err(err) if Self::is_oom_error(&err) => {
+                    loaded.transformer = None;
+                    loaded.device.synchronize()?;
+                    progress.info(
+                        "Dropping Qwen-Image transformer after resident VAE decode OOM and retrying",
+                    );
+                    Self::decode_vae_with_fallback(
+                        &latents,
+                        &loaded.vae,
+                        &loaded.vae_device,
+                        &loaded.device,
+                        progress,
+                        || {
+                            QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)
+                                .map_err(Into::into)
+                        },
+                    )?
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            loaded.transformer = None;
+            loaded.device.synchronize()?;
+            tracing::info!("Qwen-Image transformer dropped to free VRAM for VAE decode");
+            Self::decode_vae_with_fallback(
+                &latents,
+                &loaded.vae,
+                &loaded.vae_device,
+                &loaded.device,
+                progress,
+                || {
+                    QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)
+                        .map_err(Into::into)
+                },
+            )?
+        };
         Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
         Self::debug_tensor_stats("image_postprocess", &image);
@@ -1724,6 +2108,7 @@ mod tests {
             true,
             qwen2_vram_threshold(q6.size_bytes) + 1,
             16_600_000_000,
+            Qwen2TextEncoderUsage::Resident,
         )
         .unwrap();
         assert!(resolved.is_gguf);
@@ -1738,9 +2123,15 @@ mod tests {
         let free_vram = qwen2_vram_threshold(q4.size_bytes);
         assert!(free_vram < qwen2_vram_threshold(q6.size_bytes));
 
-        let resolved =
-            QwenImageEngine::choose_text_encoder_source(Some("auto"), false, true, free_vram, 0)
-                .unwrap();
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            false,
+            true,
+            free_vram,
+            0,
+            Qwen2TextEncoderUsage::Resident,
+        )
+        .unwrap();
         assert!(resolved.is_gguf);
         assert_eq!(resolved.variant_label, "q4");
         assert!(resolved.auto_use_gpu);
@@ -1754,6 +2145,7 @@ mod tests {
             false,
             QWEN2_FP16_VRAM_THRESHOLD + 1,
             16_600_000_000,
+            Qwen2TextEncoderUsage::Resident,
         )
         .unwrap();
         assert!(!resolved.is_gguf);
@@ -1762,11 +2154,94 @@ mod tests {
     }
 
     #[test]
+    fn qwen_image_auto_prefers_quantized_gpu_on_cuda_for_resident_mode_when_it_fits() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD - 1,
+            16_600_000_000,
+            Qwen2TextEncoderUsage::Resident,
+        )
+        .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_uses_quantized_cpu_fallback_on_cuda_for_resident_mode() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            1,
+            16_600_000_000,
+            Qwen2TextEncoderUsage::Resident,
+        )
+        .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert!(!resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_keeps_bf16_cpu_on_cuda_for_sequential_mode() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            1,
+            16_600_000_000,
+            Qwen2TextEncoderUsage::Sequential,
+        )
+        .unwrap();
+        assert!(!resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "bf16");
+        assert!(!resolved.auto_use_gpu);
+    }
+
+    #[test]
     fn qwen_image_explicit_q6_respects_cpu_fallback_on_cuda() {
-        let resolved =
-            QwenImageEngine::choose_text_encoder_source(Some("q6"), true, false, 1, 0).unwrap();
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("q6"),
+            true,
+            false,
+            1,
+            0,
+            Qwen2TextEncoderUsage::Resident,
+        )
+        .unwrap();
         assert!(resolved.is_gguf);
         assert_eq!(resolved.variant_label, "q6");
         assert!(!resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn quantized_cuda_cfg_headroom_scales_with_resolution() {
+        let native = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
+        let reduced = QwenImageEngine::quantized_cuda_cfg_headroom(512, 512);
+        assert_eq!(native, QWEN_GGUF_NATIVE_CFG_HEADROOM);
+        assert_eq!(reduced, QWEN_GGUF_MIN_CFG_HEADROOM);
+    }
+
+    #[test]
+    fn qwen_quantized_native_resolution_uses_split_cfg_on_24gb_cuda() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            12_300_000_000,
+            24_600_000_000,
+            1328,
+            1328,
+        ));
+    }
+
+    #[test]
+    fn qwen_quantized_reduced_resolution_keeps_batched_cfg_when_it_fits() {
+        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            12_300_000_000,
+            24_600_000_000,
+            512,
+            512,
+        ));
     }
 }
