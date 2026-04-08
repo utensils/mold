@@ -17,6 +17,20 @@ MOLD_CUDA_ARCH=sm120 curl -fsSL ... | sh  # Blackwell (RTX 50-series)
 MOLD_CUDA_ARCH=sm89 curl -fsSL ... | sh   # Ada (RTX 40-series)
 ```
 
+## Updating
+
+```bash
+mold update                       # Update to latest release
+mold update --check               # Check for updates without installing
+mold update --version v0.7.0      # Install a specific version
+```
+
+Or re-run the install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
+```
+
 ## Nix
 
 ```bash

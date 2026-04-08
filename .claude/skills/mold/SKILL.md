@@ -26,7 +26,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -349,6 +349,17 @@ mold config edit                          # Open in $EDITOR
 ```
 
 Keys use dot-notation matching the TOML structure. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active.
+
+## Self-Update
+
+```bash
+mold update                       # Update to latest GitHub release
+mold update --check               # Check for updates without installing
+mold update --version v0.6.0      # Install a specific version
+mold update --force               # Reinstall even if already up-to-date
+```
+
+Downloads the correct platform-specific binary from GitHub releases, verifies SHA-256 checksum, and replaces the running binary in-place. Detects Nix/Homebrew installations and suggests using the package manager instead. Respects `GITHUB_TOKEN` for API rate limits and `MOLD_CUDA_ARCH` for GPU architecture override on Linux.
 
 ## Server Mode
 

@@ -38,10 +38,14 @@ ctrlc = "3"
 image = "0.25"
 libc = "0.2"
 dirs = "6"
+flate2 = "1"
 indicatif = "0.17"
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 sysinfo = "0.34"
+tar = "0.4"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"

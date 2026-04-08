@@ -327,6 +327,31 @@ subcommand, runtime, and memory usage.
 
 Unload the current model from the server to free GPU memory.
 
+## `mold update`
+
+Update mold to the latest release from GitHub.
+
+```bash
+mold update [OPTIONS]
+```
+
+Downloads the correct platform-specific binary, verifies its SHA-256 checksum,
+and replaces the current binary in-place.
+
+### Options
+
+| Flag              | Description                                   |
+| ----------------- | --------------------------------------------- |
+| `--check`         | Only check for updates, don't install         |
+| `--force`         | Reinstall even if the current version matches |
+| `--version <TAG>` | Install a specific version (e.g. `v0.7.0`)   |
+
+Respects `GITHUB_TOKEN` for API authentication (avoids rate limits). On Linux,
+respects `MOLD_CUDA_ARCH` for GPU architecture override.
+
+If mold was installed via a package manager (Nix, Homebrew), the command will
+detect the read-only install path and suggest using the package manager instead.
+
 ## `mold version`
 
 Show version, build date, and git SHA.
