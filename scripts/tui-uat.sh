@@ -75,9 +75,10 @@ capture() {
     local term_id
     term_id=$(load_state)
 
-    # Save current clipboard, perform action, read file path from clipboard
+    # Save current clipboard and ensure it's restored on all exit paths
     local prev_clip
     prev_clip=$(pbpaste 2>/dev/null || true)
+    trap 'if [ -n "$prev_clip" ]; then echo -n "$prev_clip" | pbcopy 2>/dev/null || true; fi' RETURN
 
     osascript -e "
         tell application \"Ghostty\"
@@ -86,22 +87,23 @@ capture() {
         end tell
     " >/dev/null 2>&1
 
-    # Small delay for clipboard to update
-    sleep 0.1
-
-    local file_path
-    file_path=$(pbpaste 2>/dev/null)
+    # Poll for clipboard to update (write_screen_file is async)
+    local file_path=""
+    local poll_attempts=20
+    for _ in $(seq 1 $poll_attempts); do
+        file_path=$(pbpaste 2>/dev/null)
+        # The action writes a temp file path; detect it changed from prev_clip
+        if [ "$file_path" != "$prev_clip" ] && [ -f "$file_path" ]; then
+            break
+        fi
+        sleep 0.05
+    done
 
     if [ -f "$file_path" ]; then
         cat "$file_path"
     else
         echo "ERROR: Could not read screen capture file: $file_path" >&2
         return 1
-    fi
-
-    # Restore clipboard
-    if [ -n "$prev_clip" ]; then
-        echo -n "$prev_clip" | pbcopy 2>/dev/null || true
     fi
 }
 
@@ -225,13 +227,19 @@ get_cg_window_id() {
         return 1
     fi
 
+    # Escape window name for Swift string literal
+    local escaped_name
+    escaped_name="${win_name//\\/\\\\}"
+    escaped_name="${escaped_name//\"/\\\"}"
+
     # Find CGWindowID via Swift CGWindowListCopyWindowInfo
     swift -e "
 import CoreGraphics
 let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let target = \"$escaped_name\"
 for w in windows {
     if let owner = w[kCGWindowOwnerName as String] as? String, owner == \"Ghostty\",
-       let name = w[kCGWindowName as String] as? String, name == \"$win_name\",
+       let name = w[kCGWindowName as String] as? String, name == target,
        let layer = w[kCGWindowLayer as String] as? Int, layer == 0,
        let wid = w[kCGWindowNumber as String] as? Int {
         print(wid)
@@ -257,9 +265,17 @@ cmd_launch() {
         exit 1
     fi
 
-    # Build the mold tui command with arguments
+    # Build the mold tui command with arguments, escaping for AppleScript
     local cmd
     cmd="$MOLD_BIN tui $*"
+    # Escape backslashes and double quotes for AppleScript string interpolation
+    cmd="${cmd//\\/\\\\}"
+    cmd="${cmd//\"/\\\"}"
+
+    local cwd
+    cwd="$(pwd)"
+    cwd="${cwd//\\/\\\\}"
+    cwd="${cwd//\"/\\\"}"
 
     # Create a new Ghostty window running the TUI
     local term_id
@@ -269,7 +285,7 @@ cmd_launch() {
             set cfg to new surface configuration
             set command of cfg to \"$cmd\"
             set wait after command of cfg to true
-            set initial working directory of cfg to \"$(pwd)\"
+            set initial working directory of cfg to \"$cwd\"
             set w to new window with configuration cfg
             delay 0.5
             set term to focused terminal of selected tab of w
@@ -361,9 +377,9 @@ cmd_view() {
     # The tab header ("1 Generate  2 Gallery  3 Models  4 Settings") is on every screen,
     # so we use box-drawing prefixes (┌) to match section headers instead.
     case "$target" in
-        1|generate|Generate)  key="1"; landmark="┌ Parameters\|┌ Prompt";;
+        1|generate|Generate)  key="1"; landmark="┌ Parameters|┌ Prompt";;
         2|gallery|Gallery)    key="2"; landmark="┌ Gallery";;
-        3|models|Models)      key="3"; landmark="┌ Installed\|┌ Available";;
+        3|models|Models)      key="3"; landmark="┌ Installed|┌ Available";;
         4|settings|Settings)  key="4"; landmark="┌ Settings";;
         *)
             echo "ERROR: Unknown view '$target'. Use 1-4 or generate/gallery/models/settings." >&2
@@ -372,7 +388,7 @@ cmd_view() {
     esac
 
     # Already on the target view?
-    if capture | grep -q "$landmark"; then
+    if capture | grep -Eq "$landmark"; then
         echo "OK: Already on view $target"
         return 0
     fi
@@ -396,7 +412,7 @@ cmd_view() {
         send_one_key "$term_id" "$key"
         sleep 1
 
-        if capture | grep -q "$landmark"; then
+        if capture | grep -Eq "$landmark"; then
             echo "OK: Switched to view $target"
             return 0
         fi
