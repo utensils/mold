@@ -1,4 +1,6 @@
 use anyhow::Result;
+#[cfg(feature = "preview")]
+use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
@@ -1122,21 +1124,108 @@ fn save_and_preview_image(
 /// Display an image inline in the terminal using viuer.
 /// Silently skipped if the `preview` feature is not compiled or if decoding fails.
 #[cfg(any(feature = "preview", test))]
-fn should_disable_kitty_preview(term_program: Option<&str>, term: Option<&str>) -> bool {
-    matches!(term_program, Some("ghostty")) || matches!(term, Some("xterm-ghostty"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewBackend {
+    ViuerAuto,
+    GhosttyKitty,
+}
+
+#[cfg(any(feature = "preview", test))]
+fn preview_backend(term_program: Option<&str>, term: Option<&str>) -> PreviewBackend {
+    if matches!(term_program, Some("ghostty")) || matches!(term, Some("xterm-ghostty")) {
+        PreviewBackend::GhosttyKitty
+    } else {
+        PreviewBackend::ViuerAuto
+    }
+}
+
+#[cfg(any(feature = "preview", test))]
+fn fit_preview_cells(img_width: u32, img_height: u32, term_w: u16, term_h: u16) -> (u32, u32) {
+    let bound_width = term_w as u32;
+    let bound_height = 2 * term_h as u32;
+
+    if img_width <= bound_width && img_height <= bound_height {
+        let rows = std::cmp::max(1, img_height / 2 + img_height % 2);
+        let rows = if rows == term_h as u32 && rows > 1 {
+            rows - 1
+        } else {
+            rows
+        };
+        return (img_width, rows);
+    }
+
+    let ratio = img_width * bound_height;
+    let nratio = bound_width * img_height;
+    let use_width = nratio <= ratio;
+    let intermediate = if use_width {
+        img_height * bound_width / img_width
+    } else {
+        img_width * bound_height / img_height
+    };
+
+    let (cols, mut rows) = if use_width {
+        (bound_width, std::cmp::max(1, intermediate / 2))
+    } else {
+        (intermediate, std::cmp::max(1, bound_height / 2))
+    };
+
+    if rows == term_h as u32 && rows > 1 {
+        rows -= 1;
+    }
+
+    (cols, rows)
+}
+
+#[cfg(any(feature = "preview", test))]
+fn ghostty_kitty_preview_chunks(encoded: &str, cell_w: u32, cell_h: u32) -> String {
+    let mut out = String::new();
+    let mut chunks = encoded.as_bytes().chunks(4096).peekable();
+    if let Some(first) = chunks.next() {
+        let more = if chunks.peek().is_some() { 1 } else { 0 };
+        out.push_str(&format!(
+            "\x1b_Gf=100,a=T,t=d,c={},r={},m={};{}\x1b\\",
+            cell_w,
+            cell_h,
+            more,
+            std::str::from_utf8(first).expect("base64 payload must be utf-8"),
+        ));
+    }
+
+    while let Some(chunk) = chunks.next() {
+        let more = if chunks.peek().is_some() { 1 } else { 0 };
+        out.push_str(&format!(
+            "\x1b_Gm={};{}\x1b\\",
+            more,
+            std::str::from_utf8(chunk).expect("base64 payload must be utf-8"),
+        ));
+    }
+
+    out
+}
+
+#[cfg(feature = "preview")]
+fn print_ghostty_kitty_preview(img: &image::DynamicImage) -> std::io::Result<()> {
+    let mut encoded_png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut encoded_png, image::ImageFormat::Png)
+        .map_err(std::io::Error::other)?;
+    let encoded = general_purpose::STANDARD.encode(encoded_png.into_inner());
+
+    let (term_w, term_h) = viuer::terminal_size();
+    let (cell_w, cell_h) = fit_preview_cells(img.width(), img.height(), term_w, term_h);
+    let payload = ghostty_kitty_preview_chunks(&encoded, cell_w, cell_h);
+
+    let mut stdout = std::io::stdout();
+    write!(stdout, "{payload}")?;
+    if cell_w < term_w as u32 {
+        writeln!(stdout)?;
+    }
+    stdout.flush()
 }
 
 #[cfg(feature = "preview")]
 fn preview_config() -> viuer::Config {
-    let term_program = std::env::var("TERM_PROGRAM").ok();
-    let term = std::env::var("TERM").ok();
-    let disable_kitty = should_disable_kitty_preview(term_program.as_deref(), term.as_deref());
-
     viuer::Config {
         absolute_offset: false,
-        // Ghostty can echo viuer's kitty capability probe reply as visible text in cooked mode.
-        // Force a non-kitty preview path there until we replace viuer's auto-detection.
-        use_kitty: !disable_kitty,
         ..Default::default()
     }
 }
@@ -1150,8 +1239,17 @@ pub(crate) fn preview_image(data: &[u8]) {
     let Ok(img) = image::load_from_memory(data) else {
         return;
     };
-    let conf = preview_config();
-    let _ = viuer::print(&img, &conf);
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let term = std::env::var("TERM").ok();
+    match preview_backend(term_program.as_deref(), term.as_deref()) {
+        PreviewBackend::GhosttyKitty => {
+            let _ = print_ghostty_kitty_preview(&img);
+        }
+        PreviewBackend::ViuerAuto => {
+            let conf = preview_config();
+            let _ = viuer::print(&img, &conf);
+        }
+    }
 }
 
 #[cfg(not(feature = "preview"))]
@@ -1404,24 +1502,43 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_preview_disables_kitty_protocol() {
-        assert!(should_disable_kitty_preview(
-            Some("ghostty"),
-            Some("xterm-ghostty")
-        ));
-        assert!(should_disable_kitty_preview(
-            Some("ghostty"),
-            Some("xterm-256color")
-        ));
-        assert!(should_disable_kitty_preview(None, Some("xterm-ghostty")));
+    fn ghostty_preview_uses_direct_kitty_backend() {
+        assert_eq!(
+            preview_backend(Some("ghostty"), Some("xterm-ghostty")),
+            PreviewBackend::GhosttyKitty
+        );
+        assert_eq!(
+            preview_backend(Some("ghostty"), Some("xterm-256color")),
+            PreviewBackend::GhosttyKitty
+        );
+        assert_eq!(
+            preview_backend(None, Some("xterm-ghostty")),
+            PreviewBackend::GhosttyKitty
+        );
     }
 
     #[test]
-    fn non_ghostty_preview_keeps_kitty_protocol_enabled() {
-        assert!(!should_disable_kitty_preview(
-            Some("WezTerm"),
-            Some("xterm-256color")
-        ));
-        assert!(!should_disable_kitty_preview(None, Some("xterm-256color")));
+    fn non_ghostty_preview_uses_viuer_auto() {
+        assert_eq!(
+            preview_backend(Some("WezTerm"), Some("xterm-256color")),
+            PreviewBackend::ViuerAuto
+        );
+        assert_eq!(
+            preview_backend(None, Some("xterm-256color")),
+            PreviewBackend::ViuerAuto
+        );
+    }
+
+    #[test]
+    fn fit_preview_cells_keeps_last_row_free_when_using_full_height() {
+        assert_eq!(fit_preview_cells(80, 48, 80, 24), (80, 23));
+        assert_eq!(fit_preview_cells(40, 20, 80, 24), (40, 10));
+    }
+
+    #[test]
+    fn ghostty_kitty_preview_payload_uses_png_chunks() {
+        let payload = ghostty_kitty_preview_chunks(&"A".repeat(5000), 40, 20);
+        assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=40,r=20,m=1;"));
+        assert!(payload.contains("\u{1b}_Gm=0;"));
     }
 }

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CLI Ghostty preview escape leak**: `mold run --preview` and `mold upscale --preview` now avoid `viuer`'s Kitty capability probe in Ghostty, preventing visible `^[_Gi=31;OK...` control text before inline previews
+- **CLI Ghostty preview regression**: `mold run --preview` and `mold upscale --preview` now bypass `viuer`'s leaking Kitty capability probe in Ghostty without falling back to blocky half-block rendering, preserving crisp inline previews while preventing visible `^[_Gi=31;OK...` control text
 - **Qwen-Image-2512 CUDA black images / OOMs**: quantized CUDA generation now uses a staged fallback ladder for VAE decode (full GPU, tiled GPU, then CPU reload), keeps the quantized transformer resident across decode when that is safe, and aligns BF16/GGUF text masking behavior with upstream Qwen
 - **Server startup thumbnail warmup**: gallery thumbnail generation is now opt-in via `MOLD_THUMBNAIL_WARMUP=1`, preventing avoidable CPU/RAM spikes on startup when large or bad output directories are present
 
