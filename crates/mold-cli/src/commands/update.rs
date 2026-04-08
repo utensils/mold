@@ -348,39 +348,6 @@ async fn download_asset(client: &reqwest::Client, url: &str, size: u64) -> Resul
 pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()> {
     let current = mold_core::build_info::VERSION;
     eprintln!("{} Current version: {current}", theme::icon_info());
-
-    // Check if installed via package manager
-    let exe_path = std::env::current_exe()?.canonicalize()?;
-    if let Some(pkg_hint) = detect_package_manager(&exe_path) {
-        eprintln!(
-            "{} mold is installed at {}, which is read-only.",
-            theme::icon_fail(),
-            exe_path.display()
-        );
-        eprintln!(
-            "  {} update via your package manager instead (e.g. {pkg_hint})",
-            theme::prefix_hint()
-        );
-        std::process::exit(1);
-    }
-
-    // Check write permission
-    if let Some(exe_dir) = exe_path.parent() {
-        let test_path = exe_dir.join(format!(".mold-update-test-{}", std::process::id()));
-        match std::fs::write(&test_path, b"") {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&test_path);
-            }
-            Err(_) => {
-                bail!(
-                    "no write permission to {}. Try running with sudo or \
-                     set MOLD_INSTALL_DIR to a writable location and reinstall.",
-                    exe_dir.display()
-                );
-            }
-        }
-    }
-
     eprintln!("{} Checking for updates...", theme::icon_info());
 
     let client = build_client()?;
@@ -419,6 +386,7 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         "Downgrading"
     };
 
+    // --check: report availability and exit (no write access needed)
     if check {
         if is_newer(current, remote_version) {
             eprintln!(
@@ -434,18 +402,58 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         return Ok(());
     }
 
+    // From here on we will write to disk — validate install location
+    let exe_path = std::env::current_exe()?.canonicalize()?;
+    if let Some(pkg_hint) = detect_package_manager(&exe_path) {
+        eprintln!(
+            "{} mold is installed at {}, which is read-only.",
+            theme::icon_fail(),
+            exe_path.display()
+        );
+        eprintln!(
+            "  {} update via your package manager instead (e.g. {pkg_hint})",
+            theme::prefix_hint()
+        );
+        std::process::exit(1);
+    }
+
+    if let Some(exe_dir) = exe_path.parent() {
+        let test_path = exe_dir.join(format!(".mold-update-test-{}", std::process::id()));
+        match std::fs::write(&test_path, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&test_path);
+            }
+            Err(_) => {
+                bail!(
+                    "no write permission to {}. Try running with sudo or \
+                     set MOLD_INSTALL_DIR to a writable location and reinstall.",
+                    exe_dir.display()
+                );
+            }
+        }
+    }
+
     eprintln!(
         "{} {action}: {current} -> {remote_version}",
         theme::icon_info()
     );
 
-    // Detect correct asset
+    // Detect correct asset (with legacy fallback for pre-multi-arch releases)
     let asset_name = detect_asset_name()?;
 
     let asset = release
         .assets
         .iter()
         .find(|a| a.name == asset_name)
+        .or_else(|| {
+            // Legacy fallback: older releases used unsuffixed Linux asset name
+            if cfg!(target_os = "linux") {
+                let legacy = "mold-x86_64-unknown-linux-gnu-cuda.tar.gz";
+                release.assets.iter().find(|a| a.name == legacy)
+            } else {
+                None
+            }
+        })
         .with_context(|| {
             format!(
                 "release {} has no asset matching {asset_name}",
@@ -472,8 +480,8 @@ pub async fn run(check: bool, force: bool, version: Option<String>) -> Result<()
         .await
         .context("failed to read SHA256SUMS")?;
 
-    // Verify checksum
-    verify_checksum(&sums_content, &asset_name, &archive_data)?;
+    // Verify checksum (use the matched asset's actual name, which may be the legacy name)
+    verify_checksum(&sums_content, &asset.name, &archive_data)?;
     eprintln!("{} Checksum verified (SHA-256)", theme::icon_info());
 
     // Extract binary
