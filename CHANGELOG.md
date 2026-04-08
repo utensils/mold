@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CLI Ghostty preview escape leak**: `mold run --preview` and `mold upscale --preview` now avoid `viuer`'s Kitty capability probe in Ghostty, preventing visible `^[_Gi=31;OK...` control text before inline previews
+
 ## [0.6.0] - 2026-04-07
 
 ### Added

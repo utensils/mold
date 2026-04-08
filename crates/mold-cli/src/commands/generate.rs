@@ -6,6 +6,8 @@ use mold_core::{
     GenerateServerAction, ImageData, LoraWeight, MoldClient, OutputFormat, Scheduler,
 };
 use rand::Rng;
+#[cfg(feature = "preview")]
+use std::io::IsTerminal;
 use std::io::Write;
 use std::time::Duration;
 
@@ -1117,15 +1119,36 @@ fn save_and_preview_image(
 
 /// Display an image inline in the terminal using viuer.
 /// Silently skipped if the `preview` feature is not compiled or if decoding fails.
+#[cfg(any(feature = "preview", test))]
+fn should_disable_kitty_preview(term_program: Option<&str>, term: Option<&str>) -> bool {
+    matches!(term_program, Some("ghostty")) || matches!(term, Some("xterm-ghostty"))
+}
+
+#[cfg(feature = "preview")]
+fn preview_config() -> viuer::Config {
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let term = std::env::var("TERM").ok();
+    let disable_kitty = should_disable_kitty_preview(term_program.as_deref(), term.as_deref());
+
+    viuer::Config {
+        absolute_offset: false,
+        // Ghostty can echo viuer's kitty capability probe reply as visible text in cooked mode.
+        // Force a non-kitty preview path there until we replace viuer's auto-detection.
+        use_kitty: !disable_kitty,
+        ..Default::default()
+    }
+}
+
 #[cfg(feature = "preview")]
 pub(crate) fn preview_image(data: &[u8]) {
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+
     let Ok(img) = image::load_from_memory(data) else {
         return;
     };
-    let conf = viuer::Config {
-        absolute_offset: false,
-        ..Default::default()
-    };
+    let conf = preview_config();
     let _ = viuer::print(&img, &conf);
 }
 
@@ -1376,5 +1399,27 @@ mod tests {
             Some(value) => std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", value),
             None => std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE"),
         }
+    }
+
+    #[test]
+    fn ghostty_preview_disables_kitty_protocol() {
+        assert!(should_disable_kitty_preview(
+            Some("ghostty"),
+            Some("xterm-ghostty")
+        ));
+        assert!(should_disable_kitty_preview(
+            Some("ghostty"),
+            Some("xterm-256color")
+        ));
+        assert!(should_disable_kitty_preview(None, Some("xterm-ghostty")));
+    }
+
+    #[test]
+    fn non_ghostty_preview_keeps_kitty_protocol_enabled() {
+        assert!(!should_disable_kitty_preview(
+            Some("WezTerm"),
+            Some("xterm-256color")
+        ));
+        assert!(!should_disable_kitty_preview(None, Some("xterm-256color")));
     }
 }
