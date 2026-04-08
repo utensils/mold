@@ -291,40 +291,6 @@ impl Module for QwenImageUpBlock2d {
     }
 }
 
-/// Load a 5D causal conv3d weight as a stride-2 Conv2d (for encoder downsampling).
-///
-/// Same temporal slice extraction as `load_3d_conv_as_2d`, but with stride=2 and
-/// asymmetric padding (pad_with_zeros on right/bottom) to match PyTorch's behavior
-/// for even-sized kernels with stride-2 downsampling.
-fn load_3d_conv_as_2d_stride2(
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    vb: VarBuilder,
-) -> Result<Conv2d> {
-    let ws = vb.get(
-        (
-            out_channels,
-            in_channels,
-            kernel_size,
-            kernel_size,
-            kernel_size,
-        ),
-        "weight",
-    )?;
-    let ws = ws.i((.., .., kernel_size - 1, .., ..))?.contiguous()?;
-    let bias = vb.get(out_channels, "bias").ok();
-    Ok(Conv2d::new(
-        ws,
-        bias,
-        Conv2dConfig {
-            padding: 0,
-            stride: 2,
-            ..Default::default()
-        },
-    ))
-}
-
 /// Spatial downsample: asymmetric zero-pad → stride-2 Conv2d.
 ///
 /// Mirrors `QwenImageUpsample2d` but in the downsampling direction.
