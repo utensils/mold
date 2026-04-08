@@ -108,6 +108,15 @@ pine trees covered in snow, peaceful winter scene"_
 </figure>
 <figure>
 
+![Overgrown greenhouse — Qwen-Image 2512](/gallery/qwen-image-greenhouse.png)
+
+**qwen-image-2512:q4** — 50 steps, seed 2024 _"An abandoned greenhouse
+overgrown with exotic flowers and vines, cracked glass roof letting in shafts
+of golden light, butterflies and hummingbirds, lush and magical"_
+
+</figure>
+<figure>
+
 ![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
 
 **flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy

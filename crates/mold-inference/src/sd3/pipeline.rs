@@ -17,6 +17,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::quantized_mmdit::QuantizedMMDiT;
@@ -114,6 +115,10 @@ impl SD3Engine {
             return Ok((context, y));
         }
         Ok((context, y))
+    }
+
+    fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
+        img_utils::NormalizeRange::MinusOneToOne
     }
 
     /// Detect if the transformer is quantized (GGUF).
@@ -475,7 +480,98 @@ impl SD3Engine {
             (context, y)
         };
 
-        // --- Phase 2: Load transformer + denoise ---
+        // --- Phase 2: img2img — encode source image if provided ---
+        let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
+        let latent_h = height / 16 * 2;
+        let latent_w = width / 16 * 2;
+        let time_shift = 3.0;
+
+        // Build sigma schedule
+        let num_steps = req.steps as usize;
+        let mut sigmas: Vec<f64> = (0..=num_steps)
+            .map(|s| s as f64 / num_steps as f64)
+            .rev()
+            .map(|t| sampling::time_snr_shift(time_shift, t))
+            .collect();
+
+        if req.source_image.is_some() {
+            let (trimmed, start_index) =
+                crate::img2img::trim_schedule_tail(&sigmas, req.steps as usize, req.strength);
+            sigmas = trimmed;
+            tracing::info!(
+                strength = req.strength,
+                start_index,
+                start_sigma = sigmas[0],
+                schedule = ?sigmas,
+                remaining_steps = sigmas.len().saturating_sub(1),
+                "img2img: truncated schedule from strength"
+            );
+        }
+
+        let (initial_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = sigmas[0];
+
+            // Load VAE early for source image encoding
+            self.base.progress.stage_start("Loading VAE for encoding");
+            let vae_stage = Instant::now();
+            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.vae),
+                gpu_dtype,
+                &device,
+                "VAE",
+                &self.base.progress,
+            )?;
+            let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
+            let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+            self.base
+                .progress
+                .stage_done("Loading VAE for encoding", vae_stage.elapsed());
+
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                Self::img2img_source_normalize_range(),
+                &device,
+                gpu_dtype,
+            )?;
+            let dist = autoencoder.encode(&source_tensor)?;
+            // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
+            // Use the posterior mean so img2img remains deterministic.
+            let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
+            self.base
+                .progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Drop VAE to free VRAM for transformer (will reload for decode)
+            drop(autoencoder);
+            device.synchronize()?;
+            self.base
+                .progress
+                .info("Freed VAE encoder to make room for transformer");
+
+            let encoded = encoded.to_dtype(noise_dtype)?;
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
+                seed,
+                &[1, 16, latent_h, latent_w],
+                start_t,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
+                &device,
+                noise_dtype,
+            )?;
+            (Some(prepared.initial_latents), prepared.inpaint_ctx)
+        } else {
+            (None, None)
+        };
+
+        // --- Phase 3: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
 
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
@@ -521,9 +617,9 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Denoise
-        let time_shift = 3.0;
         let slg_config = self.slg_config();
-        let denoise_label = format!("Denoising ({} steps)", req.steps);
+        let actual_steps = sigmas.len().saturating_sub(1);
+        let denoise_label = format!("Denoising ({actual_steps} steps)");
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -531,7 +627,7 @@ impl SD3Engine {
             &transformer,
             &y,
             &context,
-            req.steps as usize,
+            num_steps,
             req.guidance,
             time_shift,
             height,
@@ -540,6 +636,9 @@ impl SD3Engine {
             is_quantized,
             seed,
             &self.base.progress,
+            initial_latents.as_ref(),
+            Some(sigmas),
+            inpaint_ctx.as_ref(),
         )?;
 
         self.base
@@ -550,10 +649,11 @@ impl SD3Engine {
         drop(transformer);
         drop(context);
         drop(y);
+        drop(inpaint_ctx);
         device.synchronize()?;
         self.base.progress.info("Freed SD3 MMDiT transformer");
 
-        // --- Phase 3: VAE decode ---
+        // --- Phase 4: VAE decode ---
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
@@ -621,12 +721,6 @@ impl InferenceEngine for SD3Engine {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for SD3 (flow-matching), ignoring");
         }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for SD3 — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for SD3 -- ignoring mask");
-        }
 
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
@@ -662,31 +756,6 @@ impl InferenceEngine for SD3Engine {
         );
 
         (|| -> Result<GenerateResponse> {
-            // Reload transformer if it was dropped after a previous VAE decode
-            if loaded.transformer.is_none() {
-                progress.stage_start("Reloading SD3 transformer");
-                let reload_start = Instant::now();
-                let transformer = if is_quantized {
-                    let vb = quantized_var_builder::VarBuilder::from_gguf(
-                        &transformer_path,
-                        &loaded_device,
-                    )?;
-                    SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
-                } else {
-                    let vb = crate::weight_loader::load_safetensors_with_progress(
-                        std::slice::from_ref(&transformer_path),
-                        loaded_dtype,
-                        &loaded_device,
-                        "SD3 transformer",
-                        progress,
-                    )?;
-                    let vb = vb.pp("model.diffusion_model");
-                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
-                };
-                loaded.transformer = Some(transformer);
-                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
-            }
-
             if !loaded.triple_encoder.is_loaded() {
                 progress.stage_start("Reloading SD3 triple encoder");
                 let reload_start = Instant::now();
@@ -711,7 +780,124 @@ impl InferenceEngine for SD3Engine {
                 tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
             }
 
+            // --- img2img: build schedule and encode source image ---
+            let noise_dtype = if is_quantized {
+                DType::F32
+            } else {
+                loaded_dtype
+            };
+            let latent_h = height / 16 * 2;
+            let latent_w = width / 16 * 2;
             let time_shift = 3.0;
+            let num_steps = req.steps as usize;
+
+            let mut sigmas: Vec<f64> = (0..=num_steps)
+                .map(|s| s as f64 / num_steps as f64)
+                .rev()
+                .map(|t| sampling::time_snr_shift(time_shift, t))
+                .collect();
+
+            if req.source_image.is_some() {
+                let (trimmed, start_index) =
+                    crate::img2img::trim_schedule_tail(&sigmas, req.steps as usize, req.strength);
+                sigmas = trimmed;
+                tracing::info!(
+                    strength = req.strength,
+                    start_index,
+                    start_sigma = sigmas[0],
+                    schedule = ?sigmas,
+                    remaining_steps = sigmas.len().saturating_sub(1),
+                    "img2img: truncated schedule from strength"
+                );
+            }
+
+            let (initial_latents, inpaint_ctx, early_vae) =
+                if let Some(ref source_bytes) = req.source_image {
+                    let start_t = sigmas[0];
+
+                    // Drop transformer to make room for VAE encoding
+                    loaded.transformer = None;
+                    loaded.device.synchronize()?;
+
+                    progress.stage_start("Loading VAE for encoding");
+                    let vae_stage = Instant::now();
+                    let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                        std::slice::from_ref(&loaded.vae_vb_path),
+                        loaded_dtype,
+                        &loaded.device,
+                        "VAE",
+                        progress,
+                    )?;
+                    let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
+                    let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+                    progress.stage_done("Loading VAE for encoding", vae_stage.elapsed());
+
+                    progress.stage_start("Encoding source image (VAE)");
+                    let encode_start = Instant::now();
+                    let source_tensor = img_utils::decode_source_image(
+                        source_bytes,
+                        req.width,
+                        req.height,
+                        Self::img2img_source_normalize_range(),
+                        &loaded_device,
+                        loaded_dtype,
+                    )?;
+                    let dist = autoencoder.encode(&source_tensor)?;
+                    // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
+                    // Use the posterior mean so img2img remains deterministic.
+                    let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
+                    progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+                    // Drop VAE to free VRAM for transformer reload
+                    drop(autoencoder);
+                    loaded.device.synchronize()?;
+
+                    let encoded = encoded.to_dtype(noise_dtype)?;
+                    let prepared = crate::img2img::prepare_flow_match_img2img(
+                        &encoded,
+                        seed,
+                        &[1, 16, latent_h, latent_w],
+                        start_t,
+                        req.mask_image.as_deref(),
+                        latent_h,
+                        latent_w,
+                        &loaded_device,
+                        noise_dtype,
+                    )?;
+                    (
+                        Some(prepared.initial_latents),
+                        prepared.inpaint_ctx,
+                        None::<()>,
+                    )
+                } else {
+                    (None, None, None)
+                };
+
+            // Reload transformer if needed (dropped for img2img VAE encoding, or prior VAE decode)
+            if loaded.transformer.is_none() {
+                progress.stage_start("Reloading SD3 transformer");
+                let reload_start = Instant::now();
+                let transformer = if is_quantized {
+                    let vb = quantized_var_builder::VarBuilder::from_gguf(
+                        &transformer_path,
+                        &loaded_device,
+                    )?;
+                    SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
+                } else {
+                    let vb = crate::weight_loader::load_safetensors_with_progress(
+                        std::slice::from_ref(&transformer_path),
+                        loaded_dtype,
+                        &loaded_device,
+                        "SD3 transformer",
+                        progress,
+                    )?;
+                    let vb = vb.pp("model.diffusion_model");
+                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
+                };
+                loaded.transformer = Some(transformer);
+                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
+            }
+
             let slg_config = if loaded.is_medium {
                 Some(SkipLayerGuidanceConfig {
                     scale: 2.5,
@@ -723,7 +909,8 @@ impl InferenceEngine for SD3Engine {
                 None
             };
 
-            let denoise_label = format!("Denoising ({} steps)", req.steps);
+            let actual_steps = sigmas.len().saturating_sub(1);
+            let denoise_label = format!("Denoising ({actual_steps} steps)");
             progress.stage_start(&denoise_label);
             let denoise_start = Instant::now();
 
@@ -735,7 +922,7 @@ impl InferenceEngine for SD3Engine {
                 transformer,
                 &y,
                 &context,
-                req.steps as usize,
+                num_steps,
                 req.guidance,
                 time_shift,
                 height,
@@ -744,11 +931,16 @@ impl InferenceEngine for SD3Engine {
                 loaded._is_quantized,
                 seed,
                 progress,
+                initial_latents.as_ref(),
+                Some(sigmas),
+                inpaint_ctx.as_ref(),
             )?;
 
             progress.stage_done(&denoise_label, denoise_start.elapsed());
             drop(context);
             drop(y);
+            drop(inpaint_ctx);
+            let _ = early_vae;
 
             // Drop transformer before VAE decode to free VRAM.
             loaded.transformer = None;
@@ -831,5 +1023,184 @@ impl InferenceEngine for SD3Engine {
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         Some(&self.base.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn sd3_model_paths(
+        transformer: PathBuf,
+        vae: PathBuf,
+        clip_l_path: Option<PathBuf>,
+        clip_l_tokenizer: Option<PathBuf>,
+        clip_g_path: Option<PathBuf>,
+        clip_g_tokenizer: Option<PathBuf>,
+        t5_encoder: Option<PathBuf>,
+        t5_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards: vec![],
+            vae,
+            spatial_upscaler: None,
+            t5_encoder,
+            clip_encoder: clip_l_path,
+            t5_tokenizer,
+            clip_tokenizer: clip_l_tokenizer,
+            clip_encoder_2: clip_g_path,
+            clip_tokenizer_2: clip_g_tokenizer,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
+    #[test]
+    fn sd3_img2img_uses_minus_one_to_one_source_normalization() {
+        assert_eq!(
+            SD3Engine::img2img_source_normalize_range(),
+            img_utils::NormalizeRange::MinusOneToOne
+        );
+    }
+
+    #[test]
+    fn sd3_mmdit_config_tracks_large_vs_medium_variants() {
+        let base_dir = temp_test_dir("mold-sd3-config");
+        let large = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                base_dir.join("transformer.safetensors"),
+                base_dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+        let medium = SD3Engine::new(
+            "sd3.5-medium:bf16".to_string(),
+            sd3_model_paths(
+                base_dir.join("transformer.safetensors"),
+                base_dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            true,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let large_cfg = large.mmdit_config();
+        let medium_cfg = medium.mmdit_config();
+
+        assert_eq!(large_cfg.depth, 38);
+        assert_eq!(large_cfg.pos_embed_max_size, 192);
+        assert_eq!(medium_cfg.depth, 24);
+        assert_eq!(medium_cfg.pos_embed_max_size, 384);
+        assert!(large.slg_config().is_none());
+        let slg = medium.slg_config().unwrap();
+        assert_eq!(slg.scale, 2.5);
+        assert_eq!(slg.layers, vec![7, 8, 9]);
+
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn sd3_validate_paths_accepts_existing_files() {
+        let dir = temp_test_dir("mold-sd3-validate-ok");
+        let transformer = touch(&dir, "transformer.gguf");
+        let vae = touch(&dir, "vae.safetensors");
+        let clip_l = touch(&dir, "clip-l.safetensors");
+        let clip_l_tok = touch(&dir, "clip-l-tokenizer.json");
+        let clip_g = touch(&dir, "clip-g.safetensors");
+        let clip_g_tok = touch(&dir, "clip-g-tokenizer.json");
+        let t5 = touch(&dir, "t5.safetensors");
+        let t5_tok = touch(&dir, "t5-tokenizer.json");
+
+        let engine = SD3Engine::new(
+            "sd3.5-large-turbo:q8".to_string(),
+            sd3_model_paths(
+                transformer,
+                vae,
+                Some(clip_l),
+                Some(clip_l_tok),
+                Some(clip_g),
+                Some(clip_g_tok),
+                Some(t5),
+                Some(t5_tok.clone()),
+            ),
+            true,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let (_, _, _, _, _, resolved_t5_tok) = engine.validate_paths().unwrap();
+        assert_eq!(resolved_t5_tok, t5_tok);
+        assert!(engine.detect_is_quantized());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_validate_paths_requires_t5_encoder() {
+        let dir = temp_test_dir("mold-sd3-validate-missing");
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                Some(dir.join("clip-l.safetensors")),
+                Some(dir.join("clip-l-tokenizer.json")),
+                Some(dir.join("clip-g.safetensors")),
+                Some(dir.join("clip-g-tokenizer.json")),
+                None,
+                Some(dir.join("t5-tokenizer.json")),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("T5 encoder path required"));
+        assert!(!engine.detect_is_quantized());
+
+        fs::remove_dir_all(dir).ok();
     }
 }

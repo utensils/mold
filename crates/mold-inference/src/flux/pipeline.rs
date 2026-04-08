@@ -1416,20 +1416,16 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
-        // For img2img, build a schedule starting at exactly `strength`.
-        // Insert strength as the first timestep, then keep all original schedule
-        // points below it. This ensures noise level matches the denoising start
-        // and the user gets the exact strength they requested.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            // Keep only schedule points strictly below strength
-            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
-            timesteps = std::iter::once(strength).chain(tail).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            timesteps = timesteps[start_index..].to_vec();
             tracing::info!(
-                strength,
+                strength = req.strength,
+                start_index,
+                start_timestep = timesteps[0],
                 schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
@@ -1443,7 +1439,7 @@ impl FluxEngine {
         };
 
         let (img, inpaint_ctx, early_vae) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = req.strength;
+            let start_t = timesteps[0];
 
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
@@ -1921,21 +1917,21 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
-        // For img2img, build a schedule starting at exactly `strength`.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
-            timesteps = std::iter::once(strength).chain(tail).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            timesteps = timesteps[start_index..].to_vec();
             tracing::info!(
-                strength,
+                strength = req.strength,
+                start_index,
+                start_timestep = timesteps[0],
                 schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = req.strength;
+            let start_t = timesteps[0];
 
             progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();

@@ -6,6 +6,9 @@ flow-matching with classifier-free guidance.
 ![Winter cabin — Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
 _"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_ — **qwen-image-2512:q4**, 50 steps, seed 888
 
+![Overgrown greenhouse — Qwen-Image 2512 Q4](/gallery/qwen-image-greenhouse.png)
+_"An abandoned greenhouse overgrown with exotic flowers and vines, cracked glass roof letting in shafts of golden light, butterflies and hummingbirds, lush and magical"_ — **qwen-image-2512:q4**, 50 steps, seed 2024
+
 ![Hot air balloon — Qwen-Image 2512 Q4](/gallery/qwen-image-balloon.png)
 _"A colorful hot air balloon floating over a misty valley at sunrise, the balloon has the word MOLD written on the side"_ — **qwen-image-2512:q4**, 50 steps, seed 314
 

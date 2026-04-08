@@ -9,7 +9,7 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use super::quantized_transformer::QuantizedZImageTransformer2DModel;
+use super::gguf_dense::load_gguf_dense_transformer;
 use super::transformer::ZImageTransformer;
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
@@ -27,18 +27,79 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
-
-/// Z-Image scheduler shift constants (from reference implementation).
-const BASE_IMAGE_SEQ_LEN: usize = 256;
-const MAX_IMAGE_SEQ_LEN: usize = 4096;
-const BASE_SHIFT: f64 = 0.5;
-const MAX_SHIFT: f64 = 1.15;
 
 /// Minimum free VRAM (bytes) required to place Z-Image VAE on GPU.
 /// The VAE itself is small (~160MB), but decode at 1024x1024 needs ~6GB workspace
 /// for conv2d im2col expansions through the upsampling blocks.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 6_500_000_000;
+
+/// Z-Image scheduler shift constants from the reference implementation.
+const BASE_IMAGE_SEQ_LEN: usize = 256;
+const MAX_IMAGE_SEQ_LEN: usize = 4096;
+const BASE_SHIFT: f64 = 0.5;
+const MAX_SHIFT: f64 = 1.15;
+
+fn build_zimage_scheduler(
+    num_steps: usize,
+    image_seq_len: usize,
+    strength: Option<f64>,
+) -> (FlowMatchEulerDiscreteScheduler, usize) {
+    let mut scheduler = FlowMatchEulerDiscreteScheduler::new(SchedulerConfig::z_image_turbo());
+    let mu = calculate_shift(
+        image_seq_len,
+        BASE_IMAGE_SEQ_LEN,
+        MAX_IMAGE_SEQ_LEN,
+        BASE_SHIFT,
+        MAX_SHIFT,
+    );
+    let sigmas: Vec<f64> = (0..=num_steps)
+        .map(|v| v as f64 / num_steps as f64)
+        .rev()
+        .map(|t| {
+            if !(0.0..1.0).contains(&t) {
+                t
+            } else {
+                let e_mu = mu.exp();
+                e_mu / (e_mu + (1.0 / t - 1.0))
+            }
+        })
+        .collect();
+    scheduler.timesteps = sigmas[..sigmas.len().saturating_sub(1)]
+        .iter()
+        .map(|sigma| sigma * scheduler.config.num_train_timesteps as f64)
+        .collect();
+    scheduler.sigmas = sigmas;
+    let start_index = strength
+        .map(|strength| crate::img2img::img2img_start_index(num_steps, strength))
+        .unwrap_or(0);
+    if start_index > 0 {
+        scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
+        scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
+    }
+    scheduler.reset();
+    (scheduler, start_index)
+}
+
+fn model_timestep(scheduler: &FlowMatchEulerDiscreteScheduler) -> f64 {
+    1.0 - scheduler.current_sigma()
+}
+
+fn zimage_debug_enabled() -> bool {
+    std::env::var_os("MOLD_ZIMAGE_DEBUG").is_some()
+}
+
+fn tensor_stats_summary(name: &str, tensor: &Tensor) -> Result<String> {
+    let flat = tensor.to_dtype(DType::F32)?.flatten_all()?;
+    let mean = flat.mean_all()?.to_scalar::<f32>()?;
+    let min = flat.min(0)?.to_scalar::<f32>()?;
+    let max = flat.max(0)?.to_scalar::<f32>()?;
+    let rms = flat.sqr()?.mean_all()?.to_scalar::<f32>()?.sqrt();
+    Ok(format!(
+        "{name}: mean={mean:.5} min={min:.5} max={max:.5} rms={rms:.5}"
+    ))
+}
 
 /// Loaded Z-Image model components, ready for inference.
 struct LoadedZImage {
@@ -53,8 +114,8 @@ struct LoadedZImage {
     /// Device where the VAE lives (may be CPU if VRAM is extremely tight)
     vae_device: Device,
     dtype: DType,
-    /// Whether the transformer is a GGUF quantized model (needed for reload).
-    is_quantized: bool,
+    /// Whether the transformer source file is GGUF (needed for reload/logging).
+    is_gguf: bool,
     /// Path to the VAE safetensors file (needed for CPU fallback reload on OOM).
     vae_path: std::path::PathBuf,
 }
@@ -166,9 +227,9 @@ impl ZImageEngine {
         if is_gguf {
             let vb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
-            Ok(ZImageTransformer::Quantized(
-                QuantizedZImageTransformer2DModel::new(cfg, dtype, vb)?,
-            ))
+            Ok(ZImageTransformer::Dense(load_gguf_dense_transformer(
+                cfg, dtype, vb,
+            )?))
         } else {
             let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
                 &xformer_paths,
@@ -177,7 +238,7 @@ impl ZImageEngine {
                 "Z-Image transformer",
                 &self.base.progress,
             )?;
-            Ok(ZImageTransformer::BF16(ZImageTransformer2DModel::new(
+            Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
                 cfg, xformer_vb,
             )?))
         }
@@ -222,7 +283,7 @@ impl ZImageEngine {
 
         // Load transformer
         let xformer_label = if is_gguf {
-            "Loading Z-Image transformer (GPU, quantized)".to_string()
+            "Loading Z-Image transformer (GPU, GGUF -> dense)".to_string()
         } else {
             let xformer_paths = self.transformer_paths();
             format!(
@@ -352,7 +413,7 @@ impl ZImageEngine {
             device,
             vae_device,
             dtype,
-            is_quantized: is_gguf,
+            is_gguf,
             vae_path: self.base.paths.vae.clone(),
         });
 
@@ -504,7 +565,103 @@ impl ZImageEngine {
             (cap_feats, cap_mask)
         };
 
-        // --- Phase 2: Load transformer and denoise ---
+        // Calculate latent dimensions up front so img2img can encode the source image
+        // before the transformer is loaded. This keeps the encode path on GPU and
+        // avoids the multi-minute CPU fallback.
+        let vae_align = 16;
+        let latent_h = 2 * (height / vae_align);
+        let latent_w = 2 * (width / vae_align);
+
+        let patch_size = transformer_cfg.all_patch_size[0];
+        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
+        let (mut scheduler, start_index) = build_zimage_scheduler(
+            req.steps as usize,
+            image_seq_len,
+            req.source_image.as_ref().map(|_| req.strength),
+        );
+
+        if req.source_image.is_some() {
+            tracing::info!(
+                strength = req.strength,
+                start_index,
+                start_sigma = scheduler.sigmas[0],
+                remaining_sigmas = scheduler.sigmas.len(),
+                remaining_steps = scheduler.sigmas.len().saturating_sub(1),
+                "img2img: truncated schedule from strength"
+            );
+        }
+
+        // --- Phase 2: Build initial latents ---
+        let (mut latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_sigma = scheduler.sigmas[0];
+
+            // Encode before loading the transformer so we can keep the VAE on GPU.
+            let encode_vae_device = if device.is_cuda() || device.is_metal() {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let encode_vae_dtype = if encode_vae_device.is_cpu() {
+                DType::F32
+            } else {
+                dtype
+            };
+            let encode_label = if encode_vae_device.is_cpu() {
+                "Loading VAE for source encoding (CPU)"
+            } else {
+                "Loading VAE for source encoding (GPU)"
+            };
+
+            self.base.progress.stage_start(encode_label);
+            let vae_enc_start = Instant::now();
+            let encode_vae = self.load_vae(&encode_vae_device, encode_vae_dtype)?;
+            self.base
+                .progress
+                .stage_done(encode_label, vae_enc_start.elapsed());
+
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::MinusOneToOne,
+                &encode_vae_device,
+                encode_vae_dtype,
+            )?;
+            let encoded = encode_vae.encode(&source_tensor)?;
+            self.base
+                .progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Drop encoding VAE before loading transformer
+            drop(encode_vae);
+
+            // Generate noise on the target device
+            let encoded = encoded.to_dtype(dtype)?.to_device(&device)?;
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
+                seed,
+                &[1, 16, latent_h, latent_w],
+                start_sigma,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
+                &device,
+                dtype,
+            )?;
+            // Add frame dimension: (B, C, H, W) -> (B, C, 1, H, W)
+            (prepared.initial_latents.unsqueeze(2)?, prepared.inpaint_ctx)
+        } else {
+            // txt2img: pure noise
+            let noise =
+                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+            (noise.unsqueeze(2)?, None)
+        };
+
+        // --- Phase 3: Load transformer and denoise ---
         let xformer_paths = self.transformer_paths();
         let xformer_size: u64 = xformer_paths
             .iter()
@@ -518,7 +675,7 @@ impl ZImageEngine {
         }
 
         let xformer_label = if is_gguf {
-            "Loading Z-Image transformer (GPU, quantized)".to_string()
+            "Loading Z-Image transformer (GPU, GGUF -> dense)".to_string()
         } else {
             format!(
                 "Loading Z-Image transformer ({} shards)",
@@ -532,44 +689,60 @@ impl ZImageEngine {
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());
 
-        // Calculate latent dimensions
-        let vae_align = 16;
-        let latent_h = 2 * (height / vae_align);
-        let latent_w = 2 * (width / vae_align);
-
-        let patch_size = transformer_cfg.all_patch_size[0];
-        let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
-            image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
-        );
-
-        let scheduler_cfg = SchedulerConfig::z_image_turbo();
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
-        scheduler.set_timesteps(req.steps as usize, Some(mu));
-
-        let mut latents =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
-        latents = latents.unsqueeze(2)?;
-
-        let num_steps = req.steps as usize;
+        let num_steps = scheduler.sigmas.len().saturating_sub(1);
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         for step in 0..num_steps {
             let step_start = Instant::now();
-            let t = scheduler.current_timestep_normalized();
+            let t = model_timestep(&scheduler);
             let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    sigma = scheduler.current_sigma(),
+                    timestep = t,
+                    "{}",
+                    tensor_stats_summary("latents_in", &latents)?
+                );
+            }
             let noise_pred = transformer.forward(&latents, &t_tensor, &cap_feats, &cap_mask)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    "{}",
+                    tensor_stats_summary("noise_pred_raw", &noise_pred)?
+                );
+            }
             let noise_pred = noise_pred.neg()?;
             let noise_pred_4d = noise_pred.squeeze(2)?;
             let latents_4d = latents.squeeze(2)?;
             let prev_latents = scheduler.step(&noise_pred_4d, &latents_4d)?;
             latents = prev_latents.unsqueeze(2)?;
+            if zimage_debug_enabled() {
+                tracing::debug!(
+                    step = step + 1,
+                    total = num_steps,
+                    sigma_next = scheduler.current_sigma(),
+                    "{}",
+                    tensor_stats_summary("latents_out", &latents)?
+                );
+            }
+
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ref ctx) = inpaint_ctx {
+                let latents_4d = latents.squeeze(2)?;
+                let blended = crate::img2img::apply_flow_match_inpaint(
+                    &latents_4d,
+                    ctx,
+                    scheduler.sigmas[step + 1],
+                )?;
+                latents = blended.unsqueeze(2)?;
+            }
+
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,
@@ -672,13 +845,6 @@ impl InferenceEngine for ZImageEngine {
                 "scheduler selection not supported for Z-Image (flow-matching), ignoring"
             );
         }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for Z-Image — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for Z-Image -- ignoring mask");
-        }
-
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -708,8 +874,8 @@ impl InferenceEngine for ZImageEngine {
                     .loaded
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
-                let xformer_label = if loaded_mut.is_quantized {
-                    "Reloading Z-Image transformer (GPU, quantized)"
+                let xformer_label = if loaded_mut.is_gguf {
+                    "Reloading Z-Image transformer (GPU, GGUF -> dense)"
                 } else {
                     "Reloading Z-Image transformer (GPU, BF16)"
                 };
@@ -791,33 +957,77 @@ impl InferenceEngine for ZImageEngine {
         let latent_h = 2 * (height / vae_align);
         let latent_w = 2 * (width / vae_align);
 
-        // 4. Calculate scheduler shift
+        // 5. Initialize scheduler
         let patch_size = loaded.transformer_cfg.all_patch_size[0];
         let image_seq_len = (latent_h / patch_size) * (latent_w / patch_size);
-        let mu = calculate_shift(
+        let (mut scheduler, start_index) = build_zimage_scheduler(
+            req.steps as usize,
             image_seq_len,
-            BASE_IMAGE_SEQ_LEN,
-            MAX_IMAGE_SEQ_LEN,
-            BASE_SHIFT,
-            MAX_SHIFT,
+            req.source_image.as_ref().map(|_| req.strength),
         );
 
-        // 5. Initialize scheduler
-        let scheduler_cfg = SchedulerConfig::z_image_turbo();
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
-        scheduler.set_timesteps(req.steps as usize, Some(mu));
+        if req.source_image.is_some() {
+            tracing::info!(
+                strength = req.strength,
+                start_index,
+                start_sigma = scheduler.sigmas[0],
+                remaining_sigmas = scheduler.sigmas.len(),
+                remaining_steps = scheduler.sigmas.len().saturating_sub(1),
+                "img2img: truncated schedule from strength"
+            );
+        }
 
-        // 6. Generate initial noise: (B, 16, latent_h, latent_w) → add frame dim → (B, 16, 1, latent_h, latent_w)
-        let mut latents = crate::engine::seeded_randn(
-            seed,
-            &[1, 16, latent_h, latent_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        latents = latents.unsqueeze(2)?;
+        // 6. Build initial latents — img2img encodes source image, txt2img uses pure noise
+        let (mut latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_sigma = scheduler.sigmas[0];
+
+            // Encode source image through the pre-loaded VAE
+            progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let vae_encode_device = &loaded.vae_device;
+            let vae_encode_dtype = if loaded.vae_device.is_cpu() {
+                DType::F32
+            } else {
+                loaded.dtype
+            };
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::MinusOneToOne,
+                vae_encode_device,
+                vae_encode_dtype,
+            )?;
+            let encoded = loaded.vae.encode(&source_tensor)?;
+            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
+
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
+                seed,
+                &[1, 16, latent_h, latent_w],
+                start_sigma,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (prepared.initial_latents.unsqueeze(2)?, prepared.inpaint_ctx)
+        } else {
+            // txt2img: pure noise (B, 16, latent_h, latent_w) → add frame dim
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (noise.unsqueeze(2)?, None)
+        };
 
         // 7. Denoising loop
-        let num_steps = req.steps as usize;
+        let num_steps = scheduler.sigmas.len().saturating_sub(1);
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -831,12 +1041,30 @@ impl InferenceEngine for ZImageEngine {
 
             for step in 0..num_steps {
                 let step_start = Instant::now();
-                let t = scheduler.current_timestep_normalized();
+                let t = model_timestep(&scheduler);
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                     .to_dtype(loaded.dtype)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        sigma = scheduler.current_sigma(),
+                        timestep = t,
+                        "{}",
+                        tensor_stats_summary("latents_in", &latents)?
+                    );
+                }
 
                 // Forward pass through transformer
                 let noise_pred = transformer.forward(&latents, &t_tensor, &cap_feats, &cap_mask)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        "{}",
+                        tensor_stats_summary("noise_pred_raw", &noise_pred)?
+                    );
+                }
 
                 // Negate prediction (Z-Image specific)
                 let noise_pred = noise_pred.neg()?;
@@ -850,6 +1078,27 @@ impl InferenceEngine for ZImageEngine {
 
                 // Add back frame dimension
                 latents = prev_latents.unsqueeze(2)?;
+                if zimage_debug_enabled() {
+                    tracing::debug!(
+                        step = step + 1,
+                        total = num_steps,
+                        sigma_next = scheduler.current_sigma(),
+                        "{}",
+                        tensor_stats_summary("latents_out", &latents)?
+                    );
+                }
+
+                // Inpainting: blend preserved regions back at current noise level
+                if let Some(ref ctx) = inpaint_ctx {
+                    let latents_4d = latents.squeeze(2)?;
+                    let blended = crate::img2img::apply_flow_match_inpaint(
+                        &latents_4d,
+                        ctx,
+                        scheduler.sigmas[step + 1],
+                    )?;
+                    latents = blended.unsqueeze(2)?;
+                }
+
                 progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
                     total: num_steps,
@@ -989,6 +1238,50 @@ impl InferenceEngine for ZImageEngine {
 mod tests {
     use super::*;
     use crate::device::should_use_gpu;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn zimage_model_paths(
+        transformer: PathBuf,
+        transformer_shards: Vec<PathBuf>,
+        vae: PathBuf,
+        text_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards,
+            vae,
+            spatial_upscaler: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer,
+            decoder: None,
+        }
+    }
 
     #[test]
     fn latent_dimensions() {
@@ -1101,5 +1394,132 @@ mod tests {
         let threshold = std::hint::black_box(VAE_DECODE_VRAM_THRESHOLD);
         assert!(threshold > 160_000_000);
         assert!(threshold < 15_000_000_000);
+    }
+
+    #[test]
+    fn zimage_scheduler_uses_shifted_reference_sigmas() {
+        let image_seq_len = 1024;
+        let (full, _) = build_zimage_scheduler(9, image_seq_len, None);
+        let (scheduler, start_index) = build_zimage_scheduler(9, image_seq_len, Some(0.5));
+        let expected_sigmas = full.sigmas[start_index..].to_vec();
+        let expected_timesteps = expected_sigmas[..expected_sigmas.len() - 1]
+            .iter()
+            .map(|sigma| sigma * 1000.0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(start_index, crate::img2img::img2img_start_index(9, 0.5));
+        assert_eq!(scheduler.sigmas, expected_sigmas);
+        assert_eq!(scheduler.timesteps, expected_timesteps);
+        assert_eq!(scheduler.sigmas.last().copied(), Some(0.0));
+    }
+
+    #[test]
+    fn zimage_model_timestep_matches_scheduler_timesteps() {
+        let (scheduler, _) = build_zimage_scheduler(9, 1024, Some(0.5));
+        let t = model_timestep(&scheduler);
+        assert!(
+            (t - (1.0 - scheduler.sigmas[0])).abs() < 1e-10,
+            "expected model timestep to match 1-sigma semantics, got {t} vs {}",
+            1.0 - scheduler.sigmas[0]
+        );
+    }
+
+    #[test]
+    fn zimage_zero_strength_preserves_terminal_zero_only() {
+        let (scheduler, start_index) = build_zimage_scheduler(9, 1024, Some(0.0));
+
+        assert_eq!(start_index, 9);
+        assert_eq!(scheduler.sigmas, vec![0.0]);
+        assert!(scheduler.timesteps.is_empty());
+    }
+
+    #[test]
+    fn tensor_stats_summary_reports_expected_values() {
+        let tensor =
+            Tensor::from_vec(vec![1.0f32, -1.0, 3.0, -3.0], (1, 1, 2, 2), &Device::Cpu).unwrap();
+        let summary = tensor_stats_summary("probe", &tensor).unwrap();
+
+        assert!(summary.contains("probe:"));
+        assert!(summary.contains("mean=0.00000"));
+        assert!(summary.contains("min=-3.00000"));
+        assert!(summary.contains("max=3.00000"));
+        assert!(summary.contains("rms=2.23607"));
+    }
+
+    #[test]
+    fn zimage_transformer_paths_prefer_shards_when_present() {
+        let dir = temp_test_dir("mold-zimage-shards");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let engine = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a.clone(), shard_b.clone()],
+                dir.join("vae.safetensors"),
+                Some(dir.join("tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_validate_paths_accepts_existing_files() {
+        let dir = temp_test_dir("mold-zimage-validate-ok");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let gguf = touch(&dir, "transformer.gguf");
+
+        let sharded = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a, shard_b],
+                vae.clone(),
+                Some(tokenizer.clone()),
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
+        assert!(!sharded.detect_is_gguf());
+
+        let quantized = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(gguf, vec![], vae, Some(dir.join("tokenizer.json"))),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert!(quantized.detect_is_gguf());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_validate_paths_requires_text_tokenizer() {
+        let dir = temp_test_dir("mold-zimage-validate-missing");
+        let engine = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                None,
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("text tokenizer path required"));
+
+        fs::remove_dir_all(dir).ok();
     }
 }

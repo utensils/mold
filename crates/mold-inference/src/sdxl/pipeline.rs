@@ -337,7 +337,7 @@ impl SDXLEngine {
             if let Some(ctx) = inpaint_ctx {
                 let noised_original =
                     scheduler.add_noise(&ctx.original_latents, ctx.noise.clone(), t)?;
-                *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                *latents = crate::img2img::blend_inpaint_latents(&*latents, ctx, &noised_original)?;
             }
 
             self.base.progress.emit(ProgressEvent::DenoiseStep {
@@ -396,7 +396,7 @@ impl SDXLEngine {
                     dtype,
                 )?;
                 let encoded = vae.encode(&source_tensor)?;
-                let encoded = (encoded.sample()? * vae_scale)?;
+                let encoded = (encoded.mode()? * vae_scale)?;
 
                 self.base
                     .progress
@@ -408,8 +408,7 @@ impl SDXLEngine {
             self.base.progress.cache_hit("source image latents");
         }
 
-        let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
-        let start_step = start_step.min(steps as usize);
+        let start_step = crate::img2img::img2img_start_index(steps as usize, strength);
 
         let scheduler = crate::scheduler::build_scheduler(
             sched,

@@ -50,7 +50,8 @@ Wuerstchen includes a default negative prompt. Negative prompts are supported
 and effective with this model. The 42x latent compression means the diffusion
 process operates in a very compact space (24x24 for 1024x1024 output).
 
-Features not yet supported: img2img, inpainting, ControlNet.
+img2img and inpainting are supported. ControlNet is not available for this
+model.
 
 ## Example
 

@@ -162,6 +162,7 @@ For Qwen-Image specifically:
 | ---------------------------------- | ------- | -------------------------------------------------- |
 | `MOLD_SD3_DEBUG`                   | —       | Enable verbose SD3.5 pipeline logging              |
 | `MOLD_QWEN_DEBUG`                  | —       | Enable verbose Qwen-Image pipeline logging         |
+| `MOLD_ZIMAGE_DEBUG`                | —       | Enable verbose Z-Image pipeline logging            |
 | `MOLD_LTX_DEBUG`                   | —       | Enable verbose LTX Video pipeline logging          |
 | `MOLD_WUERSTCHEN_DEBUG`            | —       | Enable verbose Wuerstchen pipeline logging         |
 | `MOLD_WUERSTCHEN_DECODER_GUIDANCE` | `0.0`   | Override decoder-stage CFG guidance for Wuerstchen |

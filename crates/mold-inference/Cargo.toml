@@ -23,9 +23,9 @@ mp4 = ["openh264"]
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.6.0" }
 anyhow = "1"
-candle-core = { package = "candle-core-mold", version = "0.9.7" }
-candle-nn = { package = "candle-nn-mold", version = "0.9.7" }
-candle-transformers = { package = "candle-transformers-mold", version = "0.9.7" }
+candle-core = { package = "candle-core-mold", version = "0.9.8" }
+candle-nn = { package = "candle-nn-mold", version = "0.9.8" }
+candle-transformers = { package = "candle-transformers-mold", version = "0.9.8" }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"

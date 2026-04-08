@@ -1,12 +1,12 @@
 //! Flux.2 VAE (`AutoencoderKLFlux2`) — diffusers weight format
 //!
-//! Standard AutoencoderKL decoder with:
+//! Standard AutoencoderKL encoder + decoder with:
 //! - `latent_channels`: 32, `block_out_channels`: [128, 256, 512, 512]
 //! - `use_quant_conv` / `use_post_quant_conv`: true
-//! - BatchNorm2d latent denormalization (running_mean/running_var)
-//! - 2x2 patchify/unpatchify around the denormalization step
+//! - BatchNorm2d latent normalization/denormalization (running_mean/running_var)
+//! - 2x2 patchify/unpatchify around the normalization step
 //!
-//! Loads from HuggingFace diffusers format (e.g. `decoder.mid_block.resnets.0`).
+//! Loads from HuggingFace diffusers format (e.g. `encoder.down_blocks.0`, `decoder.mid_block.resnets.0`).
 
 use candle_core::{Result, Tensor, D};
 use candle_nn::{conv2d, group_norm, Conv2d, Conv2dConfig, GroupNorm, Linear, Module, VarBuilder};
@@ -19,6 +19,7 @@ pub struct Flux2VaeConfig {
     pub layers_per_block: usize,
     pub latent_channels: usize,
     pub norm_num_groups: usize,
+    pub use_quant_conv: bool,
     pub use_post_quant_conv: bool,
     /// Number of patchified channels: latent_channels * patch_h * patch_w.
     pub patchified_channels: usize,
@@ -33,6 +34,7 @@ impl Flux2VaeConfig {
             layers_per_block: 2,
             latent_channels: 32,
             norm_num_groups: 32,
+            use_quant_conv: true,
             use_post_quant_conv: true,
             patchified_channels: 32 * 2 * 2, // 128
             batch_norm_eps: 0.0001,
@@ -174,6 +176,158 @@ impl Module for Upsample {
 }
 
 // ---------------------------------------------------------------------------
+// Encoder (diffusers naming: down_blocks, mid_block, conv_norm_out)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct Downsample {
+    conv: Conv2d,
+}
+
+impl Downsample {
+    fn new(in_c: usize, vb: VarBuilder) -> Result<Self> {
+        let conv = conv2d(
+            in_c,
+            in_c,
+            3,
+            Conv2dConfig {
+                stride: 2,
+                ..Default::default()
+            },
+            vb.pp("conv"),
+        )?;
+        Ok(Self { conv })
+    }
+}
+
+impl Module for Downsample {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        // Asymmetric padding: pad right=1, bottom=1 (same as diffusers)
+        let xs = xs.pad_with_zeros(D::Minus1, 0, 1)?; // width: right
+        let xs = xs.pad_with_zeros(D::Minus2, 0, 1)?; // height: bottom
+        xs.apply(&self.conv)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DownBlock {
+    resnets: Vec<ResnetBlock>,
+    downsample: Option<Downsample>,
+}
+
+#[derive(Debug, Clone)]
+struct Encoder {
+    conv_in: Conv2d,
+    down_blocks: Vec<DownBlock>,
+    mid_block_1: ResnetBlock,
+    mid_attn_1: AttnBlock,
+    mid_block_2: ResnetBlock,
+    norm_out: GroupNorm,
+    conv_out: Conv2d,
+}
+
+impl Encoder {
+    fn new(cfg: &Flux2VaeConfig, vb: VarBuilder) -> Result<Self> {
+        let conv_cfg = Conv2dConfig {
+            padding: 1,
+            ..Default::default()
+        };
+        let ch_mult = &cfg.block_out_channels;
+
+        let conv_in = conv2d(cfg.out_channels, ch_mult[0], 3, conv_cfg, vb.pp("conv_in"))?;
+
+        // Down blocks (diffusers: down_blocks.{i}.resnets.{j}, down_blocks.{i}.downsamplers.0)
+        let mut down_blocks = Vec::with_capacity(ch_mult.len());
+        let mut block_in = ch_mult[0];
+        let vb_d = vb.pp("down_blocks");
+        for (i_level, &block_out) in ch_mult.iter().enumerate() {
+            let vb_block = vb_d.pp(i_level);
+            let vb_r = vb_block.pp("resnets");
+            let mut resnets = Vec::with_capacity(cfg.layers_per_block);
+            for i_block in 0..cfg.layers_per_block {
+                let b =
+                    ResnetBlock::new(block_in, block_out, cfg.norm_num_groups, vb_r.pp(i_block))?;
+                resnets.push(b);
+                block_in = block_out;
+            }
+            let downsample = if i_level != ch_mult.len() - 1 {
+                Some(Downsample::new(
+                    block_in,
+                    vb_block.pp("downsamplers").pp("0"),
+                )?)
+            } else {
+                None
+            };
+            down_blocks.push(DownBlock {
+                resnets,
+                downsample,
+            });
+        }
+
+        // Mid block: diffusers names mid_block.resnets.0/1 and mid_block.attentions.0
+        let mid_vb = vb.pp("mid_block");
+        let mid_block_1 = ResnetBlock::new(
+            block_in,
+            block_in,
+            cfg.norm_num_groups,
+            mid_vb.pp("resnets").pp("0"),
+        )?;
+        let mid_attn_1 = AttnBlock::new(
+            block_in,
+            cfg.norm_num_groups,
+            mid_vb.pp("attentions").pp("0"),
+        )?;
+        let mid_block_2 = ResnetBlock::new(
+            block_in,
+            block_in,
+            cfg.norm_num_groups,
+            mid_vb.pp("resnets").pp("1"),
+        )?;
+
+        // Diffusers: conv_norm_out (not norm_out)
+        let norm_out = group_norm(cfg.norm_num_groups, block_in, 1e-6, vb.pp("conv_norm_out"))?;
+        // Output: 2 * latent_channels for mean + logvar (DiagonalGaussian)
+        let conv_out = conv2d(
+            block_in,
+            2 * cfg.latent_channels,
+            3,
+            conv_cfg,
+            vb.pp("conv_out"),
+        )?;
+
+        Ok(Self {
+            conv_in,
+            down_blocks,
+            mid_block_1,
+            mid_attn_1,
+            mid_block_2,
+            norm_out,
+            conv_out,
+        })
+    }
+}
+
+impl Module for Encoder {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut h = xs.apply(&self.conv_in)?;
+        for block in &self.down_blocks {
+            for r in &block.resnets {
+                h = h.apply(r)?;
+            }
+            if let Some(ds) = block.downsample.as_ref() {
+                h = h.apply(ds)?;
+            }
+        }
+        h.apply(&self.mid_block_1)?
+            .apply(&self.mid_attn_1)?
+            .apply(&self.mid_block_2)?
+            .apply(&self.norm_out)?
+            .apply(&candle_nn::Activation::Swish)?
+            .apply(&self.conv_out)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Decoder (diffusers naming: mid_block, up_blocks, conv_norm_out)
 // ---------------------------------------------------------------------------
 
@@ -290,11 +444,13 @@ impl Module for Decoder {
 
 /// Flux.2 VAE (AutoencoderKLFlux2).
 ///
-/// Decodes 32-channel latents to RGB images via BatchNorm2d latent denormalization
-/// on patchified latents (128 channels).
+/// Encodes RGB images to 32-channel latents and decodes them back, using
+/// BatchNorm2d latent normalization/denormalization on patchified latents (128 channels).
 #[derive(Debug, Clone)]
 pub struct Flux2AutoEncoder {
+    encoder: Encoder,
     decoder: Decoder,
+    quant_conv: Option<Conv2d>,
     post_quant_conv: Option<Conv2d>,
     bn_running_mean: Tensor,
     bn_running_std: Tensor,
@@ -303,7 +459,20 @@ pub struct Flux2AutoEncoder {
 
 impl Flux2AutoEncoder {
     pub fn new(cfg: &Flux2VaeConfig, vb: VarBuilder) -> Result<Self> {
+        let encoder = Encoder::new(cfg, vb.pp("encoder"))?;
         let decoder = Decoder::new(cfg, vb.pp("decoder"))?;
+
+        let quant_conv = if cfg.use_quant_conv {
+            Some(conv2d(
+                2 * cfg.latent_channels,
+                2 * cfg.latent_channels,
+                1,
+                Default::default(),
+                vb.pp("quant_conv"),
+            )?)
+        } else {
+            None
+        };
 
         let post_quant_conv = if cfg.use_post_quant_conv {
             Some(conv2d(
@@ -317,7 +486,7 @@ impl Flux2AutoEncoder {
             None
         };
 
-        // BatchNorm running statistics for latent denormalization
+        // BatchNorm running statistics for latent normalization/denormalization
         let bn_vb = vb.pp("bn");
         let bn_running_mean = bn_vb
             .get(cfg.patchified_channels, "running_mean")?
@@ -331,12 +500,58 @@ impl Flux2AutoEncoder {
         ))?;
 
         Ok(Self {
+            encoder,
             decoder,
+            quant_conv,
             post_quant_conv,
             bn_running_mean,
             bn_running_std,
             latent_channels: cfg.latent_channels,
         })
+    }
+
+    /// Encode pixel-space image to latent space.
+    ///
+    /// Input: (B, 3, H, W) in [-1, 1] → Output: (B, 32, H/8, W/8)
+    ///
+    /// Pipeline:
+    /// 1. Encoder conv/resnet/attention → (B, 64, H/8, W/8)  [2 * latent_channels]
+    /// 2. Optional quant_conv
+    /// 3. DiagonalGaussian: split mean/logvar and use the posterior mean so
+    ///    img2img encoding is deterministic
+    /// 4. BN normalization: patchify → (z - mean) / std → unpatchify
+    pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
+        let h = xs.apply(&self.encoder)?;
+
+        // Optional quant_conv (applied before splitting mean/logvar)
+        let h = if let Some(qc) = &self.quant_conv {
+            h.apply(qc)?
+        } else {
+            h
+        };
+
+        // Use the posterior mean rather than sampling an unseeded diagonal
+        // Gaussian so repeated img2img runs with the same seed remain stable.
+        let z = diagonal_gaussian_mode(&h)?;
+
+        // BN normalization (reverse of decode's denormalization):
+        // Patchify → normalize → unpatchify
+        let (b, c, h_s, w_s) = z.dims4()?;
+        let z = z
+            .reshape((b, c, h_s / 2, 2, w_s / 2, 2))?
+            .permute((0, 1, 3, 5, 2, 4))?
+            .reshape((b, c * 4, h_s / 2, w_s / 2))?;
+        let z = z
+            .broadcast_sub(&self.bn_running_mean)?
+            .broadcast_div(&self.bn_running_std)?;
+        let z = z
+            .reshape((b, self.latent_channels, 4, h_s / 2, w_s / 2))?
+            .permute((0, 1, 3, 4, 2))?
+            .reshape((b, self.latent_channels, h_s / 2, w_s / 2, 2, 2))?
+            .permute((0, 1, 2, 4, 3, 5))?
+            .reshape((b, self.latent_channels, h_s, w_s))?;
+
+        Ok(z)
     }
 
     /// Decode latents to pixel space.
@@ -374,10 +589,26 @@ impl Flux2AutoEncoder {
     }
 }
 
+fn diagonal_gaussian_mode(parameters: &Tensor) -> Result<Tensor> {
+    let (_b, c2, _h_dim, _w_dim) = parameters.dims4()?;
+    let c = c2 / 2;
+    parameters.narrow(1, 0, c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use candle_core::{DType, Device, Shape};
+    use candle_nn::VarBuilder;
+    use std::collections::HashMap;
+
+    fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
+        let map = tensors
+            .into_iter()
+            .map(|(name, tensor)| (name.to_string(), tensor))
+            .collect::<HashMap<_, _>>();
+        VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
 
     #[test]
     fn klein_vae_config() {
@@ -385,6 +616,7 @@ mod tests {
         assert_eq!(cfg.latent_channels, 32);
         assert_eq!(cfg.block_out_channels, vec![128, 256, 512, 512]);
         assert_eq!(cfg.patchified_channels, 128); // 32 * 2 * 2
+        assert!(cfg.use_quant_conv);
         assert!(cfg.use_post_quant_conv);
     }
 
@@ -465,6 +697,30 @@ mod tests {
     }
 
     #[test]
+    fn downsample_applies_asymmetric_padding_before_stride2_conv() {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "conv.weight",
+                Tensor::from_vec(vec![1.0f32; 9], (1, 1, 3, 3), &dev).unwrap(),
+            ),
+            (
+                "conv.bias",
+                Tensor::zeros(1, candle_core::DType::F32, &dev).unwrap(),
+            ),
+        ]);
+        let downsample = Downsample::new(1, vb).unwrap();
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &dev).unwrap();
+
+        let output = downsample.forward(&input).unwrap();
+        assert_eq!(output.dims(), &[1, 1, 1, 1]);
+        assert_eq!(
+            output.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0]
+        );
+    }
+
+    #[test]
     fn test_klein_decoder_channel_progression() {
         let cfg = Flux2VaeConfig::klein();
         // Must have exactly 4 stages
@@ -535,5 +791,41 @@ mod tests {
                 "channel {i}: expected {expected_std}, got {v}"
             );
         }
+    }
+
+    #[test]
+    fn diagonal_gaussian_mode_returns_mean_half() {
+        let dev = Device::Cpu;
+        let params = Tensor::from_vec(
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, // mean channels
+                99.0, 98.0, 97.0, 96.0, // ignored logvar channels
+            ],
+            (1, 8, 1, 1),
+            &dev,
+        )
+        .unwrap();
+
+        let mode = diagonal_gaussian_mode(&params).unwrap();
+        let vals = mode.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_uniform_queries_average_values() {
+        let dev = Device::Cpu;
+        let q = Tensor::zeros(Shape::from((1, 1, 2, 2)), candle_core::DType::F32, &dev).unwrap();
+        let k = Tensor::zeros(Shape::from((1, 1, 2, 2)), candle_core::DType::F32, &dev).unwrap();
+        let v = Tensor::from_vec(
+            vec![10.0f32, 0.0, 0.0, 20.0],
+            Shape::from((1, 1, 2, 2)),
+            &dev,
+        )
+        .unwrap();
+
+        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        assert_eq!(out.dims(), &[1, 1, 2, 2]);
+        let vals = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![5.0, 10.0, 5.0, 10.0]);
     }
 }

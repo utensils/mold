@@ -116,9 +116,9 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     }
     // img2img validation
     if let Some(ref img) = req.source_image {
-        if req.strength <= 0.0 || req.strength > 1.0 {
+        if req.strength < 0.0 || req.strength > 1.0 {
             return Err(format!(
-                "strength ({}) must be in range (0.0, 1.0] when source_image is provided",
+                "strength ({}) must be in range [0.0, 1.0] when source_image is provided",
                 req.strength
             ));
         }
@@ -620,10 +620,18 @@ mod tests {
     // ── img2img validation tests ────────────────────────────────────────────
 
     #[test]
-    fn img2img_strength_zero_rejected() {
+    fn img2img_strength_zero_accepted() {
         let mut req = valid_req();
         req.source_image = Some(png_bytes());
         req.strength = 0.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn img2img_strength_negative_rejected() {
+        let mut req = valid_req();
+        req.source_image = Some(png_bytes());
+        req.strength = -0.1;
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("strength"));

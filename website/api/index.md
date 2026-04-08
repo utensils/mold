@@ -169,13 +169,15 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
   "steps": 4,
   "seed": 42,
   "guidance": 0.0,
-  "batch": 1,
+  "batch_size": 1,
   "negative_prompt": "",
-  "image": "<base64>",
+  "source_image": "<base64>",
   "strength": 0.75,
-  "mask": "<base64>",
-  "lora": "/path/to/adapter.safetensors",
-  "lora_scale": 1.0,
+  "mask_image": "<base64>",
+  "lora": {
+    "path": "/path/to/adapter.safetensors",
+    "scale": 1.0
+  },
   "expand": false
 }
 ```

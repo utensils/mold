@@ -1919,7 +1919,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "z-image-turbo:q8".to_string(),
             family: "z-image".to_string(),
-            description: "Z-Image Turbo Q8 — 9-step, quantized transformer".to_string(),
+            description: "Z-Image Turbo Q8 — GGUF source, dense runtime fallback".to_string(),
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
@@ -1950,7 +1950,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "z-image-turbo:q6".to_string(),
             family: "z-image".to_string(),
-            description: "Z-Image Turbo Q6 — 9-step, best quality/size trade-off".to_string(),
+            description: "Z-Image Turbo Q6 — GGUF source, dense runtime fallback".to_string(),
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
@@ -1981,7 +1981,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "z-image-turbo:q4".to_string(),
             family: "z-image".to_string(),
-            description: "Z-Image Turbo Q4 — 9-step, smallest footprint".to_string(),
+            description: "Z-Image Turbo Q4 — GGUF source, dense runtime fallback".to_string(),
             files: {
                 let mut files = shared_zimage_files();
                 files.push(ModelFile {
