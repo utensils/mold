@@ -522,19 +522,16 @@ impl QwenImageVae {
 
     /// Encode a pixel-space image [1, 3, H, W] (in [-1, 1]) to normalized latents.
     ///
-    /// Applies the encoder, quant_conv, diagonal Gaussian sampling (mean + logvar → z),
+    /// Applies the encoder, quant_conv, then uses the diagonal Gaussian
+    /// posterior mean for deterministic img2img latents,
     /// then per-channel normalization (inverse of decode's denormalization):
     ///   `normed = (z - mean) / std`
     pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
         let h = xs.apply(&self.encoder)?.apply(&self.quant_conv)?;
 
-        // Diagonal Gaussian: split mean/logvar along channel dim, sample z
-        let c2 = h.dim(1)?;
-        let c = c2 / 2;
-        let mean = h.narrow(1, 0, c)?;
-        let logvar = h.narrow(1, c, c)?.clamp(-30.0, 20.0)?;
-        let std = (&logvar * 0.5)?.exp()?;
-        let z = (&mean + &std.broadcast_mul(&mean.randn_like(0., 1.)?)?)?;
+        // Use the posterior mean rather than sampling an unseeded diagonal
+        // Gaussian so repeated img2img runs with the same seed remain stable.
+        let z = diagonal_gaussian_mode(&h)?;
 
         // Per-channel normalization (inverse of decode's denormalization)
         let normed = z
@@ -543,6 +540,12 @@ impl QwenImageVae {
 
         Ok(normed)
     }
+}
+
+fn diagonal_gaussian_mode(parameters: &Tensor) -> Result<Tensor> {
+    let c2 = parameters.dim(1)?;
+    let c = c2 / 2;
+    parameters.narrow(1, 0, c)
 }
 
 #[cfg(test)]
@@ -646,5 +649,23 @@ mod tests {
                 BLOCK_OUT_CHANNELS[i - 1]
             );
         }
+    }
+
+    #[test]
+    fn diagonal_gaussian_mode_returns_mean_half() {
+        let dev = candle_core::Device::Cpu;
+        let params = Tensor::from_vec(
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, // mean channels
+                99.0, 98.0, 97.0, 96.0, // ignored logvar channels
+            ],
+            (1, 8, 1, 1),
+            &dev,
+        )
+        .unwrap();
+
+        let mode = diagonal_gaussian_mode(&params).unwrap();
+        let vals = mode.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
     }
 }

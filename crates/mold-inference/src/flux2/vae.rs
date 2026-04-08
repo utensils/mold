@@ -517,7 +517,8 @@ impl Flux2AutoEncoder {
     /// Pipeline:
     /// 1. Encoder conv/resnet/attention → (B, 64, H/8, W/8)  [2 * latent_channels]
     /// 2. Optional quant_conv
-    /// 3. DiagonalGaussian: split mean/logvar, sample z = mean + std * eps
+    /// 3. DiagonalGaussian: split mean/logvar and use the posterior mean so
+    ///    img2img encoding is deterministic
     /// 4. BN normalization: patchify → (z - mean) / std → unpatchify
     pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
         let h = xs.apply(&self.encoder)?;
@@ -529,13 +530,9 @@ impl Flux2AutoEncoder {
             h
         };
 
-        // DiagonalGaussian: split into mean and logvar, then sample
-        let (_b, c2, _h_dim, _w_dim) = h.dims4()?;
-        let c = c2 / 2;
-        let mean = h.narrow(1, 0, c)?;
-        let logvar = h.narrow(1, c, c)?.clamp(-30.0, 20.0)?;
-        let std = (&logvar * 0.5)?.exp()?;
-        let z = (&mean + &std * mean.randn_like(0.0, 1.0)?)?;
+        // Use the posterior mean rather than sampling an unseeded diagonal
+        // Gaussian so repeated img2img runs with the same seed remain stable.
+        let z = diagonal_gaussian_mode(&h)?;
 
         // BN normalization (reverse of decode's denormalization):
         // Patchify → normalize → unpatchify
@@ -590,6 +587,12 @@ impl Flux2AutoEncoder {
 
         xs.apply(&self.decoder)
     }
+}
+
+fn diagonal_gaussian_mode(parameters: &Tensor) -> Result<Tensor> {
+    let (_b, c2, _h_dim, _w_dim) = parameters.dims4()?;
+    let c = c2 / 2;
+    parameters.narrow(1, 0, c)
 }
 
 #[cfg(test)]
@@ -754,5 +757,23 @@ mod tests {
                 "channel {i}: expected {expected_std}, got {v}"
             );
         }
+    }
+
+    #[test]
+    fn diagonal_gaussian_mode_returns_mean_half() {
+        let dev = Device::Cpu;
+        let params = Tensor::from_vec(
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, // mean channels
+                99.0, 98.0, 97.0, 96.0, // ignored logvar channels
+            ],
+            (1, 8, 1, 1),
+            &dev,
+        )
+        .unwrap();
+
+        let mode = diagonal_gaussian_mode(&params).unwrap();
+        let vals = mode.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
     }
 }
