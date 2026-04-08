@@ -21,7 +21,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--height <N>`                     | Image height                                     |
 | `--steps <N>`                      | Inference steps                                  |
 | `--seed <N>`                       | Random seed                                      |
-| `--batch <N>`                      | Number of images (1–16)                          |
+| `--batch <N>`                      | Number of images (1+)                            |
 | `--guidance <N>`                   | Guidance scale                                   |
 | `--frames <N>`                     | Video frame count (8n+1, video models only)      |
 | `--fps <N>`                        | Video frames per second (default: 24)            |
