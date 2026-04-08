@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-04-08
+
 ### Added
 
 - **`mold update` command**: self-update from GitHub releases with SHA-256 checksum verification, platform auto-detection (macOS Metal, Linux CUDA sm89/sm120), atomic binary replacement with rollback, and package manager detection (Nix, Homebrew). Supports `--check`, `--force`, and `--version` flags.
@@ -323,6 +325,13 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server) | Axum HTTP inference server |
 
+[Unreleased]: https://github.com/utensils/mold/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/utensils/mold/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/utensils/mold/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/utensils/mold/compare/v0.5.3...v0.6.0
+[0.5.3]: https://github.com/utensils/mold/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/utensils/mold/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/utensils/mold/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/utensils/mold/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/utensils/mold/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/utensils/mold/compare/v0.3.1...v0.4.0
