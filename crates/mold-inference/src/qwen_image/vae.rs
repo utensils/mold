@@ -520,7 +520,7 @@ impl QwenImageVae {
         denormed.apply(&self.decoder)
     }
 
-    /// Encode a pixel-space image [1, 3, H, W] (in [0, 1]) to normalized latents.
+    /// Encode a pixel-space image [1, 3, H, W] (in [-1, 1]) to normalized latents.
     ///
     /// Applies the encoder, quant_conv, diagonal Gaussian sampling (mean + logvar → z),
     /// then per-channel normalization (inverse of decode's denormalization):

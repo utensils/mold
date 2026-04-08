@@ -512,7 +512,7 @@ impl Flux2AutoEncoder {
 
     /// Encode pixel-space image to latent space.
     ///
-    /// Input: (B, 3, H, W) in [0, 1] → Output: (B, 32, H/8, W/8)
+    /// Input: (B, 3, H, W) in [-1, 1] → Output: (B, 32, H/8, W/8)
     ///
     /// Pipeline:
     /// 1. Encoder conv/resnet/attention → (B, 64, H/8, W/8)  [2 * latent_channels]

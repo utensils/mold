@@ -4,10 +4,11 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 
 /// Normalization range for source images before VAE encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalizeRange {
-    /// [-1, 1] for SD1.5, SDXL, and FLUX (VAE expects this range).
+    /// [-1, 1] for SD1.5, SDXL, FLUX, Flux.2, Qwen-Image, and SD3.
     MinusOneToOne,
-    /// [0, 1] for SD3, Z-Image, Flux.2, Qwen-Image.
+    /// [0, 1] for Z-Image and VQ/VAE families that natively operate in that range.
     ZeroToOne,
 }
 
@@ -80,6 +81,53 @@ pub fn decode_mask_image(
     let tensor = tensor.to_dtype(dtype)?.to_device(device)?;
 
     Ok(tensor)
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+    use std::io::Cursor;
+
+    fn encode_test_png(pixel: [u8; 3]) -> Vec<u8> {
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(1, 1, Rgb(pixel));
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Png)
+            .expect("encode PNG");
+        out.into_inner()
+    }
+
+    fn decode_values(bytes: &[u8], range: NormalizeRange) -> Vec<f32> {
+        decode_source_image(bytes, 1, 1, range, &Device::Cpu, DType::F32)
+            .expect("decode source image")
+            .flatten_all()
+            .expect("flatten decoded tensor")
+            .to_vec1::<f32>()
+            .expect("decoded values")
+    }
+
+    #[test]
+    fn zero_to_one_normalization_preserves_unit_interval() {
+        let bytes = encode_test_png([0, 128, 255]);
+        let values = decode_values(&bytes, NormalizeRange::ZeroToOne);
+
+        assert_eq!(values.len(), 3);
+        assert!((values[0] - 0.0).abs() < 1e-6);
+        assert!((values[1] - (128.0 / 255.0)).abs() < 1e-6);
+        assert!((values[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn minus_one_to_one_normalization_centers_and_scales_pixels() {
+        let bytes = encode_test_png([0, 128, 255]);
+        let values = decode_values(&bytes, NormalizeRange::MinusOneToOne);
+
+        assert_eq!(values.len(), 3);
+        assert!((values[0] + 1.0).abs() < 1e-6);
+        assert!((values[1] - ((128.0 / 255.0) * 2.0 - 1.0)).abs() < 1e-6);
+        assert!((values[2] - 1.0).abs() < 1e-6);
+    }
 }
 
 /// Context for inpainting: holds pre-computed tensors needed during the denoising loop.

@@ -279,6 +279,10 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
+        img_utils::NormalizeRange::MinusOneToOne
+    }
+
     fn is_oom_error(err: &impl std::fmt::Display) -> bool {
         // TODO: Replace this with typed backend inspection if candle exposes
         // one. Today the fallback ladder has to key off the backend error text.
@@ -378,12 +382,12 @@ impl QwenImageEngine {
         progress.stage_start("Encoding source image (VAE)");
         let encode_start = Instant::now();
 
-        // Qwen-Image VAE expects [0, 1] normalized pixels
+        // Qwen-Image VAE expects [-1, 1] normalized pixels
         let source_tensor = img_utils::decode_source_image(
             source_bytes,
             width,
             height,
-            img_utils::NormalizeRange::ZeroToOne,
+            Self::img2img_source_normalize_range(),
             vae_device,
             DType::F32,
         )?;
@@ -398,7 +402,7 @@ impl QwenImageEngine {
                     source_bytes,
                     width,
                     height,
-                    img_utils::NormalizeRange::ZeroToOne,
+                    Self::img2img_source_normalize_range(),
                     &Device::Cpu,
                     DType::F32,
                 )?;
@@ -1918,7 +1922,7 @@ impl InferenceEngine for QwenImageEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 &loaded.vae_device,
                 DType::F32,
             )?;
@@ -1933,7 +1937,7 @@ impl InferenceEngine for QwenImageEngine {
                         source_bytes,
                         req.width,
                         req.height,
-                        img_utils::NormalizeRange::ZeroToOne,
+                        Self::img2img_source_normalize_range(),
                         &Device::Cpu,
                         DType::F32,
                     )?;
@@ -2632,5 +2636,13 @@ mod tests {
     #[test]
     fn qwen_is_oom_error_matches_cuda_memory_allocation_string() {
         assert!(QwenImageEngine::is_oom_error(&"cudaErrorMemoryAllocation"));
+    }
+
+    #[test]
+    fn qwen_img2img_uses_minus_one_to_one_source_normalization() {
+        assert_eq!(
+            QwenImageEngine::img2img_source_normalize_range(),
+            img_utils::NormalizeRange::MinusOneToOne
+        );
     }
 }

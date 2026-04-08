@@ -117,6 +117,10 @@ impl SD3Engine {
         Ok((context, y))
     }
 
+    fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
+        img_utils::NormalizeRange::MinusOneToOne
+    }
+
     /// Detect if the transformer is quantized (GGUF).
     fn detect_is_quantized(&self) -> bool {
         self.base
@@ -530,7 +534,7 @@ impl SD3Engine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 &device,
                 gpu_dtype,
             )?;
@@ -847,7 +851,7 @@ impl InferenceEngine for SD3Engine {
                         source_bytes,
                         req.width,
                         req.height,
-                        img_utils::NormalizeRange::ZeroToOne,
+                        Self::img2img_source_normalize_range(),
                         &loaded_device,
                         loaded_dtype,
                     )?;
@@ -1042,5 +1046,18 @@ impl InferenceEngine for SD3Engine {
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         Some(&self.base.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sd3_img2img_uses_minus_one_to_one_source_normalization() {
+        assert_eq!(
+            SD3Engine::img2img_source_normalize_range(),
+            img_utils::NormalizeRange::MinusOneToOne
+        );
     }
 }

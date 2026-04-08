@@ -111,6 +111,10 @@ impl Flux2Engine {
         }
     }
 
+    fn img2img_source_normalize_range() -> crate::img_utils::NormalizeRange {
+        crate::img_utils::NormalizeRange::MinusOneToOne
+    }
+
     /// Validate that all required paths exist.
     fn validate_paths(&self) -> Result<std::path::PathBuf> {
         let text_tokenizer_path = self
@@ -611,7 +615,7 @@ impl Flux2Engine {
                 source_bytes,
                 req.width,
                 req.height,
-                crate::img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 &device,
                 gpu_dtype,
             )?;
@@ -846,7 +850,7 @@ impl InferenceEngine for Flux2Engine {
                 source_bytes,
                 req.width,
                 req.height,
-                crate::img_utils::NormalizeRange::ZeroToOne,
+                Self::img2img_source_normalize_range(),
                 &loaded.device,
                 loaded.dtype,
             )?;
@@ -1003,5 +1007,18 @@ impl InferenceEngine for Flux2Engine {
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         Some(&self.base.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flux2_img2img_uses_minus_one_to_one_source_normalization() {
+        assert_eq!(
+            Flux2Engine::img2img_source_normalize_range(),
+            crate::img_utils::NormalizeRange::MinusOneToOne
+        );
     }
 }
