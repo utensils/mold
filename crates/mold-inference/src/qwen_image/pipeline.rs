@@ -279,10 +279,12 @@ pub struct QwenImageEngine {
 
 impl QwenImageEngine {
     fn is_oom_error(err: &impl std::fmt::Display) -> bool {
-        // Candle does not currently surface a typed CUDA OOM here, so the
-        // fallback ladder has to key off the backend error text.
+        // TODO: Replace this with typed backend inspection if candle exposes
+        // one. Today the fallback ladder has to key off the backend error text.
         let msg = err.to_string();
-        msg.contains("OUT_OF_MEMORY") || msg.contains("out of memory")
+        msg.contains("OUT_OF_MEMORY")
+            || msg.contains("out of memory")
+            || msg.contains("cudaErrorMemoryAllocation")
     }
 
     fn decode_vae_tiled(
@@ -306,6 +308,10 @@ impl QwenImageEngine {
                 let tile = tile.to_device(vae_device)?.to_dtype(DType::F32)?;
                 vae.decode(&tile).map_err(Into::into)
             };
+            // `upscale_with_tiling` is reused here because Qwen-Image VAE decode
+            // is guaranteed to return 3-channel RGB. If a future VAE family
+            // changes that contract, this call site needs a tiler that handles
+            // arbitrary output channel counts.
             match upscale_with_tiling(latents, &forward, 8, &config, &Device::Cpu, progress) {
                 Ok(image) => return Ok(image),
                 Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
@@ -646,7 +652,9 @@ impl QwenImageEngine {
         height: usize,
     ) -> bool {
         if free_vram == 0 {
-            return false;
+            // If VRAM probing fails, bias toward the safer split-CFG path
+            // instead of assuming batched CFG will fit.
+            return true;
         }
         let estimated_peak =
             transformer_size.saturating_add(Self::quantized_cuda_cfg_headroom(width, height));
@@ -2252,5 +2260,20 @@ mod tests {
             1328,
             1328,
         ));
+    }
+
+    #[test]
+    fn qwen_quantized_unknown_vram_biases_to_split_cfg() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            12_300_000_000,
+            0,
+            1328,
+            1328,
+        ));
+    }
+
+    #[test]
+    fn qwen_is_oom_error_matches_cuda_memory_allocation_string() {
+        assert!(QwenImageEngine::is_oom_error(&"cudaErrorMemoryAllocation"));
     }
 }

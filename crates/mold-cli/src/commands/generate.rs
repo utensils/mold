@@ -1141,6 +1141,10 @@ fn preview_backend(term_program: Option<&str>, term: Option<&str>) -> PreviewBac
 
 #[cfg(any(feature = "preview", test))]
 fn fit_preview_cells(img_width: u32, img_height: u32, term_w: u16, term_h: u16) -> (u32, u32) {
+    // Kitty is pixel-accurate, but the preview still occupies terminal cells.
+    // We intentionally model each character row as roughly 2x taller than a
+    // column is wide so Ghostty previews preserve image aspect instead of
+    // stretching to the terminal's full row count.
     let bound_width = term_w as u32;
     let bound_height = 2 * term_h as u32;
 
