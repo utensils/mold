@@ -579,18 +579,83 @@ impl Flux2Engine {
             .progress
             .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
 
-        // Generate noise with seed for reproducibility
         let latent_h = height.div_ceil(8);
         let latent_w = width.div_ceil(8);
-        let img =
-            crate::engine::seeded_randn(seed, &[1, 32, latent_h, latent_w], &device, gpu_dtype)?;
+
+        // Pre-compute timestep schedule (needed before mixing for img2img)
+        let image_seq_len = (height / 16) * (width / 16);
+        let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
+
+        // For img2img, build a schedule starting at exactly `strength`.
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
+            timesteps = std::iter::once(strength).chain(tail).collect();
+            tracing::info!(
+                strength,
+                schedule = ?timesteps,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: built schedule from strength"
+            );
+        }
+
+        // Generate noise / encode source image for img2img
+        let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = req.strength;
+
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = crate::img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                crate::img_utils::NormalizeRange::ZeroToOne,
+                &device,
+                gpu_dtype,
+            )?;
+            let encoded = vae.encode(&source_tensor)?;
+            self.base
+                .progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 32, latent_h, latent_w],
+                &device,
+                gpu_dtype,
+            )?;
+
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = crate::img_utils::decode_mask_image(
+                    mask_bytes, latent_h, latent_w, &device, gpu_dtype,
+                )?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise: noise.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Flow-matching img2img: latent = (1 - t) * encoded + t * noise
+            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
+            (img, inpaint_ctx)
+        } else {
+            let img = crate::engine::seeded_randn(
+                seed,
+                &[1, 32, latent_h, latent_w],
+                &device,
+                gpu_dtype,
+            )?;
+            (img, None)
+        };
+
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // Flux.2 empirical mu schedule (resolution + step-count dependent)
-        let image_seq_len = (height / 16) * (width / 16);
-        let timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
-
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -603,6 +668,7 @@ impl Flux2Engine {
             &timesteps,
             req.guidance,
             &self.base.progress,
+            inpaint_ctx.as_ref(),
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
@@ -612,6 +678,7 @@ impl Flux2Engine {
             .stage_done(&denoise_label, denoise_start.elapsed());
 
         // Drop transformer + state to free memory for VAE decode
+        drop(inpaint_ctx);
         drop(transformer);
         self.base.progress.info("Freed Flux.2 transformer");
         drop(state);
@@ -676,13 +743,6 @@ impl InferenceEngine for Flux2Engine {
                 "Flux.2 Klein is distilled — guidance value is ignored (no guidance embedding)"
             );
         }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for Flux.2 — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for Flux.2 -- ignoring mask");
-        }
-
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -755,27 +815,91 @@ impl InferenceEngine for Flux2Engine {
             txt_emb
         };
 
-        // 2. Generate initial noise with seed for reproducibility
+        // 2. Prepare latent space dimensions and timestep schedule
         let latent_h = height.div_ceil(8);
         let latent_w = width.div_ceil(8);
-        let img = crate::engine::seeded_randn(
-            seed,
-            &[1, 32, latent_h, latent_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
 
-        // 3. Build sampling state
+        // Pre-compute timestep schedule (needed before mixing for img2img)
+        let image_seq_len = (height / 16) * (width / 16);
+        let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
+
+        // For img2img, build a schedule starting at exactly `strength`.
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
+            timesteps = std::iter::once(strength).chain(tail).collect();
+            tracing::info!(
+                strength,
+                schedule = ?timesteps,
+                remaining_steps = timesteps.len().saturating_sub(1),
+                "img2img: built schedule from strength"
+            );
+        }
+
+        // 3. Generate noise / encode source image for img2img
+        let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = req.strength;
+
+            progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = crate::img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                crate::img_utils::NormalizeRange::ZeroToOne,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            let encoded = loaded.vae.encode(&source_tensor)?;
+            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 32, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = crate::img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                Some(crate::img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise: noise.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Flow-matching img2img: latent = (1 - t) * encoded + t * noise
+            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
+            (img, inpaint_ctx)
+        } else {
+            let img = crate::engine::seeded_randn(
+                seed,
+                &[1, 32, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (img, None)
+        };
+
+        // 4. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;
 
-        // 4. Flux.2 empirical mu schedule (resolution + step-count dependent)
-        let image_seq_len = (height / 16) * (width / 16);
-        let timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
-
-        let denoise_label = format!("Denoising ({} steps)", timesteps.len() - 1);
+        let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
-        tracing::info!(steps = timesteps.len() - 1, "running denoising loop...");
+        tracing::info!(
+            steps = timesteps.len().saturating_sub(1),
+            "running denoising loop..."
+        );
 
         // 5. Denoise
         let transformer = loaded
@@ -791,6 +915,7 @@ impl InferenceEngine for Flux2Engine {
             &timesteps,
             req.guidance,
             progress,
+            inpaint_ctx.as_ref(),
         )?;
 
         // 6. Unpack latent to spatial
@@ -801,6 +926,7 @@ impl InferenceEngine for Flux2Engine {
         // Free denoising intermediates and transformer before VAE decode.
         // The transformer consumes most of VRAM — VAE decode needs that
         // memory for conv2d intermediates. Transformer is reloaded next generate.
+        drop(inpaint_ctx);
         drop(state);
         drop(txt_emb);
         loaded.transformer = None;

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`mold update` command**: self-update from GitHub releases with SHA-256 checksum verification, platform auto-detection (macOS Metal, Linux CUDA sm89/sm120), atomic binary replacement with rollback, and package manager detection (Nix, Homebrew). Supports `--check`, `--force`, and `--version` flags.
+- **img2img and inpainting for all remaining model families**: SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image, and Wuerstchen v2 now support `--image` for img2img and `--mask` for inpainting. Includes VAE encoder implementations for Flux.2 (BN-VAE with patchified BatchNorm) and Qwen-Image (3D causal VAE specialized to 2D via temporal slice extraction). Wuerstchen uses VQ-GAN encoding with Prior bypass for img2img. All families support strength-based schedule trimming and per-step inpainting blending. ([#174](https://github.com/utensils/mold/issues/174))
 
 ## [0.6.1] - 2026-04-07
 

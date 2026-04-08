@@ -720,6 +720,7 @@ impl Flux2TransformerWrapper {
         timesteps: &[f64],
         guidance: f64,
         progress: &crate::progress::ProgressReporter,
+        inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
     ) -> anyhow::Result<Tensor> {
         use crate::progress::ProgressEvent;
         use std::time::Instant;
@@ -759,6 +760,15 @@ impl Flux2TransformerWrapper {
                 )?,
             };
             img = (img + pred * (t_prev - t_curr))?;
+
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ctx) = inpaint_ctx {
+                let t = *t_prev;
+                // Re-noise original latents to current timestep (flow-matching schedule)
+                let noised_original = ((&ctx.original_latents * (1.0 - t))? + (&ctx.noise * t)?)?;
+                // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
+                img = ((&ctx.mask * &img)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            }
 
             progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,

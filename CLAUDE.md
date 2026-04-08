@@ -26,7 +26,7 @@ nix flake check                                      # Validate formatting + fla
 |----------|---------|-------------|
 | build | `build` | `cargo build` (debug, all crates) |
 | build | `build-release` | `cargo build --release` |
-| build | `build-server` | `cargo build -p mold-cli --features {cuda\|metal}` (single binary with GPU) |
+| build | `build-server` | `cargo build -p mold-ai --features {cuda\|metal}` (single binary with GPU) |
 | build | `build-discord` | `cargo build -p mold-ai --features discord` |
 | check | `check` | `cargo check` |
 | check | `clippy` | `cargo clippy` |
@@ -44,23 +44,33 @@ nix flake check                                      # Validate formatting + fla
 ```bash
 cargo build                                          # Debug build (all crates)
 cargo build --release                                # Release build
-cargo build -p mold-cli                              # Just the CLI
-cargo build -p mold-cli --features cuda              # CLI with CUDA (includes serve)
+cargo build -p mold-ai                               # Just the CLI
+cargo build -p mold-ai --features cuda               # CLI with CUDA (includes serve)
 cargo check                                          # Type check
 cargo clippy                                         # Lint
 cargo fmt --check                                    # Format check
 cargo test                                           # All tests
-cargo test -p mold-core                              # Single crate
+cargo test -p mold-ai-core                           # Single crate
 ./scripts/coverage.sh                                # Test coverage summary
 ./scripts/coverage.sh --html                         # HTML coverage report
 ./scripts/fetch-tokenizers.sh                        # Pre-download tokenizer files
-cargo run -p mold-cli -- run "a cat"                 # Generate image
-cargo run -p mold-cli -- serve                       # Start server
+cargo run -p mold-ai -- run "a cat"                  # Generate image
+cargo run -p mold-ai -- serve                        # Start server
 ```
 
 ### CI (GitHub Actions)
 
-CI runs on every push and PR (`.github/workflows/ci.yml`): `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test --workspace`. All four must pass.
+CI runs on every push and PR (`.github/workflows/ci.yml`). All jobs must pass:
+
+| Job | What it checks |
+|-----|----------------|
+| `fmt` | `cargo fmt --all -- --check` |
+| `check` | `cargo check --workspace` |
+| `clippy` | `cargo clippy --workspace -- -D warnings` |
+| `test` | `cargo test --workspace` |
+| `coverage` | `cargo llvm-cov` → Codecov upload |
+| `check-features` | `cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4` (all optional features) |
+| `docs` | `bun run fmt:check && bun run verify && bun run build` in `website/` |
 
 > **Note:** `mold-inference` and `mold-server` have `[lib] test = false` in their `Cargo.toml` files. The test harness for these crates links against candle/CUDA which triggers heavy model weight initialization (~32GB RAM, 40+ min hang). The `mold-server` binary target also has `test = false`. Unit tests in `mold-core` and `mold-cli` run normally. If you add tests to `mold-inference` or `mold-server`, run them with `cargo test -p <crate> --lib` after temporarily removing the `test = false` flag.
 
@@ -84,6 +94,19 @@ crates/
 ├── mold-discord/             # Discord bot library (feature-gated, consumed by mold-cli via `discord` feature)
 └── mold-tui/                 # Interactive terminal UI (feature-gated, consumed by mold-cli via `tui` feature)
 ```
+
+**Package names** — Directory names differ from Cargo package names. Use `-p <package>` with these:
+
+| Directory | Package (`-p`) | Binary/Lib |
+|-----------|---------------|------------|
+| `mold-cli/` | `mold-ai` | binary: `mold` |
+| `mold-core/` | `mold-ai-core` | lib: `mold_core` |
+| `mold-inference/` | `mold-ai-inference` | lib: `mold_inference` |
+| `mold-server/` | `mold-ai-server` | lib: `mold_server` |
+| `mold-discord/` | `mold-ai-discord` | lib: `mold_discord` |
+| `mold-tui/` | `mold-ai-tui` | — |
+
+**MSRV**: 1.85
 
 **Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`), `metrics` (Prometheus `/metrics` endpoint via `mold-server`).
 
@@ -198,190 +221,23 @@ Key modules: `commands/` (slash command handlers — `generate`, `expand`, `mode
 
 Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 
-## CLI Command Reference
+## CLI Quick Reference
 
-```
-mold run [MODEL] [PROMPT...] [OPTIONS]
-    First positional arg is MODEL if it matches a known model name; otherwise it's prompt.
-    Prompt can also be piped via stdin: echo "a cat" | mold run flux2-klein
+Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `mold tui`, `mold upscale`, `mold expand`, `mold config`, `mold update`. Run `mold --help` or `mold <command> --help` for full flag details.
 
-    -m, --model <MODEL>         Explicit model override
-    -o, --output <PATH>         Output file [default: ./mold-{model}-{timestamp}.png]
-        --width/--height <N>    Image dimensions [default: from model config]
-        --steps <N>             Inference steps [default: from model config]
-        --seed <N>              Random seed
-        --batch <N>             Number of images (1-16) [default: 1]
-        --host <URL>            Override MOLD_HOST
-        --format <FORMAT>       png or jpeg [default: png]
-        --local                 Skip server, run inference locally (requires GPU features)
-        --guidance <N>          Guidance scale (defaults to model config value)
-        --eager                 Keep all model components loaded simultaneously (faster, more memory)
-        --offload               Stream transformer blocks CPU↔GPU (reduces VRAM ~24GB→2-4GB, 3-5x slower)
-        --t5-variant <TAG>      T5 encoder: auto, fp16, q8, q6, q5, q4, q3
-        --qwen3-variant <TAG>   Qwen3 encoder (Z-Image): auto, bf16, q8, q6, iq4, q3
-        --scheduler <SCHED>     Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc
-        --lora <PATH>           LoRA adapter safetensors file (FLUX BF16 or GGUF quantized)
-        --lora-scale <FLOAT>    LoRA effect strength (0.0-2.0) [default: 1.0]
-    -i, --image <PATH|->        Source image for img2img (file path or - for stdin)
-        --strength <FLOAT>      Denoising strength for img2img (0.0-1.0) [default: 0.75]
-        --mask <PATH>           Mask for inpainting (white=repaint, black=preserve; requires --image)
-        --control <PATH>        Control image for ControlNet conditioning
-        --control-model <NAME>  ControlNet model (e.g. controlnet-canny-sd15; requires --control)
-        --control-scale <FLOAT> ControlNet conditioning scale (0.0-2.0) [default: 1.0]
-    -n, --negative-prompt <TEXT>   Negative prompt (what to avoid generating; CFG models only)
-        --no-negative              Suppress config-file default negative prompt
-        --no-metadata           Disable PNG metadata embedding
-        --preview               Display generated image(s) inline in the terminal (requires `preview` feature)
-        --expand                Enable LLM-powered prompt expansion
-        --no-expand             Disable expansion (overrides config/env default)
-        --expand-backend <URL>  Expansion backend: "local" or OpenAI-compatible API URL
-        --expand-model <MODEL>  LLM model for expansion
-        --upscale <MODEL>       Post-generation upscale with named upscaler model (TODO: not yet wired)
-
-mold upscale <IMAGE> [OPTIONS]     Upscale image with Real-ESRGAN
-    -m, --model <MODEL>         Upscaler model name (env: MOLD_UPSCALE_MODEL)
-    -o, --output <PATH>         Output file [default: {input}_upscaled.png]
-        --format <FORMAT>       png or jpeg [default: png]
-        --tile-size <SIZE>      Tile size for memory-efficient tiling (env: MOLD_UPSCALE_TILE_SIZE)
-        --host <URL>            Override MOLD_HOST
-        --local                 Skip server, run inference locally
-        --preview               Display upscaled image inline in the terminal
-
-mold expand <PROMPT> [OPTIONS]     Preview LLM prompt expansion without generating
-    -m, --model <MODEL>         Target diffusion model (for model-aware prompt style)
-        --variations <N>        Number of prompt variations [default: 1]
-        --json                  Output as JSON array
-        --backend <URL>         Expansion backend override
-        --expand-model <MODEL>  LLM model name override
-
-mold default [MODEL]               Get or set the default model
-mold config list [--json]          List all config settings
-mold config get <KEY> [--raw]      Get a config value
-mold config set <KEY> <VALUE>      Set a config value
-mold config path                   Show config file path
-mold config edit                   Open config in $EDITOR
-mold tui [--host URL] [--local]     Launch interactive terminal UI (requires `tui` feature)
-mold discord                       Start Discord bot (requires `discord` feature)
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-file] [--log-format json|text] [--discord]
-mold pull <MODEL> [--skip-verify]  Download model from HuggingFace
-mold rm <MODELS...> [--force]  Remove downloaded models
-mold list                       List configured and available models (with disk usage)
-mold stats [--json]             Show disk usage overview (models, output, logs, shared components)
-mold clean [--force] [--older-than DURATION]  Clean orphaned files, stale downloads, old output images (dry-run by default)
-mold info [MODEL] [--verify]    Show installation overview, or model details with optional SHA-256 verify
-mold server start [--port N] [--bind ADDR] [--models-dir PATH] [--log-file]  Start background server daemon
-mold server status              Show managed server status
-mold server stop                Stop the managed server
-mold unload                     Unload the current model from server to free GPU memory
-mold ps                         Show server status + loaded models
-mold version                    Show version
-mold completions <SHELL>        Generate shell completions
-```
-
-**Piping**: Pipe-friendly in both directions. When stdout is not a TTY, raw image bytes go to stdout, status/progress to stderr. When stdin is not a TTY, it is read as the prompt (args take priority over stdin). `echo "a cat" | mold run flux2-klein | viu -` just works. `--output -` forces stdout even in interactive terminals. `--image -` reads source image from stdin for img2img: `cat photo.png | mold run "oil painting" --image - | viu -`.
+**Key behaviors:**
+- `mold run [MODEL] [PROMPT]` — first positional arg is MODEL if it matches a known name, otherwise it's prompt
+- **Pipe-friendly**: `echo "a cat" | mold run flux2-klein | viu -` — stdin for prompt, stdout for image bytes when not a TTY. `--output -` forces stdout. `--image -` reads source image from stdin.
+- **Inference modes**: remote (default → `MOLD_HOST`), local fallback (auto if server unreachable), `--local` (forced local GPU)
+- **VRAM management**: `--offload` streams blocks CPU↔GPU (~24GB→2-4GB, slower), `--eager` keeps everything loaded, `--t5-variant`/`--qwen3-variant`/`--qwen2-variant` control encoder quantization
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MOLD_HOME` | `~/.mold` | Override base mold directory (config, cache, default models) |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model when none specified (smart fallback to only downloaded model) |
-| `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
-| `MOLD_MODELS_DIR` | `~/.mold/models` | Model storage directory |
-| `MOLD_PORT` | `7680` | Server port |
-| `MOLD_LOG` | `warn` (CLI) / `info` (server) | Log level (trace, debug, info, warn, error) |
-| `MOLD_EAGER` | — | Set `1` to keep all model components loaded simultaneously |
-| `MOLD_TRANSFORMER_PATH` | — | Override transformer path |
-| `MOLD_VAE_PATH` | — | Override VAE path |
-| `MOLD_T5_PATH` | — | Override T5-XXL encoder path |
-| `MOLD_CLIP_PATH` | — | Override CLIP-L encoder path |
-| `MOLD_T5_TOKENIZER_PATH` | — | Override T5 tokenizer path |
-| `MOLD_CLIP_TOKENIZER_PATH` | — | Override CLIP tokenizer path |
-| `MOLD_T5_VARIANT` | `auto` | T5 encoder variant: auto, fp16, q8, q6, q5, q4, q3 |
-| `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder variant: auto, bf16, q8, q6, iq4, q3 |
-| `MOLD_QWEN2_VARIANT` | `auto` | Qwen2.5-VL encoder variant for Qwen-Image: auto, bf16, q8, q6, q5, q4, q3, q2 |
-| `MOLD_QWEN2_TEXT_ENCODER_MODE` | `auto` | Qwen-Image text encoder placement mode: auto, gpu, cpu-stage, cpu |
-| `MOLD_CLIP2_PATH` | — | Override CLIP-G encoder path (SDXL) |
-| `MOLD_CLIP2_TOKENIZER_PATH` | — | Override CLIP-G tokenizer path (SDXL) |
-| `MOLD_DEVICE` | — | Override device placement for text encoders |
-| `MOLD_SCHEDULER` | — | Noise scheduler for SD1.5/SDXL: ddim, euler-ancestral, uni-pc |
-| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Directory to save generated images (set empty to disable) |
-| `MOLD_THUMBNAIL_WARMUP` | — | Set `1` to prebuild gallery thumbnails at server startup (default: disabled) |
-| `MOLD_API_KEY` | — | API key for server auth (single key, comma-separated, or `@/path/to/keys.txt`); client sends `X-Api-Key` header |
-| `MOLD_RATE_LIMIT` | — | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`); read endpoints get 10x |
-| `MOLD_RATE_LIMIT_BURST` | `2x rate` | Burst allowance for rate limiting (defaults to 2x rate, capped at 100) |
-| `MOLD_CORS_ORIGIN` | — | Restrict CORS to specific origin (default: permissive) |
-| `MOLD_PREVIEW` | — | Set `1` to display generated images inline in the terminal |
-| `MOLD_OFFLOAD` | — | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
-| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata embedding |
-| `MOLD_EXPAND` | — | Set `1` to enable LLM prompt expansion by default |
-| `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
-| `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion (Qwen3-1.7B GGUF) |
-| `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion LLM |
-| `MOLD_EXPAND_THINKING` | — | Set `1` to enable thinking mode in expansion LLM |
-| `MOLD_EXPAND_SYSTEM_PROMPT` | — | Custom single-expansion system prompt template (placeholders: `{WORD_LIMIT}`, `{MODEL_NOTES}`) |
-| `MOLD_EXPAND_BATCH_PROMPT` | — | Custom batch-variation system prompt template (placeholders: `{N}`, `{WORD_LIMIT}`, `{MODEL_NOTES}`) |
-| `MOLD_DISCORD_TOKEN` | — | Discord bot token (preferred; falls back to `DISCORD_TOKEN`) |
-| `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown between Discord generations (seconds) |
-| `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs that can use generation commands (unset = all allowed) |
-| `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
-| `MOLD_UPSCALE_MODEL` | — | Default upscaler model for `mold upscale` |
-| `MOLD_UPSCALE_TILE_SIZE` | — | Tile size for upscaling (0 to disable tiling) |
-
-Debug-only: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG` — enable verbose logging for those pipelines.
-
-Env vars take precedence over config file values. `mold pull` auto-writes config entries pointing to hf-hub cache paths.
+All vars prefixed `MOLD_`. Key ones: `MOLD_HOST` (server URL, default `http://localhost:7680`), `MOLD_DEFAULT_MODEL` (default `flux2-klein`), `MOLD_MODELS_DIR` (default `~/.mold/models`), `MOLD_LOG` (default `warn` CLI / `info` server), `MOLD_PORT` (default `7680`), `MOLD_OUTPUT_DIR` (default `~/.mold/output`). Component path overrides: `MOLD_TRANSFORMER_PATH`, `MOLD_VAE_PATH`, `MOLD_T5_PATH`, `MOLD_CLIP_PATH`, `MOLD_CLIP2_PATH` + tokenizer variants. Encoder variant selection: `MOLD_T5_VARIANT`, `MOLD_QWEN3_VARIANT`, `MOLD_QWEN2_VARIANT`. Runtime toggles: `MOLD_OFFLOAD`, `MOLD_EAGER`, `MOLD_PREVIEW`, `MOLD_EXPAND`, `MOLD_EMBED_METADATA`. Server security: `MOLD_API_KEY`, `MOLD_RATE_LIMIT`, `MOLD_CORS_ORIGIN`. Discord: `MOLD_DISCORD_TOKEN`, `MOLD_DISCORD_COOLDOWN`, `MOLD_DISCORD_DAILY_QUOTA`. Debug: `MOLD_QWEN_DEBUG`, `MOLD_SD3_DEBUG`. Env vars override config file. Full list in source or `mold --help`.
 
 ## Config File
 
-Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists)
-
-```toml
-default_model = "flux2-klein:q8"
-models_dir = "~/.mold/models"
-server_port = 7680
-default_width = 1024
-default_height = 1024
-# t5_variant = "auto"
-# qwen3_variant = "auto"
-# output_dir = "/srv/mold/output"    # default: ~/.mold/output (set "" to disable)
-# default_negative_prompt = "low quality, worst quality, blurry, watermark"
-
-[models."flux2-klein:q8"]
-transformer = "/path/to/flux-2-klein-4b-Q8_0.gguf"
-vae = "/path/to/vae/diffusion_pytorch_model.safetensors"
-t5_encoder = "/path/to/text_encoder/model-00001-of-00002.safetensors"
-clip_encoder = ""
-t5_tokenizer = "/path/to/tokenizer/tokenizer.json"
-clip_tokenizer = ""
-default_steps = 4
-default_guidance = 0.0
-is_schnell = false
-# lora = "/path/to/adapter.safetensors"
-# lora_scale = 0.8
-
-[expand]
-enabled = false
-backend = "local"
-model = "qwen3-expand:q8"
-temperature = 0.7
-# system_prompt = "Custom system prompt. {WORD_LIMIT} {MODEL_NOTES}"
-# batch_prompt = "Custom batch prompt. {N} {WORD_LIMIT} {MODEL_NOTES}"
-
-# [expand.families.sd15]
-# word_limit = 50
-# style_notes = "Short keyword phrases for CLIP-L."
-
-# [expand.families.flux]
-# word_limit = 200
-# style_notes = "Rich natural language descriptions."
-
-[logging]
-# level = "info"              # Log level (overridden by MOLD_LOG env var)
-# file = false                # Enable file logging to ~/.mold/logs/
-# dir = "~/.mold/logs"        # Custom log directory
-# max_days = 7                # Days to retain rotated log files
-```
+Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists). Structure defined in `crates/mold-core/src/config.rs`. Key sections: top-level defaults (`default_model`, `models_dir`, `server_port`, `default_width/height`, `default_negative_prompt`), per-model `[models."name:tag"]` with paths + generation defaults + optional `lora`/`lora_scale`, `[expand]` for prompt expansion settings with per-family overrides, `[logging]` for level/file/rotation. `mold pull` auto-writes model config entries. `mold config` subcommands read/write these values.
 
 ## Model System
 
@@ -405,20 +261,6 @@ temperature = 0.7
 **Docker / RunPod**: Multi-stage `Dockerfile` at project root. Stage 1 builds with `nvidia/cuda:12.8.1-devel-ubuntu22.04` + Rust + cargo (`--features cuda,expand`). Stage 2 copies the binary into `nvidia/cuda:12.8.1-runtime-ubuntu22.04` (~3.4 GB image, 33 MB binary). `CUDA_COMPUTE_CAP` build arg (default `89`) targets the GPU architecture. `docker/start.sh` is the RunPod-convention entrypoint: detects `/workspace` network volume, sets `MOLD_HOME`/`MOLD_MODELS_DIR`, runs `mold serve --bind 0.0.0.0`. Note: `libcuda.so.1` (NVIDIA driver) is injected at runtime by the NVIDIA Container Toolkit — the binary cannot run without GPU access.
 
 **Documentation site**: VitePress 1.6 + Tailwind CSS v4 + bun in `website/`. Dev server: `cd website && bun install && bun run dev -- --host 0.0.0.0`. Build: `bun run build`. Deployed to GitHub Pages via `.github/workflows/pages.yml` on push to `main` (website/** paths). Base path is `/mold/` (served at `utensils.github.io/mold/`).
-
-**Transparent logo generation** — The site logo (`website/public/logo-transparent.png`) is derived from `docs/mold.png`:
-```bash
-# 1. Crop to remove text, remove black background, trim, add padding
-magick docs/mold.png -crop 1024x650+0+30 +repage \
-  -fuzz 25% -transparent black -trim +repage \
-  -bordercolor none -border 40 /tmp/mold-cropped.png
-# 2. Extract alpha, erode jagged edges, gaussian blur for feathering
-magick /tmp/mold-cropped.png -alpha extract \
-  -morphology Erode Disk:1 -gaussian-blur 0x3 /tmp/mold-mask.png
-# 3. Reapply softened mask
-magick /tmp/mold-cropped.png /tmp/mold-mask.png \
-  -compose CopyOpacity -composite website/public/logo-transparent.png
-```
 
 ## Maintenance Notes
 

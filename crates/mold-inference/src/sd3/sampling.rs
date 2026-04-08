@@ -8,6 +8,7 @@ use candle_core::{DType, IndexOp, Tensor};
 use std::time::Instant;
 
 use super::transformer::SD3Transformer;
+use crate::img_utils;
 use crate::progress::{ProgressEvent, ProgressReporter};
 
 /// Configuration for Skip Layer Guidance (SLG).
@@ -56,20 +57,31 @@ pub fn euler_sample(
     is_quantized: bool,
     seed: u64,
     progress: &ProgressReporter,
+    initial_latents: Option<&Tensor>,
+    sigmas_override: Option<Vec<f64>>,
+    inpaint_ctx: Option<&img_utils::InpaintContext>,
 ) -> Result<Tensor> {
     // SD3 uses the same 16-channel latent noise as FLUX
     // Quantized models (GGUF) dequantize to F32, so noise must also be F32
     let noise_dtype = if is_quantized { DType::F32 } else { DType::F16 };
     let latent_h = height / 16 * 2;
     let latent_w = width / 16 * 2;
-    let mut x =
-        crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], y.device(), noise_dtype)?;
 
-    let sigmas: Vec<f64> = (0..=num_inference_steps)
-        .map(|s| s as f64 / num_inference_steps as f64)
-        .rev()
-        .map(|t| time_snr_shift(time_shift, t))
-        .collect();
+    let mut x = if let Some(latents) = initial_latents {
+        latents.clone()
+    } else {
+        crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], y.device(), noise_dtype)?
+    };
+
+    let sigmas = sigmas_override.unwrap_or_else(|| {
+        (0..=num_inference_steps)
+            .map(|s| s as f64 / num_inference_steps as f64)
+            .rev()
+            .map(|t| time_snr_shift(time_shift, t))
+            .collect()
+    });
+
+    let total_steps = sigmas.len().saturating_sub(1);
 
     for (step, window) in sigmas.windows(2).enumerate() {
         let step_start = Instant::now();
@@ -96,8 +108,8 @@ pub fn euler_sample(
         }
 
         if let Some(slg_config) = slg_config {
-            if (num_inference_steps as f64) * slg_config.start < (step as f64)
-                && (step as f64) < (num_inference_steps as f64) * slg_config.end
+            if (total_steps as f64) * slg_config.start < (step as f64)
+                && (step as f64) < (total_steps as f64) * slg_config.end
             {
                 let slg_noise_pred = mmdit.forward(
                     &x,
@@ -112,13 +124,23 @@ pub fn euler_sample(
         }
 
         x = (x + (guidance * (*s_prev - *s_curr))?)?;
-        if step + 1 == num_inference_steps {
+
+        // Inpainting: blend preserved regions back at current noise level
+        if let Some(ctx) = inpaint_ctx {
+            let t = *s_prev;
+            // Re-noise original latents to current timestep (flow-matching schedule)
+            let noised_original = ((&ctx.original_latents * (1.0 - t))? + (&ctx.noise * t)?)?;
+            // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
+            x = ((&ctx.mask * &x)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+        }
+
+        if step + 1 == total_steps {
             debug_tensor_stats("latents_final", &x);
         }
 
         progress.emit(ProgressEvent::DenoiseStep {
             step: step + 1,
-            total: num_inference_steps,
+            total: total_steps,
             elapsed: step_start.elapsed(),
         });
     }
@@ -129,7 +151,7 @@ pub fn euler_sample(
 ///
 /// From the SD3 tech report: <https://arxiv.org/pdf/2403.03206>
 /// Following ComfyUI implementation.
-fn time_snr_shift(alpha: f64, t: f64) -> f64 {
+pub fn time_snr_shift(alpha: f64, t: f64) -> f64 {
     alpha * t / (1.0 + (alpha - 1.0) * t)
 }
 

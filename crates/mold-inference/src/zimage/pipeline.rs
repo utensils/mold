@@ -27,6 +27,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// Z-Image scheduler shift constants (from reference implementation).
@@ -551,11 +552,94 @@ impl ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        let mut latents =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
-        latents = latents.unsqueeze(2)?;
+        // For img2img, trim the scheduler to start at `strength`.
+        // Sigmas run from ~1.0 (full noise) down to 0.0 (clean).
+        // Keep only sigmas <= strength, so denoising starts partway through.
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let start_idx = scheduler
+                .sigmas
+                .iter()
+                .position(|&s| s <= strength)
+                .unwrap_or(0);
+            scheduler.sigmas = scheduler.sigmas[start_idx..].to_vec();
+            scheduler.timesteps = scheduler.timesteps[start_idx..].to_vec();
+            tracing::info!(
+                strength = req.strength,
+                remaining_sigmas = scheduler.sigmas.len(),
+                remaining_steps = scheduler.sigmas.len().saturating_sub(1),
+                "img2img: trimmed schedule from strength"
+            );
+        }
 
-        let num_steps = req.steps as usize;
+        // --- img2img: encode source image through VAE (load VAE early, then drop) ---
+        let (mut latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_sigma = scheduler.sigmas[0];
+
+            // Load VAE for encoding (will be dropped before transformer load)
+            let encode_vae_device = Device::Cpu; // CPU is safe for encode (small workspace)
+            let encode_vae_dtype = DType::F32;
+
+            self.base
+                .progress
+                .stage_start("Loading VAE for source encoding (CPU)");
+            let vae_enc_start = Instant::now();
+            let encode_vae = self.load_vae(&encode_vae_device, encode_vae_dtype)?;
+            self.base.progress.stage_done(
+                "Loading VAE for source encoding (CPU)",
+                vae_enc_start.elapsed(),
+            );
+
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::MinusOneToOne,
+                &encode_vae_device,
+                encode_vae_dtype,
+            )?;
+            let encoded = encode_vae.encode(&source_tensor)?;
+            self.base
+                .progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Drop encoding VAE before loading transformer
+            drop(encode_vae);
+
+            // Generate noise on the target device
+            let noise =
+                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+            let encoded = encoded.to_dtype(dtype)?.to_device(&device)?;
+
+            // Build inpaint context if mask provided
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask =
+                    img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, &device, dtype)?;
+                Some(img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise: noise.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Flow-matching interpolation: latent = (1 - sigma) * encoded + sigma * noise
+            let img = ((&encoded * (1.0 - start_sigma))? + (&noise * start_sigma)?)?;
+            // Add frame dimension: (B, C, H, W) -> (B, C, 1, H, W)
+            (img.unsqueeze(2)?, inpaint_ctx)
+        } else {
+            // txt2img: pure noise
+            let noise =
+                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+            (noise.unsqueeze(2)?, None)
+        };
+
+        let num_steps = scheduler.sigmas.len().saturating_sub(1);
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -570,6 +654,18 @@ impl ZImageEngine {
             let latents_4d = latents.squeeze(2)?;
             let prev_latents = scheduler.step(&noise_pred_4d, &latents_4d)?;
             latents = prev_latents.unsqueeze(2)?;
+
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ref ctx) = inpaint_ctx {
+                let sigma_next = scheduler.sigmas[step + 1];
+                let latents_4d = latents.squeeze(2)?;
+                let noised_original =
+                    ((&ctx.original_latents * (1.0 - sigma_next))? + (&ctx.noise * sigma_next)?)?;
+                let blended =
+                    ((&ctx.mask * &latents_4d)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                latents = blended.unsqueeze(2)?;
+            }
+
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step + 1,
                 total: num_steps,
@@ -672,13 +768,6 @@ impl InferenceEngine for ZImageEngine {
                 "scheduler selection not supported for Z-Image (flow-matching), ignoring"
             );
         }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for Z-Image — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for Z-Image -- ignoring mask");
-        }
-
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -807,17 +896,91 @@ impl InferenceEngine for ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        // 6. Generate initial noise: (B, 16, latent_h, latent_w) → add frame dim → (B, 16, 1, latent_h, latent_w)
-        let mut latents = crate::engine::seeded_randn(
-            seed,
-            &[1, 16, latent_h, latent_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        latents = latents.unsqueeze(2)?;
+        // For img2img, trim the scheduler to start at `strength`.
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let start_idx = scheduler
+                .sigmas
+                .iter()
+                .position(|&s| s <= strength)
+                .unwrap_or(0);
+            scheduler.sigmas = scheduler.sigmas[start_idx..].to_vec();
+            scheduler.timesteps = scheduler.timesteps[start_idx..].to_vec();
+            tracing::info!(
+                strength = req.strength,
+                remaining_sigmas = scheduler.sigmas.len(),
+                remaining_steps = scheduler.sigmas.len().saturating_sub(1),
+                "img2img: trimmed schedule from strength"
+            );
+        }
+
+        // 6. Build initial latents — img2img encodes source image, txt2img uses pure noise
+        let (mut latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_sigma = scheduler.sigmas[0];
+
+            // Encode source image through the pre-loaded VAE
+            progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let vae_encode_device = &loaded.vae_device;
+            let vae_encode_dtype = if loaded.vae_device.is_cpu() {
+                DType::F32
+            } else {
+                loaded.dtype
+            };
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::MinusOneToOne,
+                vae_encode_device,
+                vae_encode_dtype,
+            )?;
+            let encoded = loaded.vae.encode(&source_tensor)?;
+            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Generate noise on the GPU device
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
+
+            // Build inpaint context if mask provided
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                Some(img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise: noise.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Flow-matching interpolation: latent = (1 - sigma) * encoded + sigma * noise
+            let img = ((&encoded * (1.0 - start_sigma))? + (&noise * start_sigma)?)?;
+            (img.unsqueeze(2)?, inpaint_ctx)
+        } else {
+            // txt2img: pure noise (B, 16, latent_h, latent_w) → add frame dim
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (noise.unsqueeze(2)?, None)
+        };
 
         // 7. Denoising loop
-        let num_steps = req.steps as usize;
+        let num_steps = scheduler.sigmas.len().saturating_sub(1);
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -850,6 +1013,18 @@ impl InferenceEngine for ZImageEngine {
 
                 // Add back frame dimension
                 latents = prev_latents.unsqueeze(2)?;
+
+                // Inpainting: blend preserved regions back at current noise level
+                if let Some(ref ctx) = inpaint_ctx {
+                    let sigma_next = scheduler.sigmas[step + 1];
+                    let latents_4d = latents.squeeze(2)?;
+                    let noised_original = ((&ctx.original_latents * (1.0 - sigma_next))?
+                        + (&ctx.noise * sigma_next)?)?;
+                    let blended =
+                        ((&ctx.mask * &latents_4d)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                    latents = blended.unsqueeze(2)?;
+                }
+
                 progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
                     total: num_steps,

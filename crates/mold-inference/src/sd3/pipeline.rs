@@ -17,6 +17,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::quantized_mmdit::QuantizedMMDiT;
@@ -475,7 +476,111 @@ impl SD3Engine {
             (context, y)
         };
 
-        // --- Phase 2: Load transformer + denoise ---
+        // --- Phase 2: img2img — encode source image if provided ---
+        let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
+        let latent_h = height / 16 * 2;
+        let latent_w = width / 16 * 2;
+        let time_shift = 3.0;
+
+        // Build sigma schedule
+        let num_steps = req.steps as usize;
+        let mut sigmas: Vec<f64> = (0..=num_steps)
+            .map(|s| s as f64 / num_steps as f64)
+            .rev()
+            .map(|t| sampling::time_snr_shift(time_shift, t))
+            .collect();
+
+        // For img2img, trim schedule to start at strength
+        if req.source_image.is_some() {
+            let strength = req.strength;
+            let tail: Vec<f64> = sigmas.into_iter().filter(|&s| s < strength).collect();
+            sigmas = std::iter::once(strength).chain(tail).collect();
+            tracing::info!(
+                strength,
+                schedule = ?sigmas,
+                remaining_steps = sigmas.len().saturating_sub(1),
+                "img2img: built schedule from strength"
+            );
+        }
+
+        let (initial_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let start_t = req.strength;
+
+            // Load VAE early for source image encoding
+            self.base.progress.stage_start("Loading VAE for encoding");
+            let vae_stage = Instant::now();
+            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&self.base.paths.vae),
+                gpu_dtype,
+                &device,
+                "VAE",
+                &self.base.progress,
+            )?;
+            let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
+            let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+            self.base
+                .progress
+                .stage_done("Loading VAE for encoding", vae_stage.elapsed());
+
+            self.base
+                .progress
+                .stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::ZeroToOne,
+                &device,
+                gpu_dtype,
+            )?;
+            let dist = autoencoder.encode(&source_tensor)?;
+            // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609
+            let encoded = ((dist.sample()? - 0.0609)? * 1.5305)?;
+            self.base
+                .progress
+                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            // Drop VAE to free VRAM for transformer (will reload for decode)
+            drop(autoencoder);
+            device.synchronize()?;
+            self.base
+                .progress
+                .info("Freed VAE encoder to make room for transformer");
+
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &device,
+                noise_dtype,
+            )?;
+            let encoded = encoded.to_dtype(noise_dtype)?;
+
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let mask = img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &device,
+                    noise_dtype,
+                )?;
+                Some(img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise: noise.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Flow-matching interpolation: latent = (1 - t) * encoded + t * noise
+            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
+            (Some(img), inpaint_ctx)
+        } else {
+            (None, None)
+        };
+
+        // --- Phase 3: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
 
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
@@ -521,9 +626,9 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Denoise
-        let time_shift = 3.0;
         let slg_config = self.slg_config();
-        let denoise_label = format!("Denoising ({} steps)", req.steps);
+        let actual_steps = sigmas.len().saturating_sub(1);
+        let denoise_label = format!("Denoising ({actual_steps} steps)");
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
@@ -531,7 +636,7 @@ impl SD3Engine {
             &transformer,
             &y,
             &context,
-            req.steps as usize,
+            num_steps,
             req.guidance,
             time_shift,
             height,
@@ -540,6 +645,9 @@ impl SD3Engine {
             is_quantized,
             seed,
             &self.base.progress,
+            initial_latents.as_ref(),
+            Some(sigmas),
+            inpaint_ctx.as_ref(),
         )?;
 
         self.base
@@ -550,10 +658,11 @@ impl SD3Engine {
         drop(transformer);
         drop(context);
         drop(y);
+        drop(inpaint_ctx);
         device.synchronize()?;
         self.base.progress.info("Freed SD3 MMDiT transformer");
 
-        // --- Phase 3: VAE decode ---
+        // --- Phase 4: VAE decode ---
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
@@ -621,12 +730,6 @@ impl InferenceEngine for SD3Engine {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for SD3 (flow-matching), ignoring");
         }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for SD3 — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for SD3 -- ignoring mask");
-        }
 
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
@@ -662,31 +765,6 @@ impl InferenceEngine for SD3Engine {
         );
 
         (|| -> Result<GenerateResponse> {
-            // Reload transformer if it was dropped after a previous VAE decode
-            if loaded.transformer.is_none() {
-                progress.stage_start("Reloading SD3 transformer");
-                let reload_start = Instant::now();
-                let transformer = if is_quantized {
-                    let vb = quantized_var_builder::VarBuilder::from_gguf(
-                        &transformer_path,
-                        &loaded_device,
-                    )?;
-                    SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
-                } else {
-                    let vb = crate::weight_loader::load_safetensors_with_progress(
-                        std::slice::from_ref(&transformer_path),
-                        loaded_dtype,
-                        &loaded_device,
-                        "SD3 transformer",
-                        progress,
-                    )?;
-                    let vb = vb.pp("model.diffusion_model");
-                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
-                };
-                loaded.transformer = Some(transformer);
-                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
-            }
-
             if !loaded.triple_encoder.is_loaded() {
                 progress.stage_start("Reloading SD3 triple encoder");
                 let reload_start = Instant::now();
@@ -711,7 +789,132 @@ impl InferenceEngine for SD3Engine {
                 tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
             }
 
+            // --- img2img: build schedule and encode source image ---
+            let noise_dtype = if is_quantized {
+                DType::F32
+            } else {
+                loaded_dtype
+            };
+            let latent_h = height / 16 * 2;
+            let latent_w = width / 16 * 2;
             let time_shift = 3.0;
+            let num_steps = req.steps as usize;
+
+            let mut sigmas: Vec<f64> = (0..=num_steps)
+                .map(|s| s as f64 / num_steps as f64)
+                .rev()
+                .map(|t| sampling::time_snr_shift(time_shift, t))
+                .collect();
+
+            if req.source_image.is_some() {
+                let strength = req.strength;
+                let tail: Vec<f64> = sigmas.into_iter().filter(|&s| s < strength).collect();
+                sigmas = std::iter::once(strength).chain(tail).collect();
+                tracing::info!(
+                    strength,
+                    schedule = ?sigmas,
+                    remaining_steps = sigmas.len().saturating_sub(1),
+                    "img2img: built schedule from strength"
+                );
+            }
+
+            let (initial_latents, inpaint_ctx, early_vae) =
+                if let Some(ref source_bytes) = req.source_image {
+                    let start_t = req.strength;
+
+                    // Drop transformer to make room for VAE encoding
+                    loaded.transformer = None;
+                    loaded.device.synchronize()?;
+
+                    progress.stage_start("Loading VAE for encoding");
+                    let vae_stage = Instant::now();
+                    let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+                        std::slice::from_ref(&loaded.vae_vb_path),
+                        loaded_dtype,
+                        &loaded.device,
+                        "VAE",
+                        progress,
+                    )?;
+                    let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
+                    let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
+                    progress.stage_done("Loading VAE for encoding", vae_stage.elapsed());
+
+                    progress.stage_start("Encoding source image (VAE)");
+                    let encode_start = Instant::now();
+                    let source_tensor = img_utils::decode_source_image(
+                        source_bytes,
+                        req.width,
+                        req.height,
+                        img_utils::NormalizeRange::ZeroToOne,
+                        &loaded_device,
+                        loaded_dtype,
+                    )?;
+                    let dist = autoencoder.encode(&source_tensor)?;
+                    // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609
+                    let encoded = ((dist.sample()? - 0.0609)? * 1.5305)?;
+                    progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+                    // Drop VAE to free VRAM for transformer reload
+                    drop(autoencoder);
+                    loaded.device.synchronize()?;
+
+                    let noise = crate::engine::seeded_randn(
+                        seed,
+                        &[1, 16, latent_h, latent_w],
+                        &loaded_device,
+                        noise_dtype,
+                    )?;
+                    let encoded = encoded.to_dtype(noise_dtype)?;
+
+                    let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                        let mask = img_utils::decode_mask_image(
+                            mask_bytes,
+                            latent_h,
+                            latent_w,
+                            &loaded_device,
+                            noise_dtype,
+                        )?;
+                        Some(img_utils::InpaintContext {
+                            original_latents: encoded.clone(),
+                            mask,
+                            noise: noise.clone(),
+                        })
+                    } else {
+                        None
+                    };
+
+                    // Flow-matching interpolation: latent = (1 - t) * encoded + t * noise
+                    let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
+                    (Some(img), inpaint_ctx, None::<()>)
+                } else {
+                    (None, None, None)
+                };
+
+            // Reload transformer if needed (dropped for img2img VAE encoding, or prior VAE decode)
+            if loaded.transformer.is_none() {
+                progress.stage_start("Reloading SD3 transformer");
+                let reload_start = Instant::now();
+                let transformer = if is_quantized {
+                    let vb = quantized_var_builder::VarBuilder::from_gguf(
+                        &transformer_path,
+                        &loaded_device,
+                    )?;
+                    SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
+                } else {
+                    let vb = crate::weight_loader::load_safetensors_with_progress(
+                        std::slice::from_ref(&transformer_path),
+                        loaded_dtype,
+                        &loaded_device,
+                        "SD3 transformer",
+                        progress,
+                    )?;
+                    let vb = vb.pp("model.diffusion_model");
+                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
+                };
+                loaded.transformer = Some(transformer);
+                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
+            }
+
             let slg_config = if loaded.is_medium {
                 Some(SkipLayerGuidanceConfig {
                     scale: 2.5,
@@ -723,7 +926,8 @@ impl InferenceEngine for SD3Engine {
                 None
             };
 
-            let denoise_label = format!("Denoising ({} steps)", req.steps);
+            let actual_steps = sigmas.len().saturating_sub(1);
+            let denoise_label = format!("Denoising ({actual_steps} steps)");
             progress.stage_start(&denoise_label);
             let denoise_start = Instant::now();
 
@@ -735,7 +939,7 @@ impl InferenceEngine for SD3Engine {
                 transformer,
                 &y,
                 &context,
-                req.steps as usize,
+                num_steps,
                 req.guidance,
                 time_shift,
                 height,
@@ -744,11 +948,16 @@ impl InferenceEngine for SD3Engine {
                 loaded._is_quantized,
                 seed,
                 progress,
+                initial_latents.as_ref(),
+                Some(sigmas),
+                inpaint_ctx.as_ref(),
             )?;
 
             progress.stage_done(&denoise_label, denoise_start.elapsed());
             drop(context);
             drop(y);
+            drop(inpaint_ctx);
+            let _ = early_vae;
 
             // Drop transformer before VAE decode to free VRAM.
             loaded.transformer = None;

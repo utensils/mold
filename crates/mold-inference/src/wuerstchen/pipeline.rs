@@ -17,6 +17,7 @@ use crate::device::{check_memory_budget, memory_status_string, preflight_memory_
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image, update_output_metadata_size};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressEvent};
 
 /// Wuerstchen v2 prior dimensions.
@@ -41,6 +42,10 @@ const LATENT_DIM_SCALE: f64 = 42.67;
 
 /// Scale factor from Prior output spatial dims to Decoder latent dims.
 const LATENT_DIM_SCALE_DECODER: f64 = 10.67;
+
+/// VQ-GAN output scaling factor: decoder latents are multiplied by this before VQ-GAN decode.
+/// For img2img, VQ-GAN encode output is divided by this to get decoder latent space.
+const VQGAN_SCALE: f64 = 0.3764;
 
 /// Loaded Wuerstchen model components, ready for inference.
 struct LoadedWuerstchen {
@@ -666,6 +671,9 @@ impl WuerstchenEngine {
     /// `image_embeddings` is the scaled Prior output (effnet slot in WDiffNeXt).
     /// `text_embeddings` is the 1024-dim Decoder CLIP output (clip slot in WDiffNeXt).
     /// Applies decoder CFG using Diffusers-style conditioning when guidance > 1.0.
+    ///
+    /// `start_step` allows starting from a later timestep for img2img (0 = full txt2img).
+    /// `inpaint_ctx` blends preserved regions back after each step for inpainting.
     #[allow(clippy::too_many_arguments)]
     fn denoise_decoder(
         &self,
@@ -676,22 +684,23 @@ impl WuerstchenEngine {
         // TODO: use for per-step RNG reseeding to close RMSE gap vs candle reference
         _base_seed: u64,
         steps: usize,
+        start_step: usize,
         guidance: f64,
+        inpaint_ctx: Option<&img_utils::InpaintContext>,
         device: &Device,
         dtype: DType,
     ) -> Result<()> {
         let use_cfg = guidance > 1.0;
         let scheduler = DDPMWScheduler::new(steps, DDPMWSchedulerConfig::default())?;
         let timesteps = scheduler.timesteps().to_vec();
+        // Drop the final 0.0 timestep (not used for denoising), then skip start_step
+        let active_timesteps = &timesteps[start_step..timesteps.len() - 1];
 
-        let label = format!("Stage B Decoder ({} steps)", timesteps.len() - 1);
+        let label = format!("Stage B Decoder ({} steps)", active_timesteps.len());
         self.base.progress.stage_start(&label);
         let start = Instant::now();
 
-        for (step_idx, &t) in timesteps.iter().enumerate() {
-            if step_idx + 1 >= timesteps.len() {
-                break;
-            }
+        for (step_idx, &t) in active_timesteps.iter().enumerate() {
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
@@ -713,15 +722,108 @@ impl WuerstchenEngine {
 
             *latents = scheduler.step(&noise_pred, t, &*latents)?;
 
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ctx) = inpaint_ctx {
+                let noised_original = Self::ddpmw_add_noise(&ctx.original_latents, &ctx.noise, t)?;
+                *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            }
+
             self.base.progress.emit(ProgressEvent::DenoiseStep {
                 step: step_idx + 1,
-                total: timesteps.len() - 1,
+                total: active_timesteps.len(),
                 elapsed: step_start.elapsed(),
             });
         }
 
         self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
+    }
+
+    /// DDPM noise addition for Wuerstchen's continuous timesteps.
+    ///
+    /// DDPMWScheduler doesn't expose `add_noise()`, so we implement the standard
+    /// DDPM forward process: `noised = sqrt(alpha_cumprod) * original + sqrt(1 - alpha_cumprod) * noise`
+    /// using the same cosine schedule as DDPMWScheduler.
+    fn ddpmw_add_noise(original: &Tensor, noise: &Tensor, t: f64) -> Result<Tensor> {
+        // Replicate DDPMWScheduler::alpha_cumprod with default config (scaler=1.0, s=0.008)
+        let s = 0.008f64;
+        let init_alpha_cumprod = (s / (1.0 + s) * std::f64::consts::PI).cos().powi(2);
+        let alpha_cumprod = ((t + s) / (1.0 + s) * std::f64::consts::PI * 0.5)
+            .cos()
+            .powi(2)
+            / init_alpha_cumprod;
+        let alpha_cumprod = alpha_cumprod.clamp(0.0001, 0.9999);
+
+        let sqrt_alpha = alpha_cumprod.sqrt();
+        let sqrt_one_minus_alpha = (1.0 - alpha_cumprod).sqrt();
+
+        let noised = ((original * sqrt_alpha)? + (noise * sqrt_one_minus_alpha)?)?;
+        Ok(noised)
+    }
+
+    /// Prepare img2img latents: VQ-GAN encode source image, add noise at the start timestep.
+    /// Returns (noised_latents, start_step, encoded_latents, noise).
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_img2img_latents(
+        &self,
+        vqgan: &PaellaVQ,
+        source_bytes: &[u8],
+        width: u32,
+        height: u32,
+        strength: f64,
+        decoder_steps: usize,
+        seed: u64,
+        device: &Device,
+    ) -> Result<(Tensor, usize, Tensor, Tensor)> {
+        self.base
+            .progress
+            .stage_start("Encoding source image (VQ-GAN)");
+        let encode_start = Instant::now();
+
+        // VQ-GAN expects [0, 1] normalized input in F32
+        let source_tensor = img_utils::decode_source_image(
+            source_bytes,
+            width,
+            height,
+            img_utils::NormalizeRange::ZeroToOne,
+            device,
+            DType::F32,
+        )?;
+
+        let encoded = vqgan.encode(&source_tensor)?;
+        // Scale from VQ-GAN latent space to decoder latent space (inverse of decode scaling)
+        let encoded = (&encoded / VQGAN_SCALE)?;
+
+        self.base
+            .progress
+            .stage_done("Encoding source image (VQ-GAN)", encode_start.elapsed());
+
+        // Compute start step for DDPM schedule
+        let start_step = ((decoder_steps as f64) * (1.0 - strength)).round() as usize;
+        let start_step = start_step.min(decoder_steps);
+
+        // Generate deterministic noise matching decoder latent shape
+        let noise = crate::engine::seeded_randn(seed, encoded.dims(), device, DType::F32)?;
+
+        // Build scheduler to get timesteps for noise addition
+        let scheduler = DDPMWScheduler::new(decoder_steps, DDPMWSchedulerConfig::default())?;
+        let timesteps = scheduler.timesteps().to_vec();
+
+        // Add noise at the start timestep
+        let noised = if start_step < timesteps.len() - 1 {
+            Self::ddpmw_add_noise(&encoded, &noise, timesteps[start_step])?
+        } else {
+            encoded.clone()
+        };
+
+        tracing::info!(
+            start_step,
+            total_steps = decoder_steps,
+            strength,
+            "img2img: starting decoder from step {start_step}"
+        );
+
+        Ok((noised, start_step, encoded, noise))
     }
 
     /// Generate an image using sequential loading strategy.
@@ -843,70 +945,155 @@ impl WuerstchenEngine {
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
         tracing::info!("CLIP encoders processed (sequential mode)");
 
-        // --- Phase 2: Prior (Stage C) ---
-        let prior_size = std::fs::metadata(&self.base.paths.transformer)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        preflight_memory_check("Prior (Stage C)", prior_size)?;
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
+        let is_img2img = req.source_image.is_some();
 
-        self.base.progress.stage_start("Loading Prior (Stage C)");
-        let prior_start = Instant::now();
-        let prior_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[&self.base.paths.transformer],
-            dtype,
-            &device,
-            "Wuerstchen Prior",
-            &self.base.progress,
-        )?;
-        let prior = WPrior::new(
-            PRIOR_C_IN,
-            PRIOR_C,
-            PRIOR_C_COND,
-            PRIOR_C_R,
-            PRIOR_DEPTH,
-            PRIOR_NHEAD,
-            false,
-            prior_vb,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
+        // --- Phase 2: img2img path (VQ-GAN encode, skip Prior) or txt2img path (Prior) ---
+        let (image_embeddings, mut decoder_latents, decoder_start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                self.base
+                    .progress
+                    .info("img2img mode: skipping Prior, encoding source via VQ-GAN");
 
-        // Stage C latent dimensions: 42x compression
-        let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        device.set_seed(seed)?;
-        let mut prior_latents =
-            Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?
-                .to_dtype(dtype)?;
-        Self::debug_tensor_stats("prior_latents_init", &prior_latents);
+                // Load VQ-GAN for encoding
+                self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
+                let vqgan_start = Instant::now();
+                let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
+                    &[&self.base.paths.vae],
+                    DType::F32,
+                    &device,
+                    "VQ-GAN",
+                    &self.base.progress,
+                )?;
+                let vqgan = PaellaVQ::new(vqgan_vb)?;
+                self.base
+                    .progress
+                    .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
 
-        self.denoise_prior(
-            &prior,
-            &prior_text_embeddings,
-            &mut prior_latents,
-            seed,
-            prior_steps,
-            prior_guidance,
-            &device,
-            dtype,
-        )?;
+                let (noised, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &vqgan,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    decoder_steps,
+                    seed,
+                    &device,
+                )?;
 
-        // Scale prior output: convert from Prior latent space to Decoder conditioning space
-        Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
-        prior_latents = ((prior_latents * 42.)? - 1.)?;
-        Self::debug_tensor_stats("image_embeddings", &prior_latents);
+                // Build inpaint context if mask provided
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let (_, _, enc_h, enc_w) = encoded.dims4()?;
+                    let mask = img_utils::decode_mask_image(
+                        mask_bytes,
+                        enc_h,
+                        enc_w,
+                        &device,
+                        DType::F32,
+                    )?;
+                    Some(img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
 
-        drop(prior);
+                // Use zeros for effnet conditioning (no Prior output)
+                // The Decoder will rely on text conditioning + noised latents
+                let (_, _, _enc_h, _enc_w) = noised.dims4()?;
+                let prior_latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let prior_latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let image_embeddings = Tensor::zeros(
+                    (1, PRIOR_C_IN, prior_latent_h, prior_latent_w),
+                    DType::F32,
+                    &device,
+                )?;
+
+                drop(vqgan);
+                device.synchronize()?;
+                self.base
+                    .progress
+                    .info("Freed VQ-GAN (will reload for decode)");
+
+                Self::debug_tensor_stats("decoder_latents_init", &noised);
+                (image_embeddings, noised, start_step, inpaint_ctx)
+            } else {
+                // --- txt2img: run Prior (Stage C) ---
+                let prior_size = std::fs::metadata(&self.base.paths.transformer)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                preflight_memory_check("Prior (Stage C)", prior_size)?;
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
+
+                self.base.progress.stage_start("Loading Prior (Stage C)");
+                let prior_start = Instant::now();
+                let prior_vb = crate::weight_loader::load_safetensors_with_progress(
+                    &[&self.base.paths.transformer],
+                    dtype,
+                    &device,
+                    "Wuerstchen Prior",
+                    &self.base.progress,
+                )?;
+                let prior = WPrior::new(
+                    PRIOR_C_IN,
+                    PRIOR_C,
+                    PRIOR_C_COND,
+                    PRIOR_C_R,
+                    PRIOR_DEPTH,
+                    PRIOR_NHEAD,
+                    false,
+                    prior_vb,
+                )?;
+                self.base
+                    .progress
+                    .stage_done("Loading Prior (Stage C)", prior_start.elapsed());
+
+                // Stage C latent dimensions: 42x compression
+                let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                device.set_seed(seed)?;
+                let mut prior_latents =
+                    Tensor::randn(0f32, 1f32, (1, PRIOR_C_IN, latent_h, latent_w), &device)?
+                        .to_dtype(dtype)?;
+                Self::debug_tensor_stats("prior_latents_init", &prior_latents);
+
+                self.denoise_prior(
+                    &prior,
+                    &prior_text_embeddings,
+                    &mut prior_latents,
+                    seed,
+                    prior_steps,
+                    prior_guidance,
+                    &device,
+                    dtype,
+                )?;
+
+                // Scale prior output: convert from Prior latent space to Decoder conditioning space
+                Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
+                prior_latents = ((prior_latents * 42.)? - 1.)?;
+                Self::debug_tensor_stats("image_embeddings", &prior_latents);
+
+                drop(prior);
+                device.synchronize()?;
+                self.base.progress.info("Freed Prior (Stage C)");
+
+                // Decoder latent dims derived from prior output spatial dims
+                let prior_latents = prior_latents.to_dtype(DType::F32)?;
+                let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+                let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+                device.set_seed(seed.wrapping_add(1))?;
+                let decoder_latents =
+                    Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?;
+                Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
+
+                (prior_latents, decoder_latents, 0, None)
+            };
         drop(prior_text_embeddings);
-        device.synchronize()?;
-        self.base.progress.info("Freed Prior (Stage C)");
 
         // --- Phase 3: Decoder (Stage B) ---
-        // 3b. Load Decoder (Stage B) model and denoise
         let decoder_size = std::fs::metadata(&decoder_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -939,38 +1126,39 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Loading Decoder (Stage B)", dec_start.elapsed());
 
-        // Decoder latent dims derived from prior output spatial dims
-        // Cast prior output and text embeddings to F32 for Decoder
-        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+        // Cast text embeddings to F32 for Decoder
         let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
-        let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        device.set_seed(seed.wrapping_add(1))?;
-        let mut decoder_latents = Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &device)?;
-        Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         self.denoise_decoder(
             &decoder,
-            &prior_latents,
+            &image_embeddings,
             &decoder_text_embeddings,
             &mut decoder_latents,
             seed,
             decoder_steps,
+            decoder_start_step,
             decoder_guidance,
+            inpaint_ctx.as_ref(),
             &device,
             DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
         drop(decoder);
-        drop(prior_latents);
+        drop(image_embeddings);
         drop(decoder_text_embeddings);
+        drop(inpaint_ctx);
         device.synchronize()?;
         self.base.progress.info("Freed Decoder (Stage B)");
 
         // --- Phase 4: VQ-GAN decode (Stage A) ---
         // VQ-GAN uses F32 for pixel-space decoding regardless of model dtype
-        self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
+        let vqgan_load_label = if is_img2img {
+            "Reloading VQ-GAN (Stage A)"
+        } else {
+            "Loading VQ-GAN (Stage A)"
+        };
+        self.base.progress.stage_start(vqgan_load_label);
         let vqgan_start = Instant::now();
         let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
             &[&self.base.paths.vae],
@@ -982,12 +1170,12 @@ impl WuerstchenEngine {
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
-            .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
+            .stage_done(vqgan_load_label, vqgan_start.elapsed());
 
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
-        let img = vqgan.decode(&(&decoder_latents * 0.3764)?)?;
+        let img = vqgan.decode(&(&decoder_latents * VQGAN_SCALE)?)?;
         Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
         Self::debug_tensor_stats("image_postprocess", &img);
@@ -1037,12 +1225,6 @@ impl InferenceEngine for WuerstchenEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for Wuerstchen, ignoring");
-        }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for Wuerstchen — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for Wuerstchen -- ignoring mask");
         }
 
         if self.base.load_strategy == LoadStrategy::Sequential {
@@ -1094,49 +1276,103 @@ impl InferenceEngine for WuerstchenEngine {
         Self::debug_tensor_stats("prior_text_embeddings", &prior_text_embeddings);
         Self::debug_tensor_stats("decoder_text_embeddings", &decoder_text_embeddings);
 
-        // 3. Stage C (Prior): denoise in highly compressed latent space
-        let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
-        loaded.device.set_seed(seed)?;
-        let mut prior_latents = Tensor::randn(
-            0f32,
-            1f32,
-            (1, PRIOR_C_IN, latent_h, latent_w),
-            &loaded.device,
-        )?
-        .to_dtype(loaded.dtype)?;
-        Self::debug_tensor_stats("prior_latents_init", &prior_latents);
+        // 2. Prepare latents: img2img (VQ-GAN encode, skip Prior) or txt2img (Prior)
+        let (image_embeddings, mut decoder_latents, decoder_start_step, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                self.base
+                    .progress
+                    .info("img2img mode: skipping Prior, encoding source via VQ-GAN");
 
-        let prior = loaded
-            .prior
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Prior not loaded"))?;
-        self.denoise_prior(
-            prior,
-            &prior_text_embeddings,
-            &mut prior_latents,
-            seed,
-            prior_steps,
-            prior_guidance,
-            &loaded.device,
-            loaded.dtype,
-        )?;
+                let (noised, start_step, encoded, noise) = self.prepare_img2img_latents(
+                    &loaded.vqgan,
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    req.strength,
+                    decoder_steps,
+                    seed,
+                    &loaded.device,
+                )?;
 
-        // Scale prior output: convert from Prior latent space to Decoder conditioning space
-        Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
-        prior_latents = ((prior_latents * 42.)? - 1.)?;
-        Self::debug_tensor_stats("image_embeddings", &prior_latents);
+                // Build inpaint context if mask provided
+                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                    let (_, _, enc_h, enc_w) = encoded.dims4()?;
+                    let mask = img_utils::decode_mask_image(
+                        mask_bytes,
+                        enc_h,
+                        enc_w,
+                        &loaded.device,
+                        DType::F32,
+                    )?;
+                    Some(img_utils::InpaintContext {
+                        original_latents: encoded,
+                        mask,
+                        noise,
+                    })
+                } else {
+                    None
+                };
 
-        // 4. Stage B (Decoder): decode prior latents to VQ-GAN latent space
-        // Cast prior output and text embeddings to F32 for Decoder (F16 overflows)
-        let prior_latents = prior_latents.to_dtype(DType::F32)?;
+                // Use zeros for effnet conditioning (no Prior output)
+                let prior_latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let prior_latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let image_embeddings = Tensor::zeros(
+                    (1, PRIOR_C_IN, prior_latent_h, prior_latent_w),
+                    DType::F32,
+                    &loaded.device,
+                )?;
+
+                Self::debug_tensor_stats("decoder_latents_init", &noised);
+                (image_embeddings, noised, start_step, inpaint_ctx)
+            } else {
+                // txt2img: run Stage C (Prior) to generate image embeddings
+                let latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                let latent_w = (width as f64 / LATENT_DIM_SCALE).ceil() as usize;
+                loaded.device.set_seed(seed)?;
+                let mut prior_latents = Tensor::randn(
+                    0f32,
+                    1f32,
+                    (1, PRIOR_C_IN, latent_h, latent_w),
+                    &loaded.device,
+                )?
+                .to_dtype(loaded.dtype)?;
+                Self::debug_tensor_stats("prior_latents_init", &prior_latents);
+
+                let prior = loaded
+                    .prior
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Prior not loaded"))?;
+                self.denoise_prior(
+                    prior,
+                    &prior_text_embeddings,
+                    &mut prior_latents,
+                    seed,
+                    prior_steps,
+                    prior_guidance,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+
+                // Scale prior output: convert from Prior latent space to Decoder conditioning space
+                Self::debug_tensor_stats("prior_latents_denoised", &prior_latents);
+                prior_latents = ((prior_latents * 42.)? - 1.)?;
+                Self::debug_tensor_stats("image_embeddings", &prior_latents);
+
+                // Stage B (Decoder): decode prior latents to VQ-GAN latent space
+                let prior_latents = prior_latents.to_dtype(DType::F32)?;
+                let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+                let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
+                loaded.device.set_seed(seed.wrapping_add(1))?;
+                let decoder_latents =
+                    Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
+                Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
+
+                (prior_latents, decoder_latents, 0, None)
+            };
+
+        // 3. Stage B (Decoder): denoise
+        // Cast text embeddings to F32 for Decoder (F16 overflows)
         let decoder_text_embeddings = decoder_text_embeddings.to_dtype(DType::F32)?;
-        let stage_b_h = (prior_latents.dim(2)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        let stage_b_w = (prior_latents.dim(3)? as f64 * LATENT_DIM_SCALE_DECODER) as usize;
-        loaded.device.set_seed(seed.wrapping_add(1))?;
-        let mut decoder_latents =
-            Tensor::randn(0f32, 1f32, (1, 4, stage_b_h, stage_b_w), &loaded.device)?;
-        Self::debug_tensor_stats("decoder_latents_init", &decoder_latents);
 
         let decoder = loaded
             .decoder
@@ -1144,18 +1380,21 @@ impl InferenceEngine for WuerstchenEngine {
             .ok_or_else(|| anyhow::anyhow!("Decoder not loaded"))?;
         self.denoise_decoder(
             decoder,
-            &prior_latents,
+            &image_embeddings,
             &decoder_text_embeddings,
             &mut decoder_latents,
             seed,
             decoder_steps,
+            decoder_start_step,
             decoder_guidance,
+            inpaint_ctx.as_ref(),
             &loaded.device,
             DType::F32,
         )?;
         Self::debug_tensor_stats("decoder_latents_denoised", &decoder_latents);
 
         // Drop Prior and Decoder before VQ-GAN decode to free VRAM.
+        drop(inpaint_ctx);
         let _ = loaded;
         let loaded = self.base.loaded.as_mut().unwrap();
         loaded.prior = None;
@@ -1165,11 +1404,11 @@ impl InferenceEngine for WuerstchenEngine {
         let _ = loaded;
         let loaded = self.base.loaded.as_ref().unwrap();
 
-        // 5. Stage A (VQ-GAN): decode to pixel space
+        // 4. Stage A (VQ-GAN): decode to pixel space
         self.base.progress.stage_start("VQ-GAN decode");
         let decode_start = Instant::now();
         Self::debug_tensor_stats("decoder_latents_pre_vq", &decoder_latents);
-        let img = loaded.vqgan.decode(&(&decoder_latents * 0.3764)?)?;
+        let img = loaded.vqgan.decode(&(&decoder_latents * VQGAN_SCALE)?)?;
         Self::debug_tensor_stats("image_pre_postprocess", &img);
         let img = img.clamp(0f32, 1f32)?;
         Self::debug_tensor_stats("image_postprocess", &img);
@@ -1179,7 +1418,7 @@ impl InferenceEngine for WuerstchenEngine {
             .progress
             .stage_done("VQ-GAN decode", decode_start.elapsed());
 
-        // 6. Encode to image format
+        // 5. Encode to image format
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
         // due to the 42x compression rounding in the cascade.
         let (_, actual_h, actual_w) = img.dims3()?;

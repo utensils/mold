@@ -1,10 +1,9 @@
-//! Qwen-Image VAE decoder for single-image inference.
+//! Qwen-Image VAE encoder and decoder for single-image inference.
 //!
 //! The upstream Qwen-Image VAE is a 3D causal autoencoder fine-tuned from Wan VAE.
-//! For still-image generation (`T = 1`), the decoder can be specialized to a 2D path:
-//! the causal 3D convolutions only see the current frame and the temporal upsample
-//! path is inactive on the first frame. This lets us decode image latents without
-//! porting the full video encoder stack.
+//! For still-image generation (`T = 1`), the encoder/decoder can be specialized to
+//! a 2D path: the causal 3D convolutions only see the current frame and the temporal
+//! upsample/downsample paths are inactive on the first frame.
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{conv2d, Conv2d, Conv2dConfig, Module, VarBuilder};
@@ -21,6 +20,7 @@ const LATENTS_STD: [f64; 16] = [
 ];
 
 const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
+const LATENT_CHANNELS: usize = 16;
 const NUM_RES_BLOCKS: usize = 2;
 
 /// Load a 5D causal conv3d weight as a 2D conv by extracting the last temporal slice.
@@ -291,6 +291,173 @@ impl Module for QwenImageUpBlock2d {
     }
 }
 
+/// Load a 5D causal conv3d weight as a stride-2 Conv2d (for encoder downsampling).
+///
+/// Same temporal slice extraction as `load_3d_conv_as_2d`, but with stride=2 and
+/// asymmetric padding (pad_with_zeros on right/bottom) to match PyTorch's behavior
+/// for even-sized kernels with stride-2 downsampling.
+fn load_3d_conv_as_2d_stride2(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    vb: VarBuilder,
+) -> Result<Conv2d> {
+    let ws = vb.get(
+        (
+            out_channels,
+            in_channels,
+            kernel_size,
+            kernel_size,
+            kernel_size,
+        ),
+        "weight",
+    )?;
+    let ws = ws.i((.., .., kernel_size - 1, .., ..))?.contiguous()?;
+    let bias = vb.get(out_channels, "bias").ok();
+    Ok(Conv2d::new(
+        ws,
+        bias,
+        Conv2dConfig {
+            padding: 0,
+            stride: 2,
+            ..Default::default()
+        },
+    ))
+}
+
+/// Spatial downsample: asymmetric zero-pad → stride-2 Conv2d.
+///
+/// Mirrors `QwenImageUpsample2d` but in the downsampling direction.
+/// The time_conv weights in the safetensors are for video temporal downsampling
+/// and are correctly skipped for single-frame (T=1) image generation.
+#[derive(Debug, Clone)]
+struct QwenImageDownsample2d {
+    conv: Conv2d,
+}
+
+impl QwenImageDownsample2d {
+    fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            conv: load_3d_conv_as_2d_stride2(in_dim, out_dim, 3, vb.pp("resample").pp("1"))?,
+        })
+    }
+}
+
+impl Module for QwenImageDownsample2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Asymmetric padding: pad right and bottom by 1 to match PyTorch stride-2
+        // conv behavior with kernel_size=3 (same as Flux VAE Downsample).
+        let x = x.pad_with_zeros(D::Minus1, 0, 1)?;
+        let x = x.pad_with_zeros(D::Minus2, 0, 1)?;
+        x.apply(&self.conv)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QwenImageDownBlock2d {
+    resnets: Vec<QwenImageResidualBlock2d>,
+    downsample: Option<QwenImageDownsample2d>,
+}
+
+impl QwenImageDownBlock2d {
+    fn new(in_dim: usize, out_dim: usize, add_downsample: bool, vb: VarBuilder) -> Result<Self> {
+        let mut resnets = Vec::with_capacity(NUM_RES_BLOCKS);
+        let mut current_dim = in_dim;
+        for i in 0..NUM_RES_BLOCKS {
+            resnets.push(QwenImageResidualBlock2d::new(
+                current_dim,
+                out_dim,
+                vb.pp("resnets").pp(i),
+            )?);
+            current_dim = out_dim;
+        }
+        Ok(Self {
+            resnets,
+            downsample: if add_downsample {
+                Some(QwenImageDownsample2d::new(
+                    out_dim,
+                    out_dim,
+                    vb.pp("downsamplers").pp("0"),
+                )?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+impl Module for QwenImageDownBlock2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let mut x = x.clone();
+        for resnet in &self.resnets {
+            x = x.apply(resnet)?;
+        }
+        if let Some(ds) = &self.downsample {
+            x = x.apply(ds)?;
+        }
+        Ok(x)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QwenImageEncoder2d {
+    conv_in: Conv2d,
+    down_blocks: Vec<QwenImageDownBlock2d>,
+    mid_block: QwenImageMidBlock2d,
+    norm_out: QwenImageRmsNorm2d,
+    conv_out: Conv2d,
+}
+
+impl QwenImageEncoder2d {
+    fn new(vb: VarBuilder) -> Result<Self> {
+        let mut down_blocks = Vec::with_capacity(BLOCK_OUT_CHANNELS.len());
+        let mut current_dim = BLOCK_OUT_CHANNELS[0];
+        for (i, &out_dim) in BLOCK_OUT_CHANNELS.iter().enumerate() {
+            let add_downsample = i < BLOCK_OUT_CHANNELS.len() - 1;
+            down_blocks.push(QwenImageDownBlock2d::new(
+                current_dim,
+                out_dim,
+                add_downsample,
+                vb.pp("down_blocks").pp(i),
+            )?);
+            current_dim = out_dim;
+        }
+        Ok(Self {
+            conv_in: load_3d_conv_as_2d(3, BLOCK_OUT_CHANNELS[0], 3, 1, vb.pp("conv_in"))?,
+            down_blocks,
+            mid_block: QwenImageMidBlock2d::new(
+                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
+                vb.pp("mid_block"),
+            )?,
+            norm_out: QwenImageRmsNorm2d::for_feature(
+                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
+                vb.pp("norm_out"),
+            )?,
+            // Output: 2 * LATENT_CHANNELS for mean + logvar
+            conv_out: load_3d_conv_as_2d(
+                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
+                2 * LATENT_CHANNELS,
+                3,
+                1,
+                vb.pp("conv_out"),
+            )?,
+        })
+    }
+}
+
+impl Module for QwenImageEncoder2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let mut x = x.apply(&self.conv_in)?;
+        for block in &self.down_blocks {
+            x = x.apply(block)?;
+        }
+        x.apply(&self.mid_block)?
+            .apply(&self.norm_out)?
+            .apply(&candle_nn::Activation::Swish)?
+            .apply(&self.conv_out)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct QwenImageDecoder2d {
     conv_in: Conv2d,
@@ -346,8 +513,10 @@ impl Module for QwenImageDecoder2d {
     }
 }
 
-/// Qwen-Image VAE decoder with per-channel latent denormalization.
+/// Qwen-Image VAE with per-channel latent normalization.
 pub(crate) struct QwenImageVae {
+    encoder: QwenImageEncoder2d,
+    quant_conv: Conv2d,
     post_quant_conv: Conv2d,
     decoder: QwenImageDecoder2d,
     latents_mean: Tensor,
@@ -369,15 +538,26 @@ impl QwenImageVae {
             progress,
         )
         .map_err(candle_core::Error::msg)?;
-        let post_quant_conv = load_3d_conv1x1_as_2d(16, 16, vb.pp("post_quant_conv"))?;
+        let encoder = QwenImageEncoder2d::new(vb.pp("encoder"))?;
+        let quant_conv = load_3d_conv1x1_as_2d(
+            2 * LATENT_CHANNELS,
+            2 * LATENT_CHANNELS,
+            vb.pp("quant_conv"),
+        )?;
+        let post_quant_conv =
+            load_3d_conv1x1_as_2d(LATENT_CHANNELS, LATENT_CHANNELS, vb.pp("post_quant_conv"))?;
         let decoder = QwenImageDecoder2d::new(vb.pp("decoder"))?;
 
         let mean_vec: Vec<f32> = LATENTS_MEAN.iter().map(|&v| v as f32).collect();
         let std_vec: Vec<f32> = LATENTS_STD.iter().map(|&v| v as f32).collect();
-        let latents_mean = Tensor::from_vec(mean_vec, (1, 16, 1, 1), device)?.to_dtype(dtype)?;
-        let latents_std = Tensor::from_vec(std_vec, (1, 16, 1, 1), device)?.to_dtype(dtype)?;
+        let latents_mean =
+            Tensor::from_vec(mean_vec, (1, LATENT_CHANNELS, 1, 1), device)?.to_dtype(dtype)?;
+        let latents_std =
+            Tensor::from_vec(std_vec, (1, LATENT_CHANNELS, 1, 1), device)?.to_dtype(dtype)?;
 
         Ok(Self {
+            encoder,
+            quant_conv,
             post_quant_conv,
             decoder,
             latents_mean,
@@ -391,6 +571,30 @@ impl QwenImageVae {
             .broadcast_add(&self.latents_mean)?;
         let denormed = denormed.apply(&self.post_quant_conv)?;
         denormed.apply(&self.decoder)
+    }
+
+    /// Encode a pixel-space image [1, 3, H, W] (in [0, 1]) to normalized latents.
+    ///
+    /// Applies the encoder, quant_conv, diagonal Gaussian sampling (mean + logvar → z),
+    /// then per-channel normalization (inverse of decode's denormalization):
+    ///   `normed = (z - mean) / std`
+    pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
+        let h = xs.apply(&self.encoder)?.apply(&self.quant_conv)?;
+
+        // Diagonal Gaussian: split mean/logvar along channel dim, sample z
+        let c2 = h.dim(1)?;
+        let c = c2 / 2;
+        let mean = h.narrow(1, 0, c)?;
+        let logvar = h.narrow(1, c, c)?.clamp(-30.0, 20.0)?;
+        let std = (&logvar * 0.5)?.exp()?;
+        let z = (&mean + &std.broadcast_mul(&mean.randn_like(0., 1.)?)?)?;
+
+        // Per-channel normalization (inverse of decode's denormalization)
+        let normed = z
+            .broadcast_sub(&self.latents_mean)?
+            .broadcast_div(&self.latents_std)?;
+
+        Ok(normed)
     }
 }
 

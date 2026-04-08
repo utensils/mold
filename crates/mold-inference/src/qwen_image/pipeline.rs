@@ -38,6 +38,7 @@ use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
+use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 
@@ -360,6 +361,54 @@ impl QwenImageEngine {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Encode a source image through the VAE with GPU→CPU OOM fallback.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_vae_with_fallback(
+        source_bytes: &[u8],
+        width: u32,
+        height: u32,
+        vae: &QwenImageVae,
+        vae_device: &Device,
+        sync_device: &Device,
+        progress: &ProgressReporter,
+        load_cpu_vae: impl FnOnce() -> Result<QwenImageVae>,
+    ) -> Result<Tensor> {
+        progress.stage_start("Encoding source image (VAE)");
+        let encode_start = Instant::now();
+
+        // Qwen-Image VAE expects [0, 1] normalized pixels
+        let source_tensor = img_utils::decode_source_image(
+            source_bytes,
+            width,
+            height,
+            img_utils::NormalizeRange::ZeroToOne,
+            vae_device,
+            DType::F32,
+        )?;
+
+        let result = match vae.encode(&source_tensor) {
+            Ok(encoded) => Ok(encoded),
+            Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
+                progress.info("VAE encode OOM on GPU — retrying on CPU");
+                sync_device.synchronize()?;
+                let cpu_vae = load_cpu_vae()?;
+                let cpu_source = img_utils::decode_source_image(
+                    source_bytes,
+                    width,
+                    height,
+                    img_utils::NormalizeRange::ZeroToOne,
+                    &Device::Cpu,
+                    DType::F32,
+                )?;
+                cpu_vae.encode(&cpu_source).map_err(Into::into)
+            }
+            Err(e) => Err(e.into()),
+        };
+
+        progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+        result
     }
 
     fn choose_text_encoder_source(
@@ -1393,28 +1442,112 @@ impl QwenImageEngine {
         let vae_downsample = 8;
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
+        let is_img2img = req.source_image.is_some();
+
+        // For img2img, load VAE early to encode source image before transformer
+        let (encoded_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            let free_for_encode = free_vram_bytes().unwrap_or(0);
+            let encode_on_gpu = should_use_gpu(
+                device.is_cuda(),
+                device.is_metal(),
+                free_for_encode,
+                VAE_DECODE_VRAM_THRESHOLD,
+            );
+            let encode_device = if encode_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let encode_label = if encode_on_gpu { "GPU" } else { "CPU" };
+
+            let vae_label = format!("Loading Qwen-Image VAE ({}, F32) for encode", encode_label);
+            self.base.progress.stage_start(&vae_label);
+            let vae_start = Instant::now();
+            let encode_vae = self.load_vae(&encode_device, DType::F32)?;
+            self.base
+                .progress
+                .stage_done(&vae_label, vae_start.elapsed());
+
+            let encoded = Self::encode_vae_with_fallback(
+                source_bytes,
+                req.width,
+                req.height,
+                &encode_vae,
+                &encode_device,
+                &device,
+                &self.base.progress,
+                || self.load_vae(&Device::Cpu, DType::F32),
+            )?;
+            let encoded = encoded.to_device(&device)?.to_dtype(dtype)?;
+
+            // Build inpaint context if mask provided
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let noise = crate::engine::seeded_randn(
+                    seed,
+                    &[1, 16, latent_h, latent_w],
+                    &device,
+                    dtype,
+                )?;
+                let mask =
+                    img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, &device, dtype)?;
+                Some(img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise,
+                })
+            } else {
+                None
+            };
+
+            // Drop early VAE to free memory before transformer load
+            drop(encode_vae);
+            device.synchronize()?;
+
+            tracing::info!(
+                strength = req.strength,
+                "img2img: encoded source image to latents"
+            );
+
+            (Some(encoded), inpaint_ctx)
+        } else {
+            (None, None)
+        };
 
         let image_seq_len = image_seq_len(latent_h, latent_w, transformer_cfg.patch_size);
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+        let (mut scheduler, num_steps) = if is_img2img {
+            QwenImageScheduler::new_img2img(req.steps as usize, image_seq_len, req.strength)
+        } else {
+            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+            let n = sched.num_steps();
+            (sched, n)
+        };
 
-        // Initial noise scaled by sigma[0], matching the official Qwen diffusers path.
-        let mut latents =
-            crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
-        latents = (latents * scheduler.initial_sigma())?;
+        // Build initial latents
+        let mut latents = if let Some(encoded) = &encoded_latents {
+            // Flow-matching img2img: latent = (1 - strength) * encoded + strength * noise
+            let noise =
+                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+            let start_t = req.strength;
+            ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
+        } else {
+            let noise =
+                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
+            (noise * scheduler.initial_sigma())?
+        };
 
-        let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
         if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
             eprintln!(
-                "[qwen-debug] cfg={} guidance={:.1} image_seq_len={} sigmas[0]={:.4} sigmas[last]={:.4}",
+                "[qwen-debug] cfg={} guidance={:.1} image_seq_len={} sigmas[0]={:.4} sigmas[last]={:.4} img2img={}",
                 use_cfg,
                 req.guidance,
                 image_seq_len,
                 scheduler.sigmas[0],
-                scheduler.sigmas[num_steps],
+                scheduler.sigmas[scheduler.sigmas.len() - 1],
+                is_img2img,
             );
         }
 
@@ -1498,6 +1631,16 @@ impl QwenImageEngine {
                 Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
             }
             latents = scheduler.step(&noise_pred, &latents)?;
+
+            // Inpainting: blend preserved regions back at current noise level
+            if let Some(ref ctx) = inpaint_ctx {
+                let sigma_next = scheduler.sigmas[step + 1];
+                let noised_original =
+                    ((&ctx.original_latents * (1.0 - sigma_next))? + (&ctx.noise * sigma_next)?)?;
+                // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
+                latents = ((&ctx.mask * &latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            }
+
             if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
                 let n = latents
                     .ne(&latents)?
@@ -1619,12 +1762,6 @@ impl InferenceEngine for QwenImageEngine {
             tracing::warn!(
                 "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
             );
-        }
-        if req.source_image.is_some() {
-            tracing::warn!("img2img not yet supported for Qwen-Image — generating from text only");
-        }
-        if req.mask_image.is_some() {
-            tracing::warn!("inpainting not yet supported for Qwen-Image -- ignoring mask");
         }
 
         // Sequential mode: load-use-drop each component
@@ -1771,22 +1908,102 @@ impl InferenceEngine for QwenImageEngine {
         let vae_downsample = 8;
         let latent_h = height / vae_downsample;
         let latent_w = width / vae_downsample;
+        let is_img2img = req.source_image.is_some();
 
-        // 4. Initialize scheduler using the official Qwen diffusers FlowMatch schedule.
+        // For img2img, encode source image using the pre-loaded VAE
+        let (encoded_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+            progress.stage_start("Encoding source image (VAE)");
+            let encode_start = Instant::now();
+            let source_tensor = img_utils::decode_source_image(
+                source_bytes,
+                req.width,
+                req.height,
+                img_utils::NormalizeRange::ZeroToOne,
+                &loaded.vae_device,
+                DType::F32,
+            )?;
+            let encoded = match loaded.vae.encode(&source_tensor) {
+                Ok(enc) => enc,
+                Err(e) if loaded.vae_device.is_cuda() && Self::is_oom_error(&e) => {
+                    progress.info("VAE encode OOM on GPU — retrying on CPU");
+                    loaded.device.synchronize()?;
+                    let cpu_vae =
+                        QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)?;
+                    let cpu_source = img_utils::decode_source_image(
+                        source_bytes,
+                        req.width,
+                        req.height,
+                        img_utils::NormalizeRange::ZeroToOne,
+                        &Device::Cpu,
+                        DType::F32,
+                    )?;
+                    cpu_vae.encode(&cpu_source)?
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let encoded = encoded.to_device(&loaded.device)?.to_dtype(loaded.dtype)?;
+            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+
+            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
+                let noise = crate::engine::seeded_randn(
+                    seed,
+                    &[1, 16, latent_h, latent_w],
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                let mask = img_utils::decode_mask_image(
+                    mask_bytes,
+                    latent_h,
+                    latent_w,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                Some(img_utils::InpaintContext {
+                    original_latents: encoded.clone(),
+                    mask,
+                    noise,
+                })
+            } else {
+                None
+            };
+
+            (Some(encoded), inpaint_ctx)
+        } else {
+            (None, None)
+        };
+
+        // 4. Initialize scheduler
         let image_seq_len = image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size);
-        let mut scheduler = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+        let (mut scheduler, num_steps) = if is_img2img {
+            QwenImageScheduler::new_img2img(req.steps as usize, image_seq_len, req.strength)
+        } else {
+            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+            let n = sched.num_steps();
+            (sched, n)
+        };
 
-        // 5. Generate initial noise scaled by sigma[0].
-        let mut latents = crate::engine::seeded_randn(
-            seed,
-            &[1, 16, latent_h, latent_w],
-            &loaded.device,
-            loaded.dtype,
-        )?;
-        latents = (latents * scheduler.initial_sigma())?;
+        // 5. Build initial latents
+        let mut latents = if let Some(encoded) = &encoded_latents {
+            // Flow-matching img2img: latent = (1 - strength) * encoded + strength * noise
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            let start_t = req.strength;
+            ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
+        } else {
+            let noise = crate::engine::seeded_randn(
+                seed,
+                &[1, 16, latent_h, latent_w],
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            (noise * scheduler.initial_sigma())?
+        };
 
         // 7. Denoising loop
-        let num_steps = req.steps as usize;
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -1873,6 +2090,16 @@ impl InferenceEngine for QwenImageEngine {
                     Self::debug_tensor_stats("noise_pred", &noise_pred);
                 }
                 latents = scheduler.step(&noise_pred, &latents)?;
+
+                // Inpainting: blend preserved regions back at current noise level
+                if let Some(ref ctx) = inpaint_ctx {
+                    let sigma_next = scheduler.sigmas[step + 1];
+                    let noised_original = ((&ctx.original_latents * (1.0 - sigma_next))?
+                        + (&ctx.noise * sigma_next)?)?;
+                    latents =
+                        ((&ctx.mask * &latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                }
+
                 progress.emit(ProgressEvent::DenoiseStep {
                     step: step + 1,
                     total: num_steps,

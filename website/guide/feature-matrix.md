@@ -9,7 +9,7 @@ features today?
 | ----------------------------- | ------------------- |
 | LoRA adapters                 | FLUX.1              |
 | ControlNet                    | SD 1.5              |
-| img2img at 1024 output        | SDXL or FLUX.1      |
+| img2img at 1024 output        | FLUX.1 or SDXL      |
 | broadest feature surface      | SD 1.5 or SDXL      |
 | best prompt-following quality | FLUX.1 or SD 3.5    |
 
@@ -20,11 +20,11 @@ features today?
 | FLUX.1        | Yes     | Yes        |
 | SDXL          | Yes     | Yes        |
 | SD 1.5        | Yes     | Yes        |
-| SD 3.5        | Not yet | Not yet    |
-| Z-Image       | Not yet | Not yet    |
-| Flux.2 Klein  | Not yet | Not yet    |
-| Wuerstchen v2 | Not yet | Not yet    |
-| Qwen-Image    | Not yet | Not yet    |
+| SD 3.5        | Yes     | Yes        |
+| Z-Image       | Yes     | Yes        |
+| Flux.2 Klein  | Yes     | Yes        |
+| Wuerstchen v2 | Yes     | Yes        |
+| Qwen-Image    | Yes     | Yes        |
 | LTX Video     | Not yet | Not yet    |
 
 ## Control and Adapters
