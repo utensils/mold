@@ -2013,6 +2013,7 @@ impl InferenceEngine for QwenImageEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Shape;
     use std::path::PathBuf;
 
     fn resolved_text_encoder(is_gguf: bool, auto_use_gpu: bool) -> ResolvedQwen2TextEncoder {
@@ -2027,6 +2028,135 @@ mod tests {
             size_bytes: 0,
             auto_use_gpu,
         }
+    }
+
+    fn tensor_values_u8(t: &Tensor) -> Vec<u8> {
+        t.flatten_all()
+            .unwrap()
+            .to_vec1::<u8>()
+            .expect("u8 tensor values")
+    }
+
+    fn tensor_values_f32(t: &Tensor) -> Vec<f32> {
+        t.flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .expect("f32 tensor values")
+    }
+
+    #[test]
+    fn safetensors_is_fp8_uses_filename_hint() {
+        assert!(safetensors_is_fp8(Path::new(
+            "/tmp/qwen-image-fp8.safetensors"
+        )));
+        assert!(!safetensors_is_fp8(Path::new(
+            "/tmp/qwen-image.safetensors"
+        )));
+    }
+
+    #[test]
+    fn text_encoder_is_fp8_uses_filename_hint() {
+        assert!(text_encoder_is_fp8(&[PathBuf::from(
+            "/tmp/qwen2-text-encoder-fp8-00001-of-00002.safetensors"
+        )]));
+        assert!(!text_encoder_is_fp8(&[PathBuf::from(
+            "/tmp/qwen2-text-encoder-00001-of-00002.safetensors"
+        )]));
+    }
+
+    #[test]
+    fn cached_prompt_conditioning_roundtrips_and_restores_mask() {
+        let device = Device::Cpu;
+        let hidden_states = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            Shape::from((1, 3, 2)),
+            &device,
+        )
+        .unwrap();
+        let cached = CachedPromptConditioning::from_parts(&hidden_states, 2).unwrap();
+
+        let (restored_hs, restored_mask) = cached.restore(&device, DType::F32).unwrap();
+
+        assert_eq!(
+            tensor_values_f32(&restored_hs),
+            tensor_values_f32(&hidden_states)
+        );
+        assert_eq!(tensor_values_u8(&restored_mask), vec![1, 1, 0]);
+    }
+
+    #[test]
+    fn pad_text_conditioning_keeps_original_when_target_matches() {
+        let device = Device::Cpu;
+        let hidden_states =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
+        let mask = Tensor::from_vec(vec![1u8, 1], Shape::from((1, 2)), &device).unwrap();
+
+        let (padded_hs, padded_mask) = pad_text_conditioning(&hidden_states, &mask, 2).unwrap();
+
+        assert_eq!(
+            tensor_values_f32(&padded_hs),
+            tensor_values_f32(&hidden_states)
+        );
+        assert_eq!(tensor_values_u8(&padded_mask), vec![1, 1]);
+    }
+
+    #[test]
+    fn pad_text_conditioning_appends_zero_padding() {
+        let device = Device::Cpu;
+        let hidden_states =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
+        let mask = Tensor::from_vec(vec![1u8, 0], Shape::from((1, 2)), &device).unwrap();
+
+        let (padded_hs, padded_mask) = pad_text_conditioning(&hidden_states, &mask, 4).unwrap();
+
+        assert_eq!(padded_hs.dims3().unwrap(), (1, 4, 2));
+        assert_eq!(
+            tensor_values_f32(&padded_hs),
+            vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(tensor_values_u8(&padded_mask), vec![1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pad_text_conditioning_rejects_shrinking() {
+        let device = Device::Cpu;
+        let hidden_states =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
+        let mask = Tensor::from_vec(vec![1u8, 1], Shape::from((1, 2)), &device).unwrap();
+
+        let err = pad_text_conditioning(&hidden_states, &mask, 1).unwrap_err();
+        assert!(err.to_string().contains("cannot shrink text conditioning"));
+    }
+
+    #[test]
+    fn align_cfg_conditioning_pads_shorter_branch_to_match_longer_one() {
+        let device = Device::Cpu;
+        let cond_hs = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            Shape::from((1, 3, 2)),
+            &device,
+        )
+        .unwrap();
+        let cond_mask = Tensor::from_vec(vec![1u8, 1, 1], Shape::from((1, 3)), &device).unwrap();
+        let uncond_hs = Tensor::from_vec(
+            vec![7.0f32, 8.0, 9.0, 10.0],
+            Shape::from((1, 2, 2)),
+            &device,
+        )
+        .unwrap();
+        let uncond_mask = Tensor::from_vec(vec![1u8, 0], Shape::from((1, 2)), &device).unwrap();
+
+        let ((cond_hs, cond_mask), (uncond_hs, uncond_mask)) =
+            align_cfg_conditioning(&cond_hs, &cond_mask, &uncond_hs, &uncond_mask).unwrap();
+
+        assert_eq!(cond_hs.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(uncond_hs.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(tensor_values_u8(&cond_mask), vec![1, 1, 1]);
+        assert_eq!(tensor_values_u8(&uncond_mask), vec![1, 0, 0]);
+        assert_eq!(
+            tensor_values_f32(&uncond_hs),
+            vec![7.0, 8.0, 9.0, 10.0, 0.0, 0.0]
+        );
     }
 
     #[test]
