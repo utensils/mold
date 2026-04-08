@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-04-07
+
+### Added
+
+- **TUI UAT harness**: native Ghostty 1.3+ AppleScript-based acceptance testing harness (`scripts/tui-uat.sh`) with launch, capture, send keystrokes, view navigation, screenshot, and assert commands — pixel-perfect terminal screenshots via `screencapture -l<windowID>` ([#173](https://github.com/utensils/mold/issues/173))
+
 ### Changed
 
 - **Qwen-Image CUDA execution planning**: local sequential runs now preserve the stable load-use-drop path, while hot server mode keeps more of the quantized CUDA stack resident, skips redundant prompt re-encoding on cache hits, and splits CFG passes when batching would overrun VRAM
