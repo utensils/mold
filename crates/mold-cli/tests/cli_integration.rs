@@ -462,3 +462,55 @@ fn pull_unknown_model_errors() {
         .failure()
         .stderr(predicate::str::contains("unknown").or(predicate::str::contains("Unknown")));
 }
+
+// ── mold update ──────────────────────────────────────────────────────────
+
+#[test]
+fn update_help_text() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--check")
+                .and(predicate::str::contains("--force"))
+                .and(predicate::str::contains("--version")),
+        );
+}
+
+#[test]
+fn update_appears_in_main_help() {
+    let env = TestEnv::new();
+    env.cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("update"));
+}
+
+#[test]
+fn update_check_runs_without_panic() {
+    // Verifies `mold update --check` runs to completion without panicking.
+    // Outcome depends on network: success with "up to date" / "available",
+    // or failure with a connection error. Either is acceptable — panics are not.
+    let env = TestEnv::new();
+    let output = env
+        .cmd()
+        .args(["update", "--check"])
+        .timeout(std::time::Duration::from_secs(15))
+        .output()
+        .expect("failed to run mold update --check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should contain meaningful output, not a panic backtrace
+    assert!(
+        !stderr.contains("panicked at"),
+        "mold update --check panicked: {stderr}"
+    );
+    // Should print current version regardless of outcome
+    assert!(
+        stderr.contains("Current version"),
+        "expected 'Current version' in stderr: {stderr}"
+    );
+}

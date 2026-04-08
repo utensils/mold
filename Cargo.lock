@@ -2830,6 +2830,7 @@ dependencies = [
  "ctrlc",
  "dirs",
  "filetime",
+ "flate2",
  "image",
  "indicatif 0.17.11",
  "libc",
@@ -2840,9 +2841,12 @@ dependencies = [
  "mold-ai-tui",
  "predicates",
  "rand 0.8.5",
+ "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "sysinfo",
+ "tar",
  "tempfile",
  "tokio",
  "toml",
@@ -4648,6 +4652,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
+name = "tar"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22692a6476a21fa75fdfc11d452fda482af402c008cdbaf3476414e122040973"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6189,6 +6204,16 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
 
 [[package]]
 name = "y4m"

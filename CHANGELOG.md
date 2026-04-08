@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mold update` command**: self-update from GitHub releases with SHA-256 checksum verification, platform auto-detection (macOS Metal, Linux CUDA sm89/sm120), atomic binary replacement with rollback, and package manager detection (Nix, Homebrew). Supports `--check`, `--force`, and `--version` flags.
+
 ## [0.6.1] - 2026-04-07
 
 ### Added

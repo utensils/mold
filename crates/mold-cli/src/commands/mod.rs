@@ -16,4 +16,5 @@ pub mod serve;
 pub mod server;
 pub mod stats;
 pub mod unload;
+pub mod update;
 pub mod upscale;

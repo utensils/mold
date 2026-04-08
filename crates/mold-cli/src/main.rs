@@ -540,6 +540,33 @@ Examples:
     /// Show version information
     Version,
 
+    /// Update mold to the latest release from GitHub
+    ///
+    /// Checks for new releases, downloads the appropriate platform binary,
+    /// verifies its SHA256 checksum, and replaces the current binary in-place.
+    #[command(
+        disable_version_flag = true,
+        after_long_help = "\
+Examples:
+  mold update                   Update to latest release
+  mold update --check           Check for updates without installing
+  mold update --version v0.7.0  Install a specific version
+  mold update --force           Reinstall even if already up-to-date"
+    )]
+    Update {
+        /// Only check for updates, don't install
+        #[arg(long)]
+        check: bool,
+
+        /// Reinstall even if the current version matches
+        #[arg(long)]
+        force: bool,
+
+        /// Install a specific version tag (e.g. v0.7.0)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
     /// Start the Discord bot (connects to a running mold server via MOLD_HOST)
     #[cfg(feature = "discord")]
     Discord,
@@ -967,6 +994,13 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Version => {
             println!("mold {}", mold_core::build_info::version_string());
+        }
+        Commands::Update {
+            check,
+            force,
+            version,
+        } => {
+            commands::update::run(check, force, version).await?;
         }
         #[cfg(feature = "discord")]
         Commands::Discord => {
