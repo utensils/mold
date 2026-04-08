@@ -1,7 +1,8 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
-    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, SseProgressEvent,
+    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, ServerStatus,
+    SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -58,6 +59,8 @@ pub enum BackgroundEvent {
     },
     /// Upscale failed.
     UpscaleFailed(String),
+    /// Periodic server status update (remote resource info).
+    ServerStatusUpdate(Box<ServerStatus>),
 }
 
 /// A single entry in the progress log.
@@ -1162,6 +1165,48 @@ impl App {
         });
     }
 
+    /// Sync resource info source after mode changes.
+    /// Switches between local sysinfo and remote `/api/status` polling.
+    fn sync_resource_info_mode(&mut self) {
+        if self.generate.params.inference_mode == InferenceMode::Local {
+            self.resource_info.clear_server_status();
+            self.resource_info.refresh_local();
+        } else if self.server_url.is_some() {
+            self.spawn_server_status_fetch();
+        }
+    }
+
+    /// Spawn a background fetch of `/api/status` from the connected server.
+    pub fn spawn_server_status_fetch(&self) {
+        let Some(ref url) = self.server_url else {
+            return;
+        };
+        let tx = self.bg_tx.clone();
+        let url = url.clone();
+        self.tokio_handle.spawn(async move {
+            let client = mold_core::MoldClient::new(&url);
+            if let Ok(status) = client.server_status().await {
+                let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Box::new(status)));
+            }
+        });
+    }
+
+    /// Apply model defaults from the server's catalog to the current model.
+    /// When connected remotely, the server's config is authoritative for steps,
+    /// guidance, width, and height.
+    fn apply_remote_model_defaults(&mut self, catalog: &[ModelInfoExtended]) {
+        let model_name = &self.generate.params.model;
+        if let Some(entry) = catalog.iter().find(|m| &m.name == model_name) {
+            self.generate.params.steps = entry.defaults.default_steps;
+            self.generate.params.guidance = entry.defaults.default_guidance;
+            self.generate.params.width = entry.defaults.default_width;
+            self.generate.params.height = entry.defaults.default_height;
+            if !entry.defaults.description.is_empty() {
+                self.generate.model_description = entry.defaults.description.clone();
+            }
+        }
+    }
+
     /// Spawn a background upscale job for the currently selected gallery image.
     fn spawn_upscale(&mut self, model_name: String) {
         let entry = match self.gallery.entries.get(self.gallery.selected) {
@@ -1429,11 +1474,39 @@ impl App {
         let model_name = model_name.to_string();
         self.generate.params.model = model_name.clone();
 
-        let model_cfg = self.config.resolved_model_config(&model_name);
-        self.generate.params.steps = model_cfg.effective_steps(&self.config);
-        self.generate.params.guidance = model_cfg.effective_guidance();
-        self.generate.params.width = model_cfg.effective_width(&self.config);
-        self.generate.params.height = model_cfg.effective_height(&self.config);
+        // Use server catalog defaults when connected to a remote server,
+        // local config otherwise.
+        let used_remote = if self.server_url.is_some() {
+            if let Some(entry) = self.models.catalog.iter().find(|m| m.name == model_name) {
+                self.generate.params.steps = entry.defaults.default_steps;
+                self.generate.params.guidance = entry.defaults.default_guidance;
+                self.generate.params.width = entry.defaults.default_width;
+                self.generate.params.height = entry.defaults.default_height;
+                if !entry.defaults.description.is_empty() {
+                    self.generate.model_description = entry.defaults.description.clone();
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !used_remote {
+            let model_cfg = self.config.resolved_model_config(&model_name);
+            self.generate.params.steps = model_cfg.effective_steps(&self.config);
+            self.generate.params.guidance = model_cfg.effective_guidance();
+            self.generate.params.width = model_cfg.effective_width(&self.config);
+            self.generate.params.height = model_cfg.effective_height(&self.config);
+
+            self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
+                .and_then(|m| {
+                    let mc = self.config.resolved_model_config(&model_name);
+                    mc.description.or(Some(m.name.clone()))
+                })
+                .unwrap_or_default();
+        }
 
         let family = family_for_model(&model_name, &self.config);
         self.generate.capabilities = capabilities_for_family(&family);
@@ -1442,13 +1515,6 @@ impl App {
             self.generate.params.inference_mode,
         );
         self.generate.param_index = 0;
-
-        self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
-            .and_then(|m| {
-                let mc = self.config.resolved_model_config(&model_name);
-                mc.description.or(Some(m.name.clone()))
-            })
-            .unwrap_or_default();
     }
 
     /// Handle a raw crossterm event.
@@ -1730,6 +1796,9 @@ impl App {
                                 &self.generate.capabilities,
                                 self.generate.params.inference_mode,
                             );
+                            // Switch to local resource info
+                            self.resource_info.clear_server_status();
+                            self.resource_info.refresh_local();
                             // Refresh to local catalog and gallery
                             self.models.catalog =
                                 mold_core::build_model_catalog(&self.config, None, false);
@@ -2243,13 +2312,41 @@ impl App {
                     if let Some(model) = self.models.catalog.get(self.models.selected) {
                         let model_name = model.name.clone();
                         let tx = self.bg_tx.clone();
-                        self.tokio_handle.spawn(async move {
-                            if let Err(msg) =
-                                crate::backend::auto_pull_model(&model_name, &tx).await
-                            {
-                                let _ = tx.send(BackgroundEvent::Error(msg));
-                            }
-                        });
+
+                        if let Some(ref url) = self.server_url {
+                            // Pull via server when connected remotely
+                            let url = url.clone();
+                            self.tokio_handle.spawn(async move {
+                                let client = mold_core::MoldClient::new(&url);
+                                let (progress_tx, mut progress_rx) =
+                                    mpsc::unbounded_channel::<SseProgressEvent>();
+                                let tx_fwd = tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some(event) = progress_rx.recv().await {
+                                        let _ = tx_fwd.send(BackgroundEvent::Progress(event));
+                                    }
+                                });
+                                match client.pull_model_stream(&model_name, progress_tx).await {
+                                    Ok(()) => {
+                                        let _ = tx.send(BackgroundEvent::PullComplete(model_name));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(BackgroundEvent::Error(format!(
+                                            "Server pull failed: {e}"
+                                        )));
+                                    }
+                                }
+                            });
+                        } else {
+                            // Pull locally when no server connected
+                            self.tokio_handle.spawn(async move {
+                                if let Err(msg) =
+                                    crate::backend::auto_pull_model(&model_name, &tx).await
+                                {
+                                    let _ = tx.send(BackgroundEvent::Error(msg));
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -2289,6 +2386,7 @@ impl App {
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
+                self.sync_resource_info_mode();
             }
             Action::ShowHelp => {
                 self.popup = Some(Popup::Help);
@@ -2517,6 +2615,7 @@ impl App {
                 &self.generate.capabilities,
                 self.generate.params.inference_mode,
             );
+            self.sync_resource_info_mode();
         }
     }
 
@@ -2808,6 +2907,7 @@ impl App {
                     &self.generate.capabilities,
                     self.generate.params.inference_mode,
                 );
+                self.sync_resource_info_mode();
             }
             // Cycle format
             ParamField::Format => {
@@ -2861,11 +2961,24 @@ impl App {
             // Reset all params to model defaults (keep model and prompt)
             ParamField::ResetDefaults => {
                 let model = self.generate.params.model.clone();
-                let mc = self.config.resolved_model_config(&model);
-                self.generate.params.width = mc.effective_width(&self.config);
-                self.generate.params.height = mc.effective_height(&self.config);
-                self.generate.params.steps = mc.effective_steps(&self.config);
-                self.generate.params.guidance = mc.effective_guidance();
+
+                // Use server catalog defaults when connected, local config otherwise
+                if let Some(entry) = self
+                    .server_url
+                    .as_ref()
+                    .and_then(|_| self.models.catalog.iter().find(|m| m.name == model))
+                {
+                    self.generate.params.width = entry.defaults.default_width;
+                    self.generate.params.height = entry.defaults.default_height;
+                    self.generate.params.steps = entry.defaults.default_steps;
+                    self.generate.params.guidance = entry.defaults.default_guidance;
+                } else {
+                    let mc = self.config.resolved_model_config(&model);
+                    self.generate.params.width = mc.effective_width(&self.config);
+                    self.generate.params.height = mc.effective_height(&self.config);
+                    self.generate.params.steps = mc.effective_steps(&self.config);
+                    self.generate.params.guidance = mc.effective_guidance();
+                }
                 self.generate.params.seed = None;
                 self.generate.params.seed_mode = SeedMode::Random;
                 self.generate.params.batch = 1;
@@ -3985,7 +4098,7 @@ impl App {
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.server_url = Some(url.clone());
-                    self.models.catalog = models;
+                    self.models.catalog = models.clone();
                     self.models.selected = 0;
                     // Auto-switch to auto mode
                     if self.generate.params.inference_mode == InferenceMode::Local {
@@ -3995,6 +4108,8 @@ impl App {
                         &self.generate.capabilities,
                         self.generate.params.inference_mode,
                     );
+                    // Apply model defaults from server catalog
+                    self.apply_remote_model_defaults(&models);
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Connected to {url}"),
                         style: ProgressStyle::Done,
@@ -4002,6 +4117,8 @@ impl App {
                     // Re-scan gallery from the (now-connected) server
                     self.gallery.scanning = true;
                     self.spawn_gallery_scan();
+                    // Trigger immediate server status fetch for resource info
+                    self.spawn_server_status_fetch();
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
                     self.generate.progress.log.push(ProgressLogEntry {
@@ -4010,14 +4127,30 @@ impl App {
                     });
                     // Revert host — don't set server_url
                     self.generate.params.host = self.server_url.clone();
+                    // Fall back to local resource info
+                    self.resource_info.clear_server_status();
+                    self.resource_info.refresh_local();
                 }
                 BackgroundEvent::PullComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Pull complete: {model}"),
                         style: ProgressStyle::Done,
                     });
-                    // Refresh the catalog
-                    self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+                    // Refresh the catalog (from server when connected, local otherwise)
+                    if let Some(ref url) = self.server_url {
+                        let url = url.clone();
+                        let tx = self.bg_tx.clone();
+                        self.tokio_handle.spawn(async move {
+                            let client = mold_core::MoldClient::new(&url);
+                            if let Ok(models) = client.list_models_extended().await {
+                                let _ = tx.send(BackgroundEvent::ServerConnected { url, models });
+                            }
+                        });
+                    } else {
+                        self.config = Config::load_or_default();
+                        self.models.catalog =
+                            mold_core::build_model_catalog(&self.config, None, false);
+                    }
                 }
                 BackgroundEvent::ModelRemoveComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
@@ -4176,6 +4309,9 @@ impl App {
                     self.upscale_tile_progress = None;
                     self.upscale_progress.clear();
                     self.generate.error_message = Some(format!("Upscale failed: {msg}"));
+                }
+                BackgroundEvent::ServerStatusUpdate(status) => {
+                    self.resource_info.update_from_server_status(*status);
                 }
             }
         }
@@ -6538,5 +6674,160 @@ mod tests {
             catalog.iter().any(|m| m.is_upscaler()),
             "full catalog should include upscaler models"
         );
+    }
+
+    // ── Remote server awareness tests ─────────────────────────────
+
+    fn make_test_catalog_entry(
+        name: &str,
+        steps: u32,
+        guidance: f64,
+        width: u32,
+        height: u32,
+        desc: &str,
+    ) -> ModelInfoExtended {
+        ModelInfoExtended {
+            info: mold_core::ModelInfo {
+                name: name.to_string(),
+                family: "flux".to_string(),
+                size_gb: 4.5,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: "test/repo".to_string(),
+            },
+            defaults: mold_core::ModelDefaults {
+                default_steps: steps,
+                default_guidance: guidance,
+                default_width: width,
+                default_height: height,
+                description: desc.to_string(),
+            },
+            downloaded: true,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+        }
+    }
+
+    #[test]
+    fn remote_catalog_defaults_applied_to_matching_model() {
+        // Simulates apply_remote_model_defaults logic
+        let mut params = GenerateParams::from_config(&Config::load_or_default());
+        params.model = "flux-dev:q4".to_string();
+        params.steps = 1;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX Dev Q4 GGUF",
+        )];
+
+        // Apply defaults from catalog (same logic as apply_remote_model_defaults)
+        if let Some(entry) = catalog.iter().find(|m| m.name == params.model) {
+            params.steps = entry.defaults.default_steps;
+            params.guidance = entry.defaults.default_guidance;
+            params.width = entry.defaults.default_width;
+            params.height = entry.defaults.default_height;
+        }
+
+        assert_eq!(params.steps, 20);
+        assert!((params.guidance - 3.5).abs() < f64::EPSILON);
+        assert_eq!(params.width, 1024);
+        assert_eq!(params.height, 1024);
+    }
+
+    #[test]
+    fn remote_catalog_defaults_no_match_is_noop() {
+        let mut params = GenerateParams::from_config(&Config::load_or_default());
+        let original_steps = params.steps;
+        params.model = "nonexistent-model".to_string();
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            99,
+            9.9,
+            512,
+            512,
+            "test",
+        )];
+
+        if let Some(entry) = catalog.iter().find(|m| m.name == params.model) {
+            params.steps = entry.defaults.default_steps;
+        }
+
+        assert_eq!(
+            params.steps, original_steps,
+            "should not change for non-matching model"
+        );
+    }
+
+    #[test]
+    fn server_status_update_populates_resource_info() {
+        let mut ri = crate::ui::info::ResourceInfo::default();
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q4".to_string()],
+            busy: true,
+            current_generation: None,
+            gpu_info: Some(mold_core::GpuInfo {
+                name: "RTX 4090".to_string(),
+                vram_total_mb: 24564,
+                vram_used_mb: 8192,
+            }),
+            uptime_secs: 3600,
+            hostname: Some("hal9000".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        };
+        ri.update_from_server_status(status);
+        assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
+        assert_eq!(ri.process_memory_mb, 0);
+        let ss = ri.server_status.as_ref().unwrap();
+        assert_eq!(ss.hostname.as_deref(), Some("hal9000"));
+        assert!(ss.busy);
+        assert_eq!(ss.gpu_info.as_ref().unwrap().name, "RTX 4090");
+    }
+
+    #[test]
+    fn clear_server_status_reverts_to_local() {
+        let mut ri = crate::ui::info::ResourceInfo::default();
+        ri.server_status = Some(mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("remote".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        });
+        ri.clear_server_status();
+        assert!(ri.server_status.is_none());
+        ri.refresh_local();
+        // After refresh_local, process_memory_mb is populated (may be 0 if no mold process)
+        // The point is it doesn't panic and switches to local info
+    }
+
+    #[test]
+    fn background_event_server_status_variant_exists() {
+        // Compile-time check that the variant exists
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: None,
+            memory_status: None,
+        };
+        let _event = BackgroundEvent::ServerStatusUpdate(Box::new(status));
     }
 }

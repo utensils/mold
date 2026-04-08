@@ -77,7 +77,27 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    // Build right-aligned title: connection indicator + version
     let version = format!("mold {} ", mold_core::build_info::version_string());
+    let mut right_spans = Vec::new();
+
+    if let Some(ref status) = app.resource_info.server_status {
+        let host_label = status.hostname.as_deref().unwrap_or("remote");
+        right_spans.push(Span::styled(
+            format!("{host_label} "),
+            Style::default().fg(theme.accent),
+        ));
+    } else if app.server_url.is_some() {
+        right_spans.push(Span::styled(
+            "connecting... ",
+            Style::default().fg(theme.warning),
+        ));
+    } else if app.generate.params.inference_mode == crate::app::InferenceMode::Local {
+        right_spans.push(Span::styled("local ", Style::default().fg(theme.text_dim)));
+    }
+
+    right_spans.push(Span::styled(version, Style::default().fg(theme.text_dim)));
+
     let tabs = Tabs::new(tab_titles)
         .block(
             Block::default()
@@ -89,10 +109,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )
-                .title_top(
-                    Line::from(Span::styled(version, Style::default().fg(theme.text_dim)))
-                        .right_aligned(),
-                )
+                .title_top(Line::from(right_spans).right_aligned())
                 .style(Style::default().bg(theme.tab_bg))
                 .padding(Padding::horizontal(1)),
         )

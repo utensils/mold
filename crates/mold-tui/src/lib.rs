@@ -77,7 +77,11 @@ async fn run_event_loop(
 ) -> Result<()> {
     let mut last_resource_refresh = std::time::Instant::now();
     // Initial resource info refresh
-    app.resource_info.refresh();
+    if app.server_url.is_some() {
+        app.spawn_server_status_fetch();
+    } else {
+        app.resource_info.refresh_local();
+    }
 
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -93,7 +97,11 @@ async fn run_event_loop(
 
         // Refresh resource info every 2 seconds
         if last_resource_refresh.elapsed() >= std::time::Duration::from_secs(2) {
-            app.resource_info.refresh();
+            if app.server_url.is_some() {
+                app.spawn_server_status_fetch();
+            } else {
+                app.resource_info.refresh_local();
+            }
             last_resource_refresh = std::time::Instant::now();
         }
 

@@ -689,6 +689,8 @@ mod tests {
                 vram_used_mb: 8192,
             }),
             uptime_secs: 3661,
+            hostname: Some("hal9000".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -715,6 +717,8 @@ mod tests {
             current_generation: None,
             gpu_info: None,
             uptime_secs: 60,
+            hostname: None,
+            memory_status: None,
         };
         let embed = format_server_status(&status);
         assert!(embed

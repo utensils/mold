@@ -570,6 +570,13 @@ pub struct ServerStatus {
     pub gpu_info: Option<GpuInfo>,
     #[schema(example = 3600)]
     pub uptime_secs: u64,
+    /// Server hostname (e.g. "hal9000"). Added in v0.6.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "hal9000")]
+    pub hostname: Option<String>,
+    /// Human-readable memory status (e.g. "VRAM: 16.2 GB free"). Added in v0.6.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -1443,6 +1450,58 @@ mod tests {
         }"#;
         let status: super::ServerStatus = serde_json::from_str(json).unwrap();
         assert!(status.busy);
+    }
+
+    #[test]
+    fn server_status_deserialize_without_hostname_or_memory() {
+        // Older servers (pre-0.6.3) don't send hostname or memory_status
+        let json = r#"{
+            "version": "0.5.0",
+            "models_loaded": [],
+            "gpu_info": null,
+            "uptime_secs": 100
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert!(status.hostname.is_none());
+        assert!(status.memory_status.is_none());
+    }
+
+    #[test]
+    fn server_status_deserialize_with_hostname_and_memory() {
+        let json = r#"{
+            "version": "0.6.3",
+            "models_loaded": ["flux-dev:q4"],
+            "gpu_info": {"name": "RTX 4090", "vram_total_mb": 24564, "vram_used_mb": 8192},
+            "uptime_secs": 3600,
+            "hostname": "hal9000",
+            "memory_status": "VRAM: 16.0 GB free"
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.hostname.as_deref(), Some("hal9000"));
+        assert_eq!(status.memory_status.as_deref(), Some("VRAM: 16.0 GB free"));
+    }
+
+    #[test]
+    fn server_status_roundtrip_preserves_new_fields() {
+        let status = super::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("bender".to_string()),
+            memory_status: Some("Memory: 64.0 GB free, 96.0 GB available".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.hostname.as_deref(), Some("bender"));
+        assert_eq!(
+            parsed.memory_status.as_deref(),
+            Some("Memory: 64.0 GB free, 96.0 GB available")
+        );
     }
 
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────

@@ -1088,6 +1088,8 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         current_generation,
         gpu_info: query_gpu_info(),
         uptime_secs: state.start_time.elapsed().as_secs(),
+        hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
+        memory_status: mold_inference::device::memory_status_string(),
     })
 }
 
