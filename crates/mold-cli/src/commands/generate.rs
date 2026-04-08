@@ -1,5 +1,5 @@
 use anyhow::Result;
-#[cfg(feature = "preview")]
+#[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
