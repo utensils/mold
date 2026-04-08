@@ -11,6 +11,7 @@ mod factory;
 pub mod flux;
 pub mod flux2;
 mod image;
+pub(crate) mod img2img;
 pub mod img_utils;
 pub mod ltx_video;
 pub mod model_registry;

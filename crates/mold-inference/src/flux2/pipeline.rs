@@ -586,22 +586,22 @@ impl Flux2Engine {
         let image_seq_len = (height / 16) * (width / 16);
         let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
-        // For img2img, build a schedule starting at exactly `strength`.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
-            timesteps = std::iter::once(strength).chain(tail).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            timesteps = timesteps[start_index..].to_vec();
             tracing::info!(
-                strength,
+                strength = req.strength,
+                start_index,
+                start_timestep = timesteps[0],
                 schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
         // Generate noise / encode source image for img2img
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = req.strength;
+            let start_t = timesteps[0];
 
             self.base
                 .progress
@@ -823,22 +823,22 @@ impl InferenceEngine for Flux2Engine {
         let image_seq_len = (height / 16) * (width / 16);
         let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
-        // For img2img, build a schedule starting at exactly `strength`.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = timesteps.into_iter().filter(|&t| t < strength).collect();
-            timesteps = std::iter::once(strength).chain(tail).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            timesteps = timesteps[start_index..].to_vec();
             tracing::info!(
-                strength,
+                strength = req.strength,
+                start_index,
+                start_timestep = timesteps[0],
                 schedule = ?timesteps,
                 remaining_steps = timesteps.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
         // 3. Generate noise / encode source image for img2img
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = req.strength;
+            let start_t = timesteps[0];
 
             progress.stage_start("Encoding source image (VAE)");
             let encode_start = Instant::now();

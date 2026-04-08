@@ -490,21 +490,21 @@ impl SD3Engine {
             .map(|t| sampling::time_snr_shift(time_shift, t))
             .collect();
 
-        // For img2img, trim schedule to start at strength
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = sigmas.into_iter().filter(|&s| s < strength).collect();
-            sigmas = std::iter::once(strength).chain(tail).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            sigmas = sigmas[start_index..].to_vec();
             tracing::info!(
-                strength,
+                strength = req.strength,
+                start_index,
+                start_sigma = sigmas[0],
                 schedule = ?sigmas,
                 remaining_steps = sigmas.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
         let (initial_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            let start_t = req.strength;
+            let start_t = sigmas[0];
 
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE for encoding");
@@ -807,20 +807,22 @@ impl InferenceEngine for SD3Engine {
                 .collect();
 
             if req.source_image.is_some() {
-                let strength = req.strength;
-                let tail: Vec<f64> = sigmas.into_iter().filter(|&s| s < strength).collect();
-                sigmas = std::iter::once(strength).chain(tail).collect();
+                let start_index =
+                    crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+                sigmas = sigmas[start_index..].to_vec();
                 tracing::info!(
-                    strength,
+                    strength = req.strength,
+                    start_index,
+                    start_sigma = sigmas[0],
                     schedule = ?sigmas,
                     remaining_steps = sigmas.len().saturating_sub(1),
-                    "img2img: built schedule from strength"
+                    "img2img: truncated schedule from strength"
                 );
             }
 
             let (initial_latents, inpaint_ctx, early_vae) =
                 if let Some(ref source_bytes) = req.source_image {
-                    let start_t = req.strength;
+                    let start_t = sigmas[0];
 
                     // Drop transformer to make room for VAE encoding
                     loaded.transformer = None;

@@ -82,8 +82,8 @@ impl QwenImageScheduler {
         self.sigmas[self.step_index] * NUM_TRAIN_TIMESTEPS as f64
     }
 
-    /// Create a scheduler truncated for img2img: starts at `strength` noise level
-    /// and keeps only schedule points below it.
+    /// Create an img2img scheduler by slicing the full schedule at the
+    /// strength-derived start index.
     ///
     /// Returns `(scheduler, num_effective_steps)`. The caller should loop
     /// `num_effective_steps` times (same as `sigmas.len() - 1`).
@@ -93,18 +93,8 @@ impl QwenImageScheduler {
         strength: f64,
     ) -> (Self, usize) {
         let full = Self::new(num_inference_steps, image_seq_len);
-        // Keep sigmas strictly below strength, then prepend strength as start point
-        let tail: Vec<f64> = full
-            .sigmas
-            .iter()
-            .copied()
-            .filter(|&s| s < strength)
-            .collect();
-        let mut sigmas: Vec<f64> = std::iter::once(strength).chain(tail).collect();
-        // Ensure terminal 0.0 is present
-        if sigmas.last().copied() != Some(0.0) {
-            sigmas.push(0.0);
-        }
+        let start_index = crate::img2img::img2img_start_index(full.num_steps(), strength);
+        let sigmas = full.sigmas[start_index..].to_vec();
         let num_steps = sigmas.len().saturating_sub(1);
         (
             Self {
@@ -202,21 +192,26 @@ mod tests {
     fn img2img_schedule_starts_at_strength_and_is_shorter() {
         let strength = 0.75;
         let (scheduler, num_steps) = QwenImageScheduler::new_img2img(50, 4096, strength);
-        // First sigma should be the strength value
+        let full = QwenImageScheduler::new(50, 4096);
+        let start_index = crate::img2img::img2img_start_index(full.num_steps(), strength);
+        // First sigma should match the scheduler sigma selected by strength.
         assert!(
-            (scheduler.sigmas[0] - strength).abs() < 1e-10,
-            "first sigma should equal strength: got {}",
+            (scheduler.sigmas[0] - full.sigmas[start_index]).abs() < 1e-10,
+            "first sigma should equal the truncated full-schedule sigma: got {}",
             scheduler.sigmas[0]
         );
         // Last sigma should be 0.0
         assert_eq!(*scheduler.sigmas.last().unwrap(), 0.0);
         // Schedule should be shorter than full schedule
-        let full = QwenImageScheduler::new(50, 4096);
         assert!(
             num_steps < full.num_steps(),
             "img2img should have fewer steps ({}) than full ({})",
             num_steps,
             full.num_steps()
+        );
+        assert_eq!(
+            num_steps,
+            crate::img2img::img2img_effective_steps(full.num_steps(), strength)
         );
         // Sigmas should be monotonically decreasing
         for pair in scheduler.sigmas.windows(2) {

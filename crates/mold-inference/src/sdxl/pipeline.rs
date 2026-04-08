@@ -408,8 +408,7 @@ impl SDXLEngine {
             self.base.progress.cache_hit("source image latents");
         }
 
-        let start_step = ((steps as f64) * (1.0 - strength)).round() as usize;
-        let start_step = start_step.min(steps as usize);
+        let start_step = crate::img2img::img2img_start_index(steps as usize, strength);
 
         let scheduler = crate::scheduler::build_scheduler(
             sched,

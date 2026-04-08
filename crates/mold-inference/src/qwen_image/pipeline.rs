@@ -1524,10 +1524,10 @@ impl QwenImageEngine {
 
         // Build initial latents
         let mut latents = if let Some(encoded) = &encoded_latents {
-            // Flow-matching img2img: latent = (1 - strength) * encoded + strength * noise
+            // Flow-matching img2img: use the scheduler-selected start sigma.
             let noise =
                 crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
-            let start_t = req.strength;
+            let start_t = scheduler.initial_sigma();
             ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
         } else {
             let noise =
@@ -1984,14 +1984,14 @@ impl InferenceEngine for QwenImageEngine {
 
         // 5. Build initial latents
         let mut latents = if let Some(encoded) = &encoded_latents {
-            // Flow-matching img2img: latent = (1 - strength) * encoded + strength * noise
+            // Flow-matching img2img: use the scheduler-selected start sigma.
             let noise = crate::engine::seeded_randn(
                 seed,
                 &[1, 16, latent_h, latent_w],
                 &loaded.device,
                 loaded.dtype,
             )?;
-            let start_t = req.strength;
+            let start_t = scheduler.initial_sigma();
             ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
         } else {
             let noise = crate::engine::seeded_randn(

@@ -552,27 +552,17 @@ impl ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        // For img2img, build a schedule starting at exactly `strength`.
-        // Insert strength as the first sigma, then keep all original schedule
-        // points below it. This ensures any strength value works — even below
-        // the smallest precomputed sigma.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = scheduler
-                .sigmas
-                .iter()
-                .copied()
-                .filter(|&s| s < strength)
-                .collect();
-            scheduler.sigmas = std::iter::once(strength).chain(tail).collect();
-            // Rebuild timesteps from sigmas (sigma * num_train_timesteps)
-            let nts = scheduler.config.num_train_timesteps as f64;
-            scheduler.timesteps = scheduler.sigmas.iter().map(|&s| s * nts).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
+            scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
             tracing::info!(
                 strength = req.strength,
+                start_index,
+                start_sigma = scheduler.sigmas[0],
                 remaining_sigmas = scheduler.sigmas.len(),
                 remaining_steps = scheduler.sigmas.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 
@@ -900,23 +890,17 @@ impl InferenceEngine for ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        // For img2img, build a schedule starting at exactly `strength`.
         if req.source_image.is_some() {
-            let strength = req.strength;
-            let tail: Vec<f64> = scheduler
-                .sigmas
-                .iter()
-                .copied()
-                .filter(|&s| s < strength)
-                .collect();
-            scheduler.sigmas = std::iter::once(strength).chain(tail).collect();
-            let nts = scheduler.config.num_train_timesteps as f64;
-            scheduler.timesteps = scheduler.sigmas.iter().map(|&s| s * nts).collect();
+            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
+            scheduler.sigmas = scheduler.sigmas[start_index..].to_vec();
+            scheduler.timesteps = scheduler.timesteps[start_index..].to_vec();
             tracing::info!(
                 strength = req.strength,
+                start_index,
+                start_sigma = scheduler.sigmas[0],
                 remaining_sigmas = scheduler.sigmas.len(),
                 remaining_steps = scheduler.sigmas.len().saturating_sub(1),
-                "img2img: built schedule from strength"
+                "img2img: truncated schedule from strength"
             );
         }
 

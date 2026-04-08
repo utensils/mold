@@ -798,9 +798,7 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Encoding source image (VQ-GAN)", encode_start.elapsed());
 
-        // Compute start step for DDPM schedule
-        let start_step = ((decoder_steps as f64) * (1.0 - strength)).round() as usize;
-        let start_step = start_step.min(decoder_steps);
+        let start_step = crate::img2img::img2img_start_index(decoder_steps, strength);
 
         // Generate deterministic noise matching decoder latent shape
         let noise = crate::engine::seeded_randn(seed, encoded.dims(), device, DType::F32)?;
