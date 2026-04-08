@@ -1741,6 +1741,10 @@ mod tests {
         }
         assert!(thumbnail_warmup_enabled());
         unsafe {
+            std::env::set_var("MOLD_THUMBNAIL_WARMUP", "YES");
+        }
+        assert!(thumbnail_warmup_enabled());
+        unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }
     }

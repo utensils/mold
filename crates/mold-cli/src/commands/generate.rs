@@ -1203,16 +1203,25 @@ fn ghostty_kitty_preview_chunks(encoded: &str, cell_w: u32, cell_h: u32) -> Stri
     out
 }
 
-#[cfg(feature = "preview")]
-fn print_ghostty_kitty_preview(img: &image::DynamicImage) -> std::io::Result<()> {
+#[cfg(any(feature = "preview", test))]
+fn build_ghostty_kitty_preview_payload(
+    img: &image::DynamicImage,
+    term_w: u16,
+    term_h: u16,
+) -> std::io::Result<(String, u32, u32)> {
     let mut encoded_png = std::io::Cursor::new(Vec::new());
     img.write_to(&mut encoded_png, image::ImageFormat::Png)
         .map_err(std::io::Error::other)?;
     let encoded = general_purpose::STANDARD.encode(encoded_png.into_inner());
-
-    let (term_w, term_h) = viuer::terminal_size();
     let (cell_w, cell_h) = fit_preview_cells(img.width(), img.height(), term_w, term_h);
     let payload = ghostty_kitty_preview_chunks(&encoded, cell_w, cell_h);
+    Ok((payload, cell_w, cell_h))
+}
+
+#[cfg(feature = "preview")]
+fn print_ghostty_kitty_preview(img: &image::DynamicImage) -> std::io::Result<()> {
+    let (term_w, term_h) = viuer::terminal_size();
+    let (payload, cell_w, _cell_h) = build_ghostty_kitty_preview_payload(img, term_w, term_h)?;
 
     let mut stdout = std::io::stdout();
     write!(stdout, "{payload}")?;
@@ -1540,5 +1549,30 @@ mod tests {
         let payload = ghostty_kitty_preview_chunks(&"A".repeat(5000), 40, 20);
         assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=40,r=20,m=1;"));
         assert!(payload.contains("\u{1b}_Gm=0;"));
+    }
+
+    #[test]
+    fn ghostty_kitty_preview_payload_uses_single_chunk_when_small() {
+        let payload = ghostty_kitty_preview_chunks("AAAA", 12, 6);
+        assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=12,r=6,m=0;AAAA\u{1b}\\"));
+        assert!(!payload.contains("\u{1b}_Gm=1;"));
+    }
+
+    #[test]
+    fn build_ghostty_kitty_preview_payload_scales_wide_images_to_terminal_width() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(200, 100));
+        let (payload, cell_w, cell_h) =
+            build_ghostty_kitty_preview_payload(&img, 80, 24).expect("payload should build");
+        assert_eq!((cell_w, cell_h), (80, 20));
+        assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=80,r=20,"));
+    }
+
+    #[test]
+    fn build_ghostty_kitty_preview_payload_leaves_one_row_for_prompt_when_full_height() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(80, 48));
+        let (payload, cell_w, cell_h) =
+            build_ghostty_kitty_preview_payload(&img, 80, 24).expect("payload should build");
+        assert_eq!((cell_w, cell_h), (80, 23));
+        assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=80,r=23,"));
     }
 }

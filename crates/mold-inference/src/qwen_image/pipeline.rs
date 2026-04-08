@@ -2240,4 +2240,17 @@ mod tests {
             512,
         ));
     }
+
+    #[test]
+    fn qwen_quantized_cfg_split_boundary_does_not_split_when_estimate_exactly_fits() {
+        let headroom = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
+        let transformer_size = 12_300_000_000;
+        let free_vram = transformer_size + headroom;
+        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            transformer_size,
+            free_vram,
+            1328,
+            1328,
+        ));
+    }
 }
