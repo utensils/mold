@@ -363,7 +363,7 @@ impl SD15Engine {
                 )?;
 
                 let encoded = vae.encode(&source_tensor)?;
-                let encoded = (encoded.sample()? * VAE_SCALE)?;
+                let encoded = (encoded.mode()? * VAE_SCALE)?;
 
                 self.base
                     .progress

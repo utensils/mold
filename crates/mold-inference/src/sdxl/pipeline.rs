@@ -396,7 +396,7 @@ impl SDXLEngine {
                     dtype,
                 )?;
                 let encoded = vae.encode(&source_tensor)?;
-                let encoded = (encoded.sample()? * vae_scale)?;
+                let encoded = (encoded.mode()? * vae_scale)?;
 
                 self.base
                     .progress

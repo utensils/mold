@@ -539,8 +539,9 @@ impl SD3Engine {
                 gpu_dtype,
             )?;
             let dist = autoencoder.encode(&source_tensor)?;
-            // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609
-            let encoded = ((dist.sample()? - 0.0609)? * 1.5305)?;
+            // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
+            // Use the posterior mean so img2img remains deterministic.
+            let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
             self.base
                 .progress
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
@@ -856,8 +857,9 @@ impl InferenceEngine for SD3Engine {
                         loaded_dtype,
                     )?;
                     let dist = autoencoder.encode(&source_tensor)?;
-                    // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609
-                    let encoded = ((dist.sample()? - 0.0609)? * 1.5305)?;
+                    // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
+                    // Use the posterior mean so img2img remains deterministic.
+                    let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
                     progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
                     // Drop VAE to free VRAM for transformer reload
