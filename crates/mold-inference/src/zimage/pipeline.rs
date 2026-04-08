@@ -552,23 +552,27 @@ impl ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        // For img2img, trim the scheduler to start at `strength`.
-        // Sigmas run from ~1.0 (full noise) down to 0.0 (clean).
-        // Keep only sigmas <= strength, so denoising starts partway through.
+        // For img2img, build a schedule starting at exactly `strength`.
+        // Insert strength as the first sigma, then keep all original schedule
+        // points below it. This ensures any strength value works — even below
+        // the smallest precomputed sigma.
         if req.source_image.is_some() {
             let strength = req.strength;
-            let start_idx = scheduler
+            let tail: Vec<f64> = scheduler
                 .sigmas
                 .iter()
-                .position(|&s| s <= strength)
-                .unwrap_or(0);
-            scheduler.sigmas = scheduler.sigmas[start_idx..].to_vec();
-            scheduler.timesteps = scheduler.timesteps[start_idx..].to_vec();
+                .copied()
+                .filter(|&s| s < strength)
+                .collect();
+            scheduler.sigmas = std::iter::once(strength).chain(tail).collect();
+            // Rebuild timesteps from sigmas (sigma * num_train_timesteps)
+            let nts = scheduler.config.num_train_timesteps as f64;
+            scheduler.timesteps = scheduler.sigmas.iter().map(|&s| s * nts).collect();
             tracing::info!(
                 strength = req.strength,
                 remaining_sigmas = scheduler.sigmas.len(),
                 remaining_steps = scheduler.sigmas.len().saturating_sub(1),
-                "img2img: trimmed schedule from strength"
+                "img2img: built schedule from strength"
             );
         }
 
@@ -896,21 +900,23 @@ impl InferenceEngine for ZImageEngine {
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_cfg);
         scheduler.set_timesteps(req.steps as usize, Some(mu));
 
-        // For img2img, trim the scheduler to start at `strength`.
+        // For img2img, build a schedule starting at exactly `strength`.
         if req.source_image.is_some() {
             let strength = req.strength;
-            let start_idx = scheduler
+            let tail: Vec<f64> = scheduler
                 .sigmas
                 .iter()
-                .position(|&s| s <= strength)
-                .unwrap_or(0);
-            scheduler.sigmas = scheduler.sigmas[start_idx..].to_vec();
-            scheduler.timesteps = scheduler.timesteps[start_idx..].to_vec();
+                .copied()
+                .filter(|&s| s < strength)
+                .collect();
+            scheduler.sigmas = std::iter::once(strength).chain(tail).collect();
+            let nts = scheduler.config.num_train_timesteps as f64;
+            scheduler.timesteps = scheduler.sigmas.iter().map(|&s| s * nts).collect();
             tracing::info!(
                 strength = req.strength,
                 remaining_sigmas = scheduler.sigmas.len(),
                 remaining_steps = scheduler.sigmas.len().saturating_sub(1),
-                "img2img: trimmed schedule from strength"
+                "img2img: built schedule from strength"
             );
         }
 
