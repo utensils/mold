@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn img2img_full_strength_matches_txt2img() {
-        let (scheduler, num_steps) = QwenImageScheduler::new_img2img(50, 4096, 1.0);
+        let (_scheduler, num_steps) = QwenImageScheduler::new_img2img(50, 4096, 1.0);
         let full = QwenImageScheduler::new(50, 4096);
         // At strength=1.0, img2img should produce the full schedule
         assert_eq!(num_steps, full.num_steps());

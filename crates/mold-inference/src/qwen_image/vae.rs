@@ -353,56 +353,30 @@ impl Module for QwenImageDownsample2d {
     }
 }
 
+/// Encoder block: either a ResNet or a Downsample (flat layout from Wan VAE).
+///
+/// The Wan VAE encoder uses flat `down_blocks.{0-10}` indexing where each block
+/// is either a single ResNet or a Downsample operation, NOT the nested
+/// `down_blocks.{N}.resnets.{M}` grouping used by diffusers.
 #[derive(Debug, Clone)]
-struct QwenImageDownBlock2d {
-    resnets: Vec<QwenImageResidualBlock2d>,
-    downsample: Option<QwenImageDownsample2d>,
+enum QwenImageEncoderBlock {
+    ResNet(QwenImageResidualBlock2d),
+    Downsample(QwenImageDownsample2d),
 }
 
-impl QwenImageDownBlock2d {
-    fn new(in_dim: usize, out_dim: usize, add_downsample: bool, vb: VarBuilder) -> Result<Self> {
-        let mut resnets = Vec::with_capacity(NUM_RES_BLOCKS);
-        let mut current_dim = in_dim;
-        for i in 0..NUM_RES_BLOCKS {
-            resnets.push(QwenImageResidualBlock2d::new(
-                current_dim,
-                out_dim,
-                vb.pp("resnets").pp(i),
-            )?);
-            current_dim = out_dim;
-        }
-        Ok(Self {
-            resnets,
-            downsample: if add_downsample {
-                Some(QwenImageDownsample2d::new(
-                    out_dim,
-                    out_dim,
-                    vb.pp("downsamplers").pp("0"),
-                )?)
-            } else {
-                None
-            },
-        })
-    }
-}
-
-impl Module for QwenImageDownBlock2d {
+impl Module for QwenImageEncoderBlock {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut x = x.clone();
-        for resnet in &self.resnets {
-            x = x.apply(resnet)?;
+        match self {
+            Self::ResNet(r) => r.forward(x),
+            Self::Downsample(d) => d.forward(x),
         }
-        if let Some(ds) = &self.downsample {
-            x = x.apply(ds)?;
-        }
-        Ok(x)
     }
 }
 
 #[derive(Debug, Clone)]
 struct QwenImageEncoder2d {
     conv_in: Conv2d,
-    down_blocks: Vec<QwenImageDownBlock2d>,
+    blocks: Vec<QwenImageEncoderBlock>,
     mid_block: QwenImageMidBlock2d,
     norm_out: QwenImageRmsNorm2d,
     conv_out: Conv2d,
@@ -410,37 +384,34 @@ struct QwenImageEncoder2d {
 
 impl QwenImageEncoder2d {
     fn new(vb: VarBuilder) -> Result<Self> {
-        let mut down_blocks = Vec::with_capacity(BLOCK_OUT_CHANNELS.len());
-        let mut current_dim = BLOCK_OUT_CHANNELS[0];
-        for (i, &out_dim) in BLOCK_OUT_CHANNELS.iter().enumerate() {
-            let add_downsample = i < BLOCK_OUT_CHANNELS.len() - 1;
-            down_blocks.push(QwenImageDownBlock2d::new(
-                current_dim,
-                out_dim,
-                add_downsample,
-                vb.pp("down_blocks").pp(i),
-            )?);
-            current_dim = out_dim;
-        }
+        // Wan VAE encoder flat block layout:
+        //   0,1  → ResNet (128→128)
+        //   2    → Downsample
+        //   3,4  → ResNet (128→256, block 3 has conv_shortcut)
+        //   5    → Downsample
+        //   6,7  → ResNet (256→512, block 6 has conv_shortcut)
+        //   8    → Downsample
+        //   9,10 → ResNet (512→512)
+        let db = vb.pp("down_blocks");
+        let blocks = vec![
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 128, db.pp("0"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 128, db.pp("1"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(128, 128, db.pp("2"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 256, db.pp("3"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(256, 256, db.pp("4"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(256, 256, db.pp("5"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(256, 512, db.pp("6"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("7"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(512, 512, db.pp("8"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("9"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("10"))?),
+        ];
         Ok(Self {
-            conv_in: load_3d_conv_as_2d(3, BLOCK_OUT_CHANNELS[0], 3, 1, vb.pp("conv_in"))?,
-            down_blocks,
-            mid_block: QwenImageMidBlock2d::new(
-                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
-                vb.pp("mid_block"),
-            )?,
-            norm_out: QwenImageRmsNorm2d::for_feature(
-                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
-                vb.pp("norm_out"),
-            )?,
-            // Output: 2 * LATENT_CHANNELS for mean + logvar
-            conv_out: load_3d_conv_as_2d(
-                BLOCK_OUT_CHANNELS[BLOCK_OUT_CHANNELS.len() - 1],
-                2 * LATENT_CHANNELS,
-                3,
-                1,
-                vb.pp("conv_out"),
-            )?,
+            conv_in: load_3d_conv_as_2d(3, 128, 3, 1, vb.pp("conv_in"))?,
+            blocks,
+            mid_block: QwenImageMidBlock2d::new(512, vb.pp("mid_block"))?,
+            norm_out: QwenImageRmsNorm2d::for_feature(512, vb.pp("norm_out"))?,
+            conv_out: load_3d_conv_as_2d(512, 2 * LATENT_CHANNELS, 3, 1, vb.pp("conv_out"))?,
         })
     }
 }
@@ -448,7 +419,7 @@ impl QwenImageEncoder2d {
 impl Module for QwenImageEncoder2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let mut x = x.apply(&self.conv_in)?;
-        for block in &self.down_blocks {
+        for block in &self.blocks {
             x = x.apply(block)?;
         }
         x.apply(&self.mid_block)?
