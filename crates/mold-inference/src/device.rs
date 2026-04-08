@@ -541,11 +541,11 @@ mod tests {
 
     #[test]
     fn free_vram_returns_some_on_macos_or_none_on_other() {
-        let result = free_vram_bytes();
+        let _result = free_vram_bytes();
         #[cfg(target_os = "macos")]
-        assert!(result.is_some(), "macOS should return system memory info");
+        assert!(_result.is_some(), "macOS should return system memory info");
         #[cfg(not(any(target_os = "macos", feature = "cuda")))]
-        assert_eq!(result, None);
+        assert_eq!(_result, None);
     }
 
     /// On macOS (unified memory), free_vram_bytes should return available memory

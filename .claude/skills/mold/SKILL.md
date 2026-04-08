@@ -390,6 +390,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
 | `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
 | `MOLD_OUTPUT_DIR` | `~/.mold/output` | Image output directory (set empty to disable) |
+| `MOLD_THUMBNAIL_WARMUP` | unset | Set `1` to prebuild gallery thumbnails at server startup |
 | `MOLD_PORT` | `7680` | Server port |
 | `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
 | `MOLD_EAGER` | unset | Set `1` to keep all components loaded |

@@ -1,8 +1,8 @@
 //! Quantized (GGUF) Qwen-Image transformer with device-specific linear dispatch.
 //!
-//! **CUDA**: keeps GGUF weights on GPU and dequantizes each linear layer to BF16
-//! per forward call (~72MB peak temporary). All computation in BF16 matching the
-//! model's training dtype.
+//! **CUDA**: either keeps GGUF weights on GPU or loads them CPU-staged for
+//! low-VRAM offload, dequantizing each linear layer to BF16 per forward call.
+//! All computation stays in BF16 matching the model's training dtype.
 //!
 //! **Metal**: uses candle's `QMatMul`-backed `Linear` which avoids per-forward
 //! full dequantization (faster on Metal). Computation in F32 since Metal's QMatMul
@@ -10,7 +10,6 @@
 
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::RmsNorm;
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 use candle_transformers::quantized_nn::Linear as QMatMulLinear;
 use candle_transformers::quantized_var_builder::VarBuilder;
@@ -29,6 +28,12 @@ fn working_dtype(device: &Device) -> DType {
         DType::BF16
     } else {
         DType::F32
+    }
+}
+
+fn debug_stage(stage: &str) {
+    if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
+        eprintln!("[qwen-quantized] {stage}");
     }
 }
 
@@ -52,8 +57,19 @@ impl Module for QwenLinear {
             Self::Dequant { weight, bias } => {
                 let dtype = working_dtype(x.device());
                 let x = x.to_dtype(dtype)?;
-                let w = weight.dequantize(x.device())?.to_dtype(dtype)?;
-                candle_nn::Linear::new(w, bias.clone()).forward(&x)
+                let w = if weight.device().is_cpu() && !x.device().is_cpu() {
+                    weight
+                        .dequantize(&Device::Cpu)?
+                        .to_dtype(dtype)?
+                        .to_device(x.device())?
+                } else {
+                    weight.dequantize(x.device())?.to_dtype(dtype)?
+                };
+                let bias = bias
+                    .as_ref()
+                    .map(|b| b.to_device(x.device())?.to_dtype(dtype))
+                    .transpose()?;
+                candle_nn::Linear::new(w, bias).forward(&x)
             }
             Self::QMatMul(inner) => inner.forward(x),
         }
@@ -77,15 +93,33 @@ fn qlinear(vb: &VarBuilder, name: &str) -> Result<QwenLinear> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DynamicRmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl DynamicRmsNorm {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let dtype = xs.dtype();
+        let xs_f32 = xs.to_dtype(DType::F32)?;
+        let variance = xs_f32.sqr()?.mean_keepdim(D::Minus1)?;
+        let xs = xs_f32.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
+        let xs = xs.to_dtype(dtype)?;
+        let weight = self.weight.to_device(xs.device())?.to_dtype(dtype)?;
+        xs.broadcast_mul(&weight)
+    }
+}
+
 /// Dequantize a small 1D weight vector for RmsNorm (norm weights are tiny).
-fn dequant_rms_norm(vb: &VarBuilder, name: &str, eps: f64) -> Result<RmsNorm> {
+fn dequant_rms_norm(vb: &VarBuilder, name: &str, eps: f64) -> Result<DynamicRmsNorm> {
     let dtype = working_dtype(vb.device());
     let weight = vb
         .pp(name)
         .get_no_shape("weight")?
         .dequantize(vb.device())?
         .to_dtype(dtype)?;
-    Ok(RmsNorm::new(weight, eps))
+    Ok(DynamicRmsNorm { weight, eps })
 }
 
 #[derive(Debug, Clone)]
@@ -451,8 +485,8 @@ impl Module for FeedForward {
 }
 
 struct QkNorm {
-    norm_q: RmsNorm,
-    norm_k: RmsNorm,
+    norm_q: DynamicRmsNorm,
+    norm_k: DynamicRmsNorm,
 }
 
 impl QkNorm {
@@ -675,9 +709,6 @@ impl QwenImageTransformerBlock {
         txt_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
-        let txt_mask_expanded = txt_mask
-            .unsqueeze(D::Minus1)?
-            .to_dtype(txt_hidden.dtype())?;
         let temb = temb.silu()?;
         let img_mod = temb.apply(&self.img_mod)?.unsqueeze(1)?;
         let txt_mod = temb.apply(&self.txt_mod)?.unsqueeze(1)?;
@@ -735,9 +766,11 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
+        // Match the BF16 path and upstream Qwen masking semantics: txt_mask is
+        // consumed inside attention and text-conditioning, not multiplied back
+        // into each residual update.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
-        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?
-            .broadcast_mul(&txt_mask_expanded)?;
+        let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
         let img_mlp_in = self
             .img_norm2
@@ -752,9 +785,8 @@ impl QwenImageTransformerBlock {
         let img_ff = self.img_mlp.forward(&img_mlp_in)?;
 
         let img_hidden = (&img_hidden + img_gate_mlp.broadcast_mul(&img_ff)?)?;
-        let txt_hidden = (&txt_hidden
-            + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?
-        .broadcast_mul(&txt_mask_expanded)?;
+        let txt_hidden =
+            (&txt_hidden + txt_gate_mlp.broadcast_mul(&self.txt_mlp.forward(&txt_mlp_in)?)?)?;
 
         Ok((img_hidden, txt_hidden))
     }
@@ -793,15 +825,21 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
     time_embed: TimestepProjEmbeddings,
     img_in: QwenLinear,
     txt_in: QwenLinear,
-    txt_norm: RmsNorm,
+    txt_norm: DynamicRmsNorm,
     blocks: Vec<QwenImageTransformerBlock>,
     rope_embedder: QwenRopeEmbedder,
     output_layer: OutputLayer,
     cfg: QwenImageConfig,
+    supports_cfg_batching: bool,
 }
 
 impl QuantizedQwenImageTransformer2DModel {
-    pub fn new(cfg: &QwenImageConfig, vb: VarBuilder, _device: &Device) -> Result<Self> {
+    pub fn new(
+        cfg: &QwenImageConfig,
+        vb: VarBuilder,
+        device: &Device,
+        supports_cfg_batching: bool,
+    ) -> Result<Self> {
         let time_embed = TimestepProjEmbeddings::new(vb.clone())?;
         let img_in = qlinear(&vb, "img_in")?;
         let txt_in = qlinear(&vb, "txt_in")?;
@@ -814,7 +852,7 @@ impl QuantizedQwenImageTransformer2DModel {
         }
 
         // RoPE source tables stay on CPU; device-local views are cached by shape.
-        let rope_dtype = working_dtype(vb.device());
+        let rope_dtype = working_dtype(device);
         let rope_embedder = QwenRopeEmbedder::new(
             10000.0,
             cfg.axes_dims_rope.clone(),
@@ -832,7 +870,12 @@ impl QuantizedQwenImageTransformer2DModel {
             rope_embedder,
             output_layer,
             cfg: cfg.clone(),
+            supports_cfg_batching,
         })
+    }
+
+    pub fn supports_cfg_batching(&self) -> bool {
+        self.supports_cfg_batching
     }
 
     pub fn forward(
@@ -852,10 +895,12 @@ impl QuantizedQwenImageTransformer2DModel {
         let t = t.to_dtype(dtype)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(dtype)?;
         let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
+        debug_stage("inputs prepared");
 
         let (batch, channels, height, width) = x.dims4()?;
         let patch_size = self.cfg.patch_size;
         let temb = self.time_embed.forward(&t)?;
+        debug_stage("time embedding");
 
         let height_patches = height / patch_size;
         let width_patches = width / patch_size;
@@ -877,8 +922,10 @@ impl QuantizedQwenImageTransformer2DModel {
             .contiguous()?;
 
         let mut img = x_packed.apply(&self.img_in)?;
+        debug_stage("image stem");
         let txt_normed = self.txt_norm.forward(&encoder_hidden_states)?;
         let mut txt = txt_normed.apply(&self.txt_in)?;
+        debug_stage("text stem");
 
         let h_tokens = height / patch_size;
         let w_tokens = width / patch_size;
@@ -886,8 +933,9 @@ impl QuantizedQwenImageTransformer2DModel {
         let (img_cos, img_sin, txt_cos, txt_sin) =
             self.rope_embedder
                 .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
+        debug_stage("rope");
 
-        for block in &self.blocks {
+        for (i, block) in self.blocks.iter().enumerate() {
             (img, txt) = block.forward(
                 &img,
                 &txt,
@@ -898,9 +946,13 @@ impl QuantizedQwenImageTransformer2DModel {
                 &txt_cos,
                 &txt_sin,
             )?;
+            if i == 0 || i + 1 == self.blocks.len() {
+                debug_stage(&format!("block {}", i + 1));
+            }
         }
 
         let img_out = self.output_layer.forward(&img, &temb)?;
+        debug_stage("output layer");
         let out_channels = self.cfg.out_channels;
         let x_out = img_out
             .reshape((

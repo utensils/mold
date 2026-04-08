@@ -30,6 +30,7 @@ mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.6.0"
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.6.0" }
 mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.6.0" }
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 colored = "3"
