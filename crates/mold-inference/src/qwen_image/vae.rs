@@ -337,8 +337,16 @@ struct QwenImageDownsample2d {
 
 impl QwenImageDownsample2d {
     fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
+        // The encoder's resample weights are already 2D (not 3D like other encoder
+        // convolutions), so we use a standard stride-2 conv2d instead of
+        // load_3d_conv_as_2d_stride2.
+        let cfg = Conv2dConfig {
+            stride: 2,
+            padding: 0, // asymmetric padding applied in forward()
+            ..Default::default()
+        };
         Ok(Self {
-            conv: load_3d_conv_as_2d_stride2(in_dim, out_dim, 3, vb.pp("resample").pp("1"))?,
+            conv: conv2d(in_dim, out_dim, 3, cfg, vb.pp("resample").pp("1"))?,
         })
     }
 }
@@ -384,34 +392,36 @@ struct QwenImageEncoder2d {
 
 impl QwenImageEncoder2d {
     fn new(vb: VarBuilder) -> Result<Self> {
-        // Wan VAE encoder flat block layout:
-        //   0,1  → ResNet (128→128)
-        //   2    → Downsample
-        //   3,4  → ResNet (128→256, block 3 has conv_shortcut)
-        //   5    → Downsample
-        //   6,7  → ResNet (256→512, block 6 has conv_shortcut)
-        //   8    → Downsample
-        //   9,10 → ResNet (512→512)
+        // Wan VAE encoder flat block layout (channels differ from decoder):
+        //   conv_in: 3 → 96
+        //   0,1  → ResNet (96→96)
+        //   2    → Downsample (96→96)
+        //   3,4  → ResNet (96→192, block 3 has conv_shortcut)
+        //   5    → Downsample (192→192)
+        //   6,7  → ResNet (192→384, block 6 has conv_shortcut)
+        //   8    → Downsample (384→384)
+        //   9,10 → ResNet (384→384)
+        //   mid_block: 384
         let db = vb.pp("down_blocks");
         let blocks = vec![
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 128, db.pp("0"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 128, db.pp("1"))?),
-            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(128, 128, db.pp("2"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(128, 256, db.pp("3"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(256, 256, db.pp("4"))?),
-            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(256, 256, db.pp("5"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(256, 512, db.pp("6"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("7"))?),
-            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(512, 512, db.pp("8"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("9"))?),
-            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(512, 512, db.pp("10"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(96, 96, db.pp("0"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(96, 96, db.pp("1"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(96, 96, db.pp("2"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(96, 192, db.pp("3"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(192, 192, db.pp("4"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(192, 192, db.pp("5"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(192, 384, db.pp("6"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(384, 384, db.pp("7"))?),
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(384, 384, db.pp("8"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(384, 384, db.pp("9"))?),
+            QwenImageEncoderBlock::ResNet(QwenImageResidualBlock2d::new(384, 384, db.pp("10"))?),
         ];
         Ok(Self {
-            conv_in: load_3d_conv_as_2d(3, 128, 3, 1, vb.pp("conv_in"))?,
+            conv_in: load_3d_conv_as_2d(3, 96, 3, 1, vb.pp("conv_in"))?,
             blocks,
-            mid_block: QwenImageMidBlock2d::new(512, vb.pp("mid_block"))?,
-            norm_out: QwenImageRmsNorm2d::for_feature(512, vb.pp("norm_out"))?,
-            conv_out: load_3d_conv_as_2d(512, 2 * LATENT_CHANNELS, 3, 1, vb.pp("conv_out"))?,
+            mid_block: QwenImageMidBlock2d::new(384, vb.pp("mid_block"))?,
+            norm_out: QwenImageRmsNorm2d::for_feature(384, vb.pp("norm_out"))?,
+            conv_out: load_3d_conv_as_2d(384, 2 * LATENT_CHANNELS, 3, 1, vb.pp("conv_out"))?,
         })
     }
 }
