@@ -551,6 +551,17 @@ fn diagonal_gaussian_mode(parameters: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::{Device, Shape};
+    use candle_nn::{Module, VarBuilder};
+    use std::collections::HashMap;
+
+    fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
+        let map = tensors
+            .into_iter()
+            .map(|(name, tensor)| (name.to_string(), tensor))
+            .collect::<HashMap<_, _>>();
+        VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
 
     #[test]
     fn rms_norm_no_spurious_scaling() {
@@ -605,6 +616,54 @@ mod tests {
         let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
         assert!((vals[0] - 2.5).abs() < 1e-6, "1.0 * 2.0 + 0.5 = 2.5");
         assert!((vals[1] - 2.5).abs() < 1e-6, "1.0 * 3.0 + (-0.5) = 2.5");
+    }
+
+    #[test]
+    fn qwen_downsample_applies_asymmetric_padding() {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "resample.1.weight",
+                Tensor::from_vec(vec![1.0f32; 9], (1, 1, 3, 3), &dev).unwrap(),
+            ),
+            (
+                "resample.1.bias",
+                Tensor::zeros(1, DType::F32, &dev).unwrap(),
+            ),
+        ]);
+        let downsample = QwenImageDownsample2d::new(1, 1, vb).unwrap();
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &dev).unwrap();
+
+        let output = downsample.forward(&input).unwrap();
+        assert_eq!(output.dims(), &[1, 1, 1, 1]);
+        assert_eq!(
+            output.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0]
+        );
+    }
+
+    #[test]
+    fn qwen_encoder_block_dispatches_downsample_variant() {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "resample.1.weight",
+                Tensor::from_vec(vec![1.0f32; 9], (1, 1, 3, 3), &dev).unwrap(),
+            ),
+            (
+                "resample.1.bias",
+                Tensor::zeros(1, DType::F32, &dev).unwrap(),
+            ),
+        ]);
+        let block =
+            QwenImageEncoderBlock::Downsample(QwenImageDownsample2d::new(1, 1, vb).unwrap());
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &dev).unwrap();
+
+        let output = block.forward(&input).unwrap();
+        assert_eq!(
+            output.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0]
+        );
     }
 
     #[test]
@@ -667,5 +726,50 @@ mod tests {
         let mode = diagonal_gaussian_mode(&params).unwrap();
         let vals = mode.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn load_3d_conv_as_2d_uses_last_temporal_slice() {
+        let vb = vb_from_tensors(vec![
+            (
+                "weight",
+                Tensor::from_vec(
+                    (0..27).map(|i| i as f32).collect::<Vec<_>>(),
+                    Shape::from((1, 1, 3, 3, 3)),
+                    &Device::Cpu,
+                )
+                .unwrap(),
+            ),
+            ("bias", Tensor::zeros(1, DType::F32, &Device::Cpu).unwrap()),
+        ]);
+        let conv = load_3d_conv_as_2d(1, 1, 3, 0, vb).unwrap();
+        let input = Tensor::from_vec(
+            (1..=9).map(|i| i as f32).collect::<Vec<_>>(),
+            (1, 1, 3, 3),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let output = conv.forward(&input).unwrap();
+        let vals = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![1050.0]);
+    }
+
+    #[test]
+    fn load_3d_conv1x1_as_2d_keeps_only_spatial_kernel() {
+        let vb = vb_from_tensors(vec![
+            (
+                "weight",
+                Tensor::from_vec(vec![4.0f32], Shape::from((1, 1, 1, 1, 1)), &Device::Cpu).unwrap(),
+            ),
+            ("bias", Tensor::zeros(1, DType::F32, &Device::Cpu).unwrap()),
+        ]);
+        let conv = load_3d_conv1x1_as_2d(1, 1, vb).unwrap();
+        let input =
+            Tensor::from_vec(vec![3.0f32], Shape::from((1, 1, 1, 1)), &Device::Cpu).unwrap();
+
+        let output = conv.forward(&input).unwrap();
+        let vals = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![12.0]);
     }
 }

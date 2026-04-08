@@ -640,27 +640,20 @@ impl ZImageEngine {
             drop(encode_vae);
 
             // Generate noise on the target device
-            let noise =
-                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
             let encoded = encoded.to_dtype(dtype)?.to_device(&device)?;
-
-            // Build inpaint context if mask provided
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let mask =
-                    img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, &device, dtype)?;
-                Some(img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise: noise.clone(),
-                })
-            } else {
-                None
-            };
-
-            // Flow-matching interpolation: latent = (1 - sigma) * encoded + sigma * noise
-            let img = ((&encoded * (1.0 - start_sigma))? + (&noise * start_sigma)?)?;
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
+                seed,
+                &[1, 16, latent_h, latent_w],
+                start_sigma,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
+                &device,
+                dtype,
+            )?;
             // Add frame dimension: (B, C, H, W) -> (B, C, 1, H, W)
-            (img.unsqueeze(2)?, inpaint_ctx)
+            (prepared.initial_latents.unsqueeze(2)?, prepared.inpaint_ctx)
         } else {
             // txt2img: pure noise
             let noise =
@@ -741,12 +734,12 @@ impl ZImageEngine {
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ref ctx) = inpaint_ctx {
-                let sigma_next = scheduler.sigmas[step + 1];
                 let latents_4d = latents.squeeze(2)?;
-                let noised_original =
-                    ((&ctx.original_latents * (1.0 - sigma_next))? + (&ctx.noise * sigma_next)?)?;
-                let blended =
-                    ((&ctx.mask * &latents_4d)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                let blended = crate::img2img::apply_flow_match_inpaint(
+                    &latents_4d,
+                    ctx,
+                    scheduler.sigmas[step + 1],
+                )?;
                 latents = blended.unsqueeze(2)?;
             }
 
@@ -1008,36 +1001,20 @@ impl InferenceEngine for ZImageEngine {
             let encoded = loaded.vae.encode(&source_tensor)?;
             progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
-            // Generate noise on the GPU device
-            let noise = crate::engine::seeded_randn(
+            let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
+
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
                 seed,
                 &[1, 16, latent_h, latent_w],
+                start_sigma,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
                 &loaded.device,
                 loaded.dtype,
             )?;
-            let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
-
-            // Build inpaint context if mask provided
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let mask = img_utils::decode_mask_image(
-                    mask_bytes,
-                    latent_h,
-                    latent_w,
-                    &loaded.device,
-                    loaded.dtype,
-                )?;
-                Some(img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise: noise.clone(),
-                })
-            } else {
-                None
-            };
-
-            // Flow-matching interpolation: latent = (1 - sigma) * encoded + sigma * noise
-            let img = ((&encoded * (1.0 - start_sigma))? + (&noise * start_sigma)?)?;
-            (img.unsqueeze(2)?, inpaint_ctx)
+            (prepared.initial_latents.unsqueeze(2)?, prepared.inpaint_ctx)
         } else {
             // txt2img: pure noise (B, 16, latent_h, latent_w) → add frame dim
             let noise = crate::engine::seeded_randn(
@@ -1113,12 +1090,12 @@ impl InferenceEngine for ZImageEngine {
 
                 // Inpainting: blend preserved regions back at current noise level
                 if let Some(ref ctx) = inpaint_ctx {
-                    let sigma_next = scheduler.sigmas[step + 1];
                     let latents_4d = latents.squeeze(2)?;
-                    let noised_original = ((&ctx.original_latents * (1.0 - sigma_next))?
-                        + (&ctx.noise * sigma_next)?)?;
-                    let blended =
-                        ((&ctx.mask * &latents_4d)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                    let blended = crate::img2img::apply_flow_match_inpaint(
+                        &latents_4d,
+                        ctx,
+                        scheduler.sigmas[step + 1],
+                    )?;
                     latents = blended.unsqueeze(2)?;
                 }
 
@@ -1261,6 +1238,50 @@ impl InferenceEngine for ZImageEngine {
 mod tests {
     use super::*;
     use crate::device::should_use_gpu;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn zimage_model_paths(
+        transformer: PathBuf,
+        transformer_shards: Vec<PathBuf>,
+        vae: PathBuf,
+        text_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards,
+            vae,
+            spatial_upscaler: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer,
+            decoder: None,
+        }
+    }
 
     #[test]
     fn latent_dimensions() {
@@ -1410,5 +1431,95 @@ mod tests {
         assert_eq!(start_index, 9);
         assert_eq!(scheduler.sigmas, vec![0.0]);
         assert!(scheduler.timesteps.is_empty());
+    }
+
+    #[test]
+    fn tensor_stats_summary_reports_expected_values() {
+        let tensor =
+            Tensor::from_vec(vec![1.0f32, -1.0, 3.0, -3.0], (1, 1, 2, 2), &Device::Cpu).unwrap();
+        let summary = tensor_stats_summary("probe", &tensor).unwrap();
+
+        assert!(summary.contains("probe:"));
+        assert!(summary.contains("mean=0.00000"));
+        assert!(summary.contains("min=-3.00000"));
+        assert!(summary.contains("max=3.00000"));
+        assert!(summary.contains("rms=2.23607"));
+    }
+
+    #[test]
+    fn zimage_transformer_paths_prefer_shards_when_present() {
+        let dir = temp_test_dir("mold-zimage-shards");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let engine = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a.clone(), shard_b.clone()],
+                dir.join("vae.safetensors"),
+                Some(dir.join("tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_validate_paths_accepts_existing_files() {
+        let dir = temp_test_dir("mold-zimage-validate-ok");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let gguf = touch(&dir, "transformer.gguf");
+
+        let sharded = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a, shard_b],
+                vae.clone(),
+                Some(tokenizer.clone()),
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
+        assert!(!sharded.detect_is_gguf());
+
+        let quantized = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(gguf, vec![], vae, Some(dir.join("tokenizer.json"))),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert!(quantized.detect_is_gguf());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_validate_paths_requires_text_tokenizer() {
+        let dir = temp_test_dir("mold-zimage-validate-missing");
+        let engine = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                None,
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("text tokenizer path required"));
+
+        fs::remove_dir_all(dir).ok();
     }
 }

@@ -127,11 +127,7 @@ pub fn euler_sample(
 
         // Inpainting: blend preserved regions back at current noise level
         if let Some(ctx) = inpaint_ctx {
-            let t = *s_prev;
-            // Re-noise original latents to current timestep (flow-matching schedule)
-            let noised_original = ((&ctx.original_latents * (1.0 - t))? + (&ctx.noise * t)?)?;
-            // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
-            x = ((&ctx.mask * &x)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+            x = crate::img2img::apply_flow_match_inpaint(&x, ctx, *s_prev)?;
         }
 
         if step + 1 == total_steps {

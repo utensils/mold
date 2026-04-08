@@ -591,8 +591,9 @@ impl Flux2Engine {
         let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
         if req.source_image.is_some() {
-            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-            timesteps = timesteps[start_index..].to_vec();
+            let (trimmed, start_index) =
+                crate::img2img::trim_schedule_tail(&timesteps, req.steps as usize, req.strength);
+            timesteps = trimmed;
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -624,29 +625,18 @@ impl Flux2Engine {
                 .progress
                 .stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
-            let noise = crate::engine::seeded_randn(
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
                 seed,
                 &[1, 32, latent_h, latent_w],
+                start_t,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
                 &device,
                 gpu_dtype,
             )?;
-
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let mask = crate::img_utils::decode_mask_image(
-                    mask_bytes, latent_h, latent_w, &device, gpu_dtype,
-                )?;
-                Some(crate::img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise: noise.clone(),
-                })
-            } else {
-                None
-            };
-
-            // Flow-matching img2img: latent = (1 - t) * encoded + t * noise
-            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
-            (img, inpaint_ctx)
+            (prepared.initial_latents, prepared.inpaint_ctx)
         } else {
             let img = crate::engine::seeded_randn(
                 seed,
@@ -828,8 +818,9 @@ impl InferenceEngine for Flux2Engine {
         let mut timesteps = sampling::get_schedule(req.steps as usize, image_seq_len);
 
         if req.source_image.is_some() {
-            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-            timesteps = timesteps[start_index..].to_vec();
+            let (trimmed, start_index) =
+                crate::img2img::trim_schedule_tail(&timesteps, req.steps as usize, req.strength);
+            timesteps = trimmed;
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -857,33 +848,18 @@ impl InferenceEngine for Flux2Engine {
             let encoded = loaded.vae.encode(&source_tensor)?;
             progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
 
-            let noise = crate::engine::seeded_randn(
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
                 seed,
                 &[1, 32, latent_h, latent_w],
+                start_t,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
                 &loaded.device,
                 loaded.dtype,
             )?;
-
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let mask = crate::img_utils::decode_mask_image(
-                    mask_bytes,
-                    latent_h,
-                    latent_w,
-                    &loaded.device,
-                    loaded.dtype,
-                )?;
-                Some(crate::img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise: noise.clone(),
-                })
-            } else {
-                None
-            };
-
-            // Flow-matching img2img: latent = (1 - t) * encoded + t * noise
-            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
-            (img, inpaint_ctx)
+            (prepared.initial_latents, prepared.inpaint_ctx)
         } else {
             let img = crate::engine::seeded_randn(
                 seed,
@@ -1013,6 +989,51 @@ impl InferenceEngine for Flux2Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoders::variant_resolution::Qwen3Size;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn flux2_model_paths(
+        dir: &Path,
+        transformer_name: &str,
+        text_encoder_files: Vec<PathBuf>,
+        t5_encoder: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer: dir.join(transformer_name),
+            transformer_shards: vec![],
+            vae: dir.join("vae.safetensors"),
+            spatial_upscaler: None,
+            t5_encoder,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files,
+            text_tokenizer: Some(dir.join("tokenizer.json")),
+            decoder: None,
+        }
+    }
 
     #[test]
     fn flux2_img2img_uses_minus_one_to_one_source_normalization() {
@@ -1020,5 +1041,138 @@ mod tests {
             Flux2Engine::img2img_source_normalize_range(),
             crate::img_utils::NormalizeRange::MinusOneToOne
         );
+    }
+
+    #[test]
+    fn flux2_model_name_controls_transformer_and_encoder_config() {
+        let base_dir = temp_test_dir("mold-flux2-config");
+        let standard = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&base_dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+        );
+        let nine_b = Flux2Engine::new(
+            "flux2-klein-9b:q8".to_string(),
+            flux2_model_paths(&base_dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let standard_cfg = standard.resolve_config();
+        let nine_b_cfg = nine_b.resolve_config();
+
+        assert_eq!(standard_cfg.hidden_size, 3072);
+        assert_eq!(standard_cfg.context_in_dim, 7680);
+        assert_eq!(standard.qwen3_size(), Qwen3Size::B4);
+        assert_eq!(standard.qwen3_bf16_config().hidden_size, 2560);
+
+        assert_eq!(nine_b_cfg.hidden_size, 4096);
+        assert_eq!(nine_b_cfg.context_in_dim, 12288);
+        assert_eq!(nine_b.qwen3_size(), Qwen3Size::B8);
+        assert_eq!(nine_b.qwen3_bf16_config().hidden_size, 4096);
+
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn flux2_text_encoder_paths_use_shards_or_t5_fallback() {
+        let dir = temp_test_dir("mold-flux2-paths");
+        let shard_a = touch(&dir, "encoder-1.safetensors");
+        let shard_b = touch(&dir, "encoder-2.safetensors");
+        let fallback = touch(&dir, "encoder.safetensors");
+
+        let sharded = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(
+                &dir,
+                "transformer.gguf",
+                vec![shard_a.clone(), shard_b.clone()],
+                Some(fallback.clone()),
+            ),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert_eq!(sharded.text_encoder_paths(), vec![shard_a, shard_b]);
+
+        let fallback_engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&dir, "transformer.gguf", vec![], Some(fallback.clone())),
+            None,
+            LoadStrategy::Sequential,
+        );
+        assert_eq!(fallback_engine.text_encoder_paths(), vec![fallback]);
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_validate_paths_accepts_existing_files_and_returns_tokenizer() {
+        let dir = temp_test_dir("mold-flux2-validate-ok");
+        let transformer = touch(&dir, "transformer.gguf");
+        let vae = touch(&dir, "vae.safetensors");
+        let encoder = touch(&dir, "encoder.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            ModelPaths {
+                transformer,
+                transformer_shards: vec![],
+                vae,
+                spatial_upscaler: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![encoder],
+                text_tokenizer: Some(tokenizer.clone()),
+                decoder: None,
+            },
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        assert_eq!(engine.validate_paths().unwrap(), tokenizer);
+        assert!(engine.is_gguf_transformer());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_validate_paths_requires_text_encoder_paths() {
+        let dir = temp_test_dir("mold-flux2-validate-missing");
+        let transformer = touch(&dir, "transformer.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            ModelPaths {
+                transformer,
+                transformer_shards: vec![],
+                vae,
+                spatial_upscaler: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![],
+                text_tokenizer: Some(tokenizer),
+                decoder: None,
+            },
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("text encoder paths required"));
+        assert!(!engine.is_gguf_transformer());
+
+        fs::remove_dir_all(dir).ok();
     }
 }

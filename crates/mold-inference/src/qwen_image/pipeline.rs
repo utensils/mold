@@ -292,6 +292,68 @@ impl QwenImageEngine {
             || msg.contains("cudaErrorMemoryAllocation")
     }
 
+    fn with_cuda_oom_cpu_fallback<T, FPrimary, FFallback, FOom>(
+        primary: FPrimary,
+        fallback: FFallback,
+        is_cuda: bool,
+        sync_device: &Device,
+        progress: &ProgressReporter,
+        oom_message: &str,
+        is_oom: FOom,
+    ) -> Result<T>
+    where
+        FPrimary: FnOnce() -> Result<T>,
+        FFallback: FnOnce() -> Result<T>,
+        FOom: Fn(&anyhow::Error) -> bool,
+    {
+        match primary() {
+            Ok(value) => Ok(value),
+            Err(err) if is_cuda && is_oom(&err) => {
+                progress.info(oom_message);
+                sync_device.synchronize()?;
+                fallback()
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_cuda_tiled_then_cpu_fallback<T, FPrimary, FTiled, FCpu, FOom>(
+        primary: FPrimary,
+        tiled: FTiled,
+        cpu_fallback: FCpu,
+        is_cuda: bool,
+        sync_device: &Device,
+        progress: &ProgressReporter,
+        tiled_message: &str,
+        cpu_message: &str,
+        is_oom: FOom,
+    ) -> Result<T>
+    where
+        FPrimary: FnOnce() -> Result<T>,
+        FTiled: FnOnce() -> Result<T>,
+        FCpu: FnOnce() -> Result<T>,
+        FOom: Fn(&anyhow::Error) -> bool,
+    {
+        match primary() {
+            Ok(value) => Ok(value),
+            Err(err) if is_cuda && is_oom(&err) => {
+                progress.info(tiled_message);
+                sync_device.synchronize()?;
+                match tiled() {
+                    Ok(value) => Ok(value),
+                    Err(tile_err) if is_oom(&tile_err) => {
+                        progress.info(cpu_message);
+                        sync_device.synchronize()?;
+                        cpu_fallback()
+                    }
+                    Err(tile_err) => Err(tile_err),
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     fn decode_vae_tiled(
         latents: &Tensor,
         vae: &QwenImageVae,
@@ -346,25 +408,21 @@ impl QwenImageEngine {
     {
         let decode_latents = latents.to_device(vae_device)?.to_dtype(DType::F32)?;
         Self::debug_tensor_stats("latents_pre_vae", &decode_latents);
-        match vae.decode(&decode_latents) {
-            Ok(image) => Ok(image),
-            Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
-                progress.info("VAE decode OOM on GPU — retrying with tiled GPU decode");
-                sync_device.synchronize()?;
-                match Self::decode_vae_tiled(latents, vae, vae_device, progress) {
-                    Ok(image) => Ok(image),
-                    Err(tile_err) if Self::is_oom_error(&tile_err) => {
-                        progress.info("Tiled GPU VAE decode OOM — retrying on CPU");
-                        sync_device.synchronize()?;
-                        let cpu_vae = load_cpu_vae()?;
-                        let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-                        cpu_vae.decode(&cpu_latents).map_err(Into::into)
-                    }
-                    Err(tile_err) => Err(tile_err),
-                }
-            }
-            Err(e) => Err(e.into()),
-        }
+        Self::with_cuda_tiled_then_cpu_fallback(
+            || vae.decode(&decode_latents).map_err(Into::into),
+            || Self::decode_vae_tiled(latents, vae, vae_device, progress),
+            || {
+                let cpu_vae = load_cpu_vae()?;
+                let cpu_latents = latents.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                cpu_vae.decode(&cpu_latents).map_err(Into::into)
+            },
+            vae_device.is_cuda(),
+            sync_device,
+            progress,
+            "VAE decode OOM on GPU — retrying with tiled GPU decode",
+            "Tiled GPU VAE decode OOM — retrying on CPU",
+            Self::is_oom_error,
+        )
     }
 
     /// Encode a source image through the VAE with GPU→CPU OOM fallback.
@@ -392,11 +450,9 @@ impl QwenImageEngine {
             DType::F32,
         )?;
 
-        let result = match vae.encode(&source_tensor) {
-            Ok(encoded) => Ok(encoded),
-            Err(e) if vae_device.is_cuda() && Self::is_oom_error(&e) => {
-                progress.info("VAE encode OOM on GPU — retrying on CPU");
-                sync_device.synchronize()?;
+        let result = Self::with_cuda_oom_cpu_fallback(
+            || vae.encode(&source_tensor).map_err(Into::into),
+            || {
                 let cpu_vae = load_cpu_vae()?;
                 let cpu_source = img_utils::decode_source_image(
                     source_bytes,
@@ -407,9 +463,13 @@ impl QwenImageEngine {
                     DType::F32,
                 )?;
                 cpu_vae.encode(&cpu_source).map_err(Into::into)
-            }
-            Err(e) => Err(e.into()),
-        };
+            },
+            vae_device.is_cuda(),
+            sync_device,
+            progress,
+            "VAE encode OOM on GPU — retrying on CPU",
+            Self::is_oom_error,
+        );
 
         progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
         result
@@ -1449,7 +1509,9 @@ impl QwenImageEngine {
         let is_img2img = req.source_image.is_some();
 
         // For img2img, load VAE early to encode source image before transformer
-        let (encoded_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
+        let (prepared_img2img_latents, inpaint_ctx) = if let Some(ref source_bytes) =
+            req.source_image
+        {
             let free_for_encode = free_vram_bytes().unwrap_or(0);
             let encode_on_gpu = should_use_gpu(
                 device.is_cuda(),
@@ -1483,25 +1545,24 @@ impl QwenImageEngine {
                 || self.load_vae(&Device::Cpu, DType::F32),
             )?;
             let encoded = encoded.to_device(&device)?.to_dtype(dtype)?;
-
-            // Build inpaint context if mask provided
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let noise = crate::engine::seeded_randn(
-                    seed,
-                    &[1, 16, latent_h, latent_w],
-                    &device,
-                    dtype,
-                )?;
-                let mask =
-                    img_utils::decode_mask_image(mask_bytes, latent_h, latent_w, &device, dtype)?;
-                Some(img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise,
-                })
-            } else {
-                None
-            };
+            let start_sigma = QwenImageScheduler::new_img2img(
+                req.steps as usize,
+                image_seq_len(latent_h, latent_w, transformer_cfg.patch_size),
+                req.strength,
+            )
+            .0
+            .initial_sigma();
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
+                seed,
+                &[1, 16, latent_h, latent_w],
+                start_sigma,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
+                &device,
+                dtype,
+            )?;
 
             // Drop early VAE to free memory before transformer load
             drop(encode_vae);
@@ -1512,7 +1573,7 @@ impl QwenImageEngine {
                 "img2img: encoded source image to latents"
             );
 
-            (Some(encoded), inpaint_ctx)
+            (Some(prepared.initial_latents), prepared.inpaint_ctx)
         } else {
             (None, None)
         };
@@ -1527,12 +1588,8 @@ impl QwenImageEngine {
         };
 
         // Build initial latents
-        let mut latents = if let Some(encoded) = &encoded_latents {
-            // Flow-matching img2img: use the scheduler-selected start sigma.
-            let noise =
-                crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
-            let start_t = scheduler.initial_sigma();
-            ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
+        let mut latents = if let Some(initial) = &prepared_img2img_latents {
+            initial.clone()
         } else {
             let noise =
                 crate::engine::seeded_randn(seed, &[1, 16, latent_h, latent_w], &device, dtype)?;
@@ -1638,11 +1695,11 @@ impl QwenImageEngine {
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ref ctx) = inpaint_ctx {
-                let sigma_next = scheduler.sigmas[step + 1];
-                let noised_original =
-                    ((&ctx.original_latents * (1.0 - sigma_next))? + (&ctx.noise * sigma_next)?)?;
-                // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
-                latents = ((&ctx.mask * &latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                latents = crate::img2img::apply_flow_match_inpaint(
+                    &latents,
+                    ctx,
+                    scheduler.sigmas[step + 1],
+                )?;
             }
 
             if std::env::var_os("MOLD_QWEN_DEBUG").is_some() {
@@ -1915,66 +1972,49 @@ impl InferenceEngine for QwenImageEngine {
         let is_img2img = req.source_image.is_some();
 
         // For img2img, encode source image using the pre-loaded VAE
-        let (encoded_latents, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
-            progress.stage_start("Encoding source image (VAE)");
-            let encode_start = Instant::now();
-            let source_tensor = img_utils::decode_source_image(
-                source_bytes,
-                req.width,
-                req.height,
-                Self::img2img_source_normalize_range(),
-                &loaded.vae_device,
-                DType::F32,
-            )?;
-            let encoded = match loaded.vae.encode(&source_tensor) {
-                Ok(enc) => enc,
-                Err(e) if loaded.vae_device.is_cuda() && Self::is_oom_error(&e) => {
-                    progress.info("VAE encode OOM on GPU — retrying on CPU");
-                    loaded.device.synchronize()?;
-                    let cpu_vae =
-                        QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)?;
-                    let cpu_source = img_utils::decode_source_image(
-                        source_bytes,
-                        req.width,
-                        req.height,
-                        Self::img2img_source_normalize_range(),
-                        &Device::Cpu,
-                        DType::F32,
-                    )?;
-                    cpu_vae.encode(&cpu_source)?
-                }
-                Err(e) => return Err(e.into()),
-            };
-            let encoded = encoded.to_device(&loaded.device)?.to_dtype(loaded.dtype)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
-
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let noise = crate::engine::seeded_randn(
+        let (prepared_img2img_latents, inpaint_ctx) =
+            if let Some(ref source_bytes) = req.source_image {
+                let encoded = Self::encode_vae_with_fallback(
+                    source_bytes,
+                    req.width,
+                    req.height,
+                    &loaded.vae,
+                    &loaded.vae_device,
+                    &loaded.device,
+                    progress,
+                    || {
+                        Ok(QwenImageVae::load(
+                            &loaded.vae_path,
+                            &Device::Cpu,
+                            DType::F32,
+                            progress,
+                        )?)
+                    },
+                )?;
+                let encoded = encoded.to_device(&loaded.device)?.to_dtype(loaded.dtype)?;
+                let start_sigma = QwenImageScheduler::new_img2img(
+                    req.steps as usize,
+                    image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size),
+                    req.strength,
+                )
+                .0
+                .initial_sigma();
+                let prepared = crate::img2img::prepare_flow_match_img2img(
+                    &encoded,
                     seed,
                     &[1, 16, latent_h, latent_w],
-                    &loaded.device,
-                    loaded.dtype,
-                )?;
-                let mask = img_utils::decode_mask_image(
-                    mask_bytes,
+                    start_sigma,
+                    req.mask_image.as_deref(),
                     latent_h,
                     latent_w,
                     &loaded.device,
                     loaded.dtype,
                 )?;
-                Some(img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise,
-                })
-            } else {
-                None
-            };
 
-            (Some(encoded), inpaint_ctx)
-        } else {
-            (None, None)
-        };
+                (Some(prepared.initial_latents), prepared.inpaint_ctx)
+            } else {
+                (None, None)
+            };
 
         // 4. Initialize scheduler
         let image_seq_len = image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size);
@@ -1987,16 +2027,8 @@ impl InferenceEngine for QwenImageEngine {
         };
 
         // 5. Build initial latents
-        let mut latents = if let Some(encoded) = &encoded_latents {
-            // Flow-matching img2img: use the scheduler-selected start sigma.
-            let noise = crate::engine::seeded_randn(
-                seed,
-                &[1, 16, latent_h, latent_w],
-                &loaded.device,
-                loaded.dtype,
-            )?;
-            let start_t = scheduler.initial_sigma();
-            ((encoded * (1.0 - start_t))? + (&noise * start_t)?)?
+        let mut latents = if let Some(initial) = &prepared_img2img_latents {
+            initial.clone()
         } else {
             let noise = crate::engine::seeded_randn(
                 seed,
@@ -2097,11 +2129,11 @@ impl InferenceEngine for QwenImageEngine {
 
                 // Inpainting: blend preserved regions back at current noise level
                 if let Some(ref ctx) = inpaint_ctx {
-                    let sigma_next = scheduler.sigmas[step + 1];
-                    let noised_original = ((&ctx.original_latents * (1.0 - sigma_next))?
-                        + (&ctx.noise * sigma_next)?)?;
-                    latents =
-                        ((&ctx.mask * &latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                    latents = crate::img2img::apply_flow_match_inpaint(
+                        &latents,
+                        ctx,
+                        scheduler.sigmas[step + 1],
+                    )?;
                 }
 
                 progress.emit(ProgressEvent::DenoiseStep {
@@ -2244,8 +2276,51 @@ impl InferenceEngine for QwenImageEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::LoadStrategy;
     use candle_core::Shape;
-    use std::path::PathBuf;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn qwen_image_model_paths(
+        transformer: PathBuf,
+        transformer_shards: Vec<PathBuf>,
+        vae: PathBuf,
+        text_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards,
+            vae,
+            spatial_upscaler: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer,
+            decoder: None,
+        }
+    }
 
     fn resolved_text_encoder(is_gguf: bool, auto_use_gpu: bool) -> ResolvedQwen2TextEncoder {
         ResolvedQwen2TextEncoder {
@@ -2636,6 +2711,271 @@ mod tests {
     #[test]
     fn qwen_is_oom_error_matches_cuda_memory_allocation_string() {
         assert!(QwenImageEngine::is_oom_error(&"cudaErrorMemoryAllocation"));
+    }
+
+    #[test]
+    fn qwen_oom_fallback_returns_primary_success_without_running_fallback() {
+        let mut progress = ProgressReporter::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let messages_clone = messages.clone();
+        progress.set_callback(Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                messages_clone.lock().unwrap().push(message);
+            }
+        }));
+
+        let fallback_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fallback_called_clone = fallback_called.clone();
+        let value = QwenImageEngine::with_cuda_oom_cpu_fallback(
+            || Ok(7usize),
+            || {
+                fallback_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(9usize)
+            },
+            true,
+            &Device::Cpu,
+            &progress,
+            "retrying",
+            |_| true,
+        )
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert!(!fallback_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(messages.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn qwen_oom_fallback_retries_when_primary_ooms_on_cuda() {
+        let mut progress = ProgressReporter::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let messages_clone = messages.clone();
+        progress.set_callback(Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                messages_clone.lock().unwrap().push(message);
+            }
+        }));
+
+        let value = QwenImageEngine::with_cuda_oom_cpu_fallback(
+            || Err(anyhow::anyhow!("cudaErrorMemoryAllocation")),
+            || Ok(11usize),
+            true,
+            &Device::Cpu,
+            &progress,
+            "retrying",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap();
+
+        assert_eq!(value, 11);
+        assert_eq!(messages.lock().unwrap().as_slice(), ["retrying"]);
+    }
+
+    #[test]
+    fn qwen_oom_fallback_does_not_retry_non_oom_errors() {
+        let progress = ProgressReporter::default();
+        let err = QwenImageEngine::with_cuda_oom_cpu_fallback(
+            || Err(anyhow::anyhow!("not an oom")),
+            || Ok(11usize),
+            true,
+            &Device::Cpu,
+            &progress,
+            "retrying",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not an oom"));
+    }
+
+    #[test]
+    fn qwen_tiled_fallback_returns_primary_success_without_retrying() {
+        let progress = ProgressReporter::default();
+        let tiled_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cpu_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tiled_called_clone = tiled_called.clone();
+        let cpu_called_clone = cpu_called.clone();
+
+        let value = QwenImageEngine::with_cuda_tiled_then_cpu_fallback(
+            || Ok(5usize),
+            || {
+                tiled_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(7usize)
+            },
+            || {
+                cpu_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(9usize)
+            },
+            true,
+            &Device::Cpu,
+            &progress,
+            "tiled",
+            "cpu",
+            |_| true,
+        )
+        .unwrap();
+
+        assert_eq!(value, 5);
+        assert!(!tiled_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!cpu_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn qwen_tiled_fallback_uses_tiled_result_before_cpu() {
+        let mut progress = ProgressReporter::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let messages_clone = messages.clone();
+        progress.set_callback(Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                messages_clone.lock().unwrap().push(message);
+            }
+        }));
+
+        let cpu_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cpu_called_clone = cpu_called.clone();
+        let value = QwenImageEngine::with_cuda_tiled_then_cpu_fallback(
+            || Err(anyhow::anyhow!("out of memory")),
+            || Ok(13usize),
+            || {
+                cpu_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(17usize)
+            },
+            true,
+            &Device::Cpu,
+            &progress,
+            "tiled",
+            "cpu",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap();
+
+        assert_eq!(value, 13);
+        assert!(!cpu_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(messages.lock().unwrap().as_slice(), ["tiled"]);
+    }
+
+    #[test]
+    fn qwen_tiled_fallback_uses_cpu_after_tiled_oom() {
+        let mut progress = ProgressReporter::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let messages_clone = messages.clone();
+        progress.set_callback(Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                messages_clone.lock().unwrap().push(message);
+            }
+        }));
+
+        let value = QwenImageEngine::with_cuda_tiled_then_cpu_fallback(
+            || Err(anyhow::anyhow!("OUT_OF_MEMORY")),
+            || Err(anyhow::anyhow!("OUT_OF_MEMORY")),
+            || Ok(19usize),
+            true,
+            &Device::Cpu,
+            &progress,
+            "tiled",
+            "cpu",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap();
+
+        assert_eq!(value, 19);
+        assert_eq!(messages.lock().unwrap().as_slice(), ["tiled", "cpu"]);
+    }
+
+    #[test]
+    fn qwen_tiled_fallback_propagates_non_oom_tiled_error() {
+        let progress = ProgressReporter::default();
+        let err = QwenImageEngine::with_cuda_tiled_then_cpu_fallback(
+            || Err(anyhow::anyhow!("out of memory")),
+            || Err(anyhow::anyhow!("bad tiled decode")),
+            || Ok(19usize),
+            true,
+            &Device::Cpu,
+            &progress,
+            "tiled",
+            "cpu",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("bad tiled decode"));
+    }
+
+    #[test]
+    fn qwen_transformer_paths_prefer_shards_when_present() {
+        let dir = temp_test_dir("mold-qwen-shards");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a.clone(), shard_b.clone()],
+                dir.join("vae.safetensors"),
+                Some(dir.join("tokenizer.json")),
+            ),
+            LoadStrategy::Sequential,
+            false,
+        );
+
+        assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn qwen_validate_paths_accepts_existing_files() {
+        let dir = temp_test_dir("mold-qwen-validate-ok");
+        let shard_a = touch(&dir, "transformer-00001-of-00002.safetensors");
+        let shard_b = touch(&dir, "transformer-00002-of-00002.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let gguf = touch(&dir, "transformer.gguf");
+
+        let sharded = QwenImageEngine::new(
+            "qwen-image:bf16".to_string(),
+            qwen_image_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![shard_a, shard_b],
+                vae.clone(),
+                Some(tokenizer.clone()),
+            ),
+            LoadStrategy::Sequential,
+            false,
+        );
+        assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
+        assert!(!sharded.detect_is_quantized());
+
+        let quantized = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(gguf, vec![], vae, Some(dir.join("tokenizer.json"))),
+            LoadStrategy::Sequential,
+            false,
+        );
+        assert!(quantized.detect_is_quantized());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn qwen_validate_paths_requires_text_tokenizer() {
+        let dir = temp_test_dir("mold-qwen-validate-missing");
+        let engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                None,
+            ),
+            LoadStrategy::Sequential,
+            false,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("text tokenizer path required"));
+
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

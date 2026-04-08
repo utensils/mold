@@ -598,7 +598,17 @@ fn diagonal_gaussian_mode(parameters: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use candle_core::{DType, Device, Shape};
+    use candle_nn::VarBuilder;
+    use std::collections::HashMap;
+
+    fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
+        let map = tensors
+            .into_iter()
+            .map(|(name, tensor)| (name.to_string(), tensor))
+            .collect::<HashMap<_, _>>();
+        VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
 
     #[test]
     fn klein_vae_config() {
@@ -684,6 +694,30 @@ mod tests {
         assert!((vals[0] - 3.0).abs() < 0.01, "ch0: {}", vals[0]);
         // Channel 1: 1.0 * sqrt(9.0001) + (-1.0) ≈ 2.0
         assert!((vals[1] - 2.0).abs() < 0.01, "ch1: {}", vals[1]);
+    }
+
+    #[test]
+    fn downsample_applies_asymmetric_padding_before_stride2_conv() {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "conv.weight",
+                Tensor::from_vec(vec![1.0f32; 9], (1, 1, 3, 3), &dev).unwrap(),
+            ),
+            (
+                "conv.bias",
+                Tensor::zeros(1, candle_core::DType::F32, &dev).unwrap(),
+            ),
+        ]);
+        let downsample = Downsample::new(1, vb).unwrap();
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &dev).unwrap();
+
+        let output = downsample.forward(&input).unwrap();
+        assert_eq!(output.dims(), &[1, 1, 1, 1]);
+        assert_eq!(
+            output.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![10.0]
+        );
     }
 
     #[test]
@@ -775,5 +809,23 @@ mod tests {
         let mode = diagonal_gaussian_mode(&params).unwrap();
         let vals = mode.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scaled_dot_product_attention_uniform_queries_average_values() {
+        let dev = Device::Cpu;
+        let q = Tensor::zeros(Shape::from((1, 1, 2, 2)), candle_core::DType::F32, &dev).unwrap();
+        let k = Tensor::zeros(Shape::from((1, 1, 2, 2)), candle_core::DType::F32, &dev).unwrap();
+        let v = Tensor::from_vec(
+            vec![10.0f32, 0.0, 0.0, 20.0],
+            Shape::from((1, 1, 2, 2)),
+            &dev,
+        )
+        .unwrap();
+
+        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        assert_eq!(out.dims(), &[1, 1, 2, 2]);
+        let vals = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals, vec![5.0, 10.0, 5.0, 10.0]);
     }
 }

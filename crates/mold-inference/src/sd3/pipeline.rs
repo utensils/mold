@@ -495,8 +495,9 @@ impl SD3Engine {
             .collect();
 
         if req.source_image.is_some() {
-            let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-            sigmas = sigmas[start_index..].to_vec();
+            let (trimmed, start_index) =
+                crate::img2img::trim_schedule_tail(&sigmas, req.steps as usize, req.strength);
+            sigmas = trimmed;
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -553,34 +554,19 @@ impl SD3Engine {
                 .progress
                 .info("Freed VAE encoder to make room for transformer");
 
-            let noise = crate::engine::seeded_randn(
+            let encoded = encoded.to_dtype(noise_dtype)?;
+            let prepared = crate::img2img::prepare_flow_match_img2img(
+                &encoded,
                 seed,
                 &[1, 16, latent_h, latent_w],
+                start_t,
+                req.mask_image.as_deref(),
+                latent_h,
+                latent_w,
                 &device,
                 noise_dtype,
             )?;
-            let encoded = encoded.to_dtype(noise_dtype)?;
-
-            let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                let mask = img_utils::decode_mask_image(
-                    mask_bytes,
-                    latent_h,
-                    latent_w,
-                    &device,
-                    noise_dtype,
-                )?;
-                Some(img_utils::InpaintContext {
-                    original_latents: encoded.clone(),
-                    mask,
-                    noise: noise.clone(),
-                })
-            } else {
-                None
-            };
-
-            // Flow-matching interpolation: latent = (1 - t) * encoded + t * noise
-            let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
-            (Some(img), inpaint_ctx)
+            (Some(prepared.initial_latents), prepared.inpaint_ctx)
         } else {
             (None, None)
         };
@@ -812,9 +798,9 @@ impl InferenceEngine for SD3Engine {
                 .collect();
 
             if req.source_image.is_some() {
-                let start_index =
-                    crate::img2img::img2img_start_index(req.steps as usize, req.strength);
-                sigmas = sigmas[start_index..].to_vec();
+                let (trimmed, start_index) =
+                    crate::img2img::trim_schedule_tail(&sigmas, req.steps as usize, req.strength);
+                sigmas = trimmed;
                 tracing::info!(
                     strength = req.strength,
                     start_index,
@@ -866,34 +852,23 @@ impl InferenceEngine for SD3Engine {
                     drop(autoencoder);
                     loaded.device.synchronize()?;
 
-                    let noise = crate::engine::seeded_randn(
+                    let encoded = encoded.to_dtype(noise_dtype)?;
+                    let prepared = crate::img2img::prepare_flow_match_img2img(
+                        &encoded,
                         seed,
                         &[1, 16, latent_h, latent_w],
+                        start_t,
+                        req.mask_image.as_deref(),
+                        latent_h,
+                        latent_w,
                         &loaded_device,
                         noise_dtype,
                     )?;
-                    let encoded = encoded.to_dtype(noise_dtype)?;
-
-                    let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                        let mask = img_utils::decode_mask_image(
-                            mask_bytes,
-                            latent_h,
-                            latent_w,
-                            &loaded_device,
-                            noise_dtype,
-                        )?;
-                        Some(img_utils::InpaintContext {
-                            original_latents: encoded.clone(),
-                            mask,
-                            noise: noise.clone(),
-                        })
-                    } else {
-                        None
-                    };
-
-                    // Flow-matching interpolation: latent = (1 - t) * encoded + t * noise
-                    let img = ((&encoded * (1.0 - start_t))? + (&noise * start_t)?)?;
-                    (Some(img), inpaint_ctx, None::<()>)
+                    (
+                        Some(prepared.initial_latents),
+                        prepared.inpaint_ctx,
+                        None::<()>,
+                    )
                 } else {
                     (None, None, None)
                 };
@@ -1054,6 +1029,54 @@ impl InferenceEngine for SD3Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn sd3_model_paths(
+        transformer: PathBuf,
+        vae: PathBuf,
+        clip_l_path: Option<PathBuf>,
+        clip_l_tokenizer: Option<PathBuf>,
+        clip_g_path: Option<PathBuf>,
+        clip_g_tokenizer: Option<PathBuf>,
+        t5_encoder: Option<PathBuf>,
+        t5_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards: vec![],
+            vae,
+            spatial_upscaler: None,
+            t5_encoder,
+            clip_encoder: clip_l_path,
+            t5_tokenizer,
+            clip_tokenizer: clip_l_tokenizer,
+            clip_encoder_2: clip_g_path,
+            clip_tokenizer_2: clip_g_tokenizer,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
 
     #[test]
     fn sd3_img2img_uses_minus_one_to_one_source_normalization() {
@@ -1061,5 +1084,123 @@ mod tests {
             SD3Engine::img2img_source_normalize_range(),
             img_utils::NormalizeRange::MinusOneToOne
         );
+    }
+
+    #[test]
+    fn sd3_mmdit_config_tracks_large_vs_medium_variants() {
+        let base_dir = temp_test_dir("mold-sd3-config");
+        let large = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                base_dir.join("transformer.safetensors"),
+                base_dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+        let medium = SD3Engine::new(
+            "sd3.5-medium:bf16".to_string(),
+            sd3_model_paths(
+                base_dir.join("transformer.safetensors"),
+                base_dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            true,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let large_cfg = large.mmdit_config();
+        let medium_cfg = medium.mmdit_config();
+
+        assert_eq!(large_cfg.depth, 38);
+        assert_eq!(large_cfg.pos_embed_max_size, 192);
+        assert_eq!(medium_cfg.depth, 24);
+        assert_eq!(medium_cfg.pos_embed_max_size, 384);
+        assert!(large.slg_config().is_none());
+        let slg = medium.slg_config().unwrap();
+        assert_eq!(slg.scale, 2.5);
+        assert_eq!(slg.layers, vec![7, 8, 9]);
+
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn sd3_validate_paths_accepts_existing_files() {
+        let dir = temp_test_dir("mold-sd3-validate-ok");
+        let transformer = touch(&dir, "transformer.gguf");
+        let vae = touch(&dir, "vae.safetensors");
+        let clip_l = touch(&dir, "clip-l.safetensors");
+        let clip_l_tok = touch(&dir, "clip-l-tokenizer.json");
+        let clip_g = touch(&dir, "clip-g.safetensors");
+        let clip_g_tok = touch(&dir, "clip-g-tokenizer.json");
+        let t5 = touch(&dir, "t5.safetensors");
+        let t5_tok = touch(&dir, "t5-tokenizer.json");
+
+        let engine = SD3Engine::new(
+            "sd3.5-large-turbo:q8".to_string(),
+            sd3_model_paths(
+                transformer,
+                vae,
+                Some(clip_l),
+                Some(clip_l_tok),
+                Some(clip_g),
+                Some(clip_g_tok),
+                Some(t5),
+                Some(t5_tok.clone()),
+            ),
+            true,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let (_, _, _, _, _, resolved_t5_tok) = engine.validate_paths().unwrap();
+        assert_eq!(resolved_t5_tok, t5_tok);
+        assert!(engine.detect_is_quantized());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_validate_paths_requires_t5_encoder() {
+        let dir = temp_test_dir("mold-sd3-validate-missing");
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                Some(dir.join("clip-l.safetensors")),
+                Some(dir.join("clip-l-tokenizer.json")),
+                Some(dir.join("clip-g.safetensors")),
+                Some(dir.join("clip-g-tokenizer.json")),
+                None,
+                Some(dir.join("t5-tokenizer.json")),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+        );
+
+        let err = engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("T5 encoder path required"));
+        assert!(!engine.detect_is_quantized());
+
+        fs::remove_dir_all(dir).ok();
     }
 }

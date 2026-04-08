@@ -725,7 +725,7 @@ impl WuerstchenEngine {
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ctx) = inpaint_ctx {
                 let noised_original = Self::ddpmw_add_noise(&ctx.original_latents, &ctx.noise, t)?;
-                *latents = ((&ctx.mask * &*latents)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                *latents = crate::img2img::blend_inpaint_latents(&*latents, ctx, &noised_original)?;
             }
 
             self.base.progress.emit(ProgressEvent::DenoiseStep {
@@ -978,24 +978,16 @@ impl WuerstchenEngine {
                     &device,
                 )?;
 
-                // Build inpaint context if mask provided
-                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let (_, _, enc_h, enc_w) = encoded.dims4()?;
-                    let mask = img_utils::decode_mask_image(
-                        mask_bytes,
-                        enc_h,
-                        enc_w,
-                        &device,
-                        DType::F32,
-                    )?;
-                    Some(img_utils::InpaintContext {
-                        original_latents: encoded,
-                        mask,
-                        noise,
-                    })
-                } else {
-                    None
-                };
+                let (_, _, enc_h, enc_w) = encoded.dims4()?;
+                let inpaint_ctx = crate::img2img::maybe_build_inpaint_context(
+                    req.mask_image.as_deref(),
+                    &encoded,
+                    &noise,
+                    enc_h,
+                    enc_w,
+                    &device,
+                    DType::F32,
+                )?;
 
                 // Use zeros for effnet conditioning (no Prior output)
                 // The Decoder will rely on text conditioning + noised latents
@@ -1292,24 +1284,16 @@ impl InferenceEngine for WuerstchenEngine {
                     &loaded.device,
                 )?;
 
-                // Build inpaint context if mask provided
-                let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
-                    let (_, _, enc_h, enc_w) = encoded.dims4()?;
-                    let mask = img_utils::decode_mask_image(
-                        mask_bytes,
-                        enc_h,
-                        enc_w,
-                        &loaded.device,
-                        DType::F32,
-                    )?;
-                    Some(img_utils::InpaintContext {
-                        original_latents: encoded,
-                        mask,
-                        noise,
-                    })
-                } else {
-                    None
-                };
+                let (_, _, enc_h, enc_w) = encoded.dims4()?;
+                let inpaint_ctx = crate::img2img::maybe_build_inpaint_context(
+                    req.mask_image.as_deref(),
+                    &encoded,
+                    &noise,
+                    enc_h,
+                    enc_w,
+                    &loaded.device,
+                    DType::F32,
+                )?;
 
                 // Use zeros for effnet conditioning (no Prior output)
                 let prior_latent_h = (height as f64 / LATENT_DIM_SCALE).ceil() as usize;
@@ -1481,6 +1465,53 @@ impl InferenceEngine for WuerstchenEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::LoadStrategy;
+    use mold_core::ModelPaths;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"test").unwrap();
+        path
+    }
+
+    fn wuerstchen_model_paths(
+        transformer: PathBuf,
+        decoder: Option<PathBuf>,
+        vae: PathBuf,
+        prior_clip_encoder: Option<PathBuf>,
+        prior_clip_tokenizer: Option<PathBuf>,
+        decoder_clip_encoder: Option<PathBuf>,
+        decoder_clip_tokenizer: Option<PathBuf>,
+    ) -> ModelPaths {
+        ModelPaths {
+            transformer,
+            transformer_shards: vec![],
+            vae,
+            spatial_upscaler: None,
+            t5_encoder: None,
+            clip_encoder: decoder_clip_encoder,
+            t5_tokenizer: None,
+            clip_tokenizer: decoder_clip_tokenizer,
+            clip_encoder_2: prior_clip_encoder,
+            clip_tokenizer_2: prior_clip_tokenizer,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder,
+        }
+    }
 
     fn test_tokenizer() -> tokenizers::Tokenizer {
         let tokenizer_json = r#"{
@@ -1546,5 +1577,124 @@ mod tests {
         assert_eq!(WuerstchenEngine::effective_prior_steps(30), 30);
         assert_eq!(WuerstchenEngine::effective_prior_steps(60), 60);
         assert_eq!(WuerstchenEngine::effective_prior_steps(20), 20);
+    }
+
+    #[test]
+    fn ddpmw_add_noise_matches_reference_formula() {
+        let dev = Device::Cpu;
+        let original = Tensor::from_vec(vec![2.0f32, -1.0], (1, 2), &dev).unwrap();
+        let noise = Tensor::from_vec(vec![3.0f32, 4.0], (1, 2), &dev).unwrap();
+        let t = 0.5f64;
+
+        let actual = WuerstchenEngine::ddpmw_add_noise(&original, &noise, t)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let s = 0.008f64;
+        let init_alpha_cumprod = (s / (1.0 + s) * std::f64::consts::PI).cos().powi(2);
+        let alpha_cumprod = ((t + s) / (1.0 + s) * std::f64::consts::PI * 0.5)
+            .cos()
+            .powi(2)
+            / init_alpha_cumprod;
+        let alpha_cumprod = alpha_cumprod.clamp(0.0001, 0.9999);
+        let sqrt_alpha = alpha_cumprod.sqrt() as f32;
+        let sqrt_one_minus_alpha = (1.0 - alpha_cumprod).sqrt() as f32;
+        let expected = vec![
+            2.0f32 * sqrt_alpha + 3.0 * sqrt_one_minus_alpha,
+            -1.0f32 * sqrt_alpha + 4.0 * sqrt_one_minus_alpha,
+        ];
+
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn validate_paths_falls_back_to_prior_clip_when_decoder_clip_missing() {
+        let dir = temp_test_dir("mold-wuerstchen-validate-ok");
+        let transformer = touch(&dir, "prior.safetensors");
+        let decoder = touch(&dir, "decoder.safetensors");
+        let vae = touch(&dir, "vqgan.safetensors");
+        let prior_clip_encoder = touch(&dir, "prior-clip.safetensors");
+        let prior_clip_tokenizer = touch(&dir, "prior-tokenizer.json");
+
+        let engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                transformer,
+                Some(decoder.clone()),
+                vae,
+                Some(prior_clip_encoder.clone()),
+                Some(prior_clip_tokenizer.clone()),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+        );
+
+        let (
+            decoder_path,
+            resolved_prior_clip_encoder,
+            resolved_prior_clip_tokenizer,
+            resolved_decoder_clip_encoder,
+            resolved_decoder_clip_tokenizer,
+        ) = engine.validate_paths().unwrap();
+
+        assert_eq!(decoder_path, decoder);
+        assert_eq!(resolved_prior_clip_encoder, prior_clip_encoder);
+        assert_eq!(resolved_prior_clip_tokenizer, prior_clip_tokenizer);
+        assert_eq!(resolved_decoder_clip_encoder, resolved_prior_clip_encoder);
+        assert_eq!(
+            resolved_decoder_clip_tokenizer,
+            resolved_prior_clip_tokenizer
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn validate_paths_requires_decoder_and_existing_files() {
+        let dir = temp_test_dir("mold-wuerstchen-validate-missing");
+        let transformer = touch(&dir, "prior.safetensors");
+        let vae = touch(&dir, "vqgan.safetensors");
+        let prior_clip_encoder = touch(&dir, "prior-clip.safetensors");
+        let prior_clip_tokenizer = touch(&dir, "prior-tokenizer.json");
+
+        let missing_decoder_engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                transformer.clone(),
+                None,
+                vae.clone(),
+                Some(prior_clip_encoder.clone()),
+                Some(prior_clip_tokenizer.clone()),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+        );
+        let err = missing_decoder_engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("Decoder (Stage B) path required"));
+
+        let missing_file_engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                transformer,
+                Some(dir.join("missing-decoder.safetensors")),
+                vae,
+                Some(prior_clip_encoder),
+                Some(prior_clip_tokenizer),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+        );
+        let err = missing_file_engine.validate_paths().unwrap_err();
+        assert!(err.to_string().contains("decoder (Stage B) file not found"));
+
+        fs::remove_dir_all(dir).ok();
     }
 }
