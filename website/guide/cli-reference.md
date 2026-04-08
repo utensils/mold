@@ -344,7 +344,7 @@ and replaces the current binary in-place.
 | ----------------- | --------------------------------------------- |
 | `--check`         | Only check for updates, don't install         |
 | `--force`         | Reinstall even if the current version matches |
-| `--version <TAG>` | Install a specific version (e.g. `v0.7.0`)   |
+| `--version <TAG>` | Install a specific version (e.g. `v0.7.0`)    |
 
 Respects `GITHUB_TOKEN` for API authentication (avoids rate limits). On Linux,
 respects `MOLD_CUDA_ARCH` for GPU architecture override.

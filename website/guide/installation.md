@@ -10,11 +10,12 @@ Downloads the latest pre-built binary to `~/.local/bin/mold`. On Linux, the
 installer auto-detects your NVIDIA GPU architecture (RTX 40-series or RTX
 50-series). macOS builds include Metal support.
 
-Override the GPU architecture:
+Override the install directory or GPU architecture:
 
 ```bash
-MOLD_CUDA_ARCH=sm120 curl -fsSL ... | sh  # Blackwell (RTX 50-series)
-MOLD_CUDA_ARCH=sm89 curl -fsSL ... | sh   # Ada (RTX 40-series)
+MOLD_INSTALL_DIR=/usr/local/bin curl -fsSL ... | sh  # Custom install path
+MOLD_CUDA_ARCH=sm120 curl -fsSL ... | sh             # Blackwell (RTX 50-series)
+MOLD_CUDA_ARCH=sm89 curl -fsSL ... | sh              # Ada (RTX 40-series)
 ```
 
 ## Updating
