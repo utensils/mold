@@ -2331,9 +2331,9 @@ impl App {
                         let model_name = model.name.clone();
                         let tx = self.bg_tx.clone();
 
-                        if let Some(ref url) = self.server_url {
+                        if self.should_poll_remote() {
                             // Pull via server when connected remotely
-                            let url = url.clone();
+                            let url = self.server_url.clone().unwrap();
                             self.tokio_handle.spawn(async move {
                                 let client = mold_core::MoldClient::new(&url);
                                 let (progress_tx, mut progress_rx) =
