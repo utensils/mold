@@ -72,6 +72,21 @@ impl Ltx2ModelPreset {
     pub(crate) fn audio_transformer_inner_dim(self) -> usize {
         self.transformer.audio_num_attention_heads * self.transformer.audio_attention_head_dim
     }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn gemma_flat_dim(self) -> usize {
+        self.gemma.hidden_size * (self.gemma.num_hidden_layers + 1)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn video_connector_inner_dim(self) -> usize {
+        self.connectors.video_num_attention_heads * self.connectors.video_attention_head_dim
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn audio_connector_inner_dim(self) -> usize {
+        self.connectors.audio_num_attention_heads * self.connectors.audio_attention_head_dim
+    }
 }
 
 const GEMMA_PROFILE: GemmaProfile = GemmaProfile {
@@ -83,12 +98,21 @@ const GEMMA_PROFILE: GemmaProfile = GemmaProfile {
     intermediate_size: 15360,
 };
 
-const CONNECTOR_PROFILE: ConnectorProfile = ConnectorProfile {
+const CONNECTOR_PROFILE_19B: ConnectorProfile = ConnectorProfile {
     video_num_attention_heads: 30,
     video_attention_head_dim: 128,
     video_num_layers: 2,
     audio_num_attention_heads: 30,
     audio_attention_head_dim: 128,
+    audio_num_layers: 2,
+};
+
+const CONNECTOR_PROFILE_22B: ConnectorProfile = ConnectorProfile {
+    video_num_attention_heads: 30,
+    video_attention_head_dim: 128,
+    video_num_layers: 2,
+    audio_num_attention_heads: 32,
+    audio_attention_head_dim: 64,
     audio_num_layers: 2,
 };
 
@@ -112,7 +136,7 @@ const PRESET_19B: Ltx2ModelPreset = Ltx2ModelPreset {
     caption_projection: CaptionProjectionPlacement::Transformer,
     feature_extractor: GemmaFeatureExtractorKind::V1SharedAv,
     transformer: TRANSFORMER_PROFILE,
-    connectors: CONNECTOR_PROFILE,
+    connectors: CONNECTOR_PROFILE_19B,
     gemma: GEMMA_PROFILE,
     supports_spatial_upscale_x1_5: false,
     supports_spatial_upscale_x2: true,
@@ -125,7 +149,7 @@ const PRESET_22B: Ltx2ModelPreset = Ltx2ModelPreset {
     caption_projection: CaptionProjectionPlacement::TextEncoderConnector,
     feature_extractor: GemmaFeatureExtractorKind::V2DualAv,
     transformer: TRANSFORMER_PROFILE,
-    connectors: CONNECTOR_PROFILE,
+    connectors: CONNECTOR_PROFILE_22B,
     gemma: GEMMA_PROFILE,
     supports_spatial_upscale_x1_5: true,
     supports_spatial_upscale_x2: true,
@@ -162,6 +186,9 @@ mod tests {
         assert!(!preset_19b.supports_spatial_upscale_x1_5);
         assert_eq!(preset_19b.transformer_inner_dim(), 4096);
         assert_eq!(preset_19b.audio_transformer_inner_dim(), 2048);
+        assert_eq!(preset_19b.video_connector_inner_dim(), 3840);
+        assert_eq!(preset_19b.audio_connector_inner_dim(), 3840);
+        assert_eq!(preset_19b.gemma_flat_dim(), 188_160);
 
         let preset_22b = preset_for_model("ltx-2.3-22b-dev:fp8").unwrap();
         assert_eq!(preset_22b.name, "ltx-2.3-22b");
@@ -175,5 +202,7 @@ mod tests {
         );
         assert!(preset_22b.supports_spatial_upscale_x1_5);
         assert_eq!(preset_22b.streaming_prefetch_count, 2);
+        assert_eq!(preset_22b.video_connector_inner_dim(), 3840);
+        assert_eq!(preset_22b.audio_connector_inner_dim(), 2048);
     }
 }
