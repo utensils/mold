@@ -77,7 +77,7 @@ async fn run_event_loop(
 ) -> Result<()> {
     let mut last_resource_refresh = std::time::Instant::now();
     // Initial resource info refresh
-    if app.server_url.is_some() {
+    if app.should_poll_remote() {
         app.spawn_server_status_fetch();
     } else {
         app.resource_info.refresh_local();
@@ -97,7 +97,7 @@ async fn run_event_loop(
 
         // Refresh resource info every 2 seconds
         if last_resource_refresh.elapsed() >= std::time::Duration::from_secs(2) {
-            if app.server_url.is_some() {
+            if app.should_poll_remote() {
                 app.spawn_server_status_fetch();
             } else {
                 app.resource_info.refresh_local();

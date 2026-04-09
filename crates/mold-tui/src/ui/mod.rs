@@ -81,19 +81,19 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let version = format!("mold {} ", mold_core::build_info::version_string());
     let mut right_spans = Vec::new();
 
-    if let Some(ref status) = app.resource_info.server_status {
+    if app.generate.params.inference_mode == crate::app::InferenceMode::Local {
+        right_spans.push(Span::styled("local ", Style::default().fg(theme.text_dim)));
+    } else if let Some(ref status) = app.resource_info.server_status {
         let host_label = status.hostname.as_deref().unwrap_or("remote");
         right_spans.push(Span::styled(
             format!("{host_label} "),
             Style::default().fg(theme.accent),
         ));
-    } else if app.server_url.is_some() {
+    } else if app.connecting {
         right_spans.push(Span::styled(
             "connecting... ",
             Style::default().fg(theme.warning),
         ));
-    } else if app.generate.params.inference_mode == crate::app::InferenceMode::Local {
-        right_spans.push(Span::styled("local ", Style::default().fg(theme.text_dim)));
     }
 
     right_spans.push(Span::styled(version, Style::default().fg(theme.text_dim)));

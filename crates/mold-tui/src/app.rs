@@ -60,7 +60,8 @@ pub enum BackgroundEvent {
     /// Upscale failed.
     UpscaleFailed(String),
     /// Periodic server status update (remote resource info).
-    ServerStatusUpdate(Box<ServerStatus>),
+    /// `None` means the server became unreachable — clear stale status.
+    ServerStatusUpdate(Option<Box<ServerStatus>>),
 }
 
 /// A single entry in the progress log.
@@ -874,6 +875,8 @@ pub struct App {
     pub upscale_tile_progress: Option<(usize, usize)>,
     /// Download progress state during upscaler model pull.
     pub upscale_progress: ProgressState,
+    /// True while a background server health check / connect is in progress.
+    pub connecting: bool,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -1138,6 +1141,7 @@ impl App {
             upscale_task: None,
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
+            connecting: false,
         });
 
         // Spawn background gallery scan
@@ -1165,6 +1169,12 @@ impl App {
         });
     }
 
+    /// Whether the event loop should poll `/api/status` instead of local sysinfo.
+    /// True when connected to a server AND not forced into local mode.
+    pub fn should_poll_remote(&self) -> bool {
+        self.server_url.is_some() && self.generate.params.inference_mode != InferenceMode::Local
+    }
+
     /// Sync resource info source after mode changes.
     /// Switches between local sysinfo and remote `/api/status` polling.
     fn sync_resource_info_mode(&mut self) {
@@ -1185,8 +1195,15 @@ impl App {
         let url = url.clone();
         self.tokio_handle.spawn(async move {
             let client = mold_core::MoldClient::new(&url);
-            if let Ok(status) = client.server_status().await {
-                let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Box::new(status)));
+            match client.server_status().await {
+                Ok(status) => {
+                    let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+                }
+                Err(_) => {
+                    // Server became unreachable — clear stale status so the UI
+                    // stops showing the last-known hostname/memory.
+                    let _ = tx.send(BackgroundEvent::ServerStatusUpdate(None));
+                }
             }
         });
     }
@@ -1808,6 +1825,7 @@ impl App {
                             // Normalize using same logic as CLI/MoldClient
                             let url = mold_core::client::normalize_host(&host);
                             self.generate.params.host = Some(url.clone());
+                            self.connecting = true;
                             // Show connecting status
                             self.generate.progress.log.push(ProgressLogEntry {
                                 message: format!("Connecting to {url}..."),
@@ -4097,6 +4115,7 @@ impl App {
                     self.gallery.thumb_fixed_cache = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
+                    self.connecting = false;
                     self.server_url = Some(url.clone());
                     self.models.catalog = models.clone();
                     self.models.selected = 0;
@@ -4121,6 +4140,7 @@ impl App {
                     self.spawn_server_status_fetch();
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
+                    self.connecting = false;
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Server unreachable: {msg}"),
                         style: ProgressStyle::Error,
@@ -4310,8 +4330,12 @@ impl App {
                     self.upscale_progress.clear();
                     self.generate.error_message = Some(format!("Upscale failed: {msg}"));
                 }
-                BackgroundEvent::ServerStatusUpdate(status) => {
+                BackgroundEvent::ServerStatusUpdate(Some(status)) => {
                     self.resource_info.update_from_server_status(*status);
+                }
+                BackgroundEvent::ServerStatusUpdate(None) => {
+                    // Server became unreachable — clear stale remote info
+                    self.resource_info.clear_server_status();
                 }
             }
         }
@@ -5451,6 +5475,7 @@ mod tests {
             upscale_task: None,
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
+            connecting: false,
         }
     }
 
@@ -6828,6 +6853,8 @@ mod tests {
             hostname: None,
             memory_status: None,
         };
-        let _event = BackgroundEvent::ServerStatusUpdate(Box::new(status));
+        let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
+        // None variant for server-unreachable
+        let _event_none = BackgroundEvent::ServerStatusUpdate(None);
     }
 }
