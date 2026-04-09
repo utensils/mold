@@ -372,6 +372,32 @@ mod tests {
         assert_eq!(status["current_generation"], serde_json::Value::Null);
     }
 
+    #[tokio::test]
+    async fn status_includes_hostname_and_memory_status() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: mold_core::ServerStatus = serde_json::from_slice(&body).unwrap();
+        // hostname should be populated from the OS (non-empty on any real machine)
+        assert!(
+            status.hostname.is_some(),
+            "server should report its hostname"
+        );
+        assert!(
+            !status.hostname.as_ref().unwrap().is_empty(),
+            "hostname should not be empty"
+        );
+        // memory_status may be None on CI (no GPU, no macOS vm_stat) — just verify it
+        // deserializes without error (the field exists in the response)
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn status_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());

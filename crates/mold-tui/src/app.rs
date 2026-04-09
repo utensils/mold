@@ -1,7 +1,8 @@
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
-    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, SseProgressEvent,
+    Config, GenerateResponse, ModelInfoExtended, OutputFormat, Scheduler, ServerStatus,
+    SseProgressEvent,
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
@@ -58,6 +59,12 @@ pub enum BackgroundEvent {
     },
     /// Upscale failed.
     UpscaleFailed(String),
+    /// Periodic server status update (remote resource info).
+    /// `None` means the server became unreachable — clear stale status.
+    ServerStatusUpdate(Option<Box<ServerStatus>>),
+    /// Server catalog refreshed (e.g., after a pull). Updates the model list
+    /// without the mode-switching side effects of `ServerConnected`.
+    CatalogRefreshed(Vec<ModelInfoExtended>),
 }
 
 /// A single entry in the progress log.
@@ -871,6 +878,8 @@ pub struct App {
     pub upscale_tile_progress: Option<(usize, usize)>,
     /// Download progress state during upscaler model pull.
     pub upscale_progress: ProgressState,
+    /// True while a background server health check / connect is in progress.
+    pub connecting: bool,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -1135,6 +1144,7 @@ impl App {
             upscale_task: None,
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
+            connecting: false,
         });
 
         // Spawn background gallery scan
@@ -1160,6 +1170,61 @@ impl App {
             };
             let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
         });
+    }
+
+    /// Whether the event loop should poll `/api/status` instead of local sysinfo.
+    /// True when connected to a server AND not forced into local mode.
+    pub fn should_poll_remote(&self) -> bool {
+        self.server_url.is_some() && self.generate.params.inference_mode != InferenceMode::Local
+    }
+
+    /// Sync resource info source after mode changes.
+    /// Switches between local sysinfo and remote `/api/status` polling.
+    fn sync_resource_info_mode(&mut self) {
+        if self.generate.params.inference_mode == InferenceMode::Local {
+            self.resource_info.clear_server_status();
+            self.resource_info.refresh_local();
+        } else if self.server_url.is_some() {
+            self.spawn_server_status_fetch();
+        }
+    }
+
+    /// Spawn a background fetch of `/api/status` from the connected server.
+    pub fn spawn_server_status_fetch(&self) {
+        let Some(ref url) = self.server_url else {
+            return;
+        };
+        let tx = self.bg_tx.clone();
+        let url = url.clone();
+        self.tokio_handle.spawn(async move {
+            let client = mold_core::MoldClient::new(&url);
+            match client.server_status().await {
+                Ok(status) => {
+                    let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+                }
+                Err(_) => {
+                    // Server became unreachable — clear stale status so the UI
+                    // stops showing the last-known hostname/memory.
+                    let _ = tx.send(BackgroundEvent::ServerStatusUpdate(None));
+                }
+            }
+        });
+    }
+
+    /// Apply model defaults from the server's catalog to the current model.
+    /// When connected remotely, the server's config is authoritative for steps,
+    /// guidance, width, and height.
+    fn apply_remote_model_defaults(&mut self, catalog: &[ModelInfoExtended]) {
+        let model_name = &self.generate.params.model;
+        if let Some(entry) = catalog.iter().find(|m| &m.name == model_name) {
+            self.generate.params.steps = entry.defaults.default_steps;
+            self.generate.params.guidance = entry.defaults.default_guidance;
+            self.generate.params.width = entry.defaults.default_width;
+            self.generate.params.height = entry.defaults.default_height;
+            if !entry.defaults.description.is_empty() {
+                self.generate.model_description = entry.defaults.description.clone();
+            }
+        }
     }
 
     /// Spawn a background upscale job for the currently selected gallery image.
@@ -1429,11 +1494,39 @@ impl App {
         let model_name = model_name.to_string();
         self.generate.params.model = model_name.clone();
 
-        let model_cfg = self.config.resolved_model_config(&model_name);
-        self.generate.params.steps = model_cfg.effective_steps(&self.config);
-        self.generate.params.guidance = model_cfg.effective_guidance();
-        self.generate.params.width = model_cfg.effective_width(&self.config);
-        self.generate.params.height = model_cfg.effective_height(&self.config);
+        // Use server catalog defaults when connected to a remote server,
+        // local config otherwise.
+        let used_remote = if self.should_poll_remote() {
+            if let Some(entry) = self.models.catalog.iter().find(|m| m.name == model_name) {
+                self.generate.params.steps = entry.defaults.default_steps;
+                self.generate.params.guidance = entry.defaults.default_guidance;
+                self.generate.params.width = entry.defaults.default_width;
+                self.generate.params.height = entry.defaults.default_height;
+                if !entry.defaults.description.is_empty() {
+                    self.generate.model_description = entry.defaults.description.clone();
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !used_remote {
+            let model_cfg = self.config.resolved_model_config(&model_name);
+            self.generate.params.steps = model_cfg.effective_steps(&self.config);
+            self.generate.params.guidance = model_cfg.effective_guidance();
+            self.generate.params.width = model_cfg.effective_width(&self.config);
+            self.generate.params.height = model_cfg.effective_height(&self.config);
+
+            self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
+                .and_then(|m| {
+                    let mc = self.config.resolved_model_config(&model_name);
+                    mc.description.or(Some(m.name.clone()))
+                })
+                .unwrap_or_default();
+        }
 
         let family = family_for_model(&model_name, &self.config);
         self.generate.capabilities = capabilities_for_family(&family);
@@ -1442,13 +1535,6 @@ impl App {
             self.generate.params.inference_mode,
         );
         self.generate.param_index = 0;
-
-        self.generate.model_description = mold_core::manifest::find_manifest(&model_name)
-            .and_then(|m| {
-                let mc = self.config.resolved_model_config(&model_name);
-                mc.description.or(Some(m.name.clone()))
-            })
-            .unwrap_or_default();
     }
 
     /// Handle a raw crossterm event.
@@ -1730,6 +1816,9 @@ impl App {
                                 &self.generate.capabilities,
                                 self.generate.params.inference_mode,
                             );
+                            // Switch to local resource info
+                            self.resource_info.clear_server_status();
+                            self.resource_info.refresh_local();
                             // Refresh to local catalog and gallery
                             self.models.catalog =
                                 mold_core::build_model_catalog(&self.config, None, false);
@@ -1739,6 +1828,7 @@ impl App {
                             // Normalize using same logic as CLI/MoldClient
                             let url = mold_core::client::normalize_host(&host);
                             self.generate.params.host = Some(url.clone());
+                            self.connecting = true;
                             // Show connecting status
                             self.generate.progress.log.push(ProgressLogEntry {
                                 message: format!("Connecting to {url}..."),
@@ -2243,13 +2333,41 @@ impl App {
                     if let Some(model) = self.models.catalog.get(self.models.selected) {
                         let model_name = model.name.clone();
                         let tx = self.bg_tx.clone();
-                        self.tokio_handle.spawn(async move {
-                            if let Err(msg) =
-                                crate::backend::auto_pull_model(&model_name, &tx).await
-                            {
-                                let _ = tx.send(BackgroundEvent::Error(msg));
-                            }
-                        });
+
+                        if self.should_poll_remote() {
+                            // Pull via server when connected remotely
+                            let url = self.server_url.clone().unwrap();
+                            self.tokio_handle.spawn(async move {
+                                let client = mold_core::MoldClient::new(&url);
+                                let (progress_tx, mut progress_rx) =
+                                    mpsc::unbounded_channel::<SseProgressEvent>();
+                                let tx_fwd = tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some(event) = progress_rx.recv().await {
+                                        let _ = tx_fwd.send(BackgroundEvent::Progress(event));
+                                    }
+                                });
+                                match client.pull_model_stream(&model_name, progress_tx).await {
+                                    Ok(()) => {
+                                        let _ = tx.send(BackgroundEvent::PullComplete(model_name));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(BackgroundEvent::Error(format!(
+                                            "Server pull failed: {e}"
+                                        )));
+                                    }
+                                }
+                            });
+                        } else {
+                            // Pull locally when no server connected
+                            self.tokio_handle.spawn(async move {
+                                if let Err(msg) =
+                                    crate::backend::auto_pull_model(&model_name, &tx).await
+                                {
+                                    let _ = tx.send(BackgroundEvent::Error(msg));
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -2289,6 +2407,7 @@ impl App {
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
+                self.sync_resource_info_mode();
             }
             Action::ShowHelp => {
                 self.popup = Some(Popup::Help);
@@ -2517,6 +2636,7 @@ impl App {
                 &self.generate.capabilities,
                 self.generate.params.inference_mode,
             );
+            self.sync_resource_info_mode();
         }
     }
 
@@ -2808,6 +2928,7 @@ impl App {
                     &self.generate.capabilities,
                     self.generate.params.inference_mode,
                 );
+                self.sync_resource_info_mode();
             }
             // Cycle format
             ParamField::Format => {
@@ -2861,11 +2982,25 @@ impl App {
             // Reset all params to model defaults (keep model and prompt)
             ParamField::ResetDefaults => {
                 let model = self.generate.params.model.clone();
-                let mc = self.config.resolved_model_config(&model);
-                self.generate.params.width = mc.effective_width(&self.config);
-                self.generate.params.height = mc.effective_height(&self.config);
-                self.generate.params.steps = mc.effective_steps(&self.config);
-                self.generate.params.guidance = mc.effective_guidance();
+
+                // Use server catalog defaults when connected (and not in local mode),
+                // local config otherwise
+                if let Some(entry) = if self.should_poll_remote() {
+                    self.models.catalog.iter().find(|m| m.name == model)
+                } else {
+                    None
+                } {
+                    self.generate.params.width = entry.defaults.default_width;
+                    self.generate.params.height = entry.defaults.default_height;
+                    self.generate.params.steps = entry.defaults.default_steps;
+                    self.generate.params.guidance = entry.defaults.default_guidance;
+                } else {
+                    let mc = self.config.resolved_model_config(&model);
+                    self.generate.params.width = mc.effective_width(&self.config);
+                    self.generate.params.height = mc.effective_height(&self.config);
+                    self.generate.params.steps = mc.effective_steps(&self.config);
+                    self.generate.params.guidance = mc.effective_guidance();
+                }
                 self.generate.params.seed = None;
                 self.generate.params.seed_mode = SeedMode::Random;
                 self.generate.params.batch = 1;
@@ -3984,8 +4119,9 @@ impl App {
                     self.gallery.thumb_fixed_cache = vec![None; len];
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
+                    self.connecting = false;
                     self.server_url = Some(url.clone());
-                    self.models.catalog = models;
+                    self.models.catalog = models.clone();
                     self.models.selected = 0;
                     // Auto-switch to auto mode
                     if self.generate.params.inference_mode == InferenceMode::Local {
@@ -3995,6 +4131,8 @@ impl App {
                         &self.generate.capabilities,
                         self.generate.params.inference_mode,
                     );
+                    // Apply model defaults from server catalog
+                    self.apply_remote_model_defaults(&models);
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Connected to {url}"),
                         style: ProgressStyle::Done,
@@ -4002,22 +4140,43 @@ impl App {
                     // Re-scan gallery from the (now-connected) server
                     self.gallery.scanning = true;
                     self.spawn_gallery_scan();
+                    // Trigger immediate server status fetch for resource info
+                    self.spawn_server_status_fetch();
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
+                    self.connecting = false;
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Server unreachable: {msg}"),
                         style: ProgressStyle::Error,
                     });
                     // Revert host — don't set server_url
                     self.generate.params.host = self.server_url.clone();
+                    // Fall back to local resource info
+                    self.resource_info.clear_server_status();
+                    self.resource_info.refresh_local();
                 }
                 BackgroundEvent::PullComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
                         message: format!("Pull complete: {model}"),
                         style: ProgressStyle::Done,
                     });
-                    // Refresh the catalog
-                    self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+                    // Refresh the catalog (from server when in remote mode, local otherwise).
+                    // Don't reuse ServerConnected here — its handler auto-switches Local→Auto.
+                    if self.should_poll_remote() {
+                        let url = self.server_url.clone().unwrap();
+                        let tx = self.bg_tx.clone();
+                        self.tokio_handle.spawn(async move {
+                            let client = mold_core::MoldClient::new(&url);
+                            if let Ok(models) = client.list_models_extended().await {
+                                // Update catalog directly without mode-switching side effects
+                                let _ = tx.send(BackgroundEvent::CatalogRefreshed(models));
+                            }
+                        });
+                    } else {
+                        self.config = Config::load_or_default();
+                        self.models.catalog =
+                            mold_core::build_model_catalog(&self.config, None, false);
+                    }
                 }
                 BackgroundEvent::ModelRemoveComplete(model) => {
                     self.generate.progress.log.push(ProgressLogEntry {
@@ -4176,6 +4335,21 @@ impl App {
                     self.upscale_tile_progress = None;
                     self.upscale_progress.clear();
                     self.generate.error_message = Some(format!("Upscale failed: {msg}"));
+                }
+                BackgroundEvent::ServerStatusUpdate(Some(status)) => {
+                    self.resource_info.update_from_server_status(*status);
+                }
+                BackgroundEvent::ServerStatusUpdate(None) => {
+                    // Server became unreachable — clear stale remote info
+                    self.resource_info.clear_server_status();
+                }
+                BackgroundEvent::CatalogRefreshed(models) => {
+                    self.models.catalog = models;
+                    if !self.models.catalog.is_empty()
+                        && self.models.selected >= self.models.catalog.len()
+                    {
+                        self.models.selected = self.models.catalog.len() - 1;
+                    }
                 }
             }
         }
@@ -5315,6 +5489,7 @@ mod tests {
             upscale_task: None,
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
+            connecting: false,
         }
     }
 
@@ -6538,5 +6713,540 @@ mod tests {
             catalog.iter().any(|m| m.is_upscaler()),
             "full catalog should include upscaler models"
         );
+    }
+
+    // ── Remote server awareness tests ─────────────────────────────
+
+    fn make_test_catalog_entry(
+        name: &str,
+        steps: u32,
+        guidance: f64,
+        width: u32,
+        height: u32,
+        desc: &str,
+    ) -> ModelInfoExtended {
+        ModelInfoExtended {
+            info: mold_core::ModelInfo {
+                name: name.to_string(),
+                family: "flux".to_string(),
+                size_gb: 4.5,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: "test/repo".to_string(),
+            },
+            defaults: mold_core::ModelDefaults {
+                default_steps: steps,
+                default_guidance: guidance,
+                default_width: width,
+                default_height: height,
+                description: desc.to_string(),
+            },
+            downloaded: true,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+        }
+    }
+
+    #[test]
+    fn remote_catalog_defaults_applied_to_matching_model() {
+        // Simulates apply_remote_model_defaults logic
+        let mut params = GenerateParams::from_config(&Config::load_or_default());
+        params.model = "flux-dev:q4".to_string();
+        params.steps = 1;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX Dev Q4 GGUF",
+        )];
+
+        // Apply defaults from catalog (same logic as apply_remote_model_defaults)
+        if let Some(entry) = catalog.iter().find(|m| m.name == params.model) {
+            params.steps = entry.defaults.default_steps;
+            params.guidance = entry.defaults.default_guidance;
+            params.width = entry.defaults.default_width;
+            params.height = entry.defaults.default_height;
+        }
+
+        assert_eq!(params.steps, 20);
+        assert!((params.guidance - 3.5).abs() < f64::EPSILON);
+        assert_eq!(params.width, 1024);
+        assert_eq!(params.height, 1024);
+    }
+
+    #[test]
+    fn remote_catalog_defaults_no_match_is_noop() {
+        let mut params = GenerateParams::from_config(&Config::load_or_default());
+        let original_steps = params.steps;
+        params.model = "nonexistent-model".to_string();
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            99,
+            9.9,
+            512,
+            512,
+            "test",
+        )];
+
+        if let Some(entry) = catalog.iter().find(|m| m.name == params.model) {
+            params.steps = entry.defaults.default_steps;
+        }
+
+        assert_eq!(
+            params.steps, original_steps,
+            "should not change for non-matching model"
+        );
+    }
+
+    #[test]
+    fn server_status_update_populates_resource_info() {
+        let mut ri = crate::ui::info::ResourceInfo::default();
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q4".to_string()],
+            busy: true,
+            current_generation: None,
+            gpu_info: Some(mold_core::GpuInfo {
+                name: "RTX 4090".to_string(),
+                vram_total_mb: 24564,
+                vram_used_mb: 8192,
+            }),
+            uptime_secs: 3600,
+            hostname: Some("hal9000".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        };
+        ri.update_from_server_status(status);
+        assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
+        assert_eq!(ri.process_memory_mb, 0);
+        let ss = ri.server_status.as_ref().unwrap();
+        assert_eq!(ss.hostname.as_deref(), Some("hal9000"));
+        assert!(ss.busy);
+        assert_eq!(ss.gpu_info.as_ref().unwrap().name, "RTX 4090");
+    }
+
+    #[test]
+    fn clear_server_status_reverts_to_local() {
+        let mut ri = crate::ui::info::ResourceInfo::default();
+        ri.server_status = Some(mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("remote".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        });
+        ri.clear_server_status();
+        assert!(ri.server_status.is_none());
+        ri.refresh_local();
+        // After refresh_local, process_memory_mb is populated (may be 0 if no mold process)
+        // The point is it doesn't panic and switches to local info
+    }
+
+    #[test]
+    fn background_event_server_status_variant_exists() {
+        // Compile-time check that the variant exists
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: None,
+            memory_status: None,
+        };
+        let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
+        // None variant for server-unreachable
+        let _event_none = BackgroundEvent::ServerStatusUpdate(None);
+    }
+
+    // ── should_poll_remote() tests ────────────────────────────
+
+    #[tokio::test]
+    async fn should_poll_remote_true_when_server_and_auto() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Auto;
+        assert!(app.should_poll_remote());
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_true_when_server_and_remote() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Remote;
+        assert!(app.should_poll_remote());
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_false_when_server_but_local_mode() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(
+            !app.should_poll_remote(),
+            "local mode must not poll remote even with server_url set"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_false_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Auto;
+        assert!(!app.should_poll_remote());
+    }
+
+    // ── update_model() remote vs local branching ──────────────
+
+    #[tokio::test]
+    async fn update_model_uses_server_catalog_when_connected() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            28,
+            4.0,
+            768,
+            768,
+            "Server FLUX Dev Q4",
+        )];
+
+        app.update_model("flux-dev:q4");
+
+        assert_eq!(app.generate.params.steps, 28);
+        assert!((app.generate.params.guidance - 4.0).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 768);
+        assert_eq!(app.generate.params.height, 768);
+        assert_eq!(app.generate.model_description, "Server FLUX Dev Q4");
+    }
+
+    #[tokio::test]
+    async fn update_model_falls_back_to_local_when_model_not_in_catalog() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        // Catalog has a different model with an absurd step count no real model uses
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-schnell:q8",
+            199,
+            99.9,
+            256,
+            256,
+            "Schnell",
+        )];
+
+        // Update to a model NOT in the catalog — should use local config
+        let model = app.config.resolved_default_model();
+        app.update_model(&model);
+        // Should not have used the catalog entry's absurd values
+        assert_ne!(app.generate.params.steps, 199);
+        assert_ne!(app.generate.params.width, 256);
+    }
+
+    #[tokio::test]
+    async fn update_model_uses_local_config_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        let model = app.config.resolved_default_model();
+        app.update_model(&model);
+        // Should succeed without panic and use local config defaults
+        assert!(app.generate.params.steps > 0);
+        assert!(app.generate.params.width > 0);
+    }
+
+    // ── apply_remote_model_defaults() ─────────────────────────
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_updates_all_fields() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.params.steps = 1;
+        app.generate.params.guidance = 0.0;
+        app.generate.params.width = 64;
+        app.generate.params.height = 64;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX Dev Q4",
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(app.generate.params.steps, 20);
+        assert!((app.generate.params.guidance - 3.5).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 1024);
+        assert_eq!(app.generate.params.height, 1024);
+        assert_eq!(app.generate.model_description, "FLUX Dev Q4");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_skips_empty_description() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.model_description = "Original description".to_string();
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "", // empty description should not overwrite
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(app.generate.model_description, "Original description");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_no_match_leaves_params_unchanged() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "nonexistent:q4".to_string();
+        app.generate.params.steps = 42;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX",
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(
+            app.generate.params.steps, 42,
+            "should not change for non-matching model"
+        );
+    }
+
+    // ── ResetDefaults branching ───────────────────────────────
+
+    #[tokio::test]
+    async fn reset_defaults_uses_server_catalog_when_connected() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            30,
+            7.0,
+            512,
+            512,
+            "Server Flux",
+        )];
+
+        // Mutate params away from defaults
+        app.generate.params.steps = 1;
+        app.generate.params.width = 9999;
+        app.generate.params.batch = 5;
+        app.generate.params.format = OutputFormat::Jpeg;
+
+        // Focus on parameters, select ResetDefaults, and trigger it
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Parameters;
+        let reset_idx = app
+            .generate
+            .visible_fields
+            .iter()
+            .position(|f| *f == ParamField::ResetDefaults)
+            .unwrap();
+        app.generate.param_index = reset_idx;
+        app.activate_current_param();
+
+        // Server catalog defaults should be applied
+        assert_eq!(app.generate.params.steps, 30);
+        assert!((app.generate.params.guidance - 7.0).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 512);
+        assert_eq!(app.generate.params.height, 512);
+        // Non-default fields should be reset to generic defaults
+        assert_eq!(app.generate.params.batch, 1);
+        assert_eq!(app.generate.params.format, OutputFormat::Png);
+    }
+
+    #[tokio::test]
+    async fn reset_defaults_uses_local_config_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+
+        // Mutate params
+        app.generate.params.steps = 999;
+        app.generate.params.batch = 10;
+
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Parameters;
+        let reset_idx = app
+            .generate
+            .visible_fields
+            .iter()
+            .position(|f| *f == ParamField::ResetDefaults)
+            .unwrap();
+        app.generate.param_index = reset_idx;
+        app.activate_current_param();
+
+        // Should use local config defaults (steps won't be 999)
+        assert_ne!(app.generate.params.steps, 999);
+        assert_eq!(app.generate.params.batch, 1);
+    }
+
+    // ── sync_resource_info_mode() ─────────────────────────────
+
+    #[tokio::test]
+    async fn sync_resource_info_mode_local_clears_server_status() {
+        let mut app = make_settings_test_app();
+        app.generate.params.inference_mode = InferenceMode::Local;
+        // Simulate having stale server status
+        app.resource_info.server_status = Some(mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("stale-host".to_string()),
+            memory_status: None,
+        });
+
+        app.sync_resource_info_mode();
+
+        assert!(
+            app.resource_info.server_status.is_none(),
+            "local mode should clear server_status"
+        );
+    }
+
+    // ── ServerConnected handler ───────────────────────────────
+
+    #[tokio::test]
+    async fn server_connected_applies_model_defaults_and_clears_connecting() {
+        let mut app = make_settings_test_app();
+        app.connecting = true;
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.params.steps = 1;
+
+        let models = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "Server FLUX",
+        )];
+
+        // Simulate receiving ServerConnected
+        let _ = app.bg_tx.send(BackgroundEvent::ServerConnected {
+            url: "http://hal9000:7680".to_string(),
+            models,
+        });
+        app.process_background_events();
+
+        assert!(!app.connecting);
+        assert_eq!(app.server_url.as_deref(), Some("http://hal9000:7680"));
+        assert_eq!(app.generate.params.steps, 20);
+    }
+
+    // ── ServerStatusUpdate handlers ───────────────────────────
+
+    #[tokio::test]
+    async fn server_status_update_some_populates_resource_info() {
+        let mut app = make_settings_test_app();
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q4".to_string()],
+            busy: true,
+            current_generation: None,
+            gpu_info: Some(mold_core::GpuInfo {
+                name: "RTX 4090".to_string(),
+                vram_total_mb: 24564,
+                vram_used_mb: 8192,
+            }),
+            uptime_secs: 3600,
+            hostname: Some("hal9000".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        };
+
+        let _ = app
+            .bg_tx
+            .send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+        app.process_background_events();
+
+        let ri = &app.resource_info;
+        assert!(ri.server_status.is_some());
+        assert_eq!(
+            ri.server_status.as_ref().unwrap().hostname.as_deref(),
+            Some("hal9000")
+        );
+        assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
+    }
+
+    #[tokio::test]
+    async fn server_status_update_none_clears_stale_status() {
+        let mut app = make_settings_test_app();
+        // Pre-populate with server status
+        app.resource_info
+            .update_from_server_status(mold_core::ServerStatus {
+                version: "0.6.3".to_string(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 0,
+                hostname: Some("stale-host".to_string()),
+                memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            });
+        assert!(app.resource_info.server_status.is_some());
+
+        // Server went down — receive None
+        let _ = app.bg_tx.send(BackgroundEvent::ServerStatusUpdate(None));
+        app.process_background_events();
+
+        assert!(
+            app.resource_info.server_status.is_none(),
+            "stale server status should be cleared on fetch failure"
+        );
+    }
+
+    // ── ServerUnreachable handler ─────────────────────────────
+
+    #[tokio::test]
+    async fn server_unreachable_clears_connecting_and_reverts_host() {
+        let mut app = make_settings_test_app();
+        app.connecting = true;
+        app.server_url = Some("http://original:7680".to_string());
+        app.generate.params.host = Some("http://new-host:7680".to_string());
+
+        let _ = app
+            .bg_tx
+            .send(BackgroundEvent::ServerUnreachable("timeout".to_string()));
+        app.process_background_events();
+
+        assert!(!app.connecting);
+        // host should revert to server_url
+        assert_eq!(
+            app.generate.params.host.as_deref(),
+            Some("http://original:7680")
+        );
+        assert!(app.resource_info.server_status.is_none());
     }
 }

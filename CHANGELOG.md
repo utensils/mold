@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine ([#158](https://github.com/utensils/mold/issues/158)):
+  - Info panel queries `/api/status` for memory, GPU, and busy state when connected to a remote server
+  - Model parameter defaults (steps, guidance, width, height) come from the server's catalog instead of local `config.toml`
+  - Model pull routes through the server API when connected remotely
+  - Reset Defaults action uses server catalog values when connected
+  - Tab bar shows hostname (e.g. "hal9000") when connected to a remote server, "local" in local mode, "connecting..." during health check
+  - `/api/status` now includes `hostname` and `memory_status` fields (backward-compatible, older servers omit them)
+
 ## [0.6.2] - 2026-04-08
 
 ### Added
