@@ -29,8 +29,8 @@ pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
-    clamp_to_megapixel_limit, dimension_warning, fit_to_model_dimensions, recommended_dimensions,
-    validate_generate_request, validate_upscale_request,
+    clamp_to_megapixel_limit, dimension_warning, fit_to_model_dimensions, fit_to_target_area,
+    recommended_dimensions, validate_generate_request, validate_upscale_request,
 };
 
 pub use expand::{

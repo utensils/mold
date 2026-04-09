@@ -201,6 +201,30 @@ pub(crate) struct GgufQwen2TextEncoder {
 }
 
 impl GgufQwen2TextEncoder {
+    fn forward_last_hidden_from_embeddings(
+        &mut self,
+        xs: Tensor,
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let (b, seq_len, _) = xs.dims3()?;
+        let attention_mask = match attn_mask {
+            Some(mask) => Some(self.prepare_attention_mask(mask)?),
+            None => {
+                if seq_len <= 1 {
+                    None
+                } else {
+                    Some(self.prepare_causal_attention_mask(b, seq_len, 0)?)
+                }
+            }
+        };
+
+        let mut xs = xs;
+        for block in &self.blocks {
+            xs = block.forward(&xs, &self.cos, &self.sin, attention_mask.as_ref())?;
+        }
+        Ok(xs)
+    }
+
     pub fn load(path: &Path, device: &Device) -> Result<Self> {
         let mut file = std::fs::File::open(path)?;
         let content = gguf_file::Content::read(&mut file)?;
@@ -417,23 +441,33 @@ impl GgufQwen2TextEncoder {
         input_ids: &Tensor,
         attn_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let (b, seq_len) = input_ids.dims2()?;
-        let attention_mask = match attn_mask {
-            Some(mask) => Some(self.prepare_attention_mask(mask)?),
-            None => {
-                if seq_len <= 1 {
-                    None
-                } else {
-                    Some(self.prepare_causal_attention_mask(b, seq_len, 0)?)
-                }
-            }
-        };
+        let xs = self.embedding.forward(input_ids)?;
+        self.forward_last_hidden_from_embeddings(xs, attn_mask)
+    }
 
+    pub fn forward_last_hidden_with_image_embeds(
+        &mut self,
+        input_ids: &Tensor,
+        image_spans: &[(usize, usize)],
+        image_embeds: &[Tensor],
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let mut xs = self.embedding.forward(input_ids)?;
-        for block in &self.blocks {
-            xs = block.forward(&xs, &self.cos, &self.sin, attention_mask.as_ref())?;
+        for ((start, end), embeds) in image_spans.iter().zip(image_embeds.iter()) {
+            if embeds.dim(0)? != end - start {
+                anyhow::bail!(
+                    "image embedding length {} did not match placeholder span {}",
+                    embeds.dim(0)?,
+                    end - start
+                );
+            }
+            let embeds = embeds.to_device(&self.device)?.to_dtype(self.dtype)?;
+            xs = xs.slice_assign(
+                &[0..1, *start..*end, 0..embeds.dim(1)?],
+                &embeds.unsqueeze(0)?,
+            )?;
         }
-        Ok(xs)
+        self.forward_last_hidden_from_embeddings(xs, attn_mask)
     }
 }
 

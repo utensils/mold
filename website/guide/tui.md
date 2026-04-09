@@ -89,6 +89,8 @@ The main workspace with five panels:
   keybindings)
 - **Negative** — (CFG models only) Describes what to avoid
 - **Parameters** — Model, dimensions, steps, guidance, seed, and more
+- `qwen-image-edit` shows a source image and negative prompt without img2img
+  `strength` or `mask` controls
 - **Info** — Model description, system memory, process memory usage
 - **Preview** — Generated image with Kitty/sixel/halfblock rendering
 
@@ -238,6 +240,20 @@ The Model Defaults section shows settings for a specific model. Use
 Editable fields include steps, guidance, dimensions, scheduler, negative prompt,
 LoRA path, and LoRA scale. File paths (transformer, VAE) are read-only since
 they are managed by `mold pull`.
+
+## Qwen-Image-Edit
+
+The TUI treats `qwen-image-edit` as a distinct edit family:
+
+- single source image only in the TUI
+- no img2img `strength`
+- no inpainting mask
+- no ControlNet or LoRA controls
+- default width/height derived from the selected source image at roughly `1024x1024` area
+
+Local inference uses the Qwen2.5-VL multimodal edit encoder. In v1 the TUI
+keeps the flow single-image only, even though the CLI and API accept multiple
+ordered `--image` inputs for `qwen-image-edit`.
 
 ## Navigation
 

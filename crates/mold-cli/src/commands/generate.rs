@@ -4,8 +4,9 @@ use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    classify_generate_error, fit_to_model_dimensions, Config, GenerateRequest, GenerateResponse,
-    GenerateServerAction, ImageData, LoraWeight, MoldClient, OutputFormat, Scheduler,
+    classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
+    GenerateRequest, GenerateResponse, GenerateServerAction, ImageData, LoraWeight, MoldClient,
+    OutputFormat, Scheduler,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -46,17 +47,58 @@ fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Re
     Ok((w, h))
 }
 
+fn qwen_image_edit_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    const TARGET_AREA: u32 = 1024 * 1024;
+    const ALIGN: u32 = 16;
+
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
+    let orig_w = img.width().max(1);
+    let orig_h = img.height().max(1);
+    let (width, height) = fit_to_target_area(orig_w, orig_h, TARGET_AREA, ALIGN);
+
+    if width != orig_w || height != orig_h {
+        status!(
+            "{} Edit image {}x{} -> {}x{} (target ~1024x1024 area, 16px aligned)",
+            theme::icon_info(),
+            orig_w,
+            orig_h,
+            width,
+            height
+        );
+    }
+
+    Ok((width, height))
+}
+
+fn resolve_family(model: &str, config: &Config) -> Option<String> {
+    config
+        .resolved_model_config(model)
+        .family
+        .or_else(|| manifest::find_manifest(model).map(|m| m.family.clone()))
+}
+
 fn effective_dimensions(
     config: &Config,
     model_cfg: &mold_core::ModelConfig,
+    family: Option<&str>,
     width: Option<u32>,
     height: Option<u32>,
     source_image: Option<&[u8]>,
+    edit_images: Option<&[Vec<u8>]>,
 ) -> Result<(u32, u32)> {
     match (width, height, source_image) {
         (Some(width), Some(height), _) => Ok((width, height)),
         (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
         (None, Some(height), _) => Ok((model_cfg.effective_width(config), height)),
+        (None, None, _) if family == Some("qwen-image-edit") => {
+            let first = edit_images
+                .and_then(|images| images.first())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("qwen-image-edit requires at least one input image")
+                })?;
+            qwen_image_edit_dimensions(first)
+        }
         (None, None, Some(source_image)) => {
             let model_w = model_cfg.effective_width(config);
             let model_h = model_cfg.effective_height(config);
@@ -66,6 +108,19 @@ fn effective_dimensions(
             model_cfg.effective_width(config),
             model_cfg.effective_height(config),
         )),
+    }
+}
+
+fn effective_negative_prompt(
+    family: Option<&str>,
+    guidance: f64,
+    negative_prompt: Option<String>,
+) -> Option<String> {
+    if family == Some("qwen-image-edit") && guidance > 1.0 && negative_prompt.is_none() {
+        // Keep CFG's negative branch explicitly populated for Qwen edit models.
+        Some(" ".to_string())
+    } else {
+        negative_prompt
     }
 }
 
@@ -116,6 +171,7 @@ pub async fn run(
     eager: bool,
     offload: bool,
     source_image: Option<Vec<u8>>,
+    edit_images: Option<Vec<Vec<u8>>>,
     strength: f64,
     mask_image: Option<Vec<u8>>,
     control_image: Option<Vec<u8>>,
@@ -153,17 +209,31 @@ pub async fn run(
     // Otherwise we defer to env/config/default precedence inside Config.
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
+    let family = resolve_family(model, &config);
 
     // Default to the source image size for img2img/inpainting when neither
     // dimension was provided. We still normalize to the validation envelope
     // (multiples of 16, megapixel clamp) to avoid invalid requests and OOMs.
-    let (effective_width, effective_height) =
-        effective_dimensions(&config, &model_cfg, width, height, source_image.as_deref())?;
+    let (effective_width, effective_height) = effective_dimensions(
+        &config,
+        &model_cfg,
+        family.as_deref(),
+        width,
+        height,
+        source_image.as_deref(),
+        edit_images.as_deref(),
+    )?;
     let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
     let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
+    let effective_negative_prompt = effective_negative_prompt(
+        family.as_deref(),
+        effective_guidance,
+        negative_prompt.clone(),
+    );
 
     let req = GenerateRequest {
         prompt: prompt.to_string(),
+        negative_prompt: effective_negative_prompt.clone(),
         model: model.to_string(),
         width: effective_width,
         height: effective_height,
@@ -174,13 +244,13 @@ pub async fn run(
         output_format,
         embed_metadata: Some(embed_metadata),
         scheduler,
+        edit_images: edit_images.clone(),
         source_image: source_image.clone(),
         strength,
         mask_image: mask_image.clone(),
         control_image: control_image.clone(),
         control_model: control_model.clone(),
         control_scale,
-        negative_prompt: negative_prompt.clone(),
         expand,
         original_prompt,
         lora: lora.clone(),
@@ -193,7 +263,7 @@ pub async fn run(
     // Warn if user-provided dimensions don't match model recommendations.
     // Only warn locally — in remote mode the server sends the warning via SSE/header.
     if local && (width.is_some() || height.is_some()) {
-        if let Some(ref family) = model_cfg.family {
+        if let Some(ref family) = family {
             if let Some(warning) =
                 mold_core::dimension_warning(effective_width, effective_height, family)
             {
@@ -218,7 +288,7 @@ pub async fn run(
         prompt.to_string()
     };
     status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
-    if let Some(ref neg) = negative_prompt {
+    if let Some(ref neg) = effective_negative_prompt {
         let display_neg = if neg.chars().count() > 50 {
             let truncated: String = neg.chars().take(47).collect();
             format!("{truncated}...")
@@ -236,6 +306,13 @@ pub async fn run(
             "{} inpainting mode (strength: {:.2})",
             theme::icon_mode(),
             strength,
+        );
+    } else if let Some(ref images) = edit_images {
+        status!(
+            "{} image edit mode ({} input image{})",
+            theme::icon_mode(),
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
         );
     } else if source_image.is_some() {
         status!(
@@ -1376,7 +1453,7 @@ mod tests {
         };
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, None, None).unwrap(),
             (1024, 1024)
         );
     }
@@ -1393,7 +1470,8 @@ mod tests {
         let source = png_with_dimensions(1280, 704);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
+                .unwrap(),
             (1024, 560)
         );
     }
@@ -1410,7 +1488,8 @@ mod tests {
         let source = png_with_dimensions(1001, 777);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
+                .unwrap(),
             (1024, 784)
         );
     }
@@ -1426,7 +1505,16 @@ mod tests {
         let source = png_with_dimensions(1280, 704);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, Some(512), Some(768), Some(&source)).unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                None,
+                Some(512),
+                Some(768),
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (512, 768)
         );
     }
@@ -1443,7 +1531,8 @@ mod tests {
         let source = png_with_dimensions(1024, 1024);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
+                .unwrap(),
             (512, 512)
         );
     }
@@ -1460,7 +1549,8 @@ mod tests {
         let source = png_with_dimensions(1920, 1080);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
+                .unwrap(),
             (512, 288)
         );
     }
@@ -1477,8 +1567,72 @@ mod tests {
         let source = png_with_dimensions(512, 512);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, Some(&source)).unwrap(),
+            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
+                .unwrap(),
             (1024, 1024)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_qwen_image_edit_uses_first_edit_image() {
+        let config = Config::default();
+        let model_cfg = ModelConfig::default();
+        let first = png_with_dimensions(1600, 900);
+        let second = png_with_dimensions(512, 512);
+
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                Some("qwen-image-edit"),
+                None,
+                None,
+                None,
+                Some(&[first, second]),
+            )
+            .unwrap(),
+            (1360, 768)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_qwen_image_edit_requires_input_image() {
+        let config = Config::default();
+        let model_cfg = ModelConfig::default();
+        let err = effective_dimensions(
+            &config,
+            &model_cfg,
+            Some("qwen-image-edit"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires at least one input image"));
+    }
+
+    #[test]
+    fn effective_negative_prompt_injects_space_for_qwen_image_edit_cfg() {
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 4.0, None).as_deref(),
+            Some(" ")
+        );
+    }
+
+    #[test]
+    fn effective_negative_prompt_preserves_explicit_or_non_edit_values() {
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 4.0, Some("keep".to_string()))
+                .as_deref(),
+            Some("keep")
+        );
+        assert_eq!(effective_negative_prompt(Some("flux"), 4.0, None), None);
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 1.0, None),
+            None
         );
     }
 

@@ -18,7 +18,9 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::{linear, Linear, VarBuilder};
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 
-use super::quantized_transformer::QwenRopeEmbedder;
+use super::quantized_transformer::{
+    build_edit_modulation_index, select_modulation_params, QwenRopeEmbedder,
+};
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
 use crate::progress::ProgressReporter;
 
@@ -314,14 +316,25 @@ impl OffloadedQwenBlock {
         img_sin: &Tensor,
         txt_cos: &Tensor,
         txt_sin: &Tensor,
+        modulate_index: Option<&Tensor>,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
 
         // AdaLN modulation (6 params per stream)
-        let img_mod = temb.silu()?.apply(&self.img_mod)?.unsqueeze(1)?;
+        let img_mod = temb.silu()?.apply(&self.img_mod)?;
+        let img_mod = if let Some(modulate_index) = modulate_index {
+            select_modulation_params(&img_mod, modulate_index)?
+        } else {
+            img_mod.unsqueeze(1)?
+        };
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
 
-        let txt_mod = temb.silu()?.apply(&self.txt_mod)?.unsqueeze(1)?;
+        let txt_temb = if modulate_index.is_some() {
+            temb.narrow(0, 0, txt_hidden.dim(0)?)?
+        } else {
+            temb.clone()
+        };
+        let txt_mod = txt_temb.silu()?.apply(&self.txt_mod)?.unsqueeze(1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
 
         // Attention
@@ -676,6 +689,7 @@ impl OffloadedQwenImageTransformer {
                         &img_sin,
                         &txt_cos,
                         &txt_sin,
+                        None,
                     )?;
                 }
                 BlockResidency::Cpu(block) => {
@@ -690,6 +704,7 @@ impl OffloadedQwenImageTransformer {
                         &img_sin,
                         &txt_cos,
                         &txt_sin,
+                        None,
                     )?;
                     device.synchronize()?;
                     drop(gpu_block);
@@ -708,5 +723,84 @@ impl OffloadedQwenImageTransformer {
             .reshape((_b, self.cfg.out_channels, h, w))?
             .contiguous()?;
         Ok(x_out)
+    }
+
+    pub fn forward_packed(
+        &self,
+        packed_hidden_states: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
+        img_shapes: &[(usize, usize, usize)],
+    ) -> Result<Tensor> {
+        let device = &self.gpu_device;
+        let batch = packed_hidden_states.dim(0)?;
+        let mut timestep = t.clone();
+        let modulate_index = if self.cfg.zero_cond_t {
+            timestep = Tensor::cat(&[&timestep, &(timestep.zeros_like()?)], 0)?;
+            Some(build_edit_modulation_index(img_shapes, batch, device)?)
+        } else {
+            None
+        };
+
+        let temb = self.time_embed.forward(&timestep)?;
+        let mut img = packed_hidden_states.apply(&self.img_in)?;
+        let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
+        let mut txt = txt_normed.apply(&self.txt_in)?;
+
+        let txt_seq_len = encoder_hidden_states.dim(1)?;
+        let compute_dtype = packed_hidden_states.dtype();
+        let (img_cos, img_sin, txt_cos, txt_sin) = {
+            let (ic, is, tc, ts) =
+                self.rope_embedder
+                    .forward_shapes(img_shapes, txt_seq_len, device)?;
+            (
+                ic.to_dtype(compute_dtype)?,
+                is.to_dtype(compute_dtype)?,
+                tc.to_dtype(compute_dtype)?,
+                ts.to_dtype(compute_dtype)?,
+            )
+        };
+
+        for residency in &self.blocks {
+            match residency {
+                BlockResidency::Gpu(block) => {
+                    (txt, img) = block.forward(
+                        &img,
+                        &txt,
+                        encoder_attention_mask,
+                        &temb,
+                        &img_cos,
+                        &img_sin,
+                        &txt_cos,
+                        &txt_sin,
+                        modulate_index.as_ref(),
+                    )?;
+                }
+                BlockResidency::Cpu(block) => {
+                    let gpu_block = block.to_device(device)?;
+                    (txt, img) = gpu_block.forward(
+                        &img,
+                        &txt,
+                        encoder_attention_mask,
+                        &temb,
+                        &img_cos,
+                        &img_sin,
+                        &txt_cos,
+                        &txt_sin,
+                        modulate_index.as_ref(),
+                    )?;
+                    device.synchronize()?;
+                    drop(gpu_block);
+                }
+            }
+        }
+
+        let out_temb = if self.cfg.zero_cond_t {
+            temb.narrow(0, 0, batch)?
+        } else {
+            temb
+        };
+        self.output_layer.forward(&img, &out_temb)
     }
 }

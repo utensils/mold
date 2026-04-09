@@ -16,6 +16,7 @@ pub(crate) fn family_label(family: &str) -> &str {
         "sdxl" => "SDXL",
         "z-image" => "Z-Image",
         "qwen-image" | "qwen_image" => "Qwen-Image",
+        "qwen-image-edit" => "Qwen-Image-Edit",
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         "ltx-video" | "ltx_video" => "LTX Video",
         "controlnet" => "ControlNet",
@@ -34,7 +35,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "sd3" | "sd3.5" => padded.bright_green().to_string(),
         "sdxl" => padded.yellow().to_string(),
         "z-image" => padded.cyan().to_string(),
-        "qwen-image" | "qwen_image" => padded.bright_blue().to_string(),
+        "qwen-image" | "qwen_image" | "qwen-image-edit" => padded.bright_blue().to_string(),
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "ltx-video" | "ltx_video" => padded.red().to_string(),
         "controlnet" => padded.bright_red().to_string(),
@@ -56,6 +57,7 @@ pub(crate) fn format_family(family: &str) -> String {
             | "z-image"
             | "qwen-image"
             | "qwen_image"
+            | "qwen-image-edit"
             | "wuerstchen"
             | "wuerstchen-v2"
             | "ltx-video"
@@ -490,6 +492,12 @@ mod tests {
     #[test]
     fn format_family_unknown_uppercases() {
         assert_eq!(format_family("other"), "OTHER");
+    }
+
+    #[test]
+    fn format_family_qwen_image_edit_matches_qwen_image_label() {
+        let result = format_family("qwen-image-edit");
+        assert!(result.contains("Qwen-Image-Edit"));
     }
 
     #[test]

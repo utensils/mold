@@ -21,31 +21,32 @@ mold run z-image-turbo:q4 "a city at dusk" --width 768 --height 768
 
 ## Which Model Fits My GPU?
 
-| GPU VRAM | Good Starting Choices                                                                       |
-| -------- | ------------------------------------------------------------------------------------------- |
-| 4-6 GB   | `flux2-klein:q4`, `sd15:fp16`                                                               |
-| 8-10 GB  | `flux-dev:q4`, `flux-schnell:q4`, `z-image-turbo:q4`, `sdxl-turbo:fp16`                     |
-| 12-16 GB | `flux-schnell:q8`, `flux-dev:q6`, `z-image-turbo:q8`, `qwen-image:q4`, `qwen-image-2512:q4` |
-| 24 GB    | `qwen-image:q4`, `qwen-image-2512:q4`, `flux-dev:bf16`, most quantized variants             |
-| 48 GB+   | Full BF16 variants with more room for eager loading                                         |
+| GPU VRAM | Good Starting Choices                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------- |
+| 4-6 GB   | `flux2-klein:q4`, `sd15:fp16`                                                                              |
+| 8-10 GB  | `flux-dev:q4`, `flux-schnell:q4`, `z-image-turbo:q4`, `sdxl-turbo:fp16`                                    |
+| 12-16 GB | `flux-schnell:q8`, `flux-dev:q6`, `z-image-turbo:q8`, `qwen-image:q4`, `qwen-image-2512:q4`                |
+| 24 GB    | `qwen-image:q4`, `qwen-image-2512:q4`, `qwen-image-edit-2511:q4`, `flux-dev:bf16`, most quantized variants |
+| 48 GB+   | Full BF16 variants with more room for eager loading                                                        |
 
 As a rule, quantized FLUX and Z-Image variants are the easiest place to start.
-For Qwen-Image on a 24 GB card, start with `qwen-image:q4` or
-`qwen-image-2512:q4`. On the current mold validation machine, Qwen GGUF
-variants `q2` through `q6` were validated at `1024x1024`, while `q8` was
-validated at `768x768`.
+For the Qwen family on a 24 GB card, start with `qwen-image:q4`,
+`qwen-image-2512:q4`, or `qwen-image-edit-2511:q4`. On the current mold
+validation machine, Qwen GGUF variants `q2` through `q6` were validated at
+`1024x1024`, while `q8` was validated at `768x768`.
 
-On Apple Silicon, Qwen-Image now also has a separate quantized Qwen2.5-VL text
-encoder path. If the machine becomes unresponsive during prompt encoding, keep
-the model the same and try:
+If Qwen prompt conditioning or edit setup makes the machine unresponsive, keep
+the model the same and try a quantized Qwen2 path explicitly:
 
 ```bash
 mold run qwen-image:q2 "your prompt" --qwen2-variant q6
 mold run qwen-image:q2 "your prompt" --qwen2-variant q4
+mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --qwen2-variant q4
 ```
 
-Metal `auto` already prefers that path by default. Only force `--qwen2-variant
-bf16` if you are deliberately comparing the old behavior.
+`auto` already prefers the lighter path when BF16 would be too heavy. Only
+force `--qwen2-variant bf16` if you are deliberately comparing the larger
+resident encoder behavior.
 
 ## Connection Refused
 

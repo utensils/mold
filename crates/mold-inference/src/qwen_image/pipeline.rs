@@ -15,10 +15,10 @@
 //! - Official diffusers-style exponential time shift with dynamic per-image stretch
 
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use mold_core::{fit_to_target_area, GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -45,12 +45,16 @@ use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
+// Use a single space rather than an empty string so the unconditional CFG path
+// stays explicit after Qwen prompt templating and token windowing.
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 const QWEN_NATIVE_WIDTH: usize = 1328;
 const QWEN_NATIVE_HEIGHT: usize = 1328;
 const QWEN_GGUF_NATIVE_CFG_HEADROOM: u64 = 14_000_000_000;
 const QWEN_GGUF_MIN_CFG_HEADROOM: u64 = 3_000_000_000;
 const QWEN_VAE_TILE_SIZES: [u32; 3] = [64, 32, 16];
+const QWEN_IMAGE_EDIT_VAE_AREA: u32 = 1024 * 1024;
+const QWEN_IMAGE_EDIT_SYSTEM_PROMPT: &str = "Describe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.";
 
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
@@ -89,6 +93,7 @@ struct Qwen2TextEncoderPlan {
 #[derive(Debug, Clone)]
 struct ResolvedQwen2TextEncoder {
     paths: Vec<std::path::PathBuf>,
+    vision_paths: Vec<std::path::PathBuf>,
     is_gguf: bool,
     variant_label: String,
     size_bytes: u64,
@@ -269,6 +274,39 @@ impl QwenImageTransformer {
             }
         }
     }
+
+    fn forward_packed(
+        &self,
+        packed_latents: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
+        img_shapes: &[(usize, usize, usize)],
+    ) -> Result<Tensor> {
+        match self {
+            Self::BF16(model) => Ok(model.forward_packed(
+                packed_latents,
+                t,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                img_shapes,
+            )?),
+            Self::Quantized(model) => Ok(model.forward_packed(
+                packed_latents,
+                t,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                img_shapes,
+            )?),
+            Self::Offloaded(model) => model.forward_packed(
+                packed_latents,
+                t,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                img_shapes,
+            ),
+        }
+    }
 }
 
 /// Qwen-Image-2512 inference engine.
@@ -279,6 +317,77 @@ pub struct QwenImageEngine {
 }
 
 impl QwenImageEngine {
+    fn is_edit_family(&self) -> bool {
+        self.base.model_name.starts_with("qwen-image-edit")
+    }
+
+    fn should_preload_text_encoder(&self) -> bool {
+        !self.is_edit_family()
+    }
+
+    fn text_encoder_load_dtype(use_gpu: bool, gpu_dtype: DType) -> DType {
+        if use_gpu {
+            gpu_dtype
+        } else {
+            // Candle CPU matmul does not support BF16 for the Qwen2.5 encoder path.
+            // Keep CPU language/vision encoding in F32 and use quantized GGUF when
+            // lower host residency is needed.
+            DType::F32
+        }
+    }
+
+    fn transformer_config(&self) -> QwenImageConfig {
+        if self.is_edit_family() {
+            QwenImageConfig::qwen_image_edit_2511()
+        } else {
+            QwenImageConfig::qwen_image_2512()
+        }
+    }
+
+    fn qwen_image_edit_prompt(prompt: &str, image_count: usize) -> String {
+        let picture_prefix = (0..image_count)
+            .map(|idx| {
+                format!(
+                    "Picture {}: <|vision_start|><|image_pad|><|vision_end|>",
+                    idx + 1
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<|im_start|>system\n{QWEN_IMAGE_EDIT_SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n{picture_prefix}{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        )
+    }
+
+    fn qwen_image_edit_image_dims(image: &[u8], target_area: u32) -> Result<(u32, u32)> {
+        let img = image::load_from_memory(image)?;
+        Ok(fit_to_target_area(
+            img.width().max(1),
+            img.height().max(1),
+            target_area,
+            16,
+        ))
+    }
+
+    fn pack_latents_4d(latents: &Tensor) -> Result<Tensor> {
+        let (batch, channels, height, width) = latents.dims4()?;
+        let height_blocks = height / 2;
+        let width_blocks = width / 2;
+        latents
+            .reshape((batch, channels, height_blocks, 2, width_blocks, 2))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((batch, height_blocks * width_blocks, channels * 4))
+            .map_err(Into::into)
+    }
+
+    fn unpack_latents_packed(latents: &Tensor, latent_h: usize, latent_w: usize) -> Result<Tensor> {
+        let batch = latents.dim(0)?;
+        latents
+            .reshape((batch, latent_h / 2, latent_w / 2, 16, 2, 2))?
+            .permute((0, 3, 1, 4, 2, 5))?
+            .reshape((batch, 16, latent_h, latent_w))
+            .map_err(Into::into)
+    }
+
     fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
         img_utils::NormalizeRange::MinusOneToOne
     }
@@ -493,6 +602,7 @@ impl QwenImageEngine {
                 })?;
                 Ok(ResolvedQwen2TextEncoder {
                     paths: vec![],
+                    vision_paths: vec![],
                     is_gguf: true,
                     variant_label: variant.tag.to_string(),
                     size_bytes: variant.size_bytes,
@@ -506,6 +616,7 @@ impl QwenImageEngine {
             }
             Some("bf16") => Ok(ResolvedQwen2TextEncoder {
                 paths: vec![],
+                vision_paths: vec![],
                 is_gguf: false,
                 variant_label: "bf16".to_string(),
                 size_bytes: bf16_size_bytes,
@@ -528,6 +639,7 @@ impl QwenImageEngine {
                     ) {
                         return Ok(ResolvedQwen2TextEncoder {
                             paths: vec![],
+                            vision_paths: vec![],
                             is_gguf: true,
                             variant_label: variant.tag.to_string(),
                             size_bytes: variant.size_bytes,
@@ -539,6 +651,7 @@ impl QwenImageEngine {
                     .expect("known Metal fallback qwen2 variant missing");
                 Ok(ResolvedQwen2TextEncoder {
                     paths: vec![],
+                    vision_paths: vec![],
                     is_gguf: true,
                     variant_label: fallback.tag.to_string(),
                     size_bytes: fallback.size_bytes,
@@ -551,6 +664,7 @@ impl QwenImageEngine {
                 if bf16_on_gpu {
                     return Ok(ResolvedQwen2TextEncoder {
                         paths: vec![],
+                        vision_paths: vec![],
                         is_gguf: false,
                         variant_label: "bf16".to_string(),
                         size_bytes: bf16_size_bytes,
@@ -562,6 +676,7 @@ impl QwenImageEngine {
                     if matches!(usage, Qwen2TextEncoderUsage::Sequential) {
                         return Ok(ResolvedQwen2TextEncoder {
                             paths: vec![],
+                            vision_paths: vec![],
                             is_gguf: false,
                             variant_label: "bf16".to_string(),
                             size_bytes: bf16_size_bytes,
@@ -574,6 +689,7 @@ impl QwenImageEngine {
                         .expect("known CUDA fallback qwen2 variant missing");
                     return Ok(ResolvedQwen2TextEncoder {
                         paths: vec![],
+                        vision_paths: vec![],
                         is_gguf: true,
                         variant_label: fallback.tag.to_string(),
                         size_bytes: fallback.size_bytes,
@@ -589,6 +705,7 @@ impl QwenImageEngine {
 
                 Ok(ResolvedQwen2TextEncoder {
                     paths: vec![],
+                    vision_paths: vec![],
                     is_gguf: false,
                     variant_label: "bf16".to_string(),
                     size_bytes: bf16_size_bytes,
@@ -930,6 +1047,21 @@ impl QwenImageEngine {
         usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
         let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
+        self.resolve_text_encoder_source_with_preference(
+            gpu_device,
+            free_vram,
+            usage,
+            preference.as_deref(),
+        )
+    }
+
+    fn resolve_text_encoder_source_with_preference(
+        &self,
+        gpu_device: &Device,
+        free_vram: u64,
+        usage: Qwen2TextEncoderUsage,
+        preference: Option<&str>,
+    ) -> Result<ResolvedQwen2TextEncoder> {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let bf16_size_bytes = self
@@ -940,8 +1072,34 @@ impl QwenImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
+        if self.is_edit_family() {
+            let mut resolved = Self::choose_text_encoder_source(
+                preference,
+                is_cuda,
+                is_metal,
+                free_vram,
+                bf16_size_bytes,
+                Qwen2TextEncoderUsage::Resident,
+            )?;
+            resolved.vision_paths = self.base.paths.text_encoder_files.clone();
+            if resolved.is_gguf {
+                let variant = mold_core::manifest::find_qwen2_vl_variant(&resolved.variant_label)
+                    .ok_or_else(|| {
+                    anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
+                })?;
+                resolved.paths = vec![
+                    crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
+                        &self.base.progress,
+                        variant,
+                    )?,
+                ];
+            } else {
+                resolved.paths = self.base.paths.text_encoder_files.clone();
+            }
+            return Ok(resolved);
+        }
         let mut resolved = Self::choose_text_encoder_source(
-            preference.as_deref(),
+            preference,
             is_cuda,
             is_metal,
             free_vram,
@@ -963,8 +1121,9 @@ impl QwenImageEngine {
         } else {
             resolved.paths = self.base.paths.text_encoder_files.clone();
         }
+        resolved.vision_paths = vec![];
 
-        match preference.as_deref() {
+        match preference {
             Some(tag) if tag != "auto" && tag != "bf16" => self.base.progress.info(&format!(
                 "Using quantized Qwen2.5-VL {} ({}) on {} (explicit)",
                 resolved.variant_label,
@@ -1039,13 +1198,27 @@ impl QwenImageEngine {
         tokenizer_path: &std::path::PathBuf,
         device: &Device,
         dtype: DType,
+        preload_weights: bool,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
         if resolved.is_gguf {
-            encoders::qwen2_text::Qwen2TextEncoder::load_gguf(
-                &resolved.paths[0],
-                tokenizer_path,
-                device,
-            )
+            if preload_weights {
+                encoders::qwen2_text::Qwen2TextEncoder::load_gguf(
+                    &resolved.paths[0],
+                    tokenizer_path,
+                    device,
+                    dtype,
+                    &resolved.vision_paths,
+                    &self.base.progress,
+                )
+            } else {
+                encoders::qwen2_text::Qwen2TextEncoder::prepare_gguf(
+                    &resolved.paths[0],
+                    tokenizer_path,
+                    device,
+                    dtype,
+                    &resolved.vision_paths,
+                )
+            }
         } else {
             let is_fp8 = text_encoder_is_fp8(&resolved.paths);
             if is_fp8 {
@@ -1053,13 +1226,24 @@ impl QwenImageEngine {
                     .progress
                     .info("Detected FP8 text encoder — loading as BF16 on GPU");
             }
-            encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
-                &resolved.paths,
-                tokenizer_path,
-                device,
-                dtype,
-                &self.base.progress,
-            )
+            if preload_weights {
+                encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
+                    &resolved.paths,
+                    tokenizer_path,
+                    device,
+                    dtype,
+                    self.is_edit_family(),
+                    &self.base.progress,
+                )
+            } else {
+                encoders::qwen2_text::Qwen2TextEncoder::prepare_bf16(
+                    &resolved.paths,
+                    tokenizer_path,
+                    device,
+                    dtype,
+                    self.is_edit_family(),
+                )
+            }
         }
     }
 
@@ -1147,7 +1331,7 @@ impl QwenImageEngine {
 
         let text_tokenizer_path = self.validate_paths()?;
         let device = crate::device::create_device(&self.base.progress)?;
-        let transformer_cfg = QwenImageConfig::qwen_image_2512();
+        let transformer_cfg = self.transformer_config();
         let transformer_is_quantized = self.detect_is_quantized();
         // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
         // prevents direct F8E4M3→BF16 on GPU; CPU cast works fine). All paths
@@ -1218,16 +1402,30 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let te_dtype = if te_plan.use_gpu { dtype } else { DType::F32 };
+        let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
 
+        let preload_text_encoder = self.should_preload_text_encoder();
         let te_label = if resolved_text_encoder.is_gguf {
+            if preload_text_encoder {
+                format!(
+                    "Loading Qwen2.5 text encoder ({} GGUF, {})",
+                    resolved_text_encoder.variant_label, te_device_label
+                )
+            } else {
+                format!(
+                    "Preparing Qwen2.5 text encoder ({} GGUF, {})",
+                    resolved_text_encoder.variant_label, te_device_label
+                )
+            }
+        } else if preload_text_encoder {
             format!(
-                "Loading Qwen2.5 text encoder ({} GGUF, {})",
-                resolved_text_encoder.variant_label, te_device_label
+                "Loading Qwen2.5 text encoder ({} shards, {})",
+                resolved_text_encoder.paths.len(),
+                te_device_label,
             )
         } else {
             format!(
-                "Loading Qwen2.5 text encoder ({} shards, {})",
+                "Preparing Qwen2.5 text encoder ({} shards, {})",
                 resolved_text_encoder.paths.len(),
                 te_device_label,
             )
@@ -1239,9 +1437,14 @@ impl QwenImageEngine {
             &text_tokenizer_path,
             &te_device,
             te_dtype,
+            preload_text_encoder,
         )?;
         self.base.progress.stage_done(&te_label, te_start.elapsed());
-        tracing::info!(device = %te_device_label, "Qwen2.5 text encoder loaded");
+        if preload_text_encoder {
+            tracing::info!(device = %te_device_label, "Qwen2.5 text encoder loaded");
+        } else {
+            tracing::info!(device = %te_device_label, "Qwen2.5 text encoder prepared for staged loading");
+        }
 
         self.base.loaded = Some(LoadedQwenImage {
             transformer: Some(transformer),
@@ -1279,7 +1482,7 @@ impl QwenImageEngine {
     /// Generate using sequential loading strategy (load-use-drop each component).
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let text_tokenizer_path = self.validate_paths()?;
-        let transformer_cfg = QwenImageConfig::qwen_image_2512();
+        let transformer_cfg = self.transformer_config();
 
         let device = crate::device::create_device(&self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
@@ -1351,7 +1554,7 @@ impl QwenImageEngine {
                 } else {
                     Device::Cpu
                 };
-                let te_dtype = if te_plan.use_gpu { dtype } else { DType::F32 };
+                let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
 
                 let te_label = if resolved_text_encoder.is_gguf {
                     format!(
@@ -1387,6 +1590,7 @@ impl QwenImageEngine {
                     &text_tokenizer_path,
                     &te_device,
                     te_dtype,
+                    true,
                 )?;
                 self.base.progress.stage_done(&te_label, te_start.elapsed());
 
@@ -1815,6 +2019,312 @@ impl QwenImageEngine {
             video: None,
         })
     }
+
+    fn generate_edit_loaded(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let progress = &self.base.progress;
+        let start = Instant::now();
+
+        let loaded_ref = self
+            .base
+            .loaded
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+        let needs_reload = loaded_ref.transformer.is_none();
+        if needs_reload {
+            let mut loaded_mut = self
+                .base
+                .loaded
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+            progress.stage_start("Reloading Qwen-Image transformer");
+            let reload_start = Instant::now();
+            self.reload_transformer(&mut loaded_mut, req.width as usize, req.height as usize)?;
+            progress.stage_done("Reloading Qwen-Image transformer", reload_start.elapsed());
+            self.base.loaded = Some(loaded_mut);
+        }
+
+        let is_edit_family = self.is_edit_family();
+        let loaded = self
+            .base
+            .loaded
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+        let seed = req.seed.unwrap_or_else(rand_seed);
+        let width = req.width as usize;
+        let height = req.height as usize;
+        let edit_images = req
+            .edit_images
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("qwen-image-edit requires edit_images"))?;
+        let use_cfg = req.guidance > 1.0;
+        let negative_prompt = req
+            .negative_prompt
+            .as_deref()
+            .unwrap_or(QWEN_EMPTY_NEGATIVE_PROMPT);
+        let formatted_prompt = Self::qwen_image_edit_prompt(&req.prompt, edit_images.len());
+        let formatted_negative = Self::qwen_image_edit_prompt(negative_prompt, edit_images.len());
+
+        tracing::info!(
+            prompt = %req.prompt,
+            seed,
+            width,
+            height,
+            steps = req.steps,
+            edit_images = edit_images.len(),
+            "starting Qwen-Image edit generation"
+        );
+
+        if loaded.text_encoder.model.is_none() {
+            progress.stage_start("Reloading Qwen2.5 encoder");
+            let reload_start = Instant::now();
+            loaded.text_encoder.reload(progress)?;
+            progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+        }
+
+        progress.stage_start("Encoding prompt (Qwen2.5 edit)");
+        let encode_start = Instant::now();
+        let (encoder_hidden_states, encoder_attention_mask, _) =
+            loaded.text_encoder.encode_formatted_multimodal(
+                &formatted_prompt,
+                edit_images,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+        progress.stage_done("Encoding prompt (Qwen2.5 edit)", encode_start.elapsed());
+        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
+            progress.stage_start("Encoding negative prompt (Qwen2.5 edit)");
+            let neg_start = Instant::now();
+            let (hs, mask, _) = loaded.text_encoder.encode_formatted_multimodal(
+                &formatted_negative,
+                edit_images,
+                &loaded.device,
+                loaded.dtype,
+            )?;
+            progress.stage_done(
+                "Encoding negative prompt (Qwen2.5 edit)",
+                neg_start.elapsed(),
+            );
+            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
+                &encoder_hidden_states,
+                &encoder_attention_mask,
+                &hs,
+                &mask,
+            )?;
+            (cond_hs, cond_mask, Some(neg_hs), Some(neg_mask))
+        } else {
+            (encoder_hidden_states, encoder_attention_mask, None, None)
+        };
+
+        let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
+        if drop_text_encoder {
+            loaded.text_encoder.drop_weights();
+            tracing::info!(
+                on_gpu = loaded.text_encoder.on_gpu,
+                "Qwen2.5 text encoder dropped after edit conditioning"
+            );
+        }
+
+        let mut packed_input_storage = Vec::with_capacity(edit_images.len());
+        let mut img_shapes = vec![(1usize, height / 16, width / 16)];
+        progress.stage_start("Encoding edit images (VAE)");
+        let encode_start = Instant::now();
+        for image_bytes in edit_images {
+            let (vae_width, vae_height) =
+                Self::qwen_image_edit_image_dims(image_bytes, QWEN_IMAGE_EDIT_VAE_AREA)?;
+            let encoded = Self::encode_vae_with_fallback(
+                image_bytes,
+                vae_width,
+                vae_height,
+                &loaded.vae,
+                &loaded.vae_device,
+                &loaded.device,
+                progress,
+                || {
+                    Ok(QwenImageVae::load(
+                        &loaded.vae_path,
+                        &Device::Cpu,
+                        DType::F32,
+                        progress,
+                    )?)
+                },
+            )?
+            .to_device(&loaded.device)?
+            .to_dtype(loaded.dtype)?;
+            img_shapes.push((1, encoded.dim(2)? / 2, encoded.dim(3)? / 2));
+            packed_input_storage.push(Self::pack_latents_4d(&encoded)?);
+        }
+        progress.stage_done("Encoding edit images (VAE)", encode_start.elapsed());
+
+        let packed_inputs = if packed_input_storage.is_empty() {
+            None
+        } else {
+            let tensors = packed_input_storage.iter().collect::<Vec<_>>();
+            Some(Tensor::cat(&tensors, 1)?)
+        };
+
+        let noise = crate::engine::seeded_randn(
+            seed,
+            &[1, 16, height / 8, width / 8],
+            &loaded.device,
+            loaded.dtype,
+        )?;
+        let mut scheduler =
+            QwenImageScheduler::new(req.steps as usize, (height / 16) * (width / 16));
+        let num_steps = scheduler.num_steps();
+        let mut latents = Self::pack_latents_4d(&(noise * scheduler.initial_sigma())?)?;
+        let output_seq_len = latents.dim(1)?;
+
+        let denoise_label = format!("Denoising edit ({} steps)", num_steps);
+        progress.stage_start(&denoise_label);
+        let denoise_start = Instant::now();
+
+        {
+            let transformer = loaded
+                .transformer
+                .as_ref()
+                .expect("transformer must be loaded for denoising");
+            let use_batched_cfg = use_cfg && transformer.supports_cfg_batching();
+            let (batched_hs, batched_mask) = if use_batched_cfg {
+                let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
+                let mask =
+                    Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
+                (hs, mask)
+            } else {
+                (
+                    encoder_hidden_states.clone(),
+                    encoder_attention_mask.clone(),
+                )
+            };
+
+            for step in 0..num_steps {
+                let step_start = Instant::now();
+                let t = scheduler.current_timestep();
+                let timestep = if use_batched_cfg {
+                    Tensor::from_vec(vec![t as f32; 2], (2,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?
+                } else {
+                    Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
+                        .to_dtype(loaded.dtype)?
+                };
+
+                let latent_model_input = if let Some(ref packed_inputs) = packed_inputs {
+                    Tensor::cat(&[&latents, packed_inputs], 1)?
+                } else {
+                    latents.clone()
+                };
+
+                let noise_pred = if use_cfg {
+                    let (cond_pred, uncond_pred) = if use_batched_cfg {
+                        let batched_input =
+                            Tensor::cat(&[&latent_model_input, &latent_model_input], 0)?;
+                        let pred = transformer.forward_packed(
+                            &batched_input,
+                            &timestep,
+                            &batched_hs,
+                            &batched_mask,
+                            &img_shapes,
+                        )?;
+                        (
+                            pred.narrow(0, 0, 1)?.narrow(1, 0, output_seq_len)?,
+                            pred.narrow(0, 1, 1)?.narrow(1, 0, output_seq_len)?,
+                        )
+                    } else {
+                        (
+                            transformer
+                                .forward_packed(
+                                    &latent_model_input,
+                                    &timestep,
+                                    &encoder_hidden_states,
+                                    &encoder_attention_mask,
+                                    &img_shapes,
+                                )?
+                                .narrow(1, 0, output_seq_len)?,
+                            transformer
+                                .forward_packed(
+                                    &latent_model_input,
+                                    &timestep,
+                                    uncond_hs.as_ref().unwrap(),
+                                    uncond_mask.as_ref().unwrap(),
+                                    &img_shapes,
+                                )?
+                                .narrow(1, 0, output_seq_len)?,
+                        )
+                    };
+
+                    let cond_f32 = cond_pred.to_dtype(DType::F32)?;
+                    let uncond_f32 = uncond_pred.to_dtype(DType::F32)?;
+                    let comb = (&uncond_f32 + ((&cond_f32 - &uncond_f32)? * req.guidance)?)?;
+                    let cond_norm = cond_f32.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?;
+                    let comb_norm = comb
+                        .sqr()?
+                        .sum_keepdim(D::Minus1)?
+                        .sqrt()?
+                        .clamp(1e-8, f64::MAX)?;
+                    comb.broadcast_mul(&(cond_norm / comb_norm)?)?
+                        .to_dtype(loaded.dtype)?
+                } else {
+                    transformer
+                        .forward_packed(
+                            &latent_model_input,
+                            &timestep,
+                            &encoder_hidden_states,
+                            &encoder_attention_mask,
+                            &img_shapes,
+                        )?
+                        .narrow(1, 0, output_seq_len)?
+                };
+
+                latents = scheduler.step(&noise_pred, &latents)?;
+                progress.emit(ProgressEvent::DenoiseStep {
+                    step: step + 1,
+                    total: num_steps,
+                    elapsed: step_start.elapsed(),
+                });
+            }
+        }
+
+        progress.stage_done(&denoise_label, denoise_start.elapsed());
+
+        let latents = Self::unpack_latents_packed(&latents, height / 8, width / 8)?;
+        let image = Self::decode_vae_with_fallback(
+            &latents,
+            &loaded.vae,
+            &loaded.vae_device,
+            &loaded.device,
+            progress,
+            || {
+                Ok(QwenImageVae::load(
+                    &loaded.vae_path,
+                    &Device::Cpu,
+                    DType::F32,
+                    progress,
+                )?)
+            },
+        )?;
+        let image = postprocess_image(&image)?.i(0)?;
+        let output_metadata = build_output_metadata(req, seed, None);
+        let image_bytes = encode_image(
+            &image,
+            req.output_format,
+            req.width,
+            req.height,
+            output_metadata.as_ref(),
+        )?;
+
+        Ok(GenerateResponse {
+            images: vec![ImageData {
+                data: image_bytes,
+                format: req.output_format,
+                width: req.width,
+                height: req.height,
+                index: 0,
+            }],
+            generation_time_ms: start.elapsed().as_millis() as u64,
+            model: req.model.clone(),
+            seed_used: seed,
+            video: None,
+        })
+    }
 }
 
 impl InferenceEngine for QwenImageEngine {
@@ -1823,6 +2333,25 @@ impl InferenceEngine for QwenImageEngine {
             tracing::warn!(
                 "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
             );
+        }
+
+        if self.is_edit_family() {
+            let sequential = self.base.load_strategy == LoadStrategy::Sequential;
+            if sequential && self.base.loaded.is_none() {
+                let original = self.base.load_strategy;
+                self.base.load_strategy = LoadStrategy::Eager;
+                let load_result = self.load();
+                self.base.load_strategy = original;
+                load_result?;
+            }
+            if self.base.loaded.is_none() {
+                bail!("model not loaded -- call load() first");
+            }
+            let result = self.generate_edit_loaded(req);
+            if sequential {
+                self.unload();
+            }
+            return result;
         }
 
         // Sequential mode: load-use-drop each component
@@ -2299,6 +2828,15 @@ mod tests {
         path
     }
 
+    fn png_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |_, _| image::Rgb([255, 0, 0]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
     fn qwen_image_model_paths(
         transformer: PathBuf,
         transformer_shards: Vec<PathBuf>,
@@ -2325,6 +2863,7 @@ mod tests {
     fn resolved_text_encoder(is_gguf: bool, auto_use_gpu: bool) -> ResolvedQwen2TextEncoder {
         ResolvedQwen2TextEncoder {
             paths: vec![],
+            vision_paths: vec![],
             is_gguf,
             variant_label: if is_gguf {
                 "q6".to_string()
@@ -2528,6 +3067,22 @@ mod tests {
     }
 
     #[test]
+    fn qwen_image_cpu_safetensors_text_encoder_stays_f32() {
+        assert_eq!(
+            QwenImageEngine::text_encoder_load_dtype(false, DType::BF16),
+            DType::F32
+        );
+    }
+
+    #[test]
+    fn qwen_image_cpu_gguf_text_encoder_stays_f32() {
+        assert_eq!(
+            QwenImageEngine::text_encoder_load_dtype(false, DType::BF16),
+            DType::F32
+        );
+    }
+
+    #[test]
     fn qwen_image_text_encoder_gpu_override_disables_metal_staging() {
         let plan = QwenImageEngine::qwen2_text_encoder_plan_for_mode(
             Qwen2TextEncoderMode::Gpu,
@@ -2655,6 +3210,90 @@ mod tests {
         assert!(resolved.is_gguf);
         assert_eq!(resolved.variant_label, "q6");
         assert!(!resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_edit_accepts_quantized_text_with_bf16_vision_sidecar() {
+        let dir = temp_test_dir("qwen-image-edit-text-encoder");
+        let transformer = touch(&dir, "qwen-image-edit.gguf");
+        let vae = touch(&dir, "vae.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let mut paths = qwen_image_model_paths(transformer, vec![], vae, Some(tokenizer));
+        paths.text_encoder_files = vec![touch(&dir, "text-encoder-00001-of-00004.safetensors")];
+        let engine = QwenImageEngine::new(
+            "qwen-image-edit-2511:q4".to_string(),
+            paths,
+            LoadStrategy::Sequential,
+            false,
+        );
+
+        let resolved = engine
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("auto"),
+            )
+            .unwrap();
+        assert!(!resolved.vision_paths.is_empty());
+
+        let resolved = engine
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("q4"),
+            )
+            .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert_eq!(resolved.vision_paths.len(), 1);
+
+        let resolved = engine
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("bf16"),
+            )
+            .unwrap();
+        assert!(!resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "bf16");
+        assert_eq!(resolved.vision_paths.len(), 1);
+    }
+
+    #[test]
+    fn qwen_image_edit_prompt_numbers_each_picture_placeholder() {
+        let prompt = QwenImageEngine::qwen_image_edit_prompt("swap materials", 3);
+        assert!(prompt.contains(QWEN_IMAGE_EDIT_SYSTEM_PROMPT));
+        assert!(prompt.contains("Picture 1: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.contains("Picture 2: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.contains("Picture 3: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn qwen_image_edit_image_dims_fit_target_area_with_16px_alignment() {
+        let bytes = png_with_dimensions(1600, 900);
+        let (width, height) =
+            QwenImageEngine::qwen_image_edit_image_dims(&bytes, QWEN_IMAGE_EDIT_VAE_AREA).unwrap();
+        assert_eq!((width, height), (1360, 768));
+        assert_eq!(width % 16, 0);
+        assert_eq!(height % 16, 0);
+    }
+
+    #[test]
+    fn pack_and_unpack_latents_roundtrip() {
+        let values: Vec<f32> = (0..(16 * 4 * 6)).map(|i| i as f32).collect();
+        let latents = Tensor::from_vec(values.clone(), (1, 16, 4, 6), &Device::Cpu).unwrap();
+        let packed = QwenImageEngine::pack_latents_4d(&latents).unwrap();
+        assert_eq!(packed.dims3().unwrap(), (1, 6, 64));
+
+        let unpacked = QwenImageEngine::unpack_latents_packed(&packed, 4, 6).unwrap();
+        assert_eq!(
+            unpacked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            values
+        );
     }
 
     #[test]

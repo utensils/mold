@@ -298,7 +298,7 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                     .join(&file.hf_filename),
             };
         }
-        if manifest.family == "qwen-image" {
+        if manifest.family == "qwen-image" || manifest.family == "qwen-image-edit" {
             match file.hf_repo.as_str() {
                 "Qwen/Qwen-Image" => {
                     return PathBuf::from("shared")
@@ -308,6 +308,11 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 "Qwen/Qwen-Image-2512" => {
                     return PathBuf::from("shared")
                         .join("qwen-image")
+                        .join(&file.hf_filename);
+                }
+                "Qwen/Qwen-Image-Edit-2511" => {
+                    return PathBuf::from("shared")
+                        .join("qwen-image-edit")
                         .join(&file.hf_filename);
                 }
                 _ => {}
@@ -2481,6 +2486,60 @@ fn shared_qwen_image_2512_files() -> Vec<ModelFile> {
     ]
 }
 
+/// Shared Qwen-Image-Edit-2511 component files (VAE, text encoder shards, tokenizer).
+fn shared_qwen_image_edit_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 253_806_966,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_968_243_304,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_991_495_816,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 4_932_751_040,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 1_691_924_384,
+            gated: false,
+            sha256: None,
+        },
+        ModelFile {
+            hf_repo: "Qwen/Qwen2.5-7B".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 7_031_645,
+            gated: false,
+            sha256: None,
+        },
+    ]
+}
+
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
     let base_defaults = ManifestDefaults {
@@ -2495,6 +2554,17 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         fps: None,
     };
     let qwen_2512_defaults = base_defaults.clone();
+    let qwen_edit_defaults = ManifestDefaults {
+        steps: 50,
+        guidance: 4.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+    };
 
     vec![
         // Base Qwen-Image.
@@ -2936,6 +3006,171 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             },
             hidden: false,
         },
+        ModelManifest {
+            name: "qwen-image-edit-2511:bf16".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit-2511 BF16 — multimodal image editing".to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                let shards: &[(&str, u64)] = &[
+                    (
+                        "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+                        9_973_578_592,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+                        9_987_326_072,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+                        9_987_307_440,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+                        9_930_685_712,
+                    ),
+                    (
+                        "transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+                        982_130_472,
+                    ),
+                ];
+                for (filename, size) in shards {
+                    files.push(ModelFile {
+                        hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+                        hf_filename: filename.to_string(),
+                        component: ModelComponent::TransformerShard,
+                        size_bytes: *size,
+                        gated: false,
+                        sha256: None,
+                    });
+                }
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q8".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit-2511 Q8 — multimodal image editing, best GGUF quality"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_761_817_184,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q6".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description:
+                "Qwen-Image-Edit-2511 Q6 — multimodal image editing, quality/size trade-off"
+                    .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q6_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 16_852_417_120,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q5".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit-2511 Q5 — multimodal image editing, dynamic K_M GGUF"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q5_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 15_027_501_664,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q4".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit-2511 Q4 — multimodal image editing, dynamic K_M GGUF"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 13_244_758_624,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q3".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit-2511 Q3 — multimodal image editing, dynamic K_M GGUF"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q3_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_920_805_472,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-edit-2511:q2".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description:
+                "Qwen-Image-Edit-2511 Q2 — multimodal image editing, smallest published K variant"
+                    .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "unsloth/Qwen-Image-Edit-2511-GGUF".to_string(),
+                    hf_filename: "qwen-image-edit-2511-Q2_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 7_468_022_368,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_defaults.clone(),
+            hidden: false,
+        },
     ]
 }
 
@@ -3034,6 +3269,9 @@ pub fn resolve_model_name(input: &str) -> String {
     // Already has a tag
     if input.contains(':') {
         return input.to_string();
+    }
+    if input == "qwen-image-edit" {
+        return "qwen-image-edit-2511:q8".to_string();
     }
     // Legacy format: flux-dev-q4 -> flux-dev:q4
     if let Some((base, suffix)) = input.rsplit_once('-') {
@@ -4080,6 +4318,17 @@ mod tests {
         let q2512_path = storage_path(q2512_manifest, q2512_encoder);
         assert!(q2512_path.starts_with("shared/qwen-image"));
         assert_ne!(base_path, q2512_path);
+
+        let qedit_manifest = find_manifest("qwen-image-edit-2511:q4").unwrap();
+        let qedit_encoder = qedit_manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let qedit_path = storage_path(qedit_manifest, qedit_encoder);
+        assert!(qedit_path.starts_with("shared/qwen-image-edit"));
+        assert_ne!(base_path, qedit_path);
+        assert_ne!(q2512_path, qedit_path);
     }
 
     #[test]
@@ -4143,6 +4392,10 @@ mod tests {
     fn resolve_name_default_tag() {
         assert_eq!(resolve_model_name("flux-schnell"), "flux-schnell:q8");
         assert_eq!(resolve_model_name("flux-dev"), "flux-dev:q8");
+        assert_eq!(
+            resolve_model_name("qwen-image-edit"),
+            "qwen-image-edit-2511:q8"
+        );
         // SDXL models default to :fp16
         assert_eq!(resolve_model_name("sdxl-base"), "sdxl-base:fp16");
         assert_eq!(resolve_model_name("sdxl-turbo"), "sdxl-turbo:fp16");
@@ -4437,8 +4690,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 17 Qwen-Image + 1 Wuerstchen + 5 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 86
-        assert_eq!(known_manifests().len(), 86);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 93
+        assert_eq!(known_manifests().len(), 93);
     }
 
     #[test]
@@ -4724,29 +4977,33 @@ mod tests {
                         manifest.name
                     );
                 }
-                "qwen-image" => {
+                "qwen-image" | "qwen-image-edit" => {
                     // Qwen-Image uses TransformerShard (BF16 sharded)
                     assert!(
                         components.contains(&ModelComponent::Transformer)
                             || components.contains(&ModelComponent::TransformerShard),
-                        "{} (qwen-image) missing Transformer or TransformerShard",
-                        manifest.name
+                        "{} ({}) missing Transformer or TransformerShard",
+                        manifest.name,
+                        manifest.family
                     );
                     assert!(
                         components.contains(&ModelComponent::TextEncoder),
-                        "{} (qwen-image) missing TextEncoder",
-                        manifest.name
+                        "{} ({}) missing TextEncoder",
+                        manifest.name,
+                        manifest.family
                     );
                     assert!(
                         components.contains(&ModelComponent::TextTokenizer),
-                        "{} (qwen-image) missing TextTokenizer",
-                        manifest.name
+                        "{} ({}) missing TextTokenizer",
+                        manifest.name,
+                        manifest.family
                     );
                     // Qwen-Image does NOT use CLIP
                     assert!(
                         !components.contains(&ModelComponent::ClipEncoder),
-                        "{} (qwen-image) should not have ClipEncoder",
-                        manifest.name
+                        "{} ({}) should not have ClipEncoder",
+                        manifest.name,
+                        manifest.family
                     );
                 }
                 "controlnet" => {
@@ -5572,6 +5829,7 @@ mod tests {
             "z-image",
             "flux2",
             "qwen-image",
+            "qwen-image-edit",
             "wuerstchen",
             "ltx-video",
         ];
@@ -5683,6 +5941,7 @@ mod tests {
                 "z-image",
                 "flux2",
                 "qwen-image",
+                "qwen-image-edit",
                 "wuerstchen",
             ]
             .contains(&manifest.family.as_str())

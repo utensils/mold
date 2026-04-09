@@ -16,10 +16,12 @@ _"A colorful hot air balloon floating over a misty valley at sunrise, the balloo
 - **License**: Apache 2.0
 - **Upstream releases**:
   [Qwen/Qwen-Image](https://huggingface.co/Qwen/Qwen-Image),
-  [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512)
+  [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512),
+  [Qwen/Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511)
 - **GGUF sources**:
   [city96/Qwen-Image-gguf](https://huggingface.co/city96/Qwen-Image-gguf),
   [unsloth/Qwen-Image-2512-GGUF](https://huggingface.co/unsloth/Qwen-Image-2512-GGUF),
+  [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF),
   [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF)
 
 ## Stable GGUF Variants
@@ -36,7 +38,8 @@ The Qwen-Image text encoder itself is also selectable now:
 
 On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders
 (`q6`, then `q4`) to avoid the BF16 text-encoder memory spike. CUDA `auto`
-stays on the existing BF16 path unless you explicitly select a Qwen2 variant.
+prefers BF16 when enough headroom remains after the transformer load and falls
+back to quantized GGUF variants when that resident encoder would be too heavy.
 
 ### Base Qwen-Image
 
@@ -59,6 +62,32 @@ stays on the existing BF16 path unless you explicitly select a Qwen2 variant.
 | `qwen-image-2512:q4` | 50    | 13.2 GB | `1024x1024`        | Stable 24 GB choice                  |
 | `qwen-image-2512:q3` | 50    | 9.9 GB  | `1024x1024`        | Lower bitrate, still prompt-faithful |
 | `qwen-image-2512:q2` | 50    | 7.3 GB  | `1024x1024`        | Smallest published 2512 GGUF         |
+
+### Qwen-Image-Edit-2511
+
+`qwen-image-edit-2511:*` is the edit-family sibling of Qwen-Image. It uses
+repeatable `--image` inputs instead of img2img `--strength`, supports negative
+prompts, and targets output dimensions derived from the first input image at
+roughly `1024x1024` area.
+
+| Model                       | Steps | Size    | Notes                                 |
+| --------------------------- | ----- | ------- | ------------------------------------- |
+| `qwen-image-edit-2511:q8`   | 50    | 21.8 GB | Highest-quality GGUF tier             |
+| `qwen-image-edit-2511:q6`   | 50    | 16.9 GB | Quality/size trade-off                |
+| `qwen-image-edit-2511:q5`   | 50    | 15.0 GB | Dynamic `K_M` quant                   |
+| `qwen-image-edit-2511:q4`   | 50    | 13.2 GB | Stable 24 GB GGUF target              |
+| `qwen-image-edit-2511:q3`   | 50    | 9.9 GB  | Lower bitrate, still relatively small |
+| `qwen-image-edit-2511:q2`   | 50    | 7.5 GB  | Smallest published edit GGUF          |
+| `qwen-image-edit-2511:bf16` | 50    | 40.9 GB | Sharded BF16 edit transformer         |
+
+::: tip Edit Path
+`qwen-image-edit-2511` runs a real multimodal edit path: Qwen2.5-VL condition
+images are patchified through the vision tower, source-image latents are packed
+and concatenated with output-noise tokens, and true CFG uses norm rescaling.
+Quantized `--qwen2-variant` values are supported for the edit family through a
+GGUF Qwen2.5 language path plus the staged Qwen2.5-VL vision tower used for
+image conditioning.
+:::
 
 ::: tip Recommended Stable Quant Paths
 On a 24 GB card, `qwen-image:q4` and `qwen-image-2512:q4` are the safest
