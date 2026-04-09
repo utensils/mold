@@ -62,6 +62,9 @@ pub enum BackgroundEvent {
     /// Periodic server status update (remote resource info).
     /// `None` means the server became unreachable — clear stale status.
     ServerStatusUpdate(Option<Box<ServerStatus>>),
+    /// Server catalog refreshed (e.g., after a pull). Updates the model list
+    /// without the mode-switching side effects of `ServerConnected`.
+    CatalogRefreshed(Vec<ModelInfoExtended>),
 }
 
 /// A single entry in the progress log.
@@ -4157,14 +4160,16 @@ impl App {
                         message: format!("Pull complete: {model}"),
                         style: ProgressStyle::Done,
                     });
-                    // Refresh the catalog (from server when connected, local otherwise)
-                    if let Some(ref url) = self.server_url {
-                        let url = url.clone();
+                    // Refresh the catalog (from server when in remote mode, local otherwise).
+                    // Don't reuse ServerConnected here — its handler auto-switches Local→Auto.
+                    if self.should_poll_remote() {
+                        let url = self.server_url.clone().unwrap();
                         let tx = self.bg_tx.clone();
                         self.tokio_handle.spawn(async move {
                             let client = mold_core::MoldClient::new(&url);
                             if let Ok(models) = client.list_models_extended().await {
-                                let _ = tx.send(BackgroundEvent::ServerConnected { url, models });
+                                // Update catalog directly without mode-switching side effects
+                                let _ = tx.send(BackgroundEvent::CatalogRefreshed(models));
                             }
                         });
                     } else {
@@ -4337,6 +4342,14 @@ impl App {
                 BackgroundEvent::ServerStatusUpdate(None) => {
                     // Server became unreachable — clear stale remote info
                     self.resource_info.clear_server_status();
+                }
+                BackgroundEvent::CatalogRefreshed(models) => {
+                    self.models.catalog = models;
+                    if !self.models.catalog.is_empty()
+                        && self.models.selected >= self.models.catalog.len()
+                    {
+                        self.models.selected = self.models.catalog.len() - 1;
+                    }
                 }
             }
         }
