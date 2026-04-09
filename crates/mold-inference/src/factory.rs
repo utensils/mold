@@ -167,7 +167,7 @@ pub fn create_engine_with_pool(
             load_strategy,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
             other,
             model_name
         ),
@@ -372,6 +372,7 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
         assert!(err.contains("nosuchfamily"));
+        assert!(err.contains("qwen-image-edit"));
     }
 
     #[test]

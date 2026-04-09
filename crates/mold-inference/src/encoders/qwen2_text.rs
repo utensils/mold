@@ -949,4 +949,20 @@ mod tests {
         assert_eq!(expanded, vec![1, 9, 9, 9, 9, 2, 9, 9, 3]);
         assert_eq!(spans, vec![(1, 5), (6, 8)]);
     }
+
+    #[test]
+    fn expand_image_pad_tokens_rejects_extra_placeholders() {
+        let err = expand_image_pad_tokens(&[1, 9, 2, 9, 3], 9, &[4]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("more <|image_pad|> tokens than input images"));
+    }
+
+    #[test]
+    fn expand_image_pad_tokens_rejects_missing_placeholders() {
+        let err = expand_image_pad_tokens(&[1, 9, 2], 9, &[4, 2]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("referenced 2 images but only 1 <|image_pad|> placeholders"));
+    }
 }

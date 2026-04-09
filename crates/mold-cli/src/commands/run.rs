@@ -182,6 +182,16 @@ fn validate_file_args(
     Ok(())
 }
 
+fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> {
+    if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
+        anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
+    }
+    if family != "qwen-image-edit" && image.len() > 1 {
+        anyhow::bail!("multiple --image values are only supported for qwen-image-edit models");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     model_or_prompt: Option<String>,
@@ -239,12 +249,7 @@ pub async fn run(
         validate_file_args(None, Some(extra_image.as_str()), None, None, None)?;
     }
 
-    if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
-        anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
-    }
-    if family != "qwen-image-edit" && image.len() > 1 {
-        anyhow::bail!("multiple --image values are only supported for qwen-image-edit models");
-    }
+    validate_image_args_for_family(&family, &image)?;
 
     let loaded_images = image
         .iter()
@@ -835,6 +840,32 @@ mod tests {
         assert!(validate_file_args(None, Some(path.to_str().unwrap()), None, None, None,).is_ok());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_image_edit_rejects_stdin_image_arg() {
+        let err =
+            validate_image_args_for_family("qwen-image-edit", &[String::from("-")]).unwrap_err();
+        assert!(err.to_string().contains("does not support --image -"));
+    }
+
+    #[test]
+    fn non_edit_models_reject_multiple_image_args() {
+        let err = validate_image_args_for_family(
+            "flux",
+            &[String::from("one.png"), String::from("two.png")],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("multiple --image values"));
+    }
+
+    #[test]
+    fn qwen_image_edit_accepts_multiple_image_args() {
+        assert!(validate_image_args_for_family(
+            "qwen-image-edit",
+            &[String::from("one.png"), String::from("two.png")]
+        )
+        .is_ok());
     }
 
     // -- --mask tests --

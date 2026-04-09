@@ -2124,7 +2124,6 @@ impl QwenImageEngine {
             );
         }
 
-        let mut packed_input_refs = Vec::with_capacity(edit_images.len());
         let mut packed_input_storage = Vec::with_capacity(edit_images.len());
         let mut img_shapes = vec![(1usize, height / 16, width / 16)];
         progress.stage_start("Encoding edit images (VAE)");
@@ -2154,18 +2153,13 @@ impl QwenImageEngine {
             img_shapes.push((1, encoded.dim(2)? / 2, encoded.dim(3)? / 2));
             packed_input_storage.push(Self::pack_latents_4d(&encoded)?);
         }
-        for tensor in &packed_input_storage {
-            packed_input_refs.push(tensor);
-        }
         progress.stage_done("Encoding edit images (VAE)", encode_start.elapsed());
 
-        let packed_inputs = if packed_input_refs.is_empty() {
+        let packed_inputs = if packed_input_storage.is_empty() {
             None
         } else {
-            Some(Tensor::cat(
-                &packed_input_refs.iter().collect::<Vec<_>>(),
-                1,
-            )?)
+            let tensors = packed_input_storage.iter().collect::<Vec<_>>();
+            Some(Tensor::cat(&tensors, 1)?)
         };
 
         let noise = crate::engine::seeded_randn(
@@ -2834,6 +2828,15 @@ mod tests {
         path
     }
 
+    fn png_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |_, _| image::Rgb([255, 0, 0]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
     fn qwen_image_model_paths(
         transformer: PathBuf,
         transformer_shards: Vec<PathBuf>,
@@ -3257,6 +3260,40 @@ mod tests {
         assert!(!resolved.is_gguf);
         assert_eq!(resolved.variant_label, "bf16");
         assert_eq!(resolved.vision_paths.len(), 1);
+    }
+
+    #[test]
+    fn qwen_image_edit_prompt_numbers_each_picture_placeholder() {
+        let prompt = QwenImageEngine::qwen_image_edit_prompt("swap materials", 3);
+        assert!(prompt.contains(QWEN_IMAGE_EDIT_SYSTEM_PROMPT));
+        assert!(prompt.contains("Picture 1: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.contains("Picture 2: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.contains("Picture 3: <|vision_start|><|image_pad|><|vision_end|>"));
+        assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn qwen_image_edit_image_dims_fit_target_area_with_16px_alignment() {
+        let bytes = png_with_dimensions(1600, 900);
+        let (width, height) =
+            QwenImageEngine::qwen_image_edit_image_dims(&bytes, QWEN_IMAGE_EDIT_VAE_AREA).unwrap();
+        assert_eq!((width, height), (1360, 768));
+        assert_eq!(width % 16, 0);
+        assert_eq!(height % 16, 0);
+    }
+
+    #[test]
+    fn pack_and_unpack_latents_roundtrip() {
+        let values: Vec<f32> = (0..(16 * 4 * 6)).map(|i| i as f32).collect();
+        let latents = Tensor::from_vec(values.clone(), (1, 16, 4, 6), &Device::Cpu).unwrap();
+        let packed = QwenImageEngine::pack_latents_4d(&latents).unwrap();
+        assert_eq!(packed.dims3().unwrap(), (1, 6, 64));
+
+        let unpacked = QwenImageEngine::unpack_latents_packed(&packed, 4, 6).unwrap();
+        assert_eq!(
+            unpacked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            values
+        );
     }
 
     #[test]

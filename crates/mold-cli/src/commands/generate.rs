@@ -111,6 +111,19 @@ fn effective_dimensions(
     }
 }
 
+fn effective_negative_prompt(
+    family: Option<&str>,
+    guidance: f64,
+    negative_prompt: Option<String>,
+) -> Option<String> {
+    if family == Some("qwen-image-edit") && guidance > 1.0 && negative_prompt.is_none() {
+        // Keep CFG's negative branch explicitly populated for Qwen edit models.
+        Some(" ".to_string())
+    } else {
+        negative_prompt
+    }
+}
+
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn apply_local_engine_env_overrides(
     t5_variant_override: Option<&str>,
@@ -212,15 +225,11 @@ pub async fn run(
     )?;
     let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
     let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
-    let effective_negative_prompt = if family.as_deref() == Some("qwen-image-edit")
-        && effective_guidance > 1.0
-        && negative_prompt.is_none()
-    {
-        // Keep CFG's negative branch explicitly populated for Qwen edit models.
-        Some(" ".to_string())
-    } else {
-        negative_prompt.clone()
-    };
+    let effective_negative_prompt = effective_negative_prompt(
+        family.as_deref(),
+        effective_guidance,
+        negative_prompt.clone(),
+    );
 
     let req = GenerateRequest {
         prompt: prompt.to_string(),
@@ -1561,6 +1570,69 @@ mod tests {
             effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
                 .unwrap(),
             (1024, 1024)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_qwen_image_edit_uses_first_edit_image() {
+        let config = Config::default();
+        let model_cfg = ModelConfig::default();
+        let first = png_with_dimensions(1600, 900);
+        let second = png_with_dimensions(512, 512);
+
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                Some("qwen-image-edit"),
+                None,
+                None,
+                None,
+                Some(&[first, second]),
+            )
+            .unwrap(),
+            (1360, 768)
+        );
+    }
+
+    #[test]
+    fn effective_dimensions_qwen_image_edit_requires_input_image() {
+        let config = Config::default();
+        let model_cfg = ModelConfig::default();
+        let err = effective_dimensions(
+            &config,
+            &model_cfg,
+            Some("qwen-image-edit"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires at least one input image"));
+    }
+
+    #[test]
+    fn effective_negative_prompt_injects_space_for_qwen_image_edit_cfg() {
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 4.0, None).as_deref(),
+            Some(" ")
+        );
+    }
+
+    #[test]
+    fn effective_negative_prompt_preserves_explicit_or_non_edit_values() {
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 4.0, Some("keep".to_string()))
+                .as_deref(),
+            Some("keep")
+        );
+        assert_eq!(effective_negative_prompt(Some("flux"), 4.0, None), None);
+        assert_eq!(
+            effective_negative_prompt(Some("qwen-image-edit"), 1.0, None),
+            None
         );
     }
 

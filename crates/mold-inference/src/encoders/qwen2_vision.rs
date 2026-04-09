@@ -693,4 +693,22 @@ mod tests {
         assert_eq!(h % 28, 0);
         assert_eq!(w % 28, 0);
     }
+
+    #[test]
+    fn smart_resize_downscales_when_over_max_pixels() {
+        let (h, w) = smart_resize(4096, 4096, 28, MIN_PIXELS, MAX_PIXELS).unwrap();
+        assert!(h < 4096);
+        assert!(w < 4096);
+        assert!(h * w <= MAX_PIXELS);
+        assert_eq!(h % 28, 0);
+        assert_eq!(w % 28, 0);
+    }
+
+    #[test]
+    fn smart_resize_rejects_extreme_aspect_ratios() {
+        let err = smart_resize(1, 500, 28, MIN_PIXELS, MAX_PIXELS).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("aspect ratio must be smaller than 200"));
+    }
 }
