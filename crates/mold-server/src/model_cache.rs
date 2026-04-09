@@ -82,6 +82,11 @@ impl ModelCache {
         evicted
     }
 
+    /// Get a reference to a cached engine entry (does not update LRU order).
+    pub fn get(&self, model_name: &str) -> Option<&CachedEngine> {
+        self.entries.get(model_name)
+    }
+
     /// Get a mutable reference to the engine for a model, if cached.
     pub fn get_mut(&mut self, model_name: &str) -> Option<&mut CachedEngine> {
         if self.entries.contains_key(model_name) {
@@ -90,6 +95,52 @@ impl ModelCache {
         } else {
             None
         }
+    }
+
+    /// Remove an engine from the cache, returning the full entry.
+    /// Used by the take-and-restore pattern: remove before inference, re-insert after.
+    pub fn take(&mut self, model_name: &str) -> Option<CachedEngine> {
+        self.lru_order.retain(|n| n != model_name);
+        self.entries.remove(model_name)
+    }
+
+    /// Re-insert a taken engine after inference completes.
+    pub fn restore(&mut self, cached: CachedEngine) {
+        let name = cached.model_name.clone();
+        self.lru_order.push(name.clone());
+        self.entries.insert(name, cached);
+    }
+
+    /// Insert a loaded engine with a known VRAM footprint.
+    /// Unlike `insert()`, this takes a name separately from the engine.
+    pub fn insert_loaded(
+        &mut self,
+        model_name: String,
+        engine: Box<dyn InferenceEngine>,
+        vram_bytes: u64,
+    ) -> Option<Box<dyn InferenceEngine>> {
+        let mut evicted = None;
+
+        // Evict LRU if at capacity (skip if the model is already in cache)
+        if self.entries.len() >= self.max_cached && !self.entries.contains_key(&model_name) {
+            evicted = self.evict_lru();
+        }
+
+        let entry = CachedEngine {
+            model_name: model_name.clone(),
+            residency: if engine.is_loaded() {
+                ModelResidency::Gpu
+            } else {
+                ModelResidency::Unloaded
+            },
+            last_used: Instant::now(),
+            vram_bytes,
+            engine,
+        };
+
+        self.entries.insert(model_name.clone(), entry);
+        self.touch_order(&model_name);
+        evicted
     }
 
     /// Check if a model is in the cache.

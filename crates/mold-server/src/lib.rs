@@ -1,4 +1,6 @@
 pub mod auth;
+pub mod gpu_pool;
+pub mod gpu_worker;
 pub mod logging;
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -18,6 +20,7 @@ mod routes_test;
 
 use anyhow::Result;
 use axum::{extract::DefaultBodyLimit, middleware};
+use mold_core::types::GpuSelection;
 use mold_core::{Config, ModelPaths};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -30,7 +33,14 @@ use state::QueueHandle;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
-pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()> {
+pub async fn run_server(
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+    queue_size: usize,
+) -> Result<()> {
+    let _ = (&gpu_selection, queue_size); // TODO: wire into GpuPool (Task 4-5)
     Config::install_runtime_models_dir_override(models_dir.clone());
 
     let mut config = Config::load_or_default();
@@ -84,6 +94,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
                 paths,
                 &config,
                 mold_inference::LoadStrategy::Eager,
+                0,
                 offload,
                 Some(shared_pool.clone()),
             )?;
