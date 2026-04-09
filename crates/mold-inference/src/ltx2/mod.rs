@@ -7,6 +7,7 @@ mod media;
 mod model;
 mod plan;
 mod pipeline;
+mod sampler;
 mod text;
 
 pub use pipeline::Ltx2Engine;
