@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, ServerStatus, SseErrorEvent,
-    SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ServerStatus,
+    SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -87,6 +87,14 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
         }
     }
+
+    pub fn queue_full(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_FULL".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -119,6 +127,7 @@ use crate::queue::clean_error_message;
         mold_core::SseErrorEvent,
         ModelInfoExtended,
         LoadModelBody,
+        UnloadRequest,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -225,6 +234,15 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
+    // Reject early if the generation queue is at capacity.
+    if state.queue.pending() >= state.queue_capacity {
+        return Err(ApiError::queue_full(format!(
+            "generation queue is full ({}/{})",
+            state.queue.pending(),
+            state.queue_capacity,
+        )));
+    }
+
     apply_default_metadata_setting(state, request).await;
 
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
@@ -265,6 +283,7 @@ async fn prepare_generation(
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
+        (status = 503, description = "Generation queue full"),
     )
 )]
 // The server always produces 1 image per request; batch looping (--batch N)
@@ -805,6 +824,7 @@ async fn upscale_stream(
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
+        (status = 503, description = "Generation queue full"),
     )
 )]
 async fn generate_stream(
@@ -881,6 +901,10 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
 pub struct LoadModelBody {
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
+    /// Target GPU ordinal (multi-GPU only). If omitted, the server uses its
+    /// default placement strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 #[utoipa::path(
@@ -899,8 +923,10 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // TODO: when GPU-targeted loading is wired through model_manager,
+    // pass body.gpu to route the load to a specific GPU worker.
     model_manager::ensure_model_ready(&state, &body.model, None).await?;
-    tracing::info!(model = %body.model, "model loaded via API");
+    tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API");
     Ok(StatusCode::OK)
 }
 
@@ -1070,15 +1096,35 @@ impl IntoResponse for PullResponse {
 
 // ── /api/models/unload ────────────────────────────────────────────────────────
 
+/// Optional request body for unload — clients may specify a model or GPU target.
+/// An empty body (or no body) unloads the active model on the legacy path.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct UnloadRequest {
+    /// Specific model to unload. If omitted, the active model is unloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Target GPU ordinal (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+}
+
 #[utoipa::path(
     delete,
     path = "/api/models/unload",
     tag = "models",
+    request_body(content = Option<UnloadRequest>, content_type = "application/json"),
     responses(
         (status = 200, description = "Model unloaded or no model was loaded", body = String),
     )
 )]
-async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+async fn unload_model(
+    State(state): State<AppState>,
+    body: Option<Json<UnloadRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    // TODO: when GPU-targeted unloading is wired through model_manager,
+    // use req.model and req.gpu to target specific GPU workers.
+    tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -1093,23 +1139,42 @@ async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
-    let snapshot = state.engine_snapshot.read().await.clone();
-    let models_loaded = match (snapshot.model_name, snapshot.is_loaded) {
-        (Some(model_name), true) => vec![model_name],
-        _ => vec![],
+    // Aggregate GPU status from the pool.
+    let gpu_statuses = state.gpu_pool.gpu_status();
+    let has_gpus = !gpu_statuses.is_empty();
+
+    // Collect loaded models from GPU workers.
+    let gpu_models_loaded: Vec<String> = gpu_statuses
+        .iter()
+        .filter_map(|g| g.loaded_model.clone())
+        .collect();
+    let gpu_busy = gpu_statuses
+        .iter()
+        .any(|g| g.state == GpuWorkerState::Generating);
+
+    // Fall back to legacy single-GPU snapshot for backwards compat.
+    let (models_loaded, busy, current_generation) = if has_gpus {
+        (gpu_models_loaded, gpu_busy, None)
+    } else {
+        let snapshot = state.engine_snapshot.read().await.clone();
+        let models = match (snapshot.model_name, snapshot.is_loaded) {
+            (Some(model_name), true) => vec![model_name],
+            _ => vec![],
+        };
+        let gen = state
+            .active_generation
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|active| ActiveGenerationStatus {
+                model: active.model.clone(),
+                prompt_sha256: active.prompt_sha256.clone(),
+                started_at_unix_ms: active.started_at_unix_ms,
+                elapsed_ms: active.started_at.elapsed().as_millis() as u64,
+            });
+        let is_busy = gen.is_some();
+        (models, is_busy, gen)
     };
-    let current_generation = state
-        .active_generation
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|active| ActiveGenerationStatus {
-            model: active.model.clone(),
-            prompt_sha256: active.prompt_sha256.clone(),
-            started_at_unix_ms: active.started_at_unix_ms,
-            elapsed_ms: active.started_at.elapsed().as_millis() as u64,
-        });
-    let busy = current_generation.is_some();
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1130,9 +1195,9 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         memory_status: mold_inference::device::memory_status_string(),
-        gpus: None,
-        queue_depth: None,
-        queue_capacity: None,
+        gpus: if has_gpus { Some(gpu_statuses) } else { None },
+        queue_depth: Some(state.queue.pending()),
+        queue_capacity: Some(state.queue_capacity),
     })
 }
 
