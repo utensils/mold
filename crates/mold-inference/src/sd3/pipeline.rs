@@ -1066,6 +1066,8 @@ mod tests {
             transformer_shards: vec![],
             vae,
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder,
             clip_encoder: clip_l_path,
             t5_tokenizer,

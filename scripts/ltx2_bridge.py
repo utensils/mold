@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -77,6 +78,8 @@ def build_command(request: dict) -> list[str]:
     if module == "ltx_pipelines.a2vid_two_stage":
         cmd.extend(["--audio-path", request["audio_path"]])
     elif module == "ltx_pipelines.retake":
+        if request.get("retake_start_seconds") is None or request.get("retake_end_seconds") is None:
+            raise ValueError("retake requests require both retake_start_seconds and retake_end_seconds")
         cmd.extend(["--video-path", request["video_path"]])
         cmd.extend(["--start-time", str(request["retake_start_seconds"])])
         cmd.extend(["--end-time", str(request["retake_end_seconds"])])
@@ -89,12 +92,22 @@ def build_command(request: dict) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True)
+    parser.add_argument("--upstream-root")
     args = parser.parse_args()
 
     request_path = Path(args.request)
     request = json.loads(request_path.read_text())
     cmd = build_command(request)
-    upstream_root = Path(__file__).resolve().parents[1] / "tmp" / "LTX-2-upstream"
+    upstream_root = (
+        Path(args.upstream_root)
+        if args.upstream_root
+        else Path(
+            os.environ.get(
+                "MOLD_LTX2_UPSTREAM_ROOT",
+                Path(__file__).resolve().parents[1] / "tmp" / "LTX-2-upstream",
+            )
+        )
+    )
     result = subprocess.run(cmd, cwd=upstream_root.resolve(), check=False)
     return result.returncode
 
