@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use mold_core::{LoraWeight, TimeRange};
+use mold_core::{LoraWeight, Ltx2SpatialUpscale, Ltx2TemporalUpscale, TimeRange};
 
 use super::conditioning::StagedConditioning;
 use super::execution::Ltx2ExecutionGraph;
@@ -34,6 +34,7 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,
     pub(crate) spatial_upsampler_path: Option<String>,
+    pub(crate) temporal_upsampler_path: Option<String>,
     pub(crate) gemma_root: String,
     pub(crate) output_path: String,
     pub(crate) prompt: String,
@@ -50,4 +51,6 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) conditioning: StagedConditioning,
     pub(crate) loras: Vec<LoraWeight>,
     pub(crate) retake_range: Option<TimeRange>,
+    pub(crate) spatial_upscale: Option<Ltx2SpatialUpscale>,
+    pub(crate) temporal_upscale: Option<Ltx2TemporalUpscale>,
 }

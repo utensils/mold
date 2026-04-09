@@ -131,9 +131,6 @@ impl Ltx2Engine {
         output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
         let pipeline = self.select_pipeline(req)?;
-        if req.temporal_upscale.is_some() {
-            bail!("temporal upscaling is not implemented in the native LTX-2 runtime yet");
-        }
         let gemma_root = self.gemma_root()?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
             .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
@@ -148,6 +145,9 @@ impl Ltx2Engine {
             req.spatial_upscale,
         )?
         .map(|path| path.to_string_lossy().to_string());
+        let temporal_upsampler_path =
+            assets::resolve_temporal_upscaler_path(&self.paths, req.temporal_upscale)?
+                .map(|path| path.to_string_lossy().to_string());
 
         Ok(Ltx2GeneratePlan {
             pipeline,
@@ -163,6 +163,7 @@ impl Ltx2Engine {
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
             spatial_upsampler_path,
+            temporal_upsampler_path,
             gemma_root: gemma_root.to_string_lossy().to_string(),
             output_path: output_path.to_string_lossy().to_string(),
             prompt: req.prompt.clone(),
@@ -179,6 +180,8 @@ impl Ltx2Engine {
             conditioning,
             loras,
             retake_range: req.retake_range.clone(),
+            spatial_upscale: req.spatial_upscale,
+            temporal_upscale: req.temporal_upscale,
         })
     }
 

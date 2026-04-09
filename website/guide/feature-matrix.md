@@ -89,8 +89,8 @@ the full multiscale refinement path.
   the TUI keeps the edit flow to a single source image in v1.
 - `qwen-image-edit` can use quantized `--qwen2-variant` language weights while
   still loading the Qwen2.5-VL vision tower for image conditioning.
-- LTX-2 currently wires `x2` spatial upscaling only. Temporal upscaling and `x1.5`
-  spatial upscaling are not yet implemented.
+- LTX-2 now wires `x2` spatial upscaling across the family, `x1.5` spatial
+  upscaling for `ltx-2.3-*`, and `x2` temporal upscaling in the native runtime.
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).

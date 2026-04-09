@@ -6,9 +6,9 @@ aimed at synchronized MP4 output and the upstream two-stage / distilled
 pipelines.
 
 ::: warning Current implementation
-LTX-2 currently runs through the upstream Lightricks Python pipelines via a
-small bridge script. Local runs therefore require `python3`, `uv`, `ffmpeg`,
-and a checked-out upstream tree at `tmp/LTX-2-upstream`.
+LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the supported
+backend for real local generation, CPU is a correctness-oriented fallback, and
+Metal is explicitly unsupported for this family.
 :::
 
 ## Supported Models
@@ -36,14 +36,13 @@ and a checked-out upstream tree at `tmp/LTX-2-upstream`.
   supported, but they are treated as silent exports.
 - `x2` spatial upscaling is wired across the family. `x1.5` is wired for
   `ltx-2.3-*` by resolving the published upstream asset on demand.
-- Temporal upscaling is not wired yet.
+- `x2` temporal upscaling is wired through the native LTX-2 runtime.
 - Camera-control preset aliases are currently published for LTX-2 19B only. For
   LTX-2.3, pass an explicit `.safetensors` path.
 - The Gemma text encoder source is gated on Hugging Face, so you must have
   access approved before `mold pull` will complete.
-- On 24 GB Ada GPUs such as the RTX 4090, mold runs the bridge with layer
-  streaming and the upstream `fp8-cast` path rather than Hopper-only
-  `fp8-scaled-mm`.
+- On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
+  compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 
 ## Examples
 
@@ -81,7 +80,5 @@ mold run ltx-2-19b-distilled:fp8 \
   track. If you explicitly choose `gif`, `apng`, or `webp`, mold exports a
   silent animation.
 - `--lora` is repeatable for this family. The single legacy `lora` request
-  field is still populated for backward compatibility, but the LTX-2 bridge uses
-  the stacked `loras` list.
-- `ffmpeg` is used for muxing, silent-export stripping, thumbnails, and GIF
-  previews.
+  field is still populated for backward compatibility, but the LTX-2 runtime
+  uses the stacked `loras` list.

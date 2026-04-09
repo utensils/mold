@@ -2,6 +2,7 @@ pub mod patchifiers;
 pub mod rope;
 pub mod shapes;
 pub mod transformer;
+pub mod upsampler;
 
 #[allow(unused_imports)]
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};
@@ -12,3 +13,8 @@ pub use rope::{
 };
 #[allow(unused_imports)]
 pub use shapes::{AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape};
+#[allow(unused_imports)]
+pub(crate) use upsampler::{
+    derive_stage1_render_shape, spatially_upsample_frames, temporally_upsample_frames_x2,
+    Stage1RenderShape,
+};

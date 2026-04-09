@@ -1,6 +1,5 @@
 use crate::{
-    GenerateRequest, KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2TemporalUpscale,
-    OutputFormat, UpscaleRequest,
+    GenerateRequest, KeyframeCondition, LoraWeight, Ltx2PipelineMode, OutputFormat, UpscaleRequest,
 };
 
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
@@ -359,12 +358,6 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             }
         }
 
-        if let Some(temporal_upscale) = req.temporal_upscale {
-            if temporal_upscale == Ltx2TemporalUpscale::X2 {
-                return Err("LTX-2 temporal upscaling is not implemented yet".to_string());
-            }
-        }
-
         if let Some(pipeline) = req.pipeline {
             match pipeline {
                 Ltx2PipelineMode::A2Vid => {
@@ -705,14 +698,12 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_rejects_unimplemented_temporal_upscale() {
+    fn ltx2_allows_temporal_upscale_request() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
         req.output_format = OutputFormat::Mp4;
         req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
-        assert!(validate_generate_request(&req)
-            .unwrap_err()
-            .contains("temporal upscaling"));
+        validate_generate_request(&req).unwrap();
     }
 
     #[test]

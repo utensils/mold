@@ -7,7 +7,8 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use super::conditioning::retake_temporal_mask;
 use super::model::{
-    audio_temporal_positions, cross_modal_temporal_positions, video_token_positions,
+    audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
+    spatially_upsample_frames, temporally_upsample_frames_x2, video_token_positions,
     AudioLatentShape, AudioPatchifier, SpatioTemporalScaleFactors, VideoLatentPatchifier,
     VideoLatentShape, VideoPixelShape,
 };
@@ -51,15 +52,23 @@ impl Ltx2RuntimeSession {
     }
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
+        let stage1_shape = derive_stage1_render_shape(
+            plan.width,
+            plan.height,
+            plan.num_frames,
+            plan.frame_rate,
+            plan.spatial_upscale,
+            plan.temporal_upscale,
+        );
         let prompt = self
             .prompt_encoder
             .encode_prompt_pair(&plan.prompt_tokens)?;
         let pixel_shape = VideoPixelShape {
             batch: 1,
-            frames: plan.num_frames as usize,
-            height: plan.height as usize,
-            width: plan.width as usize,
-            fps: plan.frame_rate as f32,
+            frames: stage1_shape.frames as usize,
+            height: stage1_shape.height as usize,
+            width: stage1_shape.width as usize,
+            fps: stage1_shape.fps as f32,
         };
         let scale_factors = SpatioTemporalScaleFactors::default();
         let video_latent_shape = VideoLatentShape::from_pixel_shape(
@@ -108,7 +117,7 @@ impl Ltx2RuntimeSession {
         let retake_mask = plan
             .retake_range
             .as_ref()
-            .map(|range| retake_temporal_mask(range, plan.frame_rate, plan.num_frames))
+            .map(|range| retake_temporal_mask(range, stage1_shape.fps, stage1_shape.frames))
             .transpose()?;
 
         Ok(NativePreparedRun {
@@ -132,17 +141,18 @@ impl Ltx2RuntimeSession {
         let seed = plan.seed ^ 0x4c54_5832_4e41_5449;
         let mut rng = StdRng::seed_from_u64(seed);
         let phase = rng.gen_range(0.0..std::f32::consts::TAU);
-        let base_width = plan.width.min(192).max(48);
-        let base_height = plan.height.min(112).max(48);
-        let overlays = load_conditioning_overlays(plan, base_width, base_height)?;
+        let base_width = prepared.video_pixel_shape.width as u32;
+        let base_height = prepared.video_pixel_shape.height as u32;
+        let base_frames = prepared.video_pixel_shape.frames as u32;
+        let overlays = load_conditioning_overlays(plan, base_width, base_height, base_frames)?;
 
-        let mut frames = Vec::with_capacity(plan.num_frames as usize);
-        for frame_idx in 0..plan.num_frames {
+        let mut frames = Vec::with_capacity(base_frames as usize);
+        for frame_idx in 0..base_frames {
             let mut frame = RgbImage::new(base_width, base_height);
-            let t = if plan.num_frames <= 1 {
+            let t = if base_frames <= 1 {
                 0.0
             } else {
-                frame_idx as f32 / (plan.num_frames - 1) as f32
+                frame_idx as f32 / (base_frames - 1) as f32
             };
             let retake_strength = prepared
                 .retake_mask
@@ -159,16 +169,15 @@ impl Ltx2RuntimeSession {
                 plan.execution_graph.uses_audio_conditioning,
                 plan.execution_graph.uses_reference_video_conditioning,
             );
-            apply_conditioning_overlays(&mut frame, frame_idx, plan.num_frames, &overlays);
-            if plan.width != base_width || plan.height != base_height {
-                frame = imageops::resize(
-                    &frame,
-                    plan.width,
-                    plan.height,
-                    imageops::FilterType::Triangle,
-                );
-            }
+            apply_conditioning_overlays(&mut frame, frame_idx, base_frames, &overlays);
             frames.push(frame);
+        }
+        if plan.temporal_upscale.is_some() {
+            frames = temporally_upsample_frames_x2(&frames, Some(plan.num_frames));
+        }
+        if plan.spatial_upscale.is_some() || plan.width != base_width || plan.height != base_height
+        {
+            frames = spatially_upsample_frames(&frames, plan.width, plan.height);
         }
 
         Ok(NativeRenderedVideo {
@@ -241,6 +250,7 @@ fn load_conditioning_overlays(
     plan: &Ltx2GeneratePlan,
     width: u32,
     height: u32,
+    stage_frames: u32,
 ) -> Result<Vec<ConditioningOverlay>> {
     plan.conditioning
         .images
@@ -252,12 +262,22 @@ fn load_conditioning_overlays(
                 })?
                 .to_rgb8();
             Ok(ConditioningOverlay {
-                frame: image.frame,
+                frame: remap_conditioning_frame(image.frame, plan.num_frames, stage_frames),
                 strength: image.strength,
                 image: imageops::resize(&overlay, width, height, imageops::FilterType::Triangle),
             })
         })
         .collect()
+}
+
+fn remap_conditioning_frame(source_frame: u32, source_total: u32, target_total: u32) -> u32 {
+    if source_total <= 1 || target_total <= 1 {
+        return 0;
+    }
+    let mapped = ((source_frame as u64 * (target_total - 1) as u64)
+        + ((source_total - 1) / 2) as u64)
+        / (source_total - 1) as u64;
+    mapped.min((target_total - 1) as u64) as u32
 }
 
 fn fill_background(
@@ -350,7 +370,9 @@ mod tests {
 
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
-    use mold_core::{GenerateRequest, OutputFormat, TimeRange};
+    use mold_core::{
+        GenerateRequest, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat, TimeRange,
+    };
 
     use super::{Ltx2RuntimeSession, LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS};
     use crate::ltx2::conditioning::{self, StagedConditioning};
@@ -597,6 +619,7 @@ mod tests {
             distilled_checkpoint_path: None,
             distilled_lora_path: None,
             spatial_upsampler_path: None,
+            temporal_upsampler_path: None,
             gemma_root: "/tmp/gemma".to_string(),
             output_path: "/tmp/output.mp4".to_string(),
             prompt: req.prompt.clone(),
@@ -613,6 +636,8 @@ mod tests {
             conditioning,
             loras: vec![],
             retake_range: req.retake_range.clone(),
+            spatial_upscale: req.spatial_upscale,
+            temporal_upscale: req.temporal_upscale,
         }
     }
 
@@ -698,5 +723,44 @@ mod tests {
         assert!(mask[..24].iter().all(|value| *value == 0.0));
         assert!(mask[24..54].iter().all(|value| *value == 1.0));
         assert!(mask[54..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn runtime_prepare_uses_stage_one_shape_for_temporal_upscale() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.frames = Some(17);
+        req.fps = Some(12);
+        req.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.frames, 9);
+        assert_eq!(prepared.video_pixel_shape.fps as u32, 6);
+        assert_eq!(rendered.frames.len(), 17);
+        assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+    }
+
+    #[test]
+    fn runtime_prepare_uses_stage_one_shape_for_spatial_upscale() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 608);
+        assert_eq!(prepared.video_pixel_shape.height, 352);
+        assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
     }
 }

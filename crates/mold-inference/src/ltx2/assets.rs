@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Result};
-use mold_core::{Ltx2SpatialUpscale, ModelPaths};
+use mold_core::{Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelPaths};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn gemma_root(paths: &ModelPaths) -> Result<PathBuf> {
@@ -38,6 +38,22 @@ pub(crate) fn resolve_spatial_upscaler_path(
             .map(Some)
             .map_err(|err| anyhow!("failed to download LTX-2.3 x1.5 spatial upscaler: {err}"))
         }
+    }
+}
+
+pub(crate) fn resolve_temporal_upscaler_path(
+    paths: &ModelPaths,
+    mode: Option<Ltx2TemporalUpscale>,
+) -> Result<Option<PathBuf>> {
+    match mode {
+        None => Ok(None),
+        Some(Ltx2TemporalUpscale::X2) => paths
+            .temporal_upscaler
+            .clone()
+            .ok_or_else(|| {
+                anyhow!("LTX-2 temporal upscaling requires a configured temporal upsampler asset")
+            })
+            .map(Some),
     }
 }
 
@@ -100,5 +116,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("LTX-2.3 only"));
+    }
+
+    #[test]
+    fn temporal_upscaling_uses_configured_asset() {
+        let path =
+            resolve_temporal_upscaler_path(&dummy_paths(), Some(Ltx2TemporalUpscale::X2)).unwrap();
+        assert_eq!(path, Some(PathBuf::from("/tmp/temporal.safetensors")));
+    }
+
+    #[test]
+    fn temporal_upscaling_requires_configured_asset() {
+        let mut paths = dummy_paths();
+        paths.temporal_upscaler = None;
+        let err =
+            resolve_temporal_upscaler_path(&paths, Some(Ltx2TemporalUpscale::X2)).unwrap_err();
+        assert!(err.to_string().contains("temporal upsampler asset"));
     }
 }
