@@ -10,6 +10,7 @@ use super::connectors::{
 };
 use super::encoder::GemmaHiddenStateEncoder;
 use super::gemma::{EncodedPromptPair, GemmaAssets};
+use crate::ltx2::model::LtxRopeType;
 use crate::ltx2::preset::{GemmaFeatureExtractorKind, Ltx2ModelPreset};
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,11 @@ impl NativePromptEncoder {
                 num_attention_heads: preset.connectors.video_num_attention_heads,
                 attention_head_dim: preset.connectors.video_attention_head_dim,
                 num_layers: preset.connectors.video_num_layers,
+                positional_embedding_theta: preset.connectors.positional_embedding_theta,
+                positional_embedding_max_pos: preset.connectors.positional_embedding_max_pos,
+                rope_type: preset.connectors.rope_type,
+                double_precision_rope: preset.connectors.double_precision_rope,
+                num_learnable_registers: preset.connectors.num_learnable_registers,
             },
             Some(ConnectorSpec {
                 prefix: "model.diffusion_model.audio_embeddings_connector.",
@@ -88,6 +94,11 @@ impl NativePromptEncoder {
                     }
                 },
                 num_layers: preset.connectors.audio_num_layers,
+                positional_embedding_theta: preset.connectors.positional_embedding_theta,
+                positional_embedding_max_pos: preset.connectors.positional_embedding_max_pos,
+                rope_type: preset.connectors.rope_type,
+                double_precision_rope: preset.connectors.double_precision_rope,
+                num_learnable_registers: preset.connectors.num_learnable_registers,
             }),
         )
         .with_context(|| {
@@ -141,6 +152,11 @@ pub(crate) struct ConnectorSpec<'a> {
     pub(crate) num_attention_heads: usize,
     pub(crate) attention_head_dim: usize,
     pub(crate) num_layers: usize,
+    pub(crate) positional_embedding_theta: f64,
+    pub(crate) positional_embedding_max_pos: &'a [usize],
+    pub(crate) rope_type: LtxRopeType,
+    pub(crate) double_precision_rope: bool,
+    pub(crate) num_learnable_registers: Option<usize>,
 }
 
 pub(crate) fn build_embeddings_processor(
@@ -210,8 +226,11 @@ fn build_connector(vb: VarBuilder, spec: ConnectorSpec<'_>) -> Result<Embeddings
         spec.num_attention_heads,
         spec.attention_head_dim,
         spec.num_layers,
-        10_000.0,
-        Some(128),
+        spec.positional_embedding_theta,
+        spec.positional_embedding_max_pos.to_vec(),
+        spec.rope_type,
+        spec.double_precision_rope,
+        spec.num_learnable_registers,
         vb,
     )
 }
@@ -224,6 +243,7 @@ mod tests {
     use candle_nn::VarBuilder;
 
     use super::{build_embeddings_processor, ConnectorSpec, NativePromptEncoder};
+    use crate::ltx2::model::LtxRopeType;
     use crate::ltx2::preset::GemmaFeatureExtractorKind;
     use crate::ltx2::text::connectors::PaddingSide;
     use crate::ltx2::text::encoder::{GemmaConfig, GemmaHiddenStateEncoder};
@@ -393,12 +413,22 @@ mod tests {
                 num_attention_heads: 2,
                 attention_head_dim: 4,
                 num_layers: 1,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
             },
             Some(ConnectorSpec {
                 prefix: "model.diffusion_model.audio_embeddings_connector.",
                 num_attention_heads: 1,
                 attention_head_dim: 4,
                 num_layers: 1,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
             }),
         )
         .unwrap();

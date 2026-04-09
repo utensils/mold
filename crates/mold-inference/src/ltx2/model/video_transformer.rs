@@ -839,6 +839,7 @@ impl LtxAttention {
         key_rotary_emb: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
         let (b, q_len, _) = hidden_states.dims3()?;
+        let is_self_attention = encoder_hidden_states.is_none();
         let enc = encoder_hidden_states.unwrap_or(hidden_states);
         let (_, k_len, _) = enc.dims3()?;
 
@@ -856,11 +857,12 @@ impl LtxAttention {
         k = self.norm_k.forward(&k)?;
 
         if let Some((cos, sin)) = image_rotary_emb {
-            q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
-            if let Some((k_cos, k_sin)) = key_rotary_emb {
-                k = apply_rotary_emb(&k, k_cos, k_sin, self.rope_type, self.heads, self.head_dim)?;
-            } else {
+            if is_self_attention {
+                q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
                 k = apply_rotary_emb(&k, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+            } else if let Some((k_cos, k_sin)) = key_rotary_emb {
+                q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                k = apply_rotary_emb(&k, k_cos, k_sin, self.rope_type, self.heads, self.head_dim)?;
             }
         }
 
@@ -910,6 +912,7 @@ pub struct LtxVideoTransformerBlock {
     attn1: LtxAttention,
     norm2: RmsNorm,
     attn2: LtxAttention,
+    norm3: RmsNorm,
     ff: FeedForward,
     scale_shift_table: Tensor,
 }
@@ -957,6 +960,7 @@ impl LtxVideoTransformerBlock {
             rope_type,
             vb.pp("attn2"),
         )?;
+        let norm3 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm3"))?;
 
         let ff = FeedForward::new(dim, vb.pp("ff"))?;
         let scale_shift_table = vb.get((6, dim), "scale_shift_table")?;
@@ -966,6 +970,7 @@ impl LtxVideoTransformerBlock {
             attn1,
             norm2,
             attn2,
+            norm3,
             ff,
             scale_shift_table,
         })
@@ -1049,8 +1054,8 @@ impl LtxVideoTransformerBlock {
         )?;
         hs = hs.broadcast_add(&attn2)?;
 
-        let norm2 = self.norm2.forward(&hs)?;
-        let norm2 = {
+        let norm3 = self.norm3.forward(&hs)?;
+        let norm3 = {
             let one = Tensor::ones_like(&scale_mlp)?;
             let s = one.broadcast_add(&scale_mlp)?;
             let s = if s.dim(1)? == 1 {
@@ -1063,9 +1068,9 @@ impl LtxVideoTransformerBlock {
             } else {
                 shift_mlp
             };
-            norm2.broadcast_mul(&s)?.broadcast_add(&sh)?
+            norm3.broadcast_mul(&s)?.broadcast_add(&sh)?
         };
-        let ff = self.ff.forward(&norm2)?;
+        let ff = self.ff.forward(&norm3)?;
         let gate_mlp = if gate_mlp.dim(1)? == 1 {
             gate_mlp.broadcast_as((b, hs.dim(1)?, gate_mlp.dim(2)?))?
         } else {
@@ -2168,5 +2173,88 @@ impl Ltx2AvTransformer3DModel {
                 &audio.embedded_timestep,
             )?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+
+    use super::{LtxAttention, LtxRopeType};
+
+    fn attention_var_builder(dim: usize) -> VarBuilder<'static> {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        let mut identity = vec![0.0f32; dim * dim];
+        for idx in 0..dim {
+            identity[idx * dim + idx] = 1.0;
+        }
+        for name in ["to_q", "to_k", "to_v", "to_out.0"] {
+            tensors.insert(
+                format!("{name}.weight"),
+                Tensor::from_vec(identity.clone(), (dim, dim), &device).unwrap(),
+            );
+            tensors.insert(
+                format!("{name}.bias"),
+                Tensor::zeros(dim, DType::F32, &device).unwrap(),
+            );
+        }
+        tensors.insert(
+            "norm_q.weight".to_string(),
+            Tensor::ones(dim, DType::F32, &device).unwrap(),
+        );
+        tensors.insert(
+            "norm_k.weight".to_string(),
+            Tensor::ones(dim, DType::F32, &device).unwrap(),
+        );
+        VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    #[test]
+    fn text_cross_attention_ignores_video_rope_without_key_rotary_inputs() {
+        let attention =
+            LtxAttention::new(4, 1, 1, 4, 0.0, true, Some(4), true, "rms_norm", LtxRopeType::Interleaved, attention_var_builder(4))
+                .unwrap();
+        let hidden_states = Tensor::new(
+            &[[[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let encoder_hidden_states = Tensor::new(
+            &[[[0.5f32, 1.0, 1.5, 2.0], [2.0, 1.5, 1.0, 0.5], [1.0, 1.0, 1.0, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let cos = Tensor::new(
+            &[[[1.0f32, 0.5, -1.0, 0.25], [0.25, -1.0, 0.5, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let sin = Tensor::new(
+            &[[[0.0f32, 0.8660254, 0.0, -0.9689124], [0.9689124, 0.0, -0.8660254, 0.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let baseline = attention
+            .forward(&hidden_states, Some(&encoder_hidden_states), None, None, None)
+            .unwrap();
+        let with_video_rope = attention
+            .forward(
+                &hidden_states,
+                Some(&encoder_hidden_states),
+                None,
+                Some((&cos, &sin)),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            baseline.to_vec3::<f32>().unwrap(),
+            with_video_rope.to_vec3::<f32>().unwrap()
+        );
     }
 }

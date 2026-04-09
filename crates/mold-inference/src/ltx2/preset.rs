@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
 
+use crate::ltx2::model::LtxRopeType;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaptionProjectionPlacement {
     Transformer,
@@ -22,7 +24,7 @@ pub(crate) struct GemmaProfile {
     pub(crate) intermediate_size: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ConnectorProfile {
     pub(crate) video_num_attention_heads: usize,
     pub(crate) video_attention_head_dim: usize,
@@ -30,6 +32,11 @@ pub(crate) struct ConnectorProfile {
     pub(crate) audio_num_attention_heads: usize,
     pub(crate) audio_attention_head_dim: usize,
     pub(crate) audio_num_layers: usize,
+    pub(crate) positional_embedding_theta: f64,
+    pub(crate) positional_embedding_max_pos: &'static [usize],
+    pub(crate) rope_type: LtxRopeType,
+    pub(crate) double_precision_rope: bool,
+    pub(crate) num_learnable_registers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +55,7 @@ pub(crate) struct TransformerProfile {
     pub(crate) cross_attention_adaln: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Ltx2ModelPreset {
     pub(crate) name: &'static str,
     pub(crate) caption_projection: CaptionProjectionPlacement,
@@ -105,6 +112,11 @@ const CONNECTOR_PROFILE_19B: ConnectorProfile = ConnectorProfile {
     audio_num_attention_heads: 30,
     audio_attention_head_dim: 128,
     audio_num_layers: 2,
+    positional_embedding_theta: 10_000.0,
+    positional_embedding_max_pos: &[4096],
+    rope_type: LtxRopeType::Split,
+    double_precision_rope: true,
+    num_learnable_registers: Some(128),
 };
 
 const CONNECTOR_PROFILE_22B: ConnectorProfile = ConnectorProfile {
@@ -114,6 +126,11 @@ const CONNECTOR_PROFILE_22B: ConnectorProfile = ConnectorProfile {
     audio_num_attention_heads: 32,
     audio_attention_head_dim: 64,
     audio_num_layers: 2,
+    positional_embedding_theta: 10_000.0,
+    positional_embedding_max_pos: &[4096],
+    rope_type: LtxRopeType::Split,
+    double_precision_rope: true,
+    num_learnable_registers: Some(128),
 };
 
 const TRANSFORMER_PROFILE: TransformerProfile = TransformerProfile {

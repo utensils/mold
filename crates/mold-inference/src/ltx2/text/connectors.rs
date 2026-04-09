@@ -4,6 +4,8 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor, D};
 use candle_nn::{linear_b, Activation, Linear, Module, VarBuilder};
 
+use crate::ltx2::model::{video_transformer::apply_rotary_emb, LtxRopeType};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaddingSide {
     Left,
@@ -367,6 +369,9 @@ struct ConnectorAttention {
     heads: usize,
     dim_head: usize,
     positional_embedding_theta: f64,
+    positional_embedding_max_pos: Vec<usize>,
+    rope_type: LtxRopeType,
+    double_precision_rope: bool,
 }
 
 impl ConnectorAttention {
@@ -375,6 +380,9 @@ impl ConnectorAttention {
         heads: usize,
         dim_head: usize,
         positional_embedding_theta: f64,
+        positional_embedding_max_pos: Vec<usize>,
+        rope_type: LtxRopeType,
+        double_precision_rope: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = heads * dim_head;
@@ -386,6 +394,9 @@ impl ConnectorAttention {
             heads,
             dim_head,
             positional_embedding_theta,
+            positional_embedding_max_pos,
+            rope_type,
+            double_precision_rope,
         })
     }
 
@@ -406,15 +417,39 @@ impl ConnectorAttention {
             .reshape((batch, seq, self.heads, self.dim_head))?
             .transpose(1, 2)?;
 
-        let (cos, sin) = rotary_emb_cache(
+        let (cos, sin) = connector_rotary_emb_cache(
             xs.device(),
             xs.dtype(),
             seq,
+            self.heads,
             self.dim_head,
             self.positional_embedding_theta,
+            &self.positional_embedding_max_pos,
+            self.rope_type,
+            self.double_precision_rope,
         )?;
-        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?.contiguous()?;
-        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?.contiguous()?;
+        let q = apply_rotary_emb(
+            &q.transpose(1, 2)?.contiguous()?.reshape((batch, seq, inner_dim))?,
+            &cos,
+            &sin,
+            self.rope_type,
+            self.heads,
+            self.dim_head,
+        )?
+        .reshape((batch, seq, self.heads, self.dim_head))?
+        .transpose(1, 2)?
+        .contiguous()?;
+        let k = apply_rotary_emb(
+            &k.transpose(1, 2)?.contiguous()?.reshape((batch, seq, inner_dim))?,
+            &cos,
+            &sin,
+            self.rope_type,
+            self.heads,
+            self.dim_head,
+        )?
+        .reshape((batch, seq, self.heads, self.dim_head))?
+        .transpose(1, 2)?
+        .contiguous()?;
         let v = v.contiguous()?;
 
         let scale = 1f64 / (self.dim_head as f64).sqrt();
@@ -471,6 +506,9 @@ impl BasicTransformerBlock1D {
         heads: usize,
         dim_head: usize,
         positional_embedding_theta: f64,
+        positional_embedding_max_pos: Vec<usize>,
+        rope_type: LtxRopeType,
+        double_precision_rope: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
@@ -479,6 +517,9 @@ impl BasicTransformerBlock1D {
                 heads,
                 dim_head,
                 positional_embedding_theta,
+                positional_embedding_max_pos,
+                rope_type,
+                double_precision_rope,
                 vb.pp("attn1"),
             )?,
             ff: ConnectorFeedForward::new(dim, vb.pp("ff"))?,
@@ -498,6 +539,9 @@ pub struct Embeddings1DConnector {
     transformer_1d_blocks: Vec<BasicTransformerBlock1D>,
     learnable_registers: Option<Tensor>,
     positional_embedding_theta: f64,
+    positional_embedding_max_pos: Vec<usize>,
+    rope_type: LtxRopeType,
+    double_precision_rope: bool,
 }
 
 impl Embeddings1DConnector {
@@ -506,6 +550,9 @@ impl Embeddings1DConnector {
         attention_head_dim: usize,
         num_layers: usize,
         positional_embedding_theta: f64,
+        positional_embedding_max_pos: Vec<usize>,
+        rope_type: LtxRopeType,
+        double_precision_rope: bool,
         num_learnable_registers: Option<usize>,
         vb: VarBuilder,
     ) -> Result<Self> {
@@ -517,6 +564,9 @@ impl Embeddings1DConnector {
                     num_attention_heads,
                     attention_head_dim,
                     positional_embedding_theta,
+                    positional_embedding_max_pos.clone(),
+                    rope_type,
+                    double_precision_rope,
                     vb.pp("transformer_1d_blocks").pp(index),
                 )
             })
@@ -528,6 +578,9 @@ impl Embeddings1DConnector {
             transformer_1d_blocks: blocks,
             learnable_registers,
             positional_embedding_theta,
+            positional_embedding_max_pos,
+            rope_type,
+            double_precision_rope,
         })
     }
 
@@ -569,23 +622,91 @@ fn scale_free_rms_norm(xs: &Tensor, eps: f64) -> Result<Tensor> {
         .map_err(Into::into)
 }
 
-fn rotary_emb_cache(
+fn connector_rotary_emb_cache(
     device: &Device,
     dtype: DType,
     seq_len: usize,
+    heads: usize,
     dim_head: usize,
     theta: f64,
+    positional_embedding_max_pos: &[usize],
+    rope_type: LtxRopeType,
+    double_precision_rope: bool,
 ) -> Result<(Tensor, Tensor)> {
-    let inv_freq = (0..dim_head)
-        .step_by(2)
-        .map(|index| (1.0 / theta.powf(index as f64 / dim_head as f64)) as f32)
-        .collect::<Vec<_>>();
-    let inv_freq = Tensor::from_vec(inv_freq, (1, dim_head / 2), device)?.to_dtype(dtype)?;
+    let position_dims = positional_embedding_max_pos.len();
+    if position_dims == 0 {
+        bail!("connector rotary embedding requires at least one positional dimension");
+    }
+    let steps = (heads * dim_head) / (2 * position_dims);
+    if steps == 0 {
+        bail!("connector rotary embedding dimension is too small");
+    }
+
+    let indices = if steps == 1 {
+        Tensor::zeros((1,), DType::F32, device)?
+    } else {
+        let denom = (steps - 1) as f64;
+        let values = (0..steps)
+            .map(|index| {
+                let ratio = index as f64 / denom;
+                let power = if double_precision_rope {
+                    theta.powf(ratio)
+                } else {
+                    (theta as f32).powf(ratio as f32) as f64
+                };
+                (power * std::f64::consts::PI / 2.0) as f32
+            })
+            .collect::<Vec<_>>();
+        Tensor::from_vec(values, (steps,), device)?
+    };
+
     let positions = Tensor::arange(0u32, seq_len as u32, device)?
-        .to_dtype(dtype)?
-        .reshape((seq_len, 1))?;
-    let freqs = positions.matmul(&inv_freq)?;
-    Ok((freqs.cos()?, freqs.sin()?))
+        .to_dtype(DType::F32)?
+        .reshape((1, seq_len, 1))?;
+    let max_pos = positional_embedding_max_pos[0] as f64;
+    let fractional = positions.affine(1.0 / max_pos, 0.0)?;
+    let scaled = fractional.unsqueeze(D::Minus1)?.affine(2.0, -1.0)?;
+    let freqs = indices
+        .reshape((1, 1, 1, steps))?
+        .broadcast_mul(&scaled)?
+        .transpose(2, 3)?
+        .contiguous()?
+        .flatten_from(2)?;
+
+    match rope_type {
+        LtxRopeType::Interleaved => {
+            let freq_unsq = freqs.unsqueeze(D::Minus1)?;
+            let cos = Tensor::cat(&[freq_unsq.clone(), freq_unsq], D::Minus1)?
+                .reshape((1, seq_len, freqs.dim(D::Minus1)? * 2))?
+                .cos()?;
+            let sin = Tensor::cat(&[freqs.unsqueeze(D::Minus1)?, freqs.unsqueeze(D::Minus1)?], D::Minus1)?
+                .reshape((1, seq_len, freqs.dim(D::Minus1)? * 2))?
+                .sin()?;
+            Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
+        }
+        LtxRopeType::Split => {
+            let expected = (heads * dim_head) / 2;
+            let current = freqs.dim(D::Minus1)?;
+            let pad_size = expected.saturating_sub(current);
+            let mut cos = freqs.cos()?;
+            let mut sin = freqs.sin()?;
+            if pad_size != 0 {
+                let cos_pad = Tensor::ones((1, seq_len, pad_size), DType::F32, device)?;
+                let sin_pad = Tensor::zeros((1, seq_len, pad_size), DType::F32, device)?;
+                cos = Tensor::cat(&[cos_pad, cos], D::Minus1)?;
+                sin = Tensor::cat(&[sin_pad, sin], D::Minus1)?;
+            }
+            let cos = cos
+                .reshape((1, seq_len, heads, expected / heads))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let sin = sin
+                .reshape((1, seq_len, heads, expected / heads))?
+                .transpose(1, 2)?
+                .contiguous()?;
+            Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
+        }
+    }
 }
 
 fn norm_and_concat_padded_batch(
@@ -669,6 +790,7 @@ mod tests {
         EmbeddingsFeatureExtractor, EmbeddingsProcessor, FeatureExtractorV1, FeatureExtractorV2,
         PaddingSide, Projection,
     };
+    use crate::ltx2::model::LtxRopeType;
 
     fn projection(in_features: usize, out_features: usize) -> Projection {
         let device = Device::Cpu;
@@ -867,6 +989,9 @@ mod tests {
             4,
             1,
             10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
             None,
             zero_connector_var_builder(4, 1, None),
         )
@@ -908,6 +1033,9 @@ mod tests {
             4,
             1,
             10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
             None,
             zero_connector_var_builder(4, 1, None),
         )
@@ -917,6 +1045,9 @@ mod tests {
             2,
             1,
             10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
             None,
             zero_connector_var_builder(6, 1, None),
         )
