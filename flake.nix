@@ -234,9 +234,14 @@
               pkgs.openssl
               pkgs.nasm
               pkgs.git
+              pkgs.gh
+              pkgs.jq
+              pkgs.python3
+              pkgs.uv
               pkgs.viu
               pkgs.cargo-llvm-cov
               pkgs.ffmpeg
+              pkgs.imagemagick
               pkgs.bun
               pkgs.nodePackages.prettier
               pkgs.tmux
@@ -395,6 +400,12 @@
               }
               {
                 category = "check";
+                name = "test-ltx2";
+                help = "targeted LTX-2 / LTX-2.3 tests";
+                command = "cargo test \"$@\" ltx2";
+              }
+              {
+                category = "check";
                 name = "fmt";
                 help = "cargo fmt";
                 command = "cargo fmt \"$@\"";
@@ -444,6 +455,50 @@
                 name = "discord-bot";
                 help = "start the mold Discord bot";
                 command = "cargo run -p mold-ai --features ${devFeatures} -- discord \"$@\"";
+              }
+              {
+                category = "run";
+                name = "build-ltx2";
+                help = "build mold with the full feature set for LTX-2 work";
+                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+              }
+              {
+                category = "run";
+                name = "smoke-ltx2";
+                help = "run a local LTX-2 / LTX-2.3 smoke inference";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- run --local \"$@\"";
+              }
+              {
+                category = "run";
+                name = "contact-sheet";
+                help = "extract frames from a clip and build a contact sheet via ffmpeg + ImageMagick";
+                command = ''
+                  set -euo pipefail
+                  if [ "$#" -lt 2 ]; then
+                    echo "usage: contact-sheet <input-video-or-gif> <output-png> [tile]"
+                    exit 1
+                  fi
+                  input="$1"
+                  output="$2"
+                  tile="''${3:-4x}"
+                  tmp_dir="$(mktemp -d)"
+                  trap 'rm -rf "$tmp_dir"' EXIT
+                  ffmpeg -v error -i "$input" "$tmp_dir/frame-%04d.png"
+                  montage "$tmp_dir"/frame-*.png -tile "$tile" -geometry +4+4 "$output"
+                '';
+              }
+              {
+                category = "run";
+                name = "issue-note";
+                help = "post a progress update to GitHub issue #187";
+                command = ''
+                  set -euo pipefail
+                  if [ "$#" -lt 1 ]; then
+                    echo "usage: issue-note <message>"
+                    exit 1
+                  fi
+                  gh issue comment 187 --repo utensils/mold --body "$*"
+                '';
               }
               {
                 category = "docs";

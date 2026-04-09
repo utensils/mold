@@ -1,6 +1,6 @@
 # Models
 
-mold supports 10 model families spanning different architectures, quality levels,
+mold supports 11 model families spanning different architectures, quality levels,
 and VRAM requirements — including both image and video generation.
 
 ## Choosing a Model
@@ -14,6 +14,7 @@ and VRAM requirements — including both image and video generation.
 | Fast + great      | `z-image-turbo:q8`               | 9 steps, excellent quality                             |
 | SDXL              | `sdxl-turbo:fp16`                | 4 steps, 1024x1024                                     |
 | **Video**         | `ltx-video-0.9.6-distilled:bf16` | Text-to-video, 30fps, APNG/MP4, best-supported default |
+| **Audio + video** | `ltx-2-19b-distilled:fp8`        | Joint audio-video, MP4-first, advanced conditioning    |
 
 ## VRAM Guide
 
@@ -33,6 +34,8 @@ and VRAM requirements — including both image and video generation.
 | `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps     | Best GGUF, validated at 768               |
 | `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps      | Video, low-VRAM default                   |
 | `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7+3 steps    | Newer video checkpoint, multiscale refine |
+| `ltx-2-19b-distilled:fp8`           | FP8     | ~24 GB       | Slow, 8 steps      | Joint audio-video, recommended LTX-2      |
+| `ltx-2.3-22b-distilled:fp8`         | FP8     | ~24 GB       | Slow, 8 steps      | Larger joint audio-video path             |
 
 VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),
@@ -145,6 +148,7 @@ for more options.
 | [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
 | [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
+| [LTX-2](/models/ltx2)                | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
 
 Each family page lists recommended dimensions for non-square aspect ratios.

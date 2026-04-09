@@ -300,6 +300,76 @@ pub struct GenerateRequest {
     /// re-encoding when the primary format is not GIF.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gif_preview: bool,
+    /// Enable synchronized audio generation for audio-video model families such as LTX-2.
+    /// Defaults to the model family's preferred behavior when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_audio: Option<bool>,
+    /// Optional conditioning audio file for audio-to-video generation.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub audio_file: Option<Vec<u8>>,
+    /// Optional source video for video-to-video / retake generation.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+    pub source_video: Option<Vec<u8>>,
+    /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<Vec<KeyframeCondition>>,
+    /// Explicit LTX-2 pipeline mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Ltx2PipelineMode>,
+    /// Repeatable LoRA stack for model families that support multiple adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loras: Option<Vec<LoraWeight>>,
+    /// Optional time range for retake / partial regeneration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retake_range: Option<TimeRange>,
+    /// Optional spatial latent upscaling mode for LTX-2 pipelines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_upscale: Option<Ltx2SpatialUpscale>,
+    /// Optional temporal latent upscaling mode for LTX-2 pipelines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KeyframeCondition {
+    #[schema(example = 0)]
+    pub frame: u32,
+    #[serde(with = "base64_required")]
+    pub image: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TimeRange {
+    #[schema(example = 0.0)]
+    pub start_seconds: f32,
+    #[schema(example = 2.5)]
+    pub end_seconds: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ltx2PipelineMode {
+    OneStage,
+    TwoStage,
+    TwoStageHq,
+    Distilled,
+    IcLora,
+    Keyframe,
+    A2Vid,
+    Retake,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ltx2SpatialUpscale {
+    X1_5,
+    X2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ltx2TemporalUpscale {
+    X2,
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
@@ -371,6 +441,18 @@ pub struct VideoData {
     /// Always generated regardless of primary output format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gif_preview: Vec<u8>,
+    /// Whether this video includes a synchronized audio track.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_audio: bool,
+    /// Total encoded duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Audio sample rate in Hz when audio is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<u32>,
+    /// Number of audio channels when audio is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -818,6 +900,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -965,6 +1056,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -1002,6 +1102,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -1036,6 +1145,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -1072,6 +1190,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -1106,6 +1233,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
 
         let metadata =
@@ -1294,6 +1430,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1334,6 +1479,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -1387,6 +1541,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1425,6 +1588,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1484,6 +1656,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));

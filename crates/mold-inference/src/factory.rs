@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::flux2::Flux2Engine;
+use crate::ltx2::Ltx2Engine;
 use crate::ltx_video::LtxVideoEngine;
 use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
@@ -161,6 +162,7 @@ pub fn create_engine_with_pool(
                 shared_pool,
             )))
         }
+        "ltx2" | "ltx-2" => Ok(Box::new(Ltx2Engine::new(model_name, paths, load_strategy))),
         "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
             model_name,
             paths,
@@ -185,6 +187,8 @@ mod tests {
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/vae"),
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder: Some(PathBuf::from("/tmp/t5")),
             clip_encoder: Some(PathBuf::from("/tmp/clip")),
             t5_tokenizer: Some(PathBuf::from("/tmp/t5_tok")),

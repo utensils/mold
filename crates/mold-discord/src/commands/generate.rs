@@ -67,6 +67,15 @@ pub fn build_generate_request(
         fps: None,
         upscale_model: None,
         gif_preview: false,
+        enable_audio: None,
+        audio_file: None,
+        source_video: None,
+        keyframes: None,
+        pipeline: None,
+        loras: None,
+        retake_range: None,
+        spatial_upscale: None,
+        temporal_upscale: None,
     }
 }
 

@@ -2921,6 +2921,7 @@ dependencies = [
  "safetensors 0.4.5",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",
  "tokio",

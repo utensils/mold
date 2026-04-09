@@ -1,4 +1,7 @@
-use crate::{GenerateRequest, UpscaleRequest};
+use crate::{
+    GenerateRequest, KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale,
+    Ltx2TemporalUpscale, OutputFormat, UpscaleRequest,
+};
 
 /// Maximum total pixels allowed (~1.8 megapixels). Qwen-Image trains at ~1.6MP
 /// (1328x1328), other models at ≤1MP. Headroom for non-square aspect ratios.
@@ -83,6 +86,54 @@ fn model_family(model_name: &str) -> Option<&str> {
                 None
             }
         })
+}
+
+fn validate_lora_weight(lora: &LoraWeight, field_name: &str) -> Result<(), String> {
+    if lora.scale < 0.0 || lora.scale > 2.0 {
+        return Err(format!(
+            "{field_name} scale ({}) must be in range [0.0, 2.0]",
+            lora.scale
+        ));
+    }
+    if !lora.path.ends_with(".safetensors") && !lora.path.starts_with("camera-control:") {
+        return Err(format!(
+            "{field_name} file must be a .safetensors file or camera-control preset"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_keyframes(
+    keyframes: &[KeyframeCondition],
+    frames: Option<u32>,
+    family: Option<&str>,
+) -> Result<(), String> {
+    if family != Some("ltx2") {
+        return Err("keyframes are only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+    if keyframes.is_empty() {
+        return Err("keyframes must not be empty".to_string());
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for keyframe in keyframes {
+        if !is_valid_image_format(&keyframe.image) {
+            return Err("keyframes must contain only PNG or JPEG images".to_string());
+        }
+        if let Some(total_frames) = frames {
+            if keyframe.frame >= total_frames {
+                return Err(format!(
+                    "keyframe frame ({}) must be less than frames ({total_frames})",
+                    keyframe.frame
+                ));
+            }
+        }
+        if !seen.insert(keyframe.frame) {
+            return Err(format!("duplicate keyframe frame: {}", keyframe.frame));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
@@ -212,14 +263,14 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     // LoRA validation (format checks only — path existence is checked at the
     // inference layer, since in remote mode the path refers to the server filesystem).
     if let Some(ref lora) = req.lora {
-        if lora.scale < 0.0 || lora.scale > 2.0 {
-            return Err(format!(
-                "lora scale ({}) must be in range [0.0, 2.0]",
-                lora.scale
-            ));
+        validate_lora_weight(lora, "lora")?;
+    }
+    if let Some(ref loras) = req.loras {
+        if loras.is_empty() {
+            return Err("loras must not be empty when provided".to_string());
         }
-        if !lora.path.ends_with(".safetensors") {
-            return Err("lora file must be a .safetensors file".to_string());
+        for lora in loras {
+            validate_lora_weight(lora, "loras")?;
         }
     }
     // Video frame validation
@@ -245,6 +296,117 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err(format!("fps ({fps}) must be <= 120"));
         }
     }
+    if let Some(keyframes) = &req.keyframes {
+        validate_keyframes(keyframes, req.frames, family)?;
+    }
+    if let Some(audio) = &req.audio_file {
+        if family != Some("ltx2") {
+            return Err("audio_file is only supported for LTX-2 / LTX-2.3 models".to_string());
+        }
+        if audio.is_empty() {
+            return Err("audio_file must not be empty".to_string());
+        }
+    }
+    if let Some(video) = &req.source_video {
+        if family != Some("ltx2") {
+            return Err("source_video is only supported for LTX-2 / LTX-2.3 models".to_string());
+        }
+        if video.is_empty() {
+            return Err("source_video must not be empty".to_string());
+        }
+    }
+    if req.enable_audio.is_some() && family != Some("ltx2") {
+        return Err("enable_audio is only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+    if req.retake_range.is_some() && family != Some("ltx2") {
+        return Err("retake_range is only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+    if req.spatial_upscale.is_some() && family != Some("ltx2") {
+        return Err("spatial_upscale is only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+    if req.temporal_upscale.is_some() && family != Some("ltx2") {
+        return Err("temporal_upscale is only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+    if req.pipeline.is_some() && family != Some("ltx2") {
+        return Err("pipeline is only supported for LTX-2 / LTX-2.3 models".to_string());
+    }
+
+    if family == Some("ltx2") {
+        match req.output_format {
+            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {}
+            _ => return Err("LTX-2 outputs must use mp4, gif, apng, or webp".to_string()),
+        }
+
+        if req.enable_audio == Some(true) && req.output_format != OutputFormat::Mp4 {
+            return Err("audio-enabled LTX-2 outputs must use mp4 format".to_string());
+        }
+
+        if req.retake_range.is_some() && req.source_video.is_none() {
+            return Err("retake_range requires source_video to also be provided".to_string());
+        }
+
+        if let Some(range) = &req.retake_range {
+            if !(range.start_seconds.is_finite() && range.end_seconds.is_finite()) {
+                return Err("retake_range values must be finite numbers".to_string());
+            }
+            if range.start_seconds < 0.0 {
+                return Err("retake_range start_seconds must be >= 0.0".to_string());
+            }
+            if range.end_seconds <= range.start_seconds {
+                return Err(
+                    "retake_range end_seconds must be greater than start_seconds".to_string(),
+                );
+            }
+        }
+
+        if let Some(spatial_upscale) = req.spatial_upscale {
+            if spatial_upscale == Ltx2SpatialUpscale::X1_5 {
+                return Err("LTX-2 x1.5 spatial upscaling is not implemented yet".to_string());
+            }
+        }
+        if let Some(temporal_upscale) = req.temporal_upscale {
+            if temporal_upscale == Ltx2TemporalUpscale::X2 {
+                return Err("LTX-2 temporal upscaling is not implemented yet".to_string());
+            }
+        }
+
+        if let Some(pipeline) = req.pipeline {
+            match pipeline {
+                Ltx2PipelineMode::A2Vid => {
+                    if req.audio_file.is_none() {
+                        return Err("pipeline=a2vid requires audio_file".to_string());
+                    }
+                }
+                Ltx2PipelineMode::Retake => {
+                    if req.source_video.is_none() {
+                        return Err("pipeline=retake requires source_video".to_string());
+                    }
+                    if req.retake_range.is_none() {
+                        return Err("pipeline=retake requires retake_range".to_string());
+                    }
+                }
+                Ltx2PipelineMode::Keyframe => {
+                    let keyframe_count = req.keyframes.as_ref().map_or(0, Vec::len);
+                    if keyframe_count < 2 {
+                        return Err("pipeline=keyframe requires at least 2 keyframes".to_string());
+                    }
+                }
+                Ltx2PipelineMode::IcLora => {
+                    if req.source_video.is_none() {
+                        return Err("pipeline=ic-lora requires source_video".to_string());
+                    }
+                    if req.lora.is_none() && req.loras.as_ref().is_none_or(Vec::is_empty) {
+                        return Err("pipeline=ic-lora requires at least one LoRA".to_string());
+                    }
+                }
+                Ltx2PipelineMode::OneStage
+                | Ltx2PipelineMode::TwoStage
+                | Ltx2PipelineMode::TwoStageHq
+                | Ltx2PipelineMode::Distilled => {}
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -427,6 +589,15 @@ mod tests {
             fps: None,
             upscale_model: None,
             gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
         }
     }
 
@@ -497,6 +668,56 @@ mod tests {
     #[test]
     fn valid_request_passes() {
         assert!(validate_generate_request(&valid_req()).is_ok());
+    }
+
+    #[test]
+    fn ltx2_audio_requires_mp4() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Gif;
+        req.enable_audio = Some(true);
+        assert!(validate_generate_request(&req).unwrap_err().contains("mp4"));
+    }
+
+    #[test]
+    fn ltx2_retake_requires_source_video() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.retake_range = Some(crate::TimeRange {
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+        });
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("source_video"));
+    }
+
+    #[test]
+    fn ltx2_keyframe_pipeline_requires_multiple_keyframes() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.pipeline = Some(crate::Ltx2PipelineMode::Keyframe);
+        req.frames = Some(17);
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: 0,
+            image: png_bytes(),
+        }]);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("at least 2 keyframes"));
+    }
+
+    #[test]
+    fn ltx2_rejects_unimplemented_temporal_upscale() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+        assert!(validate_generate_request(&req)
+            .unwrap_err()
+            .contains("temporal upscaling"));
     }
 
     #[test]

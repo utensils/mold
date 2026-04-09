@@ -8,16 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- **LTX-2 / LTX-2.3 joint audio-video generation**: added the new `ltx2` model family with `ltx-2-19b-{dev,distilled}:fp8` and `ltx-2.3-22b-{dev,distilled}:fp8` manifests, synchronized MP4-first video metadata, request fields for audio/video/keyframes/retake/upscaling, and a separate `Ltx2Engine` wired into the inference factory. The current implementation uses the upstream Lightricks pipelines through a Python bridge (`uv` + `ffmpeg`) instead of a full in-tree Rust port.
+- **LTX-2 CLI surface**: added `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, and `--temporal-upscale` to `mold run`.
+- **LTX-2 devshell helpers**: the flake devshell now includes `gh`, `jq`, `imagemagick`, `python3`, and `uv`, plus `build-ltx2`, `test-ltx2`, `smoke-ltx2`, `contact-sheet`, and `issue-note`.
 - **Qwen-Image-Edit-2511 request surface**: added `qwen-image-edit-2511:{bf16,q8,q6,q5,q4,q3,q2}` manifests, `GenerateRequest.edit_images`, family-aware validation, and distinct shared storage paths for edit-family VAE/text-encoder assets.
 - **Qwen-Image-Edit-2511 inference pipeline**: added the Qwen2.5-VL multimodal edit encoder, condition-image preprocessing, packed edit-latent concatenation with `img_shapes`, `zero_cond_t` transformer support, and true-CFG norm rescaling for local image editing.
 
 ### Changed
 
+- **Video defaults for `ltx2`**: LTX-2 requests now default to MP4 output instead of PNG/APNG and strip audio automatically when exporting GIF/APNG/WebP.
+- **Manifest plumbing**: `ModelPaths`, manifests, validation, and `mold info` now understand temporal upscalers and distilled LoRAs.
 - **`--image` CLI semantics**: `mold run --image` is now repeatable. Non-edit families still accept at most one source image; `qwen-image-edit` maps repeated `--image` flags into `edit_images`.
 - **TUI capability modeling**: `qwen-image-edit` now appears as a source-image editing family instead of img2img, so the TUI exposes a source image and negative prompt without img2img-only controls like `strength`, `mask`, `ControlNet`, or `LoRA`.
 
 ### Fixed
 
+- **LTX-2 manifest accounting**: model-size and download-path resolution now treat the single-file LTX-2 checkpoints correctly without requiring a standalone VAE asset.
+- **LTX-2 camera-control presets**: `--camera-control dolly-in|dolly-left|dolly-out|dolly-right|jib-down|jib-up|static` now resolves the published LTX-2 19B camera LoRAs instead of failing validation.
 - **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine ([#158](https://github.com/utensils/mold/issues/158)):
   - Info panel queries `/api/status` for memory, GPU, and busy state when connected to a remote server
   - Model parameter defaults (steps, guidance, width, height) come from the server's catalog instead of local `config.toml`

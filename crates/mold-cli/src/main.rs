@@ -189,6 +189,50 @@ Examples:
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
+        /// Enable synchronized audio for LTX-2 / LTX-2.3 generation.
+        #[arg(long, help_heading = "Video")]
+        audio: bool,
+
+        /// Disable synchronized audio for LTX-2 / LTX-2.3 generation.
+        #[arg(long, help_heading = "Video")]
+        no_audio: bool,
+
+        /// Conditioning audio file for audio-to-video generation.
+        #[arg(long, help_heading = "Video", value_hint = ValueHint::FilePath)]
+        audio_file: Option<String>,
+
+        /// Source video for retake / video-to-video workflows.
+        #[arg(long, help_heading = "Video", value_hint = ValueHint::FilePath)]
+        video: Option<String>,
+
+        /// Keyframe conditioning in the form <frame:path>. Repeat for multiple keyframes.
+        #[arg(long, help_heading = "Video")]
+        keyframe: Vec<String>,
+
+        /// LTX-2 pipeline mode.
+        #[arg(
+            long,
+            help_heading = "Video",
+            value_parser = ["one-stage", "two-stage", "two-stage-hq", "distilled", "ic-lora", "keyframe", "a2vid", "retake"]
+        )]
+        pipeline: Option<String>,
+
+        /// Retake time range in the form <start:end> seconds.
+        #[arg(long, help_heading = "Video")]
+        retake: Option<String>,
+
+        /// Spatial upscaling mode for LTX-2.3.
+        #[arg(long, help_heading = "Video", value_parser = ["x1.5", "x2"])]
+        spatial_upscale: Option<String>,
+
+        /// Temporal upscaling mode for LTX-2.3.
+        #[arg(long, help_heading = "Video", value_parser = ["x2"])]
+        temporal_upscale: Option<String>,
+
+        /// Camera-control LoRA preset name or .safetensors path.
+        #[arg(long, help_heading = "Video")]
+        camera_control: Option<String>,
+
         /// Server URL to connect to
         #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
         host: Option<String>,
@@ -240,9 +284,9 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         offload: bool,
 
-        /// LoRA adapter safetensors file path
+        /// LoRA adapter safetensors file path. Repeat for multiple LTX-2 adapters.
         #[arg(long, help_heading = "LoRA", value_hint = ValueHint::FilePath)]
-        lora: Option<String>,
+        lora: Vec<String>,
 
         /// LoRA effect strength (0.0 = none, 1.0 = full, up to 2.0)
         #[arg(long, default_value = "1.0", help_heading = "LoRA")]
@@ -831,6 +875,16 @@ async fn run() -> anyhow::Result<()> {
             batch,
             frames,
             fps,
+            audio,
+            no_audio,
+            audio_file,
+            video,
+            keyframe,
+            pipeline,
+            retake,
+            spatial_upscale,
+            temporal_upscale,
+            camera_control,
             host,
             format,
             no_metadata,
@@ -871,6 +925,16 @@ async fn run() -> anyhow::Result<()> {
                 batch,
                 frames,
                 fps,
+                audio,
+                no_audio,
+                audio_file,
+                video,
+                keyframe,
+                pipeline,
+                retake,
+                spatial_upscale,
+                temporal_upscale,
+                camera_control,
                 host,
                 format,
                 no_metadata,

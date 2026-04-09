@@ -135,6 +135,8 @@ Environment variables take precedence over config file values.
 | `MOLD_TRANSFORMER_PATH`        | —       | Override transformer weights path                                                  |
 | `MOLD_VAE_PATH`                | —       | Override VAE weights path                                                          |
 | `MOLD_SPATIAL_UPSCALER_PATH`   | —       | Override LTX spatial upscaler path                                                 |
+| `MOLD_TEMPORAL_UPSCALER_PATH`  | —       | Override LTX temporal upscaler path                                                |
+| `MOLD_DISTILLED_LORA_PATH`     | —       | Override the default LTX-2 distilled LoRA path                                     |
 | `MOLD_T5_PATH`                 | —       | Override T5 encoder path                                                           |
 | `MOLD_CLIP_PATH`               | —       | Override CLIP-L encoder path                                                       |
 | `MOLD_CLIP2_PATH`              | —       | Override CLIP-G encoder path for SDXL                                              |
@@ -167,7 +169,7 @@ For Qwen-Image and Qwen-Image-Edit:
 | `MOLD_SD3_DEBUG`                   | —       | Enable verbose SD3.5 pipeline logging              |
 | `MOLD_QWEN_DEBUG`                  | —       | Enable verbose Qwen-Image pipeline logging         |
 | `MOLD_ZIMAGE_DEBUG`                | —       | Enable verbose Z-Image pipeline logging            |
-| `MOLD_LTX_DEBUG`                   | —       | Enable verbose LTX Video pipeline logging          |
+| `MOLD_LTX_DEBUG`                   | —       | Enable verbose LTX Video / LTX-2 pipeline logging  |
 | `MOLD_WUERSTCHEN_DEBUG`            | —       | Enable verbose Wuerstchen pipeline logging         |
 | `MOLD_WUERSTCHEN_DECODER_GUIDANCE` | `0.0`   | Override decoder-stage CFG guidance for Wuerstchen |
 

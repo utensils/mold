@@ -4,7 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   title: 'mold',
   description:
-    'Local AI image generation CLI — FLUX, SD3.5, SD 1.5, SDXL, Z-Image, Flux.2, Qwen-Image & Wuerstchen on your GPU',
+    'Local AI image and video generation CLI — FLUX, SD3.5, SD 1.5, SDXL, Z-Image, Flux.2, Qwen-Image, LTX Video, and LTX-2 on your GPU',
   base: '/mold/',
 
   vite: {
@@ -81,6 +81,7 @@ export default defineConfig({
             { text: 'Z-Image', link: '/models/z-image' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
+            { text: 'LTX-2', link: '/models/ltx2' },
             { text: 'LTX Video', link: '/models/ltx-video' },
             { text: 'Upscalers', link: '/models/upscalers' },
           ],

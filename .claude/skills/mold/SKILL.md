@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # mold — Local AI Image Generation CLI
 
-Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, LTX Video, and Wuerstchen diffusion models running on local GPU hardware.
+Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, and Wuerstchen diffusion models running on local GPU hardware.
 
 ## Quick Reference
 
@@ -153,6 +153,33 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
 
+### Joint Audio-Video Generation (LTX-2 / LTX-2.3)
+
+Generate synchronized MP4 clips with the LTX-2 family. This family defaults to
+MP4 output and exposes audio/video-specific controls.
+
+```bash
+# Fast default joint audio-video generation
+mold run ltx-2-19b-distilled:fp8 "rain on a neon taxi window" --frames 97 --format mp4
+
+# Audio-to-video
+mold run ltx-2-19b-distilled:fp8 "paper sculpture reacting to music" --audio-file cello.wav
+
+# Keyframe interpolation
+mold run ltx-2-19b-distilled:fp8 "a canyon flyover" \
+  --pipeline keyframe --frames 97 \
+  --keyframe 0:start.png --keyframe 96:end.png
+
+# Camera-control preset
+mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
+```
+
+**Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
+
+**Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`
+
+**Current constraints:** `x2` spatial upscaling is wired; `x1.5` spatial upscaling and temporal upscaling are not yet implemented. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. Local runs require `python3`, `uv`, `ffmpeg`, and the upstream checkout at `tmp/LTX-2-upstream`.
+
 ### Model Selection Guide
 
 Pick the right model for the task:
@@ -171,6 +198,8 @@ Pick the right model for the task:
 | `qwen-image:q8` | Slow (50 steps) | Better | Best base GGUF quality, validated at 768x768 on 24 GB |
 | `ltx-video-0.9.6-distilled:bf16` | Fast (8 steps) | Good | Text-to-video, 30fps |
 | `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7+3 steps) | Better | Newer checkpoint family with full multiscale refinement |
+| `ltx-2-19b-distilled:fp8` | Slow (8 steps) | Better | Joint audio-video, recommended LTX-2 default |
+| `ltx-2.3-22b-distilled:fp8` | Slow (8 steps) | Best | Larger joint audio-video path |
 
 Default model if none specified: `flux2-klein:q8`
 
@@ -191,6 +220,8 @@ Default model if none specified: `flux2-klein:q8`
 | `qwen-image-2512` | 50 | 4.0 | 1328x1328 |
 | `ltx-video-0.9.6-distilled` | 8 | 1.0 | 1216x704 (25 frames, 30fps) |
 | `ltx-video-0.9.8-2b-distilled` | 7+3 | 1.0 | 1216x704 (25 frames, 30fps, multiscale refine) |
+| `ltx-2-19b-distilled` | 8 | 3.0 | 1216x704 (97 frames, 24fps, mp4 default) |
+| `ltx-2.3-22b-distilled` | 8 | 3.0 | 1216x704 (97 frames, 24fps, mp4 default) |
 
 ### Available Models
 
@@ -217,6 +248,8 @@ Default model if none specified: `flux2-klein:q8`
 **Qwen-Image-2512**: `qwen-image-2512:q8`, `qwen-image-2512:q6`, `qwen-image-2512:q5`, `qwen-image-2512:q4`, `qwen-image-2512:q3`, `qwen-image-2512:q2`, `qwen-image-lightning:fp8`, `qwen-image-lightning:fp8-8step`, `qwen-image-2512:bf16`
 
 **LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
+
+**LTX-2 / LTX-2.3**: `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 **Qwen-Image text encoder controls**:
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`

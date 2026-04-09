@@ -122,7 +122,7 @@ See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference
 
 ## Models
 
-Supports 10 model families with 80+ variants:
+Supports 11 model families with 80+ variants:
 
 | Family | Models | Highlights |
 |--------|--------|------------|
@@ -135,6 +135,7 @@ Supports 10 model families with 80+ variants:
 | **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
 | **Qwen-Image-Edit** | 2511 | Multimodal image editing, repeatable `--image`, negative prompts |
 | **Wuerstchen** | v2 | 42x latent compression |
+| **LTX-2 / LTX-2.3** | 19B, 22B | Joint audio-video generation, MP4-first workflows |
 | **LTX Video** | 0.9.6, 0.9.8 | Text-to-video with APNG/GIF/WebP/MP4 output |
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
@@ -158,6 +159,24 @@ now run the full multiscale refinement path. mold keeps the shared T5 assets
 under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 `shared/LTX-Video/...`, and intentionally continues using the compatible
 `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
+
+### LTX-2 / LTX-2.3
+
+Current supported LTX-2 checkpoints are:
+
+- `ltx-2-19b-dev:fp8`
+- `ltx-2-19b-distilled:fp8`
+- `ltx-2.3-22b-dev:fp8`
+- `ltx-2.3-22b-distilled:fp8`
+
+Recommended default today: `ltx-2-19b-distilled:fp8`.
+
+This family is separate from `ltx-video`: it defaults to MP4, supports
+synchronized audio, audio-to-video, keyframe interpolation, retake workflows,
+stacked LoRAs, and camera-control LoRAs. The current implementation uses the
+upstream Lightricks Python pipelines through a bridge, so local LTX-2 runs
+require `python3`, `uv`, `ffmpeg`, and the upstream checkout at
+`tmp/LTX-2-upstream`.
 
 ## Features
 
@@ -187,7 +206,7 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 
 ## How it works
 
-Single Rust binary built on [candle](https://github.com/huggingface/candle) — pure Rust ML, no Python, no libtorch.
+Single Rust binary built on [candle](https://github.com/huggingface/candle) for the in-tree model families. LTX-2 currently bridges to the upstream Python pipelines; everything else stays in Rust with no libtorch dependency.
 
 ```
 mold run "a cat"

@@ -25,11 +25,20 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--guidance <N>`                   | Guidance scale                                                             |
 | `--frames <N>`                     | Video frame count (8n+1, video models only)                                |
 | `--fps <N>`                        | Video frames per second (default: 24)                                      |
+| `--audio`, `--no-audio`           | Keep or strip the synchronized audio track for LTX-2 MP4 output            |
+| `--audio-file <PATH>`             | Conditioning audio file for LTX-2 audio-to-video                           |
+| `--video <PATH>`                  | Source video for LTX-2 retake / video-conditioning flows                   |
+| `--keyframe <FRAME:PATH>`         | LTX-2 keyframe conditioning. Repeat for multiple keyframes                 |
+| `--pipeline <MODE>`               | LTX-2 pipeline: `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake` |
+| `--retake <START:END>`            | LTX-2 retake time range in seconds                                         |
+| `--camera-control <NAME|PATH>`    | LTX-2 camera-control preset name or explicit `.safetensors` path           |
+| `--spatial-upscale <MODE>`        | LTX-2 spatial upscaling (`x2` currently wired)                             |
+| `--temporal-upscale <MODE>`       | LTX-2 temporal upscaling (declared but not wired yet)                      |
 | `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`                                |
 | `--local`                          | Skip server, run locally                                                   |
 | `--eager`                          | Keep all components loaded (more VRAM)                                     |
 | `--offload`                        | CPU↔GPU block streaming (less VRAM)                                        |
-| `--lora <PATH>`                    | LoRA adapter safetensors                                                   |
+| `--lora <PATH>`                    | LoRA adapter safetensors. Repeat for stacked LTX-2 adapters                |
 | `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                                                    |
 | `-i, --image <PATH>`               | Source image. Repeat for `qwen-image-edit`; `-` stdin is single-image only |
 | `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                                               |
@@ -72,6 +81,15 @@ reduce unified-memory pressure during denoising.
 - `qwen-image-edit` does not support `--image -`.
 - `qwen-image-edit` supports quantized `--qwen2-variant` values by pairing GGUF language weights with the staged Qwen2.5-VL vision tower used for image conditioning.
 - The first edit image drives the default output width/height when you omit both flags.
+
+### LTX-2 Notes
+
+- This family defaults to `mp4` when you do not explicitly choose another video format.
+- If you explicitly choose `gif`, `apng`, or `webp`, mold exports a silent animation.
+- `--camera-control dolly-in|dolly-left|dolly-out|dolly-right|jib-down|jib-up|static`
+  auto-resolves the published LTX-2 19B camera LoRAs.
+- LTX-2 currently requires `python3`, `uv`, `ffmpeg`, and the upstream checkout
+  at `tmp/LTX-2-upstream`.
 
 ## `mold expand`
 

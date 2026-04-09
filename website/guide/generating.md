@@ -120,6 +120,50 @@ decode. Peak VRAM depends heavily on the selected LTX checkpoint.
 Video dimensions must be multiples of 32 (not 16 like images). Current LTX
 defaults use 1216×704 at 30 FPS.
 
+## Joint Audio-Video Generation
+
+LTX-2 / LTX-2.3 is exposed as a separate `ltx2` family. Unlike `ltx-video`,
+its default container is MP4 and it can keep a synchronized audio track when
+the request stays in MP4.
+
+```bash
+# Text-to-audio+video
+mold run ltx-2-19b-distilled:fp8 \
+  "a toy train rolling through a snowy diorama, gentle mechanical hum" \
+  --frames 97 \
+  --format mp4
+
+# Audio-to-video
+mold run ltx-2-19b-distilled:fp8 \
+  "abstract paper sculpture reacting to a cello performance" \
+  --audio-file ./cello.wav
+
+# Keyframe interpolation
+mold run ltx-2-19b-distilled:fp8 \
+  "a drone shot over a canyon river" \
+  --pipeline keyframe \
+  --frames 97 \
+  --keyframe 0:./start.png \
+  --keyframe 96:./end.png
+```
+
+LTX-2 also adds:
+
+- `--audio` / `--no-audio`
+- `--audio-file`
+- `--video`
+- repeatable `--keyframe <frame:path>`
+- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2vid|retake`
+- `--retake <start:end>`
+- repeatable `--lora`
+- `--camera-control <preset-or-path>`
+
+::: warning Runtime requirements
+The current LTX-2 implementation uses the upstream Lightricks Python pipelines
+through a bridge. Local runs require `python3`, `uv`, `ffmpeg`, and the
+upstream checkout at `tmp/LTX-2-upstream`.
+:::
+
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,
