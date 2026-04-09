@@ -236,8 +236,6 @@
               pkgs.git
               pkgs.gh
               pkgs.jq
-              pkgs.python3
-              pkgs.uv
               pkgs.viu
               pkgs.cargo-llvm-cov
               pkgs.ffmpeg
@@ -471,26 +469,14 @@
               {
                 category = "run";
                 name = "contact-sheet";
-                help = "build a contact sheet from a clip via ffmpeg";
+                help = "build native review artifacts from a clip via the Rust ltx2_review tool";
                 command = ''
                   set -euo pipefail
-                  if [ "$#" -lt 2 ]; then
-                    echo "usage: contact-sheet <input-video-or-gif> <output-png> [tile]"
+                  if [ "$#" -lt 1 ]; then
+                    echo "usage: contact-sheet <input.mp4> [more.mp4...]"
                     exit 1
                   fi
-                  input="$1"
-                  output="$2"
-                  tile="''${3:-4x5}"
-                  cols="''${tile%x*}"
-                  rows="''${tile#*x}"
-                  if [ -z "$cols" ] || [ "$cols" = "$tile" ]; then
-                    echo "tile must be in CxR format, for example 4x5"
-                    exit 1
-                  fi
-                  if [ -z "$rows" ] || [ "$rows" = "$tile" ]; then
-                    rows=5
-                  fi
-                  ffmpeg -y -v error -i "$input" -vf "tile=''${cols}x''${rows}" -frames:v 1 "$output"
+                  cargo run -p mold-ai-inference --features mp4 --bin ltx2_review -- "$@"
                 '';
               }
               {

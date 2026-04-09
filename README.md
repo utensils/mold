@@ -173,12 +173,13 @@ Recommended default today: `ltx-2-19b-distilled:fp8`.
 
 This family is separate from `ltx-video`: it defaults to MP4, supports
 synchronized audio, audio-to-video, keyframe interpolation, retake workflows,
-stacked LoRAs, and camera-control LoRAs. The current implementation uses the
-upstream Lightricks Python pipelines through a bridge, so local LTX-2 runs
-require `python3`, `uv`, `ffmpeg`, and the upstream checkout at
-`tmp/LTX-2-upstream`. On 24 GB Ada GPUs such as the RTX 4090, mold uses
-bridge-side layer streaming with the upstream `fp8-cast` path for local FP8
-smoke runs rather than Hopper-only `fp8-scaled-mm`.
+stacked LoRAs, and camera-control LoRAs. The implementation is native Rust in
+`mold-inference` with no Python bridge or upstream checkout requirement. CUDA
+is the supported backend for real local generation, CPU is a correctness-only
+fallback, and Metal is explicitly unsupported for this family. On 24 GB Ada
+GPUs such as the RTX 4090, mold uses native staged loading, layer streaming,
+and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
+`fp8-scaled-mm`.
 
 ## Features
 
@@ -208,7 +209,7 @@ smoke runs rather than Hopper-only `fp8-scaled-mm`.
 
 ## How it works
 
-Single Rust binary built on [candle](https://github.com/huggingface/candle) for the in-tree model families. LTX-2 currently bridges to the upstream Python pipelines; everything else stays in Rust with no libtorch dependency.
+Single Rust binary built on [candle](https://github.com/huggingface/candle) for the in-tree model families. LTX-2 now runs through the native Rust stack in `mold-inference`, so the full model surface stays in Rust with no libtorch dependency.
 
 ```
 mold run "a cat"

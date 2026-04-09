@@ -158,10 +158,10 @@ LTX-2 also adds:
 - repeatable `--lora`
 - `--camera-control <preset-or-path>`
 
-::: warning Runtime requirements
-The current LTX-2 implementation uses the upstream Lightricks Python pipelines
-through a bridge. Local runs require `python3`, `uv`, `ffmpeg`, and the
-upstream checkout at `tmp/LTX-2-upstream`.
+::: warning Backend policy
+LTX-2 now runs natively in Rust inside `mold-inference`. CUDA is the supported
+backend for real local generation, CPU is correctness-only, and Metal is
+unsupported for this family.
 :::
 
 ## Negative Prompts

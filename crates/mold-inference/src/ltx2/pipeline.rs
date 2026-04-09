@@ -175,6 +175,7 @@ impl Ltx2Engine {
             num_frames: req.frames.unwrap_or(97),
             frame_rate: req.fps.unwrap_or(24),
             num_inference_steps: req.steps,
+            guidance: req.guidance as f64,
             quantization: self.request_quantization(),
             streaming_prefetch_count: Some(preset.streaming_prefetch_count),
             conditioning,

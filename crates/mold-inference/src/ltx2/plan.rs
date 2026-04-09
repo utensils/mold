@@ -46,6 +46,7 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) num_frames: u32,
     pub(crate) frame_rate: u32,
     pub(crate) num_inference_steps: u32,
+    pub(crate) guidance: f64,
     pub(crate) quantization: Option<String>,
     pub(crate) streaming_prefetch_count: Option<u32>,
     pub(crate) conditioning: StagedConditioning,

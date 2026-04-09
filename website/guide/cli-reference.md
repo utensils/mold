@@ -88,11 +88,13 @@ reduce unified-memory pressure during denoising.
 - If you explicitly choose `gif`, `apng`, or `webp`, mold exports a silent animation.
 - `--camera-control dolly-in|dolly-left|dolly-out|dolly-right|jib-down|jib-up|static`
   auto-resolves the published LTX-2 19B camera LoRAs.
-- LTX-2 currently requires `python3`, `uv`, `ffmpeg`, and the upstream checkout
-  at `tmp/LTX-2-upstream`.
+- LTX-2 runs natively in Rust inside `mold-inference`; no Python bridge or
+  upstream checkout is required.
+- Backend policy: CUDA is supported, CPU is correctness-only, and Metal is
+  unsupported for this family.
 - On 24 GB Ada GPUs such as the RTX 4090, the verified local FP8 path uses
-  bridge-side layer streaming plus the upstream `fp8-cast` mode rather than
-  Hopper-only `fp8-scaled-mm`.
+  native staged loading, layer streaming, and the compatible `fp8-cast` mode
+  rather than Hopper-only `fp8-scaled-mm`.
 
 ## `mold expand`
 

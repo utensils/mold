@@ -23,8 +23,8 @@ Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 | `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                   |
 | `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default               |
 | `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine |
-| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; Python bridge + ffmpeg       |
-| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger joint audio-video path                   |
+| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path         |
+| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path            |
 
 ## What Slows Things Down
 
@@ -39,14 +39,18 @@ Reducing resolution has a large impact since the latent sequence length scales
 as frames × height × width.
 
 LTX-2 is slower again than `ltx-video` because it carries the joint
-audio-video stack, larger checkpoints, and a Python bridge into the upstream
-Lightricks pipelines. Treat it as a quality-first workflow, not a quick draft
+audio-video stack, larger checkpoints, staged native loading, and a larger
+conditioning surface. Treat it as a quality-first workflow, not a quick draft
 path.
 
 On a 24 GB RTX 4090-class card, the practical local path is the distilled FP8
-checkpoint with layer streaming enabled through the bridge. mold currently uses
-the upstream `fp8-cast` path there rather than Hopper-only
+checkpoint with native layer streaming enabled. mold currently uses the
+compatible `fp8-cast` path there rather than Hopper-only
 `fp8-scaled-mm`/TensorRT-LLM.
+
+CUDA is the supported backend for real local LTX-2 runs. CPU exists for
+correctness-oriented native coverage and can be extremely slow. Metal is
+explicitly unsupported for this family.
 
 ### Offloading
 

@@ -29,3 +29,8 @@ name = "mold"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+candle-core-mold = { path = "../candle/candle-core" }
+candle-nn-mold = { path = "../candle/candle-nn" }
+candle-transformers-mold = { path = "../candle/candle-transformers" }
