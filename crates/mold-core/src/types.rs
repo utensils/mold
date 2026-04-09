@@ -736,18 +736,13 @@ pub struct GpuInfo {
 }
 
 /// GPU selection for multi-GPU setups.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum GpuSelection {
     /// Use all discovered GPUs (default).
+    #[default]
     All,
     /// Use only these specific GPU ordinals.
     Specific(Vec<usize>),
-}
-
-impl Default for GpuSelection {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl GpuSelection {

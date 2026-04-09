@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
+use mold_core::types::GpuWorkerState;
 
 use crate::control::CliContext;
 use crate::procinfo;
@@ -13,27 +14,57 @@ pub async fn run() -> Result<()> {
             println!("{} mold server v{}", theme::icon_ok(), status.version);
             println!("{} Uptime: {}s", theme::icon_ok(), status.uptime_secs,);
 
-            if let Some(gpu) = &status.gpu_info {
-                println!(
-                    "{} GPU: {} ({}/{} MB VRAM)",
-                    theme::icon_ok(),
-                    gpu.name,
-                    gpu.vram_used_mb,
-                    gpu.vram_total_mb,
-                );
-            } else {
-                println!("{} GPU: {}", theme::icon_ok(), "not detected".dimmed());
-            }
-
-            println!(
-                "{} Busy: {}",
-                theme::icon_ok(),
-                if status.busy {
-                    "yes".yellow()
-                } else {
-                    "no".dimmed()
+            // Multi-GPU display: show per-GPU status when available.
+            if let Some(gpus) = &status.gpus {
+                println!();
+                for gpu in gpus {
+                    let model = gpu.loaded_model.as_deref().unwrap_or("(none)");
+                    let state_str = match gpu.state {
+                        GpuWorkerState::Generating => "[generating]".yellow().to_string(),
+                        GpuWorkerState::Idle => "[idle]".dimmed().to_string(),
+                        GpuWorkerState::Loading => "[loading]".cyan().to_string(),
+                        GpuWorkerState::Degraded => "[degraded]".red().to_string(),
+                    };
+                    let vram_used_gb = gpu.vram_used_bytes as f64 / 1_073_741_824.0;
+                    let vram_total_gb = gpu.vram_total_bytes as f64 / 1_073_741_824.0;
+                    println!(
+                        "GPU {} ({}, {:.0}GB):  {:<20} {}  VRAM: {:.1}/{:.1} GB",
+                        gpu.ordinal,
+                        gpu.name,
+                        vram_total_gb,
+                        model.green(),
+                        state_str,
+                        vram_used_gb,
+                        vram_total_gb,
+                    );
                 }
-            );
+                if let (Some(depth), Some(capacity)) = (status.queue_depth, status.queue_capacity) {
+                    println!("Queue: {}/{}", depth, capacity);
+                }
+            } else {
+                // Single-GPU fallback display.
+                if let Some(gpu) = &status.gpu_info {
+                    println!(
+                        "{} GPU: {} ({}/{} MB VRAM)",
+                        theme::icon_ok(),
+                        gpu.name,
+                        gpu.vram_used_mb,
+                        gpu.vram_total_mb,
+                    );
+                } else {
+                    println!("{} GPU: {}", theme::icon_ok(), "not detected".dimmed());
+                }
+
+                println!(
+                    "{} Busy: {}",
+                    theme::icon_ok(),
+                    if status.busy {
+                        "yes".yellow()
+                    } else {
+                        "no".dimmed()
+                    }
+                );
+            }
 
             if let Some(job) = &status.current_generation {
                 println!("{} Active model: {}", theme::icon_ok(), job.model);

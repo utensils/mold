@@ -1,4 +1,5 @@
 use anyhow::Result;
+use mold_core::types::GpuSelection;
 use mold_core::Config;
 use std::path::PathBuf;
 
@@ -23,7 +24,14 @@ fn client_host(bind: &str, port: u16) -> String {
     format!("http://{host}:{port}")
 }
 
-pub async fn run(port: u16, bind: &str, models_dir: Option<String>, discord: bool) -> Result<()> {
+pub async fn run(
+    port: u16,
+    bind: &str,
+    models_dir: Option<String>,
+    gpus: Option<String>,
+    queue_size: usize,
+    discord: bool,
+) -> Result<()> {
     let config = Config::load_or_default();
 
     let models_path = match models_dir {
@@ -33,6 +41,12 @@ pub async fn run(port: u16, bind: &str, models_dir: Option<String>, discord: boo
 
     // Ensure models directory exists
     std::fs::create_dir_all(&models_path)?;
+
+    // Resolve GPU selection: CLI flag > env var > config > default (all).
+    let gpu_selection = match &gpus {
+        Some(s) => GpuSelection::parse(s)?,
+        None => config.gpu_selection(),
+    };
 
     println!(
         "{} Starting mold server on {}:{}",
@@ -45,6 +59,16 @@ pub async fn run(port: u16, bind: &str, models_dir: Option<String>, discord: boo
         theme::icon_ok(),
         models_path.display(),
     );
+    match &gpu_selection {
+        GpuSelection::All => {
+            println!("{} GPUs: all available", theme::icon_ok());
+        }
+        GpuSelection::Specific(ordinals) => {
+            let list: Vec<String> = ordinals.iter().map(|o| o.to_string()).collect();
+            println!("{} GPUs: {}", theme::icon_ok(), list.join(", "));
+        }
+    }
+    println!("{} Queue size: {}", theme::icon_ok(), queue_size);
 
     // Optionally spawn the Discord bot alongside the server.
     #[cfg(feature = "discord")]
@@ -105,7 +129,7 @@ pub async fn run(port: u16, bind: &str, models_dir: Option<String>, discord: boo
         );
     }
 
-    mold_server::run_server(bind, port, models_path).await
+    mold_server::run_server(bind, port, models_path, gpu_selection, queue_size).await
 }
 
 #[cfg(all(test, feature = "discord"))]

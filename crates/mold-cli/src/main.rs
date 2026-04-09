@@ -442,6 +442,10 @@ Examples:
         #[arg(long, help_heading = "Server")]
         local: bool,
 
+        /// Comma-separated GPU ordinals to use for local generation (default: all)
+        #[arg(long, env = "MOLD_GPUS", help_heading = "Advanced")]
+        gpus: Option<String>,
+
         /// T5 encoder variant: auto (default), fp16, q8, q6, q5, q4, q3
         #[arg(long, help_heading = "Advanced")]
         t5_variant: Option<String>,
@@ -578,6 +582,14 @@ environment before starting mold serve.")]
         /// Write logs to file (~/.mold/logs/)
         #[arg(long)]
         log_file: bool,
+
+        /// Comma-separated GPU ordinals to use (default: all discovered)
+        #[arg(long, env = "MOLD_GPUS")]
+        gpus: Option<String>,
+
+        /// Max queued requests before 503 (default: 200)
+        #[arg(long, env = "MOLD_QUEUE_SIZE", default_value_t = 200)]
+        queue_size: usize,
 
         /// Also start the Discord bot in this process
         #[cfg(feature = "discord")]
@@ -1113,6 +1125,7 @@ async fn run() -> anyhow::Result<()> {
             no_metadata,
             preview,
             local,
+            gpus,
             t5_variant,
             qwen3_variant,
             qwen2_variant,
@@ -1163,6 +1176,7 @@ async fn run() -> anyhow::Result<()> {
                 no_metadata,
                 preview,
                 local,
+                gpus,
                 t5_variant,
                 qwen3_variant,
                 qwen2_variant,
@@ -1209,6 +1223,8 @@ async fn run() -> anyhow::Result<()> {
             port,
             bind,
             models_dir,
+            gpus,
+            queue_size,
             #[cfg(feature = "discord")]
             discord,
             ..
@@ -1218,7 +1234,8 @@ async fn run() -> anyhow::Result<()> {
             #[cfg(not(feature = "discord"))]
             let discord_enabled = false;
 
-            commands::serve::run(port, &bind, models_dir, discord_enabled).await?;
+            commands::serve::run(port, &bind, models_dir, gpus, queue_size, discord_enabled)
+                .await?;
         }
         Commands::Server { action } => match action {
             ServerAction::Start {
