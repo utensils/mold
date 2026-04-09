@@ -15,6 +15,7 @@ use super::lora;
 use super::media::{self, ProbeMetadata};
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::preset;
+use super::text::gemma::GemmaAssets;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::progress::ProgressCallback;
 
@@ -199,6 +200,9 @@ impl Ltx2Engine {
         if req.temporal_upscale.is_some() {
             bail!("temporal upscaling is not implemented in the current upstream LTX-2 bridge");
         }
+        let gemma_root = self.gemma_root()?;
+        let prompt_tokens = GemmaAssets::discover(&gemma_root)?
+            .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
         let loras = lora::resolve_loras(&self.model_name, req)?;
         let preset = preset::preset_for_model(&self.model_name)?;
@@ -225,10 +229,11 @@ impl Ltx2Engine {
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
             spatial_upsampler_path,
-            gemma_root: self.gemma_root()?.to_string_lossy().to_string(),
+            gemma_root: gemma_root.to_string_lossy().to_string(),
             output_path: output_path.to_string_lossy().to_string(),
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
+            prompt_tokens,
             seed: req.seed.unwrap_or_else(rand_seed),
             width: req.width,
             height: req.height,
@@ -306,10 +311,12 @@ impl InferenceEngine for Ltx2Engine {
         let plan = self.materialize_request(req, work_dir.path(), &upstream_output)?;
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
         self.emit(&format!(
-            "Planned native LTX-2 graph: preset={}, denoise_stages={}, blocks={}",
+            "Planned native LTX-2 graph: preset={}, denoise_stages={}, blocks={}, prompt_tokens={}/{}",
             plan.preset.name,
             planned_stage_count,
-            plan.execution_graph.blocks.len()
+            plan.execution_graph.blocks.len(),
+            plan.prompt_tokens.conditional.valid_len(),
+            plan.prompt_tokens.unconditional.valid_len()
         ));
         let bridge_request = plan.to_bridge_request();
         let bridge_request_path = work_dir.path().join("request.json");
@@ -421,6 +428,7 @@ impl InferenceEngine for Ltx2Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     fn dummy_paths() -> ModelPaths {
@@ -437,10 +445,48 @@ mod tests {
             clip_tokenizer: None,
             clip_encoder_2: None,
             clip_tokenizer_2: None,
-            text_encoder_files: vec![PathBuf::from("/tmp/gemma/tokenizer.model")],
+            text_encoder_files: vec![PathBuf::from("/tmp/gemma/tokenizer.json")],
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    fn dummy_paths_with_gemma_root(root: &std::path::Path) -> ModelPaths {
+        let mut paths = dummy_paths();
+        paths.text_encoder_files = vec![root.join("tokenizer.json")];
+        paths
+    }
+
+    fn write_test_gemma_assets(root: &std::path::Path) {
+        fs::write(
+            root.join("tokenizer.json"),
+            r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "WhitespaceSplit"
+  },
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<eos>": 7,
+      "test": 11
+    },
+    "unk_token": "<eos>"
+  }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("special_tokens_map.json"),
+            r#"{"eos_token":"<eos>"}"#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -515,9 +561,11 @@ mod tests {
 
     #[test]
     fn materialized_request_uses_streaming_defaults_for_fp8_smoke_path() {
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
         let engine = Ltx2Engine::new(
             "ltx-2-19b-distilled:fp8".to_string(),
-            dummy_paths(),
+            dummy_paths_with_gemma_root(gemma_dir.path()),
             LoadStrategy::Sequential,
         );
         let req = GenerateRequest {
@@ -567,5 +615,8 @@ mod tests {
         assert_eq!(bridge.height, 576);
         assert_eq!(bridge.num_frames, 17);
         assert_eq!(bridge.frame_rate, 12);
+        assert_eq!(bridge.prompt_tokens.conditional.len(), 1024);
+        assert_eq!(bridge.prompt_tokens.conditional.valid_len(), 1);
+        assert_eq!(bridge.prompt_tokens.pad_token_id, 7);
     }
 }

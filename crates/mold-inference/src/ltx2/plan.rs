@@ -4,6 +4,7 @@ use serde::Serialize;
 use super::conditioning::{StagedConditioning, StagedImage};
 use super::execution::Ltx2ExecutionGraph;
 use super::preset::Ltx2ModelPreset;
+use super::text::gemma::EncodedPromptPair;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PipelineKind {
@@ -49,6 +50,7 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) output_path: String,
     pub(crate) prompt: String,
     pub(crate) negative_prompt: Option<String>,
+    pub(crate) prompt_tokens: EncodedPromptPair,
     pub(crate) seed: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,

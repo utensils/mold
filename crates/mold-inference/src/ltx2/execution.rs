@@ -157,6 +157,7 @@ pub(crate) fn build_execution_graph(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use mold_core::{GenerateRequest, ModelPaths, OutputFormat, TimeRange};
@@ -221,18 +222,52 @@ mod tests {
             clip_tokenizer: None,
             clip_encoder_2: None,
             clip_tokenizer_2: None,
-            text_encoder_files: vec![PathBuf::from("/tmp/gemma/tokenizer.model")],
+            text_encoder_files: vec![PathBuf::from("/tmp/gemma/tokenizer.json")],
             text_tokenizer: None,
             decoder: None,
         }
     }
 
-    fn engine(model_name: &str) -> Ltx2Engine {
-        Ltx2Engine::new(
-            model_name.to_string(),
-            dummy_paths(),
-            LoadStrategy::Sequential,
+    fn dummy_paths_with_gemma_root(root: &std::path::Path) -> ModelPaths {
+        let mut paths = dummy_paths();
+        paths.text_encoder_files = vec![root.join("tokenizer.json")];
+        paths
+    }
+
+    fn write_test_gemma_assets(root: &std::path::Path) {
+        fs::write(
+            root.join("tokenizer.json"),
+            r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "WhitespaceSplit"
+  },
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<eos>": 7,
+      "test": 11
+    },
+    "unk_token": "<eos>"
+  }
+}"#,
         )
+        .unwrap();
+        fs::write(
+            root.join("special_tokens_map.json"),
+            r#"{"eos_token":"<eos>"}"#,
+        )
+        .unwrap();
+    }
+
+    fn engine(model_name: &str, paths: ModelPaths) -> Ltx2Engine {
+        Ltx2Engine::new(model_name.to_string(), paths, LoadStrategy::Sequential)
     }
 
     #[test]
@@ -324,7 +359,12 @@ mod tests {
 
     #[test]
     fn pipeline_materialization_attaches_native_preset_and_execution_graph() {
-        let engine = engine("ltx-2.3-22b-distilled:fp8");
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
+        let engine = engine(
+            "ltx-2.3-22b-distilled:fp8",
+            dummy_paths_with_gemma_root(gemma_dir.path()),
+        );
         let req = req("ltx-2.3-22b-distilled:fp8");
         let temp_dir = tempfile::tempdir().unwrap();
         let plan = engine
@@ -336,5 +376,7 @@ mod tests {
             plan.execution_graph.feature_extractor,
             plan.preset.feature_extractor
         );
+        assert_eq!(plan.prompt_tokens.conditional.valid_len(), 1);
+        assert_eq!(plan.prompt_tokens.pad_token_id, 7);
     }
 }
