@@ -6857,4 +6857,382 @@ mod tests {
         // None variant for server-unreachable
         let _event_none = BackgroundEvent::ServerStatusUpdate(None);
     }
+
+    // ── should_poll_remote() tests ────────────────────────────
+
+    #[tokio::test]
+    async fn should_poll_remote_true_when_server_and_auto() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Auto;
+        assert!(app.should_poll_remote());
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_true_when_server_and_remote() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Remote;
+        assert!(app.should_poll_remote());
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_false_when_server_but_local_mode() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(
+            !app.should_poll_remote(),
+            "local mode must not poll remote even with server_url set"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_poll_remote_false_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Auto;
+        assert!(!app.should_poll_remote());
+    }
+
+    // ── update_model() remote vs local branching ──────────────
+
+    #[tokio::test]
+    async fn update_model_uses_server_catalog_when_connected() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            28,
+            4.0,
+            768,
+            768,
+            "Server FLUX Dev Q4",
+        )];
+
+        app.update_model("flux-dev:q4");
+
+        assert_eq!(app.generate.params.steps, 28);
+        assert!((app.generate.params.guidance - 4.0).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 768);
+        assert_eq!(app.generate.params.height, 768);
+        assert_eq!(app.generate.model_description, "Server FLUX Dev Q4");
+    }
+
+    #[tokio::test]
+    async fn update_model_falls_back_to_local_when_model_not_in_catalog() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        // Catalog has a different model with an absurd step count no real model uses
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-schnell:q8",
+            199,
+            99.9,
+            256,
+            256,
+            "Schnell",
+        )];
+
+        // Update to a model NOT in the catalog — should use local config
+        let model = app.config.resolved_default_model();
+        app.update_model(&model);
+        // Should not have used the catalog entry's absurd values
+        assert_ne!(app.generate.params.steps, 199);
+        assert_ne!(app.generate.params.width, 256);
+    }
+
+    #[tokio::test]
+    async fn update_model_uses_local_config_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        let model = app.config.resolved_default_model();
+        app.update_model(&model);
+        // Should succeed without panic and use local config defaults
+        assert!(app.generate.params.steps > 0);
+        assert!(app.generate.params.width > 0);
+    }
+
+    // ── apply_remote_model_defaults() ─────────────────────────
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_updates_all_fields() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.params.steps = 1;
+        app.generate.params.guidance = 0.0;
+        app.generate.params.width = 64;
+        app.generate.params.height = 64;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX Dev Q4",
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(app.generate.params.steps, 20);
+        assert!((app.generate.params.guidance - 3.5).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 1024);
+        assert_eq!(app.generate.params.height, 1024);
+        assert_eq!(app.generate.model_description, "FLUX Dev Q4");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_skips_empty_description() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.model_description = "Original description".to_string();
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "", // empty description should not overwrite
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(app.generate.model_description, "Original description");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_model_defaults_no_match_leaves_params_unchanged() {
+        let mut app = make_settings_test_app();
+        app.generate.params.model = "nonexistent:q4".to_string();
+        app.generate.params.steps = 42;
+
+        let catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "FLUX",
+        )];
+        app.apply_remote_model_defaults(&catalog);
+
+        assert_eq!(
+            app.generate.params.steps, 42,
+            "should not change for non-matching model"
+        );
+    }
+
+    // ── ResetDefaults branching ───────────────────────────────
+
+    #[tokio::test]
+    async fn reset_defaults_uses_server_catalog_when_connected() {
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://hal9000:7680".to_string());
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            30,
+            7.0,
+            512,
+            512,
+            "Server Flux",
+        )];
+
+        // Mutate params away from defaults
+        app.generate.params.steps = 1;
+        app.generate.params.width = 9999;
+        app.generate.params.batch = 5;
+        app.generate.params.format = OutputFormat::Jpeg;
+
+        // Focus on parameters, select ResetDefaults, and trigger it
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Parameters;
+        let reset_idx = app
+            .generate
+            .visible_fields
+            .iter()
+            .position(|f| *f == ParamField::ResetDefaults)
+            .unwrap();
+        app.generate.param_index = reset_idx;
+        app.activate_current_param();
+
+        // Server catalog defaults should be applied
+        assert_eq!(app.generate.params.steps, 30);
+        assert!((app.generate.params.guidance - 7.0).abs() < f64::EPSILON);
+        assert_eq!(app.generate.params.width, 512);
+        assert_eq!(app.generate.params.height, 512);
+        // Non-default fields should be reset to generic defaults
+        assert_eq!(app.generate.params.batch, 1);
+        assert_eq!(app.generate.params.format, OutputFormat::Png);
+    }
+
+    #[tokio::test]
+    async fn reset_defaults_uses_local_config_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+
+        // Mutate params
+        app.generate.params.steps = 999;
+        app.generate.params.batch = 10;
+
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Parameters;
+        let reset_idx = app
+            .generate
+            .visible_fields
+            .iter()
+            .position(|f| *f == ParamField::ResetDefaults)
+            .unwrap();
+        app.generate.param_index = reset_idx;
+        app.activate_current_param();
+
+        // Should use local config defaults (steps won't be 999)
+        assert_ne!(app.generate.params.steps, 999);
+        assert_eq!(app.generate.params.batch, 1);
+    }
+
+    // ── sync_resource_info_mode() ─────────────────────────────
+
+    #[tokio::test]
+    async fn sync_resource_info_mode_local_clears_server_status() {
+        let mut app = make_settings_test_app();
+        app.generate.params.inference_mode = InferenceMode::Local;
+        // Simulate having stale server status
+        app.resource_info.server_status = Some(mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("stale-host".to_string()),
+            memory_status: None,
+        });
+
+        app.sync_resource_info_mode();
+
+        assert!(
+            app.resource_info.server_status.is_none(),
+            "local mode should clear server_status"
+        );
+    }
+
+    // ── ServerConnected handler ───────────────────────────────
+
+    #[tokio::test]
+    async fn server_connected_applies_model_defaults_and_clears_connecting() {
+        let mut app = make_settings_test_app();
+        app.connecting = true;
+        app.generate.params.model = "flux-dev:q4".to_string();
+        app.generate.params.steps = 1;
+
+        let models = vec![make_test_catalog_entry(
+            "flux-dev:q4",
+            20,
+            3.5,
+            1024,
+            1024,
+            "Server FLUX",
+        )];
+
+        // Simulate receiving ServerConnected
+        let _ = app.bg_tx.send(BackgroundEvent::ServerConnected {
+            url: "http://hal9000:7680".to_string(),
+            models,
+        });
+        app.process_background_events();
+
+        assert!(!app.connecting);
+        assert_eq!(app.server_url.as_deref(), Some("http://hal9000:7680"));
+        assert_eq!(app.generate.params.steps, 20);
+    }
+
+    // ── ServerStatusUpdate handlers ───────────────────────────
+
+    #[tokio::test]
+    async fn server_status_update_some_populates_resource_info() {
+        let mut app = make_settings_test_app();
+        let status = mold_core::ServerStatus {
+            version: "0.6.3".to_string(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q4".to_string()],
+            busy: true,
+            current_generation: None,
+            gpu_info: Some(mold_core::GpuInfo {
+                name: "RTX 4090".to_string(),
+                vram_total_mb: 24564,
+                vram_used_mb: 8192,
+            }),
+            uptime_secs: 3600,
+            hostname: Some("hal9000".to_string()),
+            memory_status: Some("VRAM: 16.0 GB free".to_string()),
+        };
+
+        let _ = app
+            .bg_tx
+            .send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+        app.process_background_events();
+
+        let ri = &app.resource_info;
+        assert!(ri.server_status.is_some());
+        assert_eq!(
+            ri.server_status.as_ref().unwrap().hostname.as_deref(),
+            Some("hal9000")
+        );
+        assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
+    }
+
+    #[tokio::test]
+    async fn server_status_update_none_clears_stale_status() {
+        let mut app = make_settings_test_app();
+        // Pre-populate with server status
+        app.resource_info
+            .update_from_server_status(mold_core::ServerStatus {
+                version: "0.6.3".to_string(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 0,
+                hostname: Some("stale-host".to_string()),
+                memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            });
+        assert!(app.resource_info.server_status.is_some());
+
+        // Server went down — receive None
+        let _ = app.bg_tx.send(BackgroundEvent::ServerStatusUpdate(None));
+        app.process_background_events();
+
+        assert!(
+            app.resource_info.server_status.is_none(),
+            "stale server status should be cleared on fetch failure"
+        );
+    }
+
+    // ── ServerUnreachable handler ─────────────────────────────
+
+    #[tokio::test]
+    async fn server_unreachable_clears_connecting_and_reverts_host() {
+        let mut app = make_settings_test_app();
+        app.connecting = true;
+        app.server_url = Some("http://original:7680".to_string());
+        app.generate.params.host = Some("http://new-host:7680".to_string());
+
+        let _ = app
+            .bg_tx
+            .send(BackgroundEvent::ServerUnreachable("timeout".to_string()));
+        app.process_background_events();
+
+        assert!(!app.connecting);
+        // host should revert to server_url
+        assert_eq!(
+            app.generate.params.host.as_deref(),
+            Some("http://original:7680")
+        );
+        assert!(app.resource_info.server_status.is_none());
+    }
 }
