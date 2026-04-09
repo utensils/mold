@@ -15,18 +15,18 @@ features today?
 
 ## Source Image Workflows
 
-| Family            | img2img | Inpainting | Edit-family refs |
-| ----------------- | ------- | ---------- | ---------------- |
-| FLUX.1            | Yes     | Yes        | No               |
-| SDXL              | Yes     | Yes        | No               |
-| SD 1.5            | Yes     | Yes        | No               |
-| SD 3.5            | Yes     | Yes        | No               |
-| Z-Image           | Yes     | Yes        | No               |
-| Flux.2 Klein      | Yes     | Yes        | No               |
-| Wuerstchen v2     | Yes     | Yes        | No               |
-| Qwen-Image        | Yes     | Yes        | No               |
-| Qwen-Image-Edit   | No      | No         | Yes              |
-| LTX Video         | Not yet | Not yet    | Not yet          |
+| Family          | img2img | Inpainting | Edit-family refs |
+| --------------- | ------- | ---------- | ---------------- |
+| FLUX.1          | Yes     | Yes        | No               |
+| SDXL            | Yes     | Yes        | No               |
+| SD 1.5          | Yes     | Yes        | No               |
+| SD 3.5          | Yes     | Yes        | No               |
+| Z-Image         | Yes     | Yes        | No               |
+| Flux.2 Klein    | Yes     | Yes        | No               |
+| Wuerstchen v2   | Yes     | Yes        | No               |
+| Qwen-Image      | Yes     | Yes        | No               |
+| Qwen-Image-Edit | No      | No         | Yes              |
+| LTX Video       | Not yet | Not yet    | Not yet          |
 
 ## Control and Adapters
 
@@ -44,18 +44,18 @@ features today?
 
 ## Prompt Conditioning
 
-| Family            | Negative Prompts | Scheduler Override |
-| ----------------- | ---------------- | ------------------ |
-| FLUX.1            | No               | No                 |
-| SDXL              | Yes              | Yes                |
-| SD 1.5            | Yes              | Yes                |
-| SD 3.5            | Yes              | No                 |
-| Z-Image           | No               | No                 |
-| Flux.2 Klein      | No               | No                 |
-| Wuerstchen v2     | Yes              | No                 |
-| Qwen-Image        | Yes              | No                 |
-| Qwen-Image-Edit   | Yes              | No                 |
-| LTX Video         | No               | No                 |
+| Family          | Negative Prompts | Scheduler Override |
+| --------------- | ---------------- | ------------------ |
+| FLUX.1          | No               | No                 |
+| SDXL            | Yes              | Yes                |
+| SD 1.5          | Yes              | Yes                |
+| SD 3.5          | Yes              | No                 |
+| Z-Image         | No               | No                 |
+| Flux.2 Klein    | No               | No                 |
+| Wuerstchen v2   | Yes              | No                 |
+| Qwen-Image      | Yes              | No                 |
+| Qwen-Image-Edit | Yes              | No                 |
+| LTX Video       | No               | No                 |
 
 ## Video Generation
 

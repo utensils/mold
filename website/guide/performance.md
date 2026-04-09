@@ -57,6 +57,11 @@ For Qwen-Image on Apple Metal/MPS, `auto` now prefers quantized Qwen2.5-VL
 GGUF text encoders before falling back to the heavier BF16 text stack. That is
 mainly a memory-responsiveness improvement, not a promise of higher throughput.
 
+For `qwen-image-edit`, mold also stages the Qwen2.5-VL vision tower only while
+building edit conditioning. Quantized `--qwen2-variant` values reduce the
+language-side footprint further, so short edit runs do not keep the full
+multimodal stack resident between requests.
+
 ### Cold starts
 
 The first request for a model pays for:

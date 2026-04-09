@@ -394,17 +394,19 @@ impl ParamField {
 }
 
 fn qwen_image_edit_dimensions_for_path(path: &str) -> Option<(u32, u32)> {
-    const TARGET_AREA: f64 = 1024.0 * 1024.0;
+    const TARGET_AREA: u32 = 1024 * 1024;
     const ALIGN: u32 = 16;
 
     let bytes = std::fs::read(path).ok()?;
     let img = image::load_from_memory(&bytes).ok()?;
     let orig_w = img.width().max(1);
     let orig_h = img.height().max(1);
-    let scale = (TARGET_AREA / f64::from(orig_w * orig_h)).sqrt();
-    let width = ((f64::from(orig_w) * scale) / f64::from(ALIGN)).round() as u32 * ALIGN;
-    let height = ((f64::from(orig_h) * scale) / f64::from(ALIGN)).round() as u32 * ALIGN;
-    Some((width.max(ALIGN), height.max(ALIGN)))
+    Some(mold_core::fit_to_target_area(
+        orig_w,
+        orig_h,
+        TARGET_AREA,
+        ALIGN,
+    ))
 }
 
 /// How the seed behaves across generations.

@@ -70,15 +70,15 @@ repeatable `--image` inputs instead of img2img `--strength`, supports negative
 prompts, and targets output dimensions derived from the first input image at
 roughly `1024x1024` area.
 
-| Model                     | Steps | Size    | Notes                                  |
-| ------------------------- | ----- | ------- | -------------------------------------- |
-| `qwen-image-edit-2511:q8` | 50    | 21.8 GB | Highest-quality GGUF tier              |
-| `qwen-image-edit-2511:q6` | 50    | 16.9 GB | Quality/size trade-off                 |
-| `qwen-image-edit-2511:q5` | 50    | 15.0 GB | Dynamic `K_M` quant                    |
-| `qwen-image-edit-2511:q4` | 50    | 13.2 GB | Stable 24 GB GGUF target               |
-| `qwen-image-edit-2511:q3` | 50    | 9.9 GB  | Lower bitrate, still relatively small  |
-| `qwen-image-edit-2511:q2` | 50    | 7.5 GB  | Smallest published edit GGUF           |
-| `qwen-image-edit-2511:bf16` | 50  | 40.9 GB | Sharded BF16 edit transformer          |
+| Model                       | Steps | Size    | Notes                                 |
+| --------------------------- | ----- | ------- | ------------------------------------- |
+| `qwen-image-edit-2511:q8`   | 50    | 21.8 GB | Highest-quality GGUF tier             |
+| `qwen-image-edit-2511:q6`   | 50    | 16.9 GB | Quality/size trade-off                |
+| `qwen-image-edit-2511:q5`   | 50    | 15.0 GB | Dynamic `K_M` quant                   |
+| `qwen-image-edit-2511:q4`   | 50    | 13.2 GB | Stable 24 GB GGUF target              |
+| `qwen-image-edit-2511:q3`   | 50    | 9.9 GB  | Lower bitrate, still relatively small |
+| `qwen-image-edit-2511:q2`   | 50    | 7.5 GB  | Smallest published edit GGUF          |
+| `qwen-image-edit-2511:bf16` | 50    | 40.9 GB | Sharded BF16 edit transformer         |
 
 ::: tip Edit Path
 `qwen-image-edit-2511` runs a real multimodal edit path: Qwen2.5-VL condition

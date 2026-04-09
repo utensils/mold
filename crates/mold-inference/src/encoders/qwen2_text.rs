@@ -563,22 +563,18 @@ impl Qwen2TextModel {
         attn_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         match self {
-            Self::Bf16(model) => {
-                model.forward_last_hidden_with_image_embeds(
-                    input_ids,
-                    image_spans,
-                    image_embeds,
-                    attn_mask,
-                )
-            }
-            Self::Quantized(model) => {
-                model.forward_last_hidden_with_image_embeds(
-                    input_ids,
-                    image_spans,
-                    image_embeds,
-                    attn_mask,
-                )
-            }
+            Self::Bf16(model) => model.forward_last_hidden_with_image_embeds(
+                input_ids,
+                image_spans,
+                image_embeds,
+                attn_mask,
+            ),
+            Self::Quantized(model) => model.forward_last_hidden_with_image_embeds(
+                input_ids,
+                image_spans,
+                image_embeds,
+                attn_mask,
+            ),
         }
     }
 }
@@ -690,13 +686,8 @@ impl Qwen2TextEncoder {
             "Qwen2.5-VL encoder",
             progress,
         )?;
-        let mut encoder = Self::prepare_bf16(
-            encoder_paths,
-            tokenizer_path,
-            device,
-            dtype,
-            enable_vision,
-        )?;
+        let mut encoder =
+            Self::prepare_bf16(encoder_paths, tokenizer_path, device, dtype, enable_vision)?;
         if enable_vision {
             encoder.vision = Some(Self::build_vision(vb.clone())?);
         }
@@ -715,8 +706,13 @@ impl Qwen2TextEncoder {
         vision_encoder_paths: &[PathBuf],
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let mut encoder =
-            Self::prepare_gguf(gguf_path, tokenizer_path, device, dtype, vision_encoder_paths)?;
+        let mut encoder = Self::prepare_gguf(
+            gguf_path,
+            tokenizer_path,
+            device,
+            dtype,
+            vision_encoder_paths,
+        )?;
         encoder.model = Some(Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(
             gguf_path, device,
         )?));

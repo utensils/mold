@@ -1,6 +1,6 @@
 # Models
 
-mold supports 9 model families spanning different architectures, quality levels,
+mold supports 10 model families spanning different architectures, quality levels,
 and VRAM requirements — including both image and video generation.
 
 ## Choosing a Model
@@ -134,17 +134,18 @@ for more options.
 
 ## All Families
 
-| Family                           | Native Resolution | Architecture                   |
-| -------------------------------- | ----------------- | ------------------------------ |
-| [FLUX.2](/models/flux2)          | 1024x1024         | Qwen3 encoder, 4B transformer  |
-| [FLUX.1](/models/flux)           | 1024x1024         | Flow-matching transformer      |
-| [SDXL](/models/sdxl)             | 1024x1024         | Dual-CLIP, UNet                |
-| [SD 1.5](/models/sd15)           | 512x512           | CLIP-L, UNet                   |
-| [SD 3.5](/models/sd35)           | 1024x1024         | Triple encoder, MMDiT          |
-| [Z-Image](/models/z-image)       | 1024x1024         | Qwen3 encoder, 3D RoPE         |
-| [Wuerstchen](/models/wuerstchen) | 1024x1024         | 3-stage cascade, 42x compress  |
-| [Qwen-Image](/models/qwen-image) | 1328x1328         | Qwen2.5-VL, flow-matching, CFG |
-| [LTX Video](/models/ltx-video)   | 768x512           | T5-XXL, DiT, 3D causal VAE     |
+| Family                                | Native Resolution             | Architecture                                   |
+| ------------------------------------- | ----------------------------- | ---------------------------------------------- |
+| [FLUX.2](/models/flux2)               | 1024x1024                     | Qwen3 encoder, 4B transformer                  |
+| [FLUX.1](/models/flux)                | 1024x1024                     | Flow-matching transformer                      |
+| [SDXL](/models/sdxl)                  | 1024x1024                     | Dual-CLIP, UNet                                |
+| [SD 1.5](/models/sd15)                | 512x512                       | CLIP-L, UNet                                   |
+| [SD 3.5](/models/sd35)                | 1024x1024                     | Triple encoder, MMDiT                          |
+| [Z-Image](/models/z-image)            | 1024x1024                     | Qwen3 encoder, 3D RoPE                         |
+| [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
+| [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
+| [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
+| [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.

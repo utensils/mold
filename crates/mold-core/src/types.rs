@@ -1304,6 +1304,44 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_edit_images_base64_roundtrip() {
+        let image_a = vec![0x89, 0x50, 0x4E, 0x47];
+        let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: "qwen-image-edit-2511:q4".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 4.0,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: Some(vec![image_a.clone(), image_b.clone()]),
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("edit_images"));
+        let back: GenerateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.edit_images, Some(vec![image_a, image_b]));
+    }
+
+    #[test]
     fn generate_request_backward_compat_no_source_image() {
         // Existing JSON without source_image/strength should deserialize fine
         let json =

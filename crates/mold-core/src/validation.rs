@@ -50,6 +50,20 @@ pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u3
     clamp_to_megapixel_limit(w, h)
 }
 
+/// Resize dimensions toward a target pixel area while preserving aspect ratio.
+///
+/// The result is rounded to the requested alignment and clamped to the shared
+/// megapixel safety limit.
+pub fn fit_to_target_area(src_w: u32, src_h: u32, target_area: u32, align: u32) -> (u32, u32) {
+    let src_w = src_w.max(1);
+    let src_h = src_h.max(1);
+    let align = align.max(1);
+    let scale = (f64::from(target_area) / (f64::from(src_w) * f64::from(src_h))).sqrt();
+    let width = ((f64::from(src_w) * scale) / f64::from(align)).round() as u32 * align;
+    let height = ((f64::from(src_h) * scale) / f64::from(align)).round() as u32 * align;
+    clamp_to_megapixel_limit(width.max(align), height.max(align))
+}
+
 /// Check whether `data` starts with a recognized image format magic bytes (PNG or JPEG).
 fn is_valid_image_format(data: &[u8]) -> bool {
     let is_png = data.len() >= 4 && data[..4] == [0x89, 0x50, 0x4E, 0x47];
@@ -130,16 +144,6 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             ));
         }
     }
-    if let Some(ref images) = req.edit_images {
-        if images.is_empty() {
-            return Err("edit_images must contain at least one PNG or JPEG image".to_string());
-        }
-        for image in images {
-            if !is_valid_image_format(image) {
-                return Err("edit_images must contain only PNG or JPEG images".to_string());
-            }
-        }
-    }
     if family == Some("qwen-image-edit") {
         if req.edit_images.as_ref().is_none_or(Vec::is_empty) {
             return Err("qwen-image-edit requires edit_images to be provided".to_string());
@@ -155,6 +159,13 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
         }
         if req.control_image.is_some() || req.control_model.is_some() {
             return Err("qwen-image-edit does not support ControlNet inputs".to_string());
+        }
+        if let Some(ref images) = req.edit_images {
+            for image in images {
+                if !is_valid_image_format(image) {
+                    return Err("edit_images must contain only PNG or JPEG images".to_string());
+                }
+            }
         }
     } else if req.edit_images.is_some() {
         return Err("edit_images are only supported for qwen-image-edit models".to_string());
@@ -778,6 +789,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn non_edit_models_reject_edit_images_before_format_validation() {
+        let mut req = valid_req();
+        req.model = "flux-schnell:q8".to_string();
+        req.edit_images = Some(vec![b"not-an-image".to_vec()]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("only supported for qwen-image-edit"),
+            "got: {err}"
+        );
+    }
+
     // ── ControlNet validation tests ────────────────────────────────────────
 
     #[test]
@@ -972,6 +995,12 @@ mod tests {
     fn fit_tiny_source_gets_model_native() {
         // 64x64 source -> 1024x1024 model
         assert_eq!(fit_to_model_dimensions(64, 64, 1024, 1024), (1024, 1024));
+    }
+
+    #[test]
+    fn fit_to_target_area_preserves_ratio_and_alignment() {
+        let (w, h) = fit_to_target_area(1600, 900, 1024 * 1024, 16);
+        assert_eq!((w, h), (1360, 768));
     }
 
     // ── LoRA validation tests ──────────────────────────────────────────────

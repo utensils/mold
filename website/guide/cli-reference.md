@@ -13,46 +13,46 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 
 ### Options
 
-| Flag                               | Description                                      |
-| ---------------------------------- | ------------------------------------------------ |
-| `-m, --model <MODEL>`              | Explicit model override                          |
-| `-o, --output <PATH>`              | Output file (default: `./mold-{model}-{ts}.png`) |
-| `--width <N>`                      | Image width                                      |
-| `--height <N>`                     | Image height                                     |
-| `--steps <N>`                      | Inference steps                                  |
-| `--seed <N>`                       | Random seed                                      |
-| `--batch <N>`                      | Number of images (1+)                            |
-| `--guidance <N>`                   | Guidance scale                                   |
-| `--frames <N>`                     | Video frame count (8n+1, video models only)      |
-| `--fps <N>`                        | Video frames per second (default: 24)            |
-| `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`      |
-| `--local`                          | Skip server, run locally                         |
-| `--eager`                          | Keep all components loaded (more VRAM)           |
-| `--offload`                        | CPU↔GPU block streaming (less VRAM)              |
-| `--lora <PATH>`                    | LoRA adapter safetensors                         |
-| `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                          |
+| Flag                               | Description                                                                |
+| ---------------------------------- | -------------------------------------------------------------------------- |
+| `-m, --model <MODEL>`              | Explicit model override                                                    |
+| `-o, --output <PATH>`              | Output file (default: `./mold-{model}-{ts}.png`)                           |
+| `--width <N>`                      | Image width                                                                |
+| `--height <N>`                     | Image height                                                               |
+| `--steps <N>`                      | Inference steps                                                            |
+| `--seed <N>`                       | Random seed                                                                |
+| `--batch <N>`                      | Number of images (1+)                                                      |
+| `--guidance <N>`                   | Guidance scale                                                             |
+| `--frames <N>`                     | Video frame count (8n+1, video models only)                                |
+| `--fps <N>`                        | Video frames per second (default: 24)                                      |
+| `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`                                |
+| `--local`                          | Skip server, run locally                                                   |
+| `--eager`                          | Keep all components loaded (more VRAM)                                     |
+| `--offload`                        | CPU↔GPU block streaming (less VRAM)                                        |
+| `--lora <PATH>`                    | LoRA adapter safetensors                                                   |
+| `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                                                    |
 | `-i, --image <PATH>`               | Source image. Repeat for `qwen-image-edit`; `-` stdin is single-image only |
-| `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                     |
-| `--mask <PATH>`                    | Inpainting mask                                  |
-| `--control <PATH>`                 | ControlNet control image                         |
-| `--control-model <NAME>`           | ControlNet model name                            |
-| `--control-scale <FLOAT>`          | ControlNet scale (0.0–2.0)                       |
-| `-n, --negative-prompt`            | Negative prompt (CFG models)                     |
-| `--no-negative`                    | Suppress config default negative                 |
-| `--no-metadata`                    | Disable PNG metadata                             |
-| `--preview`                        | Display image inline in terminal                 |
-| `--expand`                         | Enable prompt expansion                          |
-| `--no-expand`                      | Disable prompt expansion                         |
-| `--expand-backend <URL>`           | Expansion backend URL                            |
-| `--expand-model <MODEL>`           | LLM model for expansion                          |
-| `--t5-variant <TAG>`               | T5 encoder variant                               |
-| `--qwen3-variant <TAG>`            | Qwen3 encoder variant                            |
-| `--qwen2-variant <TAG>`            | Qwen2.5-VL text encoder variant for Qwen-Image   |
-| `--qwen2-text-encoder-mode <MODE>` | Qwen2.5-VL placement/staging mode for Qwen-Image |
-| `--scheduler <SCHED>`              | Noise scheduler (ddim, euler-ancestral, uni-pc)  |
-| `--host <URL>`                     | Override MOLD_HOST                               |
+| `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                                               |
+| `--mask <PATH>`                    | Inpainting mask                                                            |
+| `--control <PATH>`                 | ControlNet control image                                                   |
+| `--control-model <NAME>`           | ControlNet model name                                                      |
+| `--control-scale <FLOAT>`          | ControlNet scale (0.0–2.0)                                                 |
+| `-n, --negative-prompt`            | Negative prompt (CFG models)                                               |
+| `--no-negative`                    | Suppress config default negative                                           |
+| `--no-metadata`                    | Disable PNG metadata                                                       |
+| `--preview`                        | Display image inline in terminal                                           |
+| `--expand`                         | Enable prompt expansion                                                    |
+| `--no-expand`                      | Disable prompt expansion                                                   |
+| `--expand-backend <URL>`           | Expansion backend URL                                                      |
+| `--expand-model <MODEL>`           | LLM model for expansion                                                    |
+| `--t5-variant <TAG>`               | T5 encoder variant                                                         |
+| `--qwen3-variant <TAG>`            | Qwen3 encoder variant                                                      |
+| `--qwen2-variant <TAG>`            | Qwen2.5-VL text encoder variant for the Qwen family                        |
+| `--qwen2-text-encoder-mode <MODE>` | Qwen2.5-VL placement/staging mode for the Qwen family                      |
+| `--scheduler <SCHED>`              | Noise scheduler (ddim, euler-ancestral, uni-pc)                            |
+| `--host <URL>`                     | Override MOLD_HOST                                                         |
 
-### Qwen-Image Encoder Controls
+### Qwen Family Encoder Controls
 
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`

@@ -18,7 +18,7 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use mold_core::{fit_to_target_area, GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -45,6 +45,8 @@ use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
+// Use a single space rather than an empty string so the unconditional CFG path
+// stays explicit after Qwen prompt templating and token windowing.
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 const QWEN_NATIVE_WIDTH: usize = 1328;
 const QWEN_NATIVE_HEIGHT: usize = 1328;
@@ -323,18 +325,13 @@ impl QwenImageEngine {
         !self.is_edit_family()
     }
 
-    fn text_encoder_load_dtype(
-        resolved: &ResolvedQwen2TextEncoder,
-        use_gpu: bool,
-        gpu_dtype: DType,
-    ) -> DType {
+    fn text_encoder_load_dtype(use_gpu: bool, gpu_dtype: DType) -> DType {
         if use_gpu {
             gpu_dtype
         } else {
             // Candle CPU matmul does not support BF16 for the Qwen2.5 encoder path.
             // Keep CPU language/vision encoding in F32 and use quantized GGUF when
             // lower host residency is needed.
-            let _ = resolved;
             DType::F32
         }
     }
@@ -363,12 +360,12 @@ impl QwenImageEngine {
 
     fn qwen_image_edit_image_dims(image: &[u8], target_area: u32) -> Result<(u32, u32)> {
         let img = image::load_from_memory(image)?;
-        let ratio = img.width() as f64 / img.height() as f64;
-        let mut width = (target_area as f64 * ratio).sqrt();
-        let mut height = width / ratio;
-        width = (width / 32.0).round() * 32.0;
-        height = (height / 32.0).round() * 32.0;
-        Ok((width as u32, height as u32))
+        Ok(fit_to_target_area(
+            img.width().max(1),
+            img.height().max(1),
+            target_area,
+            16,
+        ))
     }
 
     fn pack_latents_4d(latents: &Tensor) -> Result<Tensor> {
@@ -1050,6 +1047,21 @@ impl QwenImageEngine {
         usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
         let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
+        self.resolve_text_encoder_source_with_preference(
+            gpu_device,
+            free_vram,
+            usage,
+            preference.as_deref(),
+        )
+    }
+
+    fn resolve_text_encoder_source_with_preference(
+        &self,
+        gpu_device: &Device,
+        free_vram: u64,
+        usage: Qwen2TextEncoderUsage,
+        preference: Option<&str>,
+    ) -> Result<ResolvedQwen2TextEncoder> {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let bf16_size_bytes = self
@@ -1062,7 +1074,7 @@ impl QwenImageEngine {
             .sum();
         if self.is_edit_family() {
             let mut resolved = Self::choose_text_encoder_source(
-                preference.as_deref(),
+                preference,
                 is_cuda,
                 is_metal,
                 free_vram,
@@ -1073,8 +1085,8 @@ impl QwenImageEngine {
             if resolved.is_gguf {
                 let variant = mold_core::manifest::find_qwen2_vl_variant(&resolved.variant_label)
                     .ok_or_else(|| {
-                        anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
-                    })?;
+                    anyhow::anyhow!("unknown Qwen2.5-VL variant '{}'", resolved.variant_label)
+                })?;
                 resolved.paths = vec![
                     crate::encoders::variant_resolution::resolve_qwen2_vl_gguf_path(
                         &self.base.progress,
@@ -1087,7 +1099,7 @@ impl QwenImageEngine {
             return Ok(resolved);
         }
         let mut resolved = Self::choose_text_encoder_source(
-            preference.as_deref(),
+            preference,
             is_cuda,
             is_metal,
             free_vram,
@@ -1390,7 +1402,7 @@ impl QwenImageEngine {
         } else {
             Device::Cpu
         };
-        let te_dtype = Self::text_encoder_load_dtype(&resolved_text_encoder, te_plan.use_gpu, dtype);
+        let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
 
         let preload_text_encoder = self.should_preload_text_encoder();
         let te_label = if resolved_text_encoder.is_gguf {
@@ -1542,8 +1554,7 @@ impl QwenImageEngine {
                 } else {
                     Device::Cpu
                 };
-                let te_dtype =
-                    Self::text_encoder_load_dtype(&resolved_text_encoder, te_plan.use_gpu, dtype);
+                let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
 
                 let te_label = if resolved_text_encoder.is_gguf {
                     format!(
@@ -3054,18 +3065,16 @@ mod tests {
 
     #[test]
     fn qwen_image_cpu_safetensors_text_encoder_stays_f32() {
-        let resolved = resolved_text_encoder(false, false);
         assert_eq!(
-            QwenImageEngine::text_encoder_load_dtype(&resolved, false, DType::BF16),
+            QwenImageEngine::text_encoder_load_dtype(false, DType::BF16),
             DType::F32
         );
     }
 
     #[test]
     fn qwen_image_cpu_gguf_text_encoder_stays_f32() {
-        let resolved = resolved_text_encoder(true, false);
         assert_eq!(
-            QwenImageEngine::text_encoder_load_dtype(&resolved, false, DType::BF16),
+            QwenImageEngine::text_encoder_load_dtype(false, DType::BF16),
             DType::F32
         );
     }
@@ -3215,28 +3224,39 @@ mod tests {
             false,
         );
 
-        std::env::set_var("MOLD_QWEN2_VARIANT", "auto");
         let resolved = engine
-            .resolve_text_encoder_source(&Device::Cpu, 0, Qwen2TextEncoderUsage::Sequential)
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("auto"),
+            )
             .unwrap();
         assert!(!resolved.vision_paths.is_empty());
 
-        std::env::set_var("MOLD_QWEN2_VARIANT", "q4");
         let resolved = engine
-            .resolve_text_encoder_source(&Device::Cpu, 0, Qwen2TextEncoderUsage::Sequential)
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("q4"),
+            )
             .unwrap();
         assert!(resolved.is_gguf);
         assert_eq!(resolved.variant_label, "q4");
         assert_eq!(resolved.vision_paths.len(), 1);
 
-        std::env::set_var("MOLD_QWEN2_VARIANT", "bf16");
         let resolved = engine
-            .resolve_text_encoder_source(&Device::Cpu, 0, Qwen2TextEncoderUsage::Sequential)
+            .resolve_text_encoder_source_with_preference(
+                &Device::Cpu,
+                0,
+                Qwen2TextEncoderUsage::Sequential,
+                Some("bf16"),
+            )
             .unwrap();
         assert!(!resolved.is_gguf);
         assert_eq!(resolved.variant_label, "bf16");
         assert_eq!(resolved.vision_paths.len(), 1);
-        std::env::remove_var("MOLD_QWEN2_VARIANT");
     }
 
     #[test]

@@ -1,8 +1,6 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor, D};
-use candle_nn::{
-    linear, rms_norm, Conv2d, Conv2dConfig, Linear, Module, RmsNorm, VarBuilder,
-};
+use candle_nn::{linear, rms_norm, Conv2d, Conv2dConfig, Linear, Module, RmsNorm, VarBuilder};
 use std::cmp::{max, min};
 
 const CONDITION_IMAGE_AREA: u32 = 384 * 384;
@@ -410,11 +408,7 @@ impl Qwen2VisionModel {
     fn rot_pos_emb(&self, grid_thw: &Tensor) -> Result<Tensor> {
         let device = self.rotary_pos_emb.inv_freq.device();
         let grid = grid_thw.to_vec2::<u32>()?;
-        let max_grid_size = grid
-            .iter()
-            .flat_map(|g| [g[1], g[2]])
-            .max()
-            .unwrap_or(0) as usize;
+        let max_grid_size = grid.iter().flat_map(|g| [g[1], g[2]]).max().unwrap_or(0) as usize;
         let freq_table = self.rotary_pos_emb.make_embeds(max_grid_size)?;
 
         let mut rows = Vec::new();
@@ -459,8 +453,7 @@ impl Qwen2VisionModel {
         let mut window_index = Vec::new();
         let mut cu_window_seqlens = vec![0usize];
         let mut window_index_id = 0u32;
-        let vit_merger_window_size =
-            self.window_size / self.spatial_merge_size / self.patch_size;
+        let vit_merger_window_size = self.window_size / self.spatial_merge_size / self.patch_size;
 
         for g in &grid {
             let grid_t = g[0] as usize;
@@ -482,7 +475,8 @@ impl Qwen2VisionModel {
                                 let h_idx = win_h * vit_merger_window_size + inner_h;
                                 let w_idx = win_w * vit_merger_window_size + inner_w;
                                 if h_idx < llm_grid_h && w_idx < llm_grid_w {
-                                    let idx = t * llm_grid_h * llm_grid_w + h_idx * llm_grid_w + w_idx;
+                                    let idx =
+                                        t * llm_grid_h * llm_grid_w + h_idx * llm_grid_w + w_idx;
                                     window_index.push(window_index_id + idx as u32);
                                     groups_in_window += 1;
                                 }
@@ -557,11 +551,8 @@ impl Qwen2VisionModel {
         for (position, &idx) in window_index.iter().enumerate() {
             reverse_indices[idx as usize] = position as u32;
         }
-        let reverse_indices = Tensor::from_vec(
-            reverse_indices,
-            (group_count,),
-            hidden_states.device(),
-        )?;
+        let reverse_indices =
+            Tensor::from_vec(reverse_indices, (group_count,), hidden_states.device())?;
 
         self.merger
             .forward(&hidden_states)?

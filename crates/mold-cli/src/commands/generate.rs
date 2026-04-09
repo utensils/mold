@@ -4,9 +4,9 @@ use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    classify_generate_error, fit_to_model_dimensions, manifest, Config, GenerateRequest,
-    GenerateResponse, GenerateServerAction, ImageData, LoraWeight, MoldClient, OutputFormat,
-    Scheduler,
+    classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
+    GenerateRequest, GenerateResponse, GenerateServerAction, ImageData, LoraWeight, MoldClient,
+    OutputFormat, Scheduler,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -48,18 +48,14 @@ fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Re
 }
 
 fn qwen_image_edit_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
-    const TARGET_AREA: f64 = 1024.0 * 1024.0;
+    const TARGET_AREA: u32 = 1024 * 1024;
     const ALIGN: u32 = 16;
 
     let img = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
     let orig_w = img.width().max(1);
     let orig_h = img.height().max(1);
-    let scale = (TARGET_AREA / f64::from(orig_w * orig_h)).sqrt();
-    let width = ((f64::from(orig_w) * scale) / f64::from(ALIGN)).round() as u32 * ALIGN;
-    let height = ((f64::from(orig_h) * scale) / f64::from(ALIGN)).round() as u32 * ALIGN;
-    let width = width.max(ALIGN);
-    let height = height.max(ALIGN);
+    let (width, height) = fit_to_target_area(orig_w, orig_h, TARGET_AREA, ALIGN);
 
     if width != orig_w || height != orig_h {
         status!(
@@ -220,6 +216,7 @@ pub async fn run(
         && effective_guidance > 1.0
         && negative_prompt.is_none()
     {
+        // Keep CFG's negative branch explicitly populated for Qwen edit models.
         Some(" ".to_string())
     } else {
         negative_prompt.clone()

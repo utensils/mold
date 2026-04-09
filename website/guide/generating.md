@@ -53,6 +53,30 @@ mold run sdxl-turbo "a portrait" --width 832 --height 1216
 See each [model family page](/models/) for the full list of recommended
 dimensions and aspect ratios.
 
+## Image Editing
+
+`qwen-image-edit-2511:*` is a distinct edit family, not standard img2img. It
+uses one or more ordered `--image` inputs, supports negative prompts, and
+derives default output dimensions from the first input image when you omit
+`--width` and `--height`.
+
+```bash
+# Single-image edit
+mold run qwen-image-edit-2511:q4 \
+  --image ./chair.png \
+  "turn this fabric chair into dark red leather"
+
+# Multi-image edit
+mold run qwen-image-edit-2511:q4 \
+  --image ./chair.png \
+  --image ./swatch.png \
+  "make Picture 1 match the leather color and finish from Picture 2"
+```
+
+Use regular img2img families when you need `--strength`-based denoising.
+Use `qwen-image-edit` when you want instruction-following edits against one or
+more reference images.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video model family. Video
@@ -99,7 +123,8 @@ defaults use 1216×704 at 30 FPS.
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,
-SD3, Wuerstchen); ignored by FLUX and other flow-matching models.
+SD3, Wuerstchen, Qwen-Image, Qwen-Image-Edit); ignored by FLUX, Z-Image, and
+Flux.2 Klein.
 
 ```bash
 mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"

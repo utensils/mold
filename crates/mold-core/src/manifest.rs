@@ -3270,6 +3270,9 @@ pub fn resolve_model_name(input: &str) -> String {
     if input.contains(':') {
         return input.to_string();
     }
+    if input == "qwen-image-edit" {
+        return "qwen-image-edit-2511:q8".to_string();
+    }
     // Legacy format: flux-dev-q4 -> flux-dev:q4
     if let Some((base, suffix)) = input.rsplit_once('-') {
         if suffix.starts_with('q')
@@ -4389,6 +4392,10 @@ mod tests {
     fn resolve_name_default_tag() {
         assert_eq!(resolve_model_name("flux-schnell"), "flux-schnell:q8");
         assert_eq!(resolve_model_name("flux-dev"), "flux-dev:q8");
+        assert_eq!(
+            resolve_model_name("qwen-image-edit"),
+            "qwen-image-edit-2511:q8"
+        );
         // SDXL models default to :fp16
         assert_eq!(resolve_model_name("sdxl-base"), "sdxl-base:fp16");
         assert_eq!(resolve_model_name("sdxl-turbo"), "sdxl-turbo:fp16");

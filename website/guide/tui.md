@@ -243,7 +243,7 @@ they are managed by `mold pull`.
 
 ## Qwen-Image-Edit
 
-On this branch the TUI treats `qwen-image-edit` as a distinct edit family:
+The TUI treats `qwen-image-edit` as a distinct edit family:
 
 - single source image only in the TUI
 - no img2img `strength`

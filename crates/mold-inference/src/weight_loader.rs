@@ -26,7 +26,8 @@ pub(crate) struct NativeFp8Backend {
 }
 
 fn total_file_bytes(paths: &[impl AsRef<Path>]) -> u64 {
-    paths.iter()
+    paths
+        .iter()
         .map(|p| std::fs::metadata(p.as_ref()).map(|m| m.len()).unwrap_or(0))
         .sum()
 }
@@ -150,8 +151,8 @@ pub fn load_safetensors_with_filtered_progress<'a>(
     progress: &ProgressReporter,
     include_tensor: impl Fn(&str) -> bool,
 ) -> Result<VarBuilder<'a>> {
-    let bytes_total =
-        filtered_safetensors_tensor_bytes(paths, include_tensor).unwrap_or_else(|_| total_file_bytes(paths));
+    let bytes_total = filtered_safetensors_tensor_bytes(paths, include_tensor)
+        .unwrap_or_else(|_| total_file_bytes(paths));
     load_safetensors_with_progress_total(paths, dtype, device, component, progress, bytes_total)
 }
 

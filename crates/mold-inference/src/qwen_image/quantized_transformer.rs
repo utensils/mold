@@ -553,15 +553,14 @@ pub(crate) fn build_edit_modulation_index(
         .map(|(f, h, w)| f * h * w)
         .unwrap_or_default();
     let condition_tokens: usize = img_shapes.iter().skip(1).map(|(f, h, w)| f * h * w).sum();
-    let row: Vec<u32> = std::iter::repeat_n(0u32, output_tokens)
-        .chain(std::iter::repeat_n(1u32, condition_tokens))
-        .collect();
-    let rows = vec![row; batch_size];
-    Tensor::from_vec(
-        rows.into_iter().flatten().collect(),
-        (batch_size, output_tokens + condition_tokens),
-        device,
-    )
+    let row_len = output_tokens + condition_tokens;
+    let mut flat = Vec::with_capacity(batch_size * row_len);
+    for batch_idx in 0..batch_size {
+        let base = (batch_idx as u32) * 2;
+        flat.extend(std::iter::repeat_n(base, output_tokens));
+        flat.extend(std::iter::repeat_n(base + 1, condition_tokens));
+    }
+    Tensor::from_vec(flat, (batch_size, row_len), device)
 }
 
 pub(crate) fn select_modulation_params(
@@ -570,15 +569,8 @@ pub(crate) fn select_modulation_params(
 ) -> Result<Tensor> {
     let (batch, seq_len) = modulate_index.dims2()?;
     let hidden = mod_params.dim(1)?;
-    let selector = modulate_index.to_vec2::<u32>()?;
-    let mut flat = Vec::with_capacity(batch * seq_len);
-    for (batch_idx, row) in selector.into_iter().enumerate() {
-        let base = (batch_idx as u32) * 2;
-        flat.extend(row.into_iter().map(|value| base + value));
-    }
-    let indices = Tensor::from_vec(flat, batch * seq_len, modulate_index.device())?;
     mod_params
-        .index_select(&indices, 0)?
+        .index_select(&modulate_index.flatten_all()?, 0)?
         .reshape((batch, seq_len, hidden))
 }
 
@@ -1207,8 +1199,10 @@ impl QuantizedQwenImageTransformer2DModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{RopeCacheDevice, RopeCacheKey};
-    use candle_core::Device;
+    use super::{
+        build_edit_modulation_index, select_modulation_params, RopeCacheDevice, RopeCacheKey,
+    };
+    use candle_core::{Device, Tensor};
 
     #[test]
     fn rope_cache_device_detects_cpu() {
@@ -1235,5 +1229,22 @@ mod tests {
             device: RopeCacheDevice::Metal,
         };
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn edit_modulation_index_is_precomputed_per_batch_on_device() {
+        let index = build_edit_modulation_index(&[(1, 1, 2), (1, 1, 1)], 2, &Device::Cpu).unwrap();
+        let rows = index.to_vec2::<u32>().unwrap();
+        assert_eq!(rows, vec![vec![0, 0, 1], vec![2, 2, 3]]);
+    }
+
+    #[test]
+    fn select_modulation_params_uses_precomputed_indices_without_rebasing() {
+        let mod_params =
+            Tensor::from_vec(vec![10f32, 20., 30., 40.], (4, 1), &Device::Cpu).unwrap();
+        let index = Tensor::from_vec(vec![0u32, 0, 1, 2, 2, 3], (2, 3), &Device::Cpu).unwrap();
+        let selected = select_modulation_params(&mod_params, &index).unwrap();
+        let rows = selected.squeeze(2).unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(rows, vec![vec![10.0, 10.0, 20.0], vec![30.0, 30.0, 40.0]]);
     }
 }

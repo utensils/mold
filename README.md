@@ -57,6 +57,7 @@ mold run flux-dev:q4 "a turtle in the desert"         # Pick a model
 mold run "a portrait" --width 768 --height 1024       # Custom size
 mold run "a sunset" --batch 4 --seed 42               # Batch with reproducible seeds
 mold run "oil painting" --image photo.png              # img2img
+mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --image swatch.png
 mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 mold run "a cat" --expand                              # LLM prompt expansion
 mold run qwen-image:q2 "a poster" --qwen2-variant q6  # Qwen-Image quantized text encoder
@@ -121,7 +122,7 @@ See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference
 
 ## Models
 
-Supports 9 model families with 80+ variants:
+Supports 10 model families with 80+ variants:
 
 | Family | Models | Highlights |
 |--------|--------|------------|
@@ -132,6 +133,7 @@ Supports 9 model families with 80+ variants:
 | **SD 3.5** | large, medium, turbo | Triple encoder, high quality |
 | **Z-Image** | turbo | Fast 9-step, Qwen3 encoder |
 | **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
+| **Qwen-Image-Edit** | 2511 | Multimodal image editing, repeatable `--image`, negative prompts |
 | **Wuerstchen** | v2 | 42x latent compression |
 | **LTX Video** | 0.9.6, 0.9.8 | Text-to-video with APNG/GIF/WebP/MP4 output |
 
@@ -159,7 +161,7 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 
 ## Features
 
-- **txt2img, img2img, inpainting** — full generation pipeline
+- **txt2img, img2img, multimodal edit, inpainting** — full generation pipeline
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via `mold upscale`, server API, or TUI
 - **LoRA adapters** — FLUX BF16 and GGUF quantized
 - **ControlNet** — canny, depth, openpose (SD1.5)
@@ -169,7 +171,7 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 - **PNG metadata** — embedded prompt, seed, model info
 - **Terminal preview** — Kitty, Sixel, iTerm2, halfblock
 - **Smart VRAM** — quantized encoders, block offloading, drop-and-reload
-- **Qwen-Image encoder control** — selectable Qwen2.5-VL GGUF text encoders with Metal-safe defaults
+- **Qwen family encoder control** — selectable Qwen2.5-VL variants for Qwen-Image and Qwen-Image-Edit, with quantized auto-fallback when BF16 would be too heavy
 - **Shell completions** — bash, zsh, fish, elvish, powershell
 - **REST API** — `mold serve` with SSE streaming, auth, rate limiting
 - **Discord bot** — slash commands with role permissions and quotas

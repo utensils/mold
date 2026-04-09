@@ -129,32 +129,36 @@ Environment variables take precedence over config file values.
 
 ### Device and Path Overrides
 
-| Variable                       | Default | Description                                                                       |
-| ------------------------------ | ------- | --------------------------------------------------------------------------------- |
-| `MOLD_DEVICE`                  | —       | Force device placement, currently `cpu` for debugging                             |
-| `MOLD_TRANSFORMER_PATH`        | —       | Override transformer weights path                                                 |
-| `MOLD_VAE_PATH`                | —       | Override VAE weights path                                                         |
-| `MOLD_SPATIAL_UPSCALER_PATH`   | —       | Override LTX spatial upscaler path                                                |
-| `MOLD_T5_PATH`                 | —       | Override T5 encoder path                                                          |
-| `MOLD_CLIP_PATH`               | —       | Override CLIP-L encoder path                                                      |
-| `MOLD_CLIP2_PATH`              | —       | Override CLIP-G encoder path for SDXL                                             |
-| `MOLD_T5_TOKENIZER_PATH`       | —       | Override T5 tokenizer path                                                        |
-| `MOLD_CLIP_TOKENIZER_PATH`     | —       | Override CLIP-L tokenizer path                                                    |
-| `MOLD_CLIP2_TOKENIZER_PATH`    | —       | Override CLIP-G tokenizer path for SDXL                                           |
-| `MOLD_TEXT_TOKENIZER_PATH`     | —       | Override generic text tokenizer path for Qwen/Z-Image                             |
-| `MOLD_DECODER_PATH`            | —       | Override Wuerstchen decoder weights path                                          |
-| `MOLD_QWEN2_VARIANT`           | `auto`  | Qwen-Image Qwen2.5-VL encoder: `auto`, `bf16`, `q8`, `q6`, `q5`, `q4`, `q3`, `q2` |
-| `MOLD_QWEN2_TEXT_ENCODER_MODE` | `auto`  | Qwen-Image placement mode: `auto`, `gpu`, `cpu-stage`, `cpu`                      |
+| Variable                       | Default | Description                                                                        |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------- |
+| `MOLD_DEVICE`                  | —       | Force device placement, currently `cpu` for debugging                              |
+| `MOLD_TRANSFORMER_PATH`        | —       | Override transformer weights path                                                  |
+| `MOLD_VAE_PATH`                | —       | Override VAE weights path                                                          |
+| `MOLD_SPATIAL_UPSCALER_PATH`   | —       | Override LTX spatial upscaler path                                                 |
+| `MOLD_T5_PATH`                 | —       | Override T5 encoder path                                                           |
+| `MOLD_CLIP_PATH`               | —       | Override CLIP-L encoder path                                                       |
+| `MOLD_CLIP2_PATH`              | —       | Override CLIP-G encoder path for SDXL                                              |
+| `MOLD_T5_TOKENIZER_PATH`       | —       | Override T5 tokenizer path                                                         |
+| `MOLD_CLIP_TOKENIZER_PATH`     | —       | Override CLIP-L tokenizer path                                                     |
+| `MOLD_CLIP2_TOKENIZER_PATH`    | —       | Override CLIP-G tokenizer path for SDXL                                            |
+| `MOLD_TEXT_TOKENIZER_PATH`     | —       | Override generic text tokenizer path for Qwen/Z-Image                              |
+| `MOLD_DECODER_PATH`            | —       | Override Wuerstchen decoder weights path                                           |
+| `MOLD_QWEN2_VARIANT`           | `auto`  | Qwen-family Qwen2.5-VL encoder: `auto`, `bf16`, `q8`, `q6`, `q5`, `q4`, `q3`, `q2` |
+| `MOLD_QWEN2_TEXT_ENCODER_MODE` | `auto`  | Qwen-family placement mode: `auto`, `gpu`, `cpu-stage`, `cpu`                      |
 
 These are mainly useful for custom local model layouts, manual debugging, or
 testing alternative weight files without editing `config.toml`.
 
-For Qwen-Image specifically:
+For Qwen-Image and Qwen-Image-Edit:
 
-- CUDA `auto` keeps the existing BF16-first behavior unless you explicitly set
-  `MOLD_QWEN2_VARIANT`.
+- CUDA `auto` prefers BF16 when enough headroom remains after the transformer
+  load, and falls back to quantized GGUF variants when a resident encoder or
+  edit-conditioning path would otherwise be too heavy.
 - Metal/MPS `auto` prefers the quantized Qwen2.5-VL GGUF encoder path to reduce
   memory pressure during prompt encoding.
+- `qwen-image-edit` still loads the Qwen2.5-VL vision tower for image
+  conditioning, but quantized `MOLD_QWEN2_VARIANT` values keep the language side
+  smaller and stage the vision weights only when needed.
 
 ### Debug and Family-Specific Knobs
 
