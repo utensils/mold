@@ -72,6 +72,13 @@ impl Ltx2Engine {
         }
     }
 
+    fn is_oom_error(err: &impl std::fmt::Display) -> bool {
+        let msg = err.to_string().to_ascii_lowercase();
+        msg.contains("out of memory")
+            || msg.contains("out_of_memory")
+            || msg.contains("cudaerrormemoryallocation")
+    }
+
     fn gemma_root(&self) -> Result<PathBuf> {
         assets::gemma_root(&self.paths)
     }
@@ -179,9 +186,7 @@ impl Ltx2Engine {
         media::probe_video(input_video)
     }
 
-    fn native_device(&self) -> Result<Device> {
-        let backend = Ltx2Backend::detect();
-        backend.ensure_supported()?;
+    fn native_device_for_backend(&self, backend: Ltx2Backend) -> Result<Device> {
         match backend {
             Ltx2Backend::Cuda => {
                 self.info("CUDA detected, using native LTX-2 GPU path");
@@ -202,8 +207,11 @@ impl Ltx2Engine {
         }
     }
 
-    fn create_runtime_session(&self, plan: &Ltx2GeneratePlan) -> Result<Ltx2RuntimeSession> {
-        let device = self.native_device()?;
+    fn load_runtime_session_on_device(
+        &self,
+        plan: &Ltx2GeneratePlan,
+        device: Device,
+    ) -> Result<Ltx2RuntimeSession> {
         let dtype = gpu_dtype(&device);
         self.emit("Loading native LTX-2 prompt encoder");
         let prompt_encoder = NativePromptEncoder::load(
@@ -214,6 +222,23 @@ impl Ltx2Engine {
             dtype,
         )?;
         Ok(Ltx2RuntimeSession::new(prompt_encoder))
+    }
+
+    fn create_runtime_session(&self, plan: &Ltx2GeneratePlan) -> Result<Ltx2RuntimeSession> {
+        let backend = Ltx2Backend::detect();
+        backend.ensure_supported()?;
+
+        match self.load_runtime_session_on_device(plan, self.native_device_for_backend(backend)?) {
+            Ok(runtime) => Ok(runtime),
+            Err(err) if matches!(backend, Ltx2Backend::Cuda) && Self::is_oom_error(&err) => {
+                self.info(
+                    "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
+                );
+                crate::device::reclaim_gpu_memory();
+                self.load_runtime_session_on_device(plan, Device::Cpu)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn encode_native_video(
@@ -804,6 +829,13 @@ mod tests {
             LoadStrategy::Sequential,
         );
         assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
+    }
+
+    #[test]
+    fn oom_error_detection_matches_cuda_allocator_strings() {
+        assert!(Ltx2Engine::is_oom_error(&"CUDA out of memory"));
+        assert!(Ltx2Engine::is_oom_error(&"cudaErrorMemoryAllocation"));
+        assert!(!Ltx2Engine::is_oom_error(&"some other error"));
     }
 
     #[test]
