@@ -85,6 +85,18 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
         .unwrap_or_else(|| "flux".to_string())
 }
 
+#[derive(Default, Clone, Copy)]
+struct FileArgRefs<'a> {
+    lora: Option<&'a str>,
+    image: Option<&'a str>,
+    mask: Option<&'a str>,
+    control: Option<&'a str>,
+    audio: Option<&'a str>,
+    video: Option<&'a str>,
+    camera_control: Option<&'a str>,
+    output: Option<&'a str>,
+}
+
 #[cfg(test)]
 fn validate_file_args(
     lora: Option<&str>,
@@ -93,21 +105,19 @@ fn validate_file_args(
     control: Option<&str>,
     output: Option<&str>,
 ) -> Result<()> {
-    validate_file_args_full(lora, image, mask, control, None, None, None, output)
+    validate_file_args_full(FileArgRefs {
+        lora,
+        image,
+        mask,
+        control,
+        output,
+        ..FileArgRefs::default()
+    })
 }
 
-fn validate_file_args_full(
-    lora: Option<&str>,
-    image: Option<&str>,
-    mask: Option<&str>,
-    control: Option<&str>,
-    audio: Option<&str>,
-    video: Option<&str>,
-    camera_control: Option<&str>,
-    output: Option<&str>,
-) -> Result<()> {
+fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
     // -- --lora validation --
-    if let Some(lora_path) = lora {
+    if let Some(lora_path) = args.lora {
         let p = Path::new(lora_path);
         if p.is_dir() {
             // List .safetensors files in the directory as suggestions
@@ -143,7 +153,7 @@ fn validate_file_args_full(
     }
 
     // -- --image validation --
-    if let Some(img_path) = image {
+    if let Some(img_path) = args.image {
         if img_path != "-" {
             let p = Path::new(img_path);
             if p.is_dir() {
@@ -156,7 +166,7 @@ fn validate_file_args_full(
     }
 
     // -- --mask validation --
-    if let Some(mask_path) = mask {
+    if let Some(mask_path) = args.mask {
         let p = Path::new(mask_path);
         if p.is_dir() {
             anyhow::bail!("--mask path is a directory, not an image file: {mask_path}");
@@ -167,7 +177,7 @@ fn validate_file_args_full(
     }
 
     // -- --control validation --
-    if let Some(ctrl_path) = control {
+    if let Some(ctrl_path) = args.control {
         let p = Path::new(ctrl_path);
         if p.is_dir() {
             anyhow::bail!("--control path is a directory, not an image file: {ctrl_path}");
@@ -177,7 +187,7 @@ fn validate_file_args_full(
         }
     }
 
-    if let Some(audio_path) = audio {
+    if let Some(audio_path) = args.audio {
         let p = Path::new(audio_path);
         if p.is_dir() {
             anyhow::bail!("--audio-file path is a directory, not a file: {audio_path}");
@@ -187,7 +197,7 @@ fn validate_file_args_full(
         }
     }
 
-    if let Some(video_path) = video {
+    if let Some(video_path) = args.video {
         let p = Path::new(video_path);
         if p.is_dir() {
             anyhow::bail!("--video path is a directory, not a file: {video_path}");
@@ -197,8 +207,9 @@ fn validate_file_args_full(
         }
     }
 
-    if let Some(camera_control_path) =
-        camera_control.filter(|value| value.ends_with(".safetensors"))
+    if let Some(camera_control_path) = args
+        .camera_control
+        .filter(|value| value.ends_with(".safetensors"))
     {
         let p = Path::new(camera_control_path);
         if p.is_dir() {
@@ -212,7 +223,7 @@ fn validate_file_args_full(
     }
 
     // -- --output validation --
-    if let Some(out_path) = output {
+    if let Some(out_path) = args.output {
         if out_path != "-" {
             let p = Path::new(out_path);
             if p.is_dir() {
@@ -371,39 +382,27 @@ pub async fn run(
     let family = resolve_family(&model, &config);
 
     // Validate file-based arguments early — before expansion or inference.
-    validate_file_args_full(
-        lora.first().map(String::as_str),
-        image.first().map(String::as_str),
-        mask.as_deref(),
-        control.as_deref(),
-        audio_file.as_deref(),
-        video.as_deref(),
-        camera_control.as_deref(),
-        output.as_deref(),
-    )?;
+    validate_file_args_full(FileArgRefs {
+        lora: lora.first().map(String::as_str),
+        image: image.first().map(String::as_str),
+        mask: mask.as_deref(),
+        control: control.as_deref(),
+        audio: audio_file.as_deref(),
+        video: video.as_deref(),
+        camera_control: camera_control.as_deref(),
+        output: output.as_deref(),
+    })?;
     for lora_path in &lora {
-        validate_file_args_full(
-            Some(lora_path.as_str()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )?;
+        validate_file_args_full(FileArgRefs {
+            lora: Some(lora_path.as_str()),
+            ..FileArgRefs::default()
+        })?;
     }
     for extra_image in image.iter().skip(1) {
-        validate_file_args_full(
-            None,
-            Some(extra_image.as_str()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )?;
+        validate_file_args_full(FileArgRefs {
+            image: Some(extra_image.as_str()),
+            ..FileArgRefs::default()
+        })?;
     }
 
     validate_image_args_for_family(&family, &image)?;

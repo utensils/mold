@@ -796,4 +796,60 @@ mod tests {
         );
         assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
     }
+
+    #[test]
+    fn materialized_request_uses_streaming_defaults_for_fp8_smoke_path() {
+        let engine = Ltx2Engine::new(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            LoadStrategy::Sequential,
+        );
+        let req = GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            width: 960,
+            height: 576,
+            steps: 8,
+            guidance: 3.0,
+            seed: Some(42),
+            batch_size: 1,
+            output_format: OutputFormat::Mp4,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: Some(17),
+            fps: Some(12),
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: Some(true),
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+        };
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bridge = engine
+            .materialize_request(&req, temp_dir.path(), &temp_dir.path().join("out.mp4"))
+            .unwrap();
+        assert_eq!(bridge.quantization.as_deref(), Some("fp8-cast"));
+        assert_eq!(bridge.streaming_prefetch_count, Some(2));
+        assert_eq!(bridge.width, 960);
+        assert_eq!(bridge.height, 576);
+        assert_eq!(bridge.num_frames, 17);
+        assert_eq!(bridge.frame_rate, 12);
+    }
 }

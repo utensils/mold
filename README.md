@@ -176,7 +176,9 @@ synchronized audio, audio-to-video, keyframe interpolation, retake workflows,
 stacked LoRAs, and camera-control LoRAs. The current implementation uses the
 upstream Lightricks Python pipelines through a bridge, so local LTX-2 runs
 require `python3`, `uv`, `ffmpeg`, and the upstream checkout at
-`tmp/LTX-2-upstream`.
+`tmp/LTX-2-upstream`. On 24 GB Ada GPUs such as the RTX 4090, mold uses
+bridge-side layer streaming with the upstream `fp8-cast` path for local FP8
+smoke runs rather than Hopper-only `fp8-scaled-mm`.
 
 ## Features
 

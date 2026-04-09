@@ -178,7 +178,7 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`
 
-**Current constraints:** `x2` spatial upscaling is wired; `x1.5` spatial upscaling and temporal upscaling are not yet implemented. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. Local runs require `python3`, `uv`, `ffmpeg`, and the upstream checkout at `tmp/LTX-2-upstream`.
+**Current constraints:** `x2` spatial upscaling is wired; `x1.5` spatial upscaling and temporal upscaling are not yet implemented. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. Local runs require `python3`, `uv`, `ffmpeg`, and the upstream checkout at `tmp/LTX-2-upstream`. On 24 GB Ada GPUs such as the RTX 4090, the verified local path is bridge-side layer streaming with the upstream `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`.
 
 ### Model Selection Guide
 

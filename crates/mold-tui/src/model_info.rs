@@ -136,7 +136,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video: false,
             default_scheduler: None,
         },
-        "ltx-video" => ModelCapabilities {
+        "ltx-video" | "ltx2" => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
@@ -251,6 +251,13 @@ mod tests {
     #[test]
     fn ltx_video_supports_video() {
         let caps = capabilities_for_family("ltx-video");
+        assert!(caps.supports_video);
+        assert!(!caps.supports_negative_prompt);
+    }
+
+    #[test]
+    fn ltx2_supports_video() {
+        let caps = capabilities_for_family("ltx2");
         assert!(caps.supports_video);
         assert!(!caps.supports_negative_prompt);
     }

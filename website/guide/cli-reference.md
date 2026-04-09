@@ -90,6 +90,9 @@ reduce unified-memory pressure during denoising.
   auto-resolves the published LTX-2 19B camera LoRAs.
 - LTX-2 currently requires `python3`, `uv`, `ffmpeg`, and the upstream checkout
   at `tmp/LTX-2-upstream`.
+- On 24 GB Ada GPUs such as the RTX 4090, the verified local FP8 path uses
+  bridge-side layer streaming plus the upstream `fp8-cast` mode rather than
+  Hopper-only `fp8-scaled-mm`.
 
 ## `mold expand`
 
