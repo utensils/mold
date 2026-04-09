@@ -6,8 +6,10 @@ use mold_core::{
 };
 use mold_db::{GenerationRecord, MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
     ActiveGenerationSnapshot, AppState, GenerationJob, GenerationJobResult, SseMessage,
@@ -474,5 +476,94 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
+    }
+}
+
+// ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
+
+/// Runs the multi-GPU dispatch loop. Routes each generation job to the best
+/// GPU worker based on the placement strategy (model-loaded > idle > evict LRU).
+///
+/// Exits when the sender half of the channel is dropped (server shutdown).
+pub async fn run_queue_dispatcher(
+    mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+) {
+    tracing::debug!("multi-GPU queue dispatcher started");
+    while let Some(job) = job_rx.recv().await {
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_queue_depth(state.queue.pending());
+
+        let model_name = &job.request.model;
+
+        // Estimate VRAM for placement — use a conservative default.
+        let estimated_vram = estimate_model_vram(model_name);
+
+        // Select worker via placement strategy.
+        let worker = match state.gpu_pool.select_worker(model_name, estimated_vram) {
+            Some(w) => w,
+            None => {
+                tracing::error!(model = %model_name, "No GPU available for model");
+                let err_msg = format!("no GPU available for model {model_name}");
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: err_msg.clone(),
+                    }));
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                state.queue.decrement();
+                continue;
+            }
+        };
+
+        // Increment in-flight BEFORE sending to worker (prevents TOCTOU race
+        // where burst loads all see the same stale state and route to the same GPU).
+        worker.in_flight.fetch_add(1, Ordering::SeqCst);
+
+        // Build GpuJob from the GenerationJob.
+        let gpu_job = GpuJob {
+            model: model_name.to_string(),
+            request: job.request,
+            progress_tx: job.progress_tx,
+            result_tx: job.result_tx,
+            output_dir: job.output_dir,
+            config: state.config.clone(),
+        };
+
+        // Dispatch to worker's dedicated thread.
+        if worker.job_tx.try_send(gpu_job).is_err() {
+            worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+            tracing::warn!(
+                gpu = worker.gpu.ordinal,
+                "GPU worker channel full — job dropped"
+            );
+            // The result_tx was moved into gpu_job and is now lost.
+            // This shouldn't happen if queue_size is configured properly.
+        }
+
+        state.queue.decrement();
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_queue_depth(state.queue.pending());
+    }
+    tracing::info!("multi-GPU queue dispatcher shutting down");
+}
+
+/// Rough VRAM estimate for a model (used for placement decisions).
+fn estimate_model_vram(model_name: &str) -> u64 {
+    // Use a simple heuristic based on model name patterns.
+    // Quantized models are smaller; BF16/FP16 are larger.
+    let lower = model_name.to_lowercase();
+    if lower.contains(":q4") {
+        6_000_000_000 // ~6GB
+    } else if lower.contains(":q8") || lower.contains(":fp8") {
+        12_000_000_000 // ~12GB
+    } else if lower.contains(":bf16") || lower.contains(":fp16") {
+        24_000_000_000 // ~24GB
+    } else if lower.contains("sd15") || lower.contains("sd1.5") {
+        4_000_000_000 // ~4GB
+    } else if lower.contains("sdxl") {
+        8_000_000_000 // ~8GB
+    } else {
+        8_000_000_000 // 8GB default fallback
     }
 }

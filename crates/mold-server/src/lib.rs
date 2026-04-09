@@ -184,9 +184,14 @@ pub async fn run_server(
     }
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
-    // TODO: Task 6 will replace this with the multi-GPU queue dispatcher.
+    // Spawn queue worker: use multi-GPU dispatcher if GPUs are available,
+    // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
-    tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+    if gpu_pool.worker_count() > 0 {
+        tokio::spawn(queue::run_queue_dispatcher(job_rx, worker_state));
+    } else {
+        tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+    }
 
     // Ensure output directory exists and pre-generate thumbnails.
     {
