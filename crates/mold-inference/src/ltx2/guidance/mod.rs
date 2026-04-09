@@ -58,8 +58,7 @@ impl MultiModalGuider {
     ) -> Result<Tensor> {
         let cfg = (cond.broadcast_sub(uncond_text)? * (self.params.cfg_scale - 1.0))?;
         let stg = (cond.broadcast_sub(uncond_perturbed)? * self.params.stg_scale)?;
-        let modality =
-            (cond.broadcast_sub(uncond_modality)? * (self.params.modality_scale - 1.0))?;
+        let modality = (cond.broadcast_sub(uncond_modality)? * (self.params.modality_scale - 1.0))?;
         let mut pred = cond.broadcast_add(&cfg)?;
         pred = pred.broadcast_add(&stg)?;
         pred = pred.broadcast_add(&modality)?;
@@ -177,8 +176,7 @@ mod tests {
 
     use super::{
         BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderFactory,
-        MultiModalGuiderParams, OrderedSigma, Perturbation, PerturbationConfig,
-        PerturbationType,
+        MultiModalGuiderParams, OrderedSigma, Perturbation, PerturbationConfig, PerturbationType,
     };
 
     #[test]
@@ -278,8 +276,7 @@ mod tests {
         assert!(config.any_in_batch(PerturbationType::SkipVideoSelfAttention, 4));
         assert!(!config.all_in_batch(PerturbationType::SkipVideoSelfAttention, 4));
         assert_eq!(
-            config
-                .mask_values(PerturbationType::SkipVideoSelfAttention, 4),
+            config.mask_values(PerturbationType::SkipVideoSelfAttention, 4),
             vec![0.0, 1.0]
         );
     }

@@ -134,9 +134,7 @@ impl AudioLatentShape {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape,
-    };
+    use super::{AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape};
 
     #[test]
     fn video_latent_shape_from_pixel_shape_matches_ltx2_contract() {

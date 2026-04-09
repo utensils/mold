@@ -21,16 +21,17 @@ impl Projection {
     }
 
     pub fn out_features(&self) -> Result<usize> {
-        self.weight.dims2().map(|(rows, _)| rows).map_err(Into::into)
+        self.weight
+            .dims2()
+            .map(|(rows, _)| rows)
+            .map_err(Into::into)
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (batch, seq, hidden) = xs.dims3()?;
         let (out, in_features) = self.weight.dims2()?;
         if hidden != in_features {
-            bail!(
-                "projection input dimension mismatch: expected {in_features}, got {hidden}"
-            );
+            bail!("projection input dimension mismatch: expected {in_features}, got {hidden}");
         }
         let ys = xs
             .reshape((batch * seq, hidden))?
@@ -113,8 +114,12 @@ impl FeatureExtractorV2 {
             .as_ref()
             .map(|projection| {
                 projection.forward(
-                    &rescale_norm(&normed, projection.out_features().unwrap(), self.embedding_dim)
-                        .unwrap(),
+                    &rescale_norm(
+                        &normed,
+                        projection.out_features().unwrap(),
+                        self.embedding_dim,
+                    )
+                    .unwrap(),
                 )
             })
             .transpose()?;
@@ -136,7 +141,9 @@ pub fn norm_and_concat_per_token_rms(
     let normed = encoded.broadcast_div(&(variance + 1e-6)?.sqrt()?)?;
     let (batch, seq, hidden, layers) = normed.dims4()?;
     let normed = normed.reshape((batch, seq, hidden * layers))?;
-    let mask = attention_mask.to_dtype(DType::F32)?.reshape((batch, seq, 1))?;
+    let mask = attention_mask
+        .to_dtype(DType::F32)?
+        .reshape((batch, seq, 1))?;
     normed.broadcast_mul(&mask).map_err(Into::into)
 }
 
@@ -190,7 +197,8 @@ fn norm_and_concat_padded_batch(
     let attention_mask = attention_mask.to_device(&Device::Cpu)?.to_vec2::<u8>()?;
     let (batch, seq, hidden, layers) = encoded.dims4()?;
     let flat = encoded.flatten_all()?.to_vec1::<f32>()?;
-    let index = |b: usize, t: usize, d: usize, l: usize| (((b * seq + t) * hidden + d) * layers) + l;
+    let index =
+        |b: usize, t: usize, d: usize, l: usize| (((b * seq + t) * hidden + d) * layers) + l;
 
     let mut output = Vec::with_capacity(batch * seq * hidden * layers);
     for (batch_index, batch_mask) in attention_mask.iter().enumerate() {
@@ -237,7 +245,11 @@ fn norm_and_concat_padded_batch(
         }
     }
 
-    Ok(Tensor::from_vec(output, (batch, seq, hidden * layers), &device)?)
+    Ok(Tensor::from_vec(
+        output,
+        (batch, seq, hidden * layers),
+        &device,
+    )?)
 }
 
 fn rescale_norm(xs: &Tensor, target_dim: usize, source_dim: usize) -> Result<Tensor> {
@@ -297,7 +309,9 @@ mod tests {
             .unwrap();
         let mask = Tensor::new(&[[1u8, 1, 0]], &device).unwrap();
         let extractor = FeatureExtractorV2::new(projection(4, 5), Some(projection(4, 6)), 4);
-        let (video, audio) = extractor.forward(&[hidden_state_0, hidden_state_1], &mask).unwrap();
+        let (video, audio) = extractor
+            .forward(&[hidden_state_0, hidden_state_1], &mask)
+            .unwrap();
 
         assert_eq!(video.dims3().unwrap(), (1, 3, 5));
         assert_eq!(audio.unwrap().dims3().unwrap(), (1, 3, 6));

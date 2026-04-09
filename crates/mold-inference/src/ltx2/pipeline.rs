@@ -199,9 +199,12 @@ impl Ltx2Engine {
         }
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
         let loras = lora::resolve_loras(&self.model_name, req)?;
-        let spatial_upsampler_path =
-            assets::resolve_spatial_upscaler_path(&self.model_name, &self.paths, req.spatial_upscale)?
-                .map(|path| path.to_string_lossy().to_string());
+        let spatial_upsampler_path = assets::resolve_spatial_upscaler_path(
+            &self.model_name,
+            &self.paths,
+            req.spatial_upscale,
+        )?
+        .map(|path| path.to_string_lossy().to_string());
 
         Ok(Ltx2GeneratePlan {
             pipeline,
@@ -277,11 +280,6 @@ impl Ltx2Engine {
 
     fn probe_video(&self, input_video: &Path) -> Result<ProbeMetadata> {
         media::probe_video(input_video)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn parse_probe_metadata(value: serde_json::Value) -> Result<ProbeMetadata> {
-        media::parse_probe_metadata(value)
     }
 }
 
@@ -406,15 +404,9 @@ impl InferenceEngine for Ltx2Engine {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn parse_ffprobe_fps(value: &str) -> Option<u32> {
-    media::parse_ffprobe_fps(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::path::PathBuf;
 
     fn dummy_paths() -> ModelPaths {
@@ -435,12 +427,6 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
-    }
-
-    #[test]
-    fn parse_ffprobe_fps_rounds_fraction() {
-        assert_eq!(parse_ffprobe_fps("24/1"), Some(24));
-        assert_eq!(parse_ffprobe_fps("30000/1001"), Some(30));
     }
 
     #[test]
@@ -567,38 +553,5 @@ mod tests {
         assert_eq!(bridge.height, 576);
         assert_eq!(bridge.num_frames, 17);
         assert_eq!(bridge.frame_rate, 12);
-    }
-
-    #[test]
-    fn parse_probe_metadata_rejects_missing_video_dimensions() {
-        let err = Ltx2Engine::parse_probe_metadata(json!({
-            "streams": [{
-                "codec_type": "video",
-                "r_frame_rate": "24/1"
-            }],
-            "format": { "duration": "1.0" }
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("valid video dimensions"));
-    }
-
-    #[test]
-    fn parse_probe_metadata_uses_avg_frame_rate_fallback() {
-        let metadata = Ltx2Engine::parse_probe_metadata(json!({
-            "streams": [{
-                "codec_type": "video",
-                "width": 960,
-                "height": 576,
-                "avg_frame_rate": "12/1",
-                "nb_frames": "17"
-            }],
-            "format": { "duration": "1.42" }
-        }))
-        .unwrap();
-        assert_eq!(metadata.width, 960);
-        assert_eq!(metadata.height, 576);
-        assert_eq!(metadata.fps, 12);
-        assert_eq!(metadata.frames, Some(17));
-        assert_eq!(metadata.duration_ms, Some(1420));
     }
 }

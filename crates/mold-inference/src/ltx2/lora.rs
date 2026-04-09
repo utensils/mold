@@ -50,10 +50,7 @@ pub(crate) fn camera_control_preset(name: &str) -> Option<CameraControlPreset> {
     }
 }
 
-pub(crate) fn resolve_camera_control_preset_path(
-    model_name: &str,
-    name: &str,
-) -> Result<PathBuf> {
+pub(crate) fn resolve_camera_control_preset_path(model_name: &str, name: &str) -> Result<PathBuf> {
     if model_name.contains("ltx-2.3") {
         bail!(
             "camera-control presets are currently published for LTX-2 19B only; pass an explicit .safetensors path for LTX-2.3"

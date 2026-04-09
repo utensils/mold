@@ -11,6 +11,4 @@ pub use rope::{
     video_token_positions, LtxRopeType,
 };
 #[allow(unused_imports)]
-pub use shapes::{
-    AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape,
-};
+pub use shapes::{AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape};

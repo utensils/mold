@@ -38,9 +38,7 @@ impl TransformerModalityInputs {
         if let Some(mask) = &self.attention_mask {
             let (mask_batch, mask_tokens, other_tokens) = mask.dims3()?;
             if mask_batch != batch || mask_tokens != tokens || other_tokens != tokens {
-                bail!(
-                    "{modality_name} self-attention mask must be shaped [batch, tokens, tokens]"
-                );
+                bail!("{modality_name} self-attention mask must be shaped [batch, tokens, tokens]");
             }
         }
         Ok((batch, tokens, channels))

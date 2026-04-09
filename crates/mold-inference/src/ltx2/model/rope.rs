@@ -15,7 +15,10 @@ pub enum LtxRopeType {
 pub fn midpoint_positions(bounds: &Tensor) -> Result<Tensor> {
     let starts = bounds.narrow(3, 0, 1)?;
     let ends = bounds.narrow(3, 1, 1)?;
-    starts.broadcast_add(&ends)?.affine(0.5, 0.0).map_err(Into::into)
+    starts
+        .broadcast_add(&ends)?
+        .affine(0.5, 0.0)
+        .map_err(Into::into)
 }
 
 pub fn video_token_positions(
@@ -121,7 +124,8 @@ mod tests {
         )
         .unwrap();
 
-        let (video_temporal, audio_temporal) = cross_modal_temporal_positions(&video, &audio).unwrap();
+        let (video_temporal, audio_temporal) =
+            cross_modal_temporal_positions(&video, &audio).unwrap();
         assert_eq!(video_temporal.dims4().unwrap(), (1, 1, 2, 1));
         assert_eq!(audio_temporal.dims4().unwrap(), (1, 1, 3, 1));
     }

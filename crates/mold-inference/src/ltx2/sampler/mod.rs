@@ -3,8 +3,9 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Tensor};
 
-pub const DISTILLED_SIGMA_VALUES: &[f32] =
-    &[1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0];
+pub const DISTILLED_SIGMA_VALUES: &[f32] = &[
+    1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0,
+];
 
 pub const STAGE_2_DISTILLED_SIGMA_VALUES: &[f32] = &[0.909375, 0.725, 0.421875, 0.0];
 
@@ -22,11 +23,15 @@ pub fn to_velocity(sample: &Tensor, sigma: f64, denoised_sample: &Tensor) -> Res
 pub fn to_denoised(sample: &Tensor, velocity: &Tensor, sigma: f64) -> Result<Tensor> {
     Ok(sample
         .to_dtype(DType::F32)?
-        .broadcast_sub(&(velocity.to_dtype(DType::F32)? * sigma)?)?
-    )
+        .broadcast_sub(&(velocity.to_dtype(DType::F32)? * sigma)?)?)
 }
 
-pub fn euler_step(sample: &Tensor, denoised_sample: &Tensor, sigmas: &[f32], step_index: usize) -> Result<Tensor> {
+pub fn euler_step(
+    sample: &Tensor,
+    denoised_sample: &Tensor,
+    sigmas: &[f32],
+    step_index: usize,
+) -> Result<Tensor> {
     if step_index + 1 >= sigmas.len() {
         bail!("euler step requires a sigma and next sigma");
     }
@@ -36,8 +41,7 @@ pub fn euler_step(sample: &Tensor, denoised_sample: &Tensor, sigmas: &[f32], ste
     let velocity = to_velocity(sample, sigma, denoised_sample)?;
     Ok(sample
         .to_dtype(DType::F32)?
-        .broadcast_add(&(velocity * dt)?)?
-    )
+        .broadcast_add(&(velocity * dt)?)?)
 }
 
 pub fn apply_denoise_mask(
@@ -184,7 +188,10 @@ mod tests {
         assert_eq!(DISTILLED_SIGMA_VALUES[7], 0.421875);
         assert_eq!(DISTILLED_SIGMA_VALUES[8], 0.0);
 
-        assert_eq!(STAGE_2_DISTILLED_SIGMA_VALUES, &[0.909375, 0.725, 0.421875, 0.0]);
+        assert_eq!(
+            STAGE_2_DISTILLED_SIGMA_VALUES,
+            &[0.909375, 0.725, 0.421875, 0.0]
+        );
     }
 
     #[test]

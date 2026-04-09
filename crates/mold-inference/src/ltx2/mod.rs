@@ -5,8 +5,8 @@ mod guidance;
 mod lora;
 mod media;
 mod model;
-mod plan;
 mod pipeline;
+mod plan;
 mod sampler;
 mod text;
 

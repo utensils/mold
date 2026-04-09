@@ -110,7 +110,11 @@ impl VideoLatentPatchifier {
                 }
             }
         }
-        Ok(Tensor::from_vec(data, (shape.batch, 3, token_count, 2), device)?)
+        Ok(Tensor::from_vec(
+            data,
+            (shape.batch, 3, token_count, 2),
+            device,
+        )?)
     }
 }
 
@@ -174,7 +178,11 @@ impl AudioPatchifier {
                 data.push(end);
             }
         }
-        Ok(Tensor::from_vec(data, (shape.batch, 1, shape.frames, 2), device)?)
+        Ok(Tensor::from_vec(
+            data,
+            (shape.batch, 1, shape.frames, 2),
+            device,
+        )?)
     }
 
     fn audio_latent_time_seconds(self, latent_index: usize) -> f32 {

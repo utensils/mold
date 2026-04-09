@@ -41,11 +41,12 @@ pub fn pad_to_alignment(
     }
 }
 
-pub fn left_pad_batch(
-    sequences: &[Vec<u32>],
-    pad_token_id: u32,
-) -> (Vec<Vec<u32>>, Vec<Vec<u8>>) {
-    let width = sequences.iter().map(|sequence| sequence.len()).max().unwrap_or(0);
+pub fn left_pad_batch(sequences: &[Vec<u32>], pad_token_id: u32) -> (Vec<Vec<u32>>, Vec<Vec<u8>>) {
+    let width = sequences
+        .iter()
+        .map(|sequence| sequence.len())
+        .max()
+        .unwrap_or(0);
     let mut padded_ids = Vec::with_capacity(sequences.len());
     let mut padded_masks = Vec::with_capacity(sequences.len());
     for sequence in sequences {

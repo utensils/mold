@@ -1,8 +1,18 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use image::RgbImage;
 use mold_core::OutputFormat;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
-use std::process::Command;
+
+use mp4_rs::{
+    AvcConfig, ChannelConfig, MediaConfig, MediaType, Mp4Config, Mp4Reader, Mp4Writer, TrackConfig,
+    TrackType,
+};
+use openh264::decoder::{Decoder, DecoderConfig, Flush};
+use openh264::formats::YUVSource;
+
+use crate::ltx_video::video_enc;
 
 #[derive(Debug, Default)]
 pub(crate) struct ProbeMetadata {
@@ -16,18 +26,332 @@ pub(crate) struct ProbeMetadata {
     pub(crate) audio_channels: Option<u32>,
 }
 
-fn run_ffmpeg<I, S>(args: I, context_message: &str) -> Result<()>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let status = Command::new("ffmpeg")
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run ffmpeg for {context_message}"))?;
-    if !status.success() {
-        bail!("ffmpeg failed while {context_message}");
+#[derive(Debug)]
+struct VideoTrackInfo {
+    track_id: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    frames: Option<u32>,
+    duration_ms: Option<u64>,
+    timescale: u32,
+    language: String,
+    seq_param_set: Vec<u8>,
+    pic_param_set: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct DecodedVideo {
+    metadata: ProbeMetadata,
+    frames: Vec<RgbImage>,
+}
+
+fn read_mp4(input_video: &Path) -> Result<Mp4Reader<Cursor<Vec<u8>>>> {
+    let bytes = fs::read(input_video)
+        .with_context(|| format!("failed to read {}", input_video.display()))?;
+    Mp4Reader::read_header(Cursor::new(bytes), fs::metadata(input_video)?.len()).with_context(
+        || {
+            format!(
+                "failed to parse MP4 container from {}",
+                input_video.display()
+            )
+        },
+    )
+}
+
+fn find_video_track(reader: &Mp4Reader<Cursor<Vec<u8>>>) -> Result<VideoTrackInfo> {
+    let (track_id, track) = reader
+        .tracks()
+        .iter()
+        .find(|(_, track)| matches!(track.track_type(), Ok(TrackType::Video)))
+        .ok_or_else(|| anyhow!("MP4 did not contain a video track"))?;
+
+    if track.media_type()? != MediaType::H264 {
+        bail!(
+            "unsupported LTX-2 video codec: expected H.264/AVC, found {}",
+            track.media_type()?
+        );
     }
+
+    let width = track.width() as u32;
+    let height = track.height() as u32;
+    let fps = track.frame_rate().round() as u32;
+    if width == 0 || height == 0 {
+        bail!("MP4 video track did not contain valid dimensions");
+    }
+    if fps == 0 {
+        bail!("MP4 video track did not contain a valid frame rate");
+    }
+
+    Ok(VideoTrackInfo {
+        track_id: *track_id,
+        width,
+        height,
+        fps,
+        frames: Some(track.sample_count()),
+        duration_ms: Some(track.duration().as_millis() as u64),
+        timescale: track.timescale(),
+        language: track.language().to_string(),
+        seq_param_set: track.sequence_parameter_set()?.to_vec(),
+        pic_param_set: track.picture_parameter_set()?.to_vec(),
+    })
+}
+
+fn audio_metadata(reader: &Mp4Reader<Cursor<Vec<u8>>>) -> Result<(bool, Option<u32>, Option<u32>)> {
+    if let Some(track) = reader
+        .tracks()
+        .values()
+        .find(|track| matches!(track.track_type(), Ok(TrackType::Audio)))
+    {
+        let sample_rate = track.sample_freq_index().ok().map(|value| value.freq());
+        let channels = track.channel_config().ok().map(channel_config_channels);
+        Ok((true, sample_rate, channels))
+    } else {
+        Ok((false, None, None))
+    }
+}
+
+fn channel_config_channels(config: ChannelConfig) -> u32 {
+    match config {
+        ChannelConfig::Mono => 1,
+        ChannelConfig::Stereo => 2,
+        ChannelConfig::Three => 3,
+        ChannelConfig::Four => 4,
+        ChannelConfig::Five => 5,
+        ChannelConfig::FiveOne => 6,
+        ChannelConfig::SevenOne => 8,
+    }
+}
+
+fn annex_b_convert_packet(
+    packet: &[u8],
+    length_size: u8,
+    sps: &[Vec<u8>],
+    pps: &[Vec<u8>],
+    new_idr: &mut bool,
+    sps_seen: &mut bool,
+    pps_seen: &mut bool,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    let mut stream = packet;
+
+    while stream.len() >= length_size as usize {
+        let mut nal_size = 0usize;
+        for _ in 0..length_size {
+            nal_size = (nal_size << 8) | usize::from(stream[0]);
+            stream = &stream[1..];
+        }
+
+        if nal_size == 0 || nal_size > stream.len() {
+            break;
+        }
+
+        let nal = &stream[..nal_size];
+        stream = &stream[nal_size..];
+        if nal.is_empty() {
+            continue;
+        }
+
+        let nal_type = nal[0] & 0x1F;
+        match nal_type {
+            7 => *sps_seen = true,
+            8 => *pps_seen = true,
+            5 => {
+                if !*new_idr && nal.get(1).is_some_and(|value| value & 0x80 != 0) {
+                    *new_idr = true;
+                }
+                if *new_idr && !*sps_seen && !*pps_seen {
+                    *new_idr = false;
+                    for unit in sps {
+                        out.extend([0, 0, 1]);
+                        out.extend(unit);
+                    }
+                    for unit in pps {
+                        out.extend([0, 0, 1]);
+                        out.extend(unit);
+                    }
+                } else if *new_idr && *sps_seen && !*pps_seen {
+                    for unit in pps {
+                        out.extend([0, 0, 1]);
+                        out.extend(unit);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        out.extend([0, 0, 1]);
+        out.extend(nal);
+
+        if !*new_idr && nal_type == 1 {
+            *new_idr = true;
+            *sps_seen = false;
+            *pps_seen = false;
+        }
+    }
+}
+
+fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
+    let mut reader = read_mp4(input_video)?;
+    let video = find_video_track(&reader)?;
+    let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
+
+    let track = reader
+        .tracks()
+        .get(&video.track_id)
+        .ok_or_else(|| anyhow!("video track {} disappeared during decode", video.track_id))?;
+    let avcc = &track
+        .trak
+        .mdia
+        .minf
+        .stbl
+        .stsd
+        .avc1
+        .as_ref()
+        .ok_or_else(|| anyhow!("video track is missing avcC configuration"))?
+        .avcc;
+
+    let sps: Vec<Vec<u8>> = avcc
+        .sequence_parameter_sets
+        .iter()
+        .map(|unit| unit.bytes.clone())
+        .collect();
+    let pps: Vec<Vec<u8>> = avcc
+        .picture_parameter_sets
+        .iter()
+        .map(|unit| unit.bytes.clone())
+        .collect();
+    let length_size = avcc.length_size_minus_one + 1;
+
+    let mut decoder = Decoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        DecoderConfig::new().flush_after_decode(Flush::NoFlush),
+    )
+    .context("failed to create H.264 decoder for LTX-2 media output")?;
+
+    let mut converted = Vec::new();
+    let mut frames = Vec::with_capacity(video.frames.unwrap_or_default() as usize);
+    let mut new_idr = true;
+    let mut sps_seen = false;
+    let mut pps_seen = false;
+
+    for sample_id in 1..=video.frames.unwrap_or_default() {
+        let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
+            continue;
+        };
+        annex_b_convert_packet(
+            &sample.bytes,
+            length_size,
+            &sps,
+            &pps,
+            &mut new_idr,
+            &mut sps_seen,
+            &mut pps_seen,
+            &mut converted,
+        );
+        if converted.is_empty() {
+            continue;
+        }
+
+        if let Some(image) = decoder
+            .decode(&converted)
+            .context("failed to decode H.264 frame from MP4")?
+        {
+            let mut rgb = vec![0; image.rgb8_len()];
+            image.write_rgb8(&mut rgb);
+            let frame = RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
+                anyhow!("decoded H.264 frame size did not match track dimensions")
+            })?;
+            frames.push(frame);
+        }
+    }
+
+    for image in decoder
+        .flush_remaining()
+        .context("failed to flush delayed H.264 frames")?
+    {
+        let mut rgb = vec![0; image.rgb8_len()];
+        image.write_rgb8(&mut rgb);
+        let frame = RgbImage::from_raw(video.width, video.height, rgb)
+            .ok_or_else(|| anyhow!("flushed H.264 frame size did not match track dimensions"))?;
+        frames.push(frame);
+    }
+
+    if frames.is_empty() {
+        bail!(
+            "no decodable video frames were found in {}",
+            input_video.display()
+        );
+    }
+
+    Ok(DecodedVideo {
+        metadata: ProbeMetadata {
+            width: video.width,
+            height: video.height,
+            fps: video.fps,
+            frames: Some(frames.len() as u32),
+            duration_ms: video.duration_ms,
+            has_audio,
+            audio_sample_rate,
+            audio_channels,
+        },
+        frames,
+    })
+}
+
+fn video_only_track_config(video: &VideoTrackInfo) -> TrackConfig {
+    TrackConfig {
+        track_type: TrackType::Video,
+        timescale: video.timescale,
+        language: video.language.clone(),
+        media_conf: MediaConfig::AvcConfig(AvcConfig {
+            width: video.width as u16,
+            height: video.height as u16,
+            seq_param_set: video.seq_param_set.clone(),
+            pic_param_set: video.pic_param_set.clone(),
+        }),
+    }
+}
+
+fn mp4_config() -> Result<Mp4Config> {
+    Ok(Mp4Config {
+        major_brand: "isom".parse()?,
+        minor_version: 0x200,
+        compatible_brands: vec![
+            "isom".parse()?,
+            "iso2".parse()?,
+            "avc1".parse()?,
+            "mp41".parse()?,
+        ],
+        timescale: 1_000,
+    })
+}
+
+fn copy_video_only_mp4(input_mp4: &Path, out_path: &Path) -> Result<()> {
+    let mut reader = read_mp4(input_mp4)?;
+    let video = find_video_track(&reader)?;
+    let mut writer = Mp4Writer::write_start(Cursor::new(Vec::new()), &mp4_config()?)
+        .context("failed to start video-only MP4 writer")?;
+    writer
+        .add_track(&video_only_track_config(&video))
+        .context("failed to add video track to output MP4")?;
+
+    for sample_id in 1..=video.frames.unwrap_or_default() {
+        let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
+            continue;
+        };
+        writer
+            .write_sample(1, &sample)
+            .with_context(|| format!("failed to copy video sample {sample_id} into silent MP4"))?;
+    }
+
+    writer
+        .write_end()
+        .context("failed to finalize video-only MP4")?;
+    let bytes = writer.into_writer().into_inner();
+    fs::write(out_path, bytes)
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
     Ok(())
 }
 
@@ -41,41 +365,26 @@ pub(crate) fn transcode_output(
             fs::copy(input_mp4, out_path)?;
         }
         OutputFormat::Gif => {
-            run_ffmpeg(
-                [
-                    "-y",
-                    "-i",
-                    input_mp4.to_string_lossy().as_ref(),
-                    out_path.to_string_lossy().as_ref(),
-                ],
-                "encoding GIF",
-            )?;
+            let video = decode_video(input_mp4)?;
+            let encoded = video_enc::encode_gif(&video.frames, video.metadata.fps)?;
+            fs::write(out_path, encoded)?;
         }
         OutputFormat::Apng => {
-            run_ffmpeg(
-                [
-                    "-y",
-                    "-i",
-                    input_mp4.to_string_lossy().as_ref(),
-                    "-plays",
-                    "0",
-                    out_path.to_string_lossy().as_ref(),
-                ],
-                "encoding APNG",
-            )?;
+            let video = decode_video(input_mp4)?;
+            let encoded = video_enc::encode_apng(&video.frames, video.metadata.fps, None)?;
+            fs::write(out_path, encoded)?;
         }
         OutputFormat::Webp => {
-            run_ffmpeg(
-                [
-                    "-y",
-                    "-i",
-                    input_mp4.to_string_lossy().as_ref(),
-                    "-loop",
-                    "0",
-                    out_path.to_string_lossy().as_ref(),
-                ],
-                "encoding WebP",
-            )?;
+            #[cfg(feature = "webp")]
+            {
+                let video = decode_video(input_mp4)?;
+                let encoded = video_enc::encode_webp(&video.frames, video.metadata.fps)?;
+                fs::write(out_path, encoded)?;
+            }
+            #[cfg(not(feature = "webp"))]
+            {
+                bail!("WebP output requires the 'webp' feature");
+            }
         }
         other => bail!("{other:?} is not supported for LTX-2 video output"),
     }
@@ -83,166 +392,186 @@ pub(crate) fn transcode_output(
 }
 
 pub(crate) fn strip_audio_track(input_mp4: &Path, out_path: &Path) -> Result<()> {
-    run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            input_mp4.to_string_lossy().as_ref(),
-            "-an",
-            "-c:v",
-            "copy",
-            out_path.to_string_lossy().as_ref(),
-        ],
-        "stripping audio track",
-    )
+    copy_video_only_mp4(input_mp4, out_path)
 }
 
 pub(crate) fn extract_thumbnail(input_video: &Path, output_png: &Path) -> Result<()> {
-    run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            input_video.to_string_lossy().as_ref(),
-            "-update",
-            "1",
-            "-frames:v",
-            "1",
-            output_png.to_string_lossy().as_ref(),
-        ],
-        "extracting thumbnail",
-    )
+    let video = decode_video(input_video)?;
+    let thumbnail = video_enc::first_frame_png(&video.frames)?;
+    fs::write(output_png, thumbnail)?;
+    Ok(())
 }
 
 pub(crate) fn extract_gif_preview(input_video: &Path, output_gif: &Path) -> Result<()> {
-    run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            input_video.to_string_lossy().as_ref(),
-            output_gif.to_string_lossy().as_ref(),
-        ],
-        "encoding GIF preview",
-    )
+    let video = decode_video(input_video)?;
+    let gif = video_enc::encode_gif(&video.frames, video.metadata.fps)?;
+    fs::write(output_gif, gif)?;
+    Ok(())
 }
 
 pub(crate) fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_streams",
-            "-show_format",
-            "-of",
-            "json",
-            input_video.to_string_lossy().as_ref(),
-        ])
-        .output()
-        .context("failed to run ffprobe")?;
-    if !output.status.success() {
-        bail!("ffprobe failed for {}", input_video.display());
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    parse_probe_metadata(value)
+    let reader = read_mp4(input_video)?;
+    let video = find_video_track(&reader)?;
+    let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
+    Ok(ProbeMetadata {
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        frames: video.frames,
+        duration_ms: video.duration_ms,
+        has_audio,
+        audio_sample_rate,
+        audio_channels,
+    })
 }
 
-pub(crate) fn parse_probe_metadata(value: serde_json::Value) -> Result<ProbeMetadata> {
-    let mut metadata = ProbeMetadata::default();
-    let streams = value["streams"].as_array().cloned().unwrap_or_default();
-    for stream in streams {
-        match stream["codec_type"].as_str() {
-            Some("video") => {
-                metadata.width = stream["width"].as_u64().unwrap_or_default() as u32;
-                metadata.height = stream["height"].as_u64().unwrap_or_default() as u32;
-                metadata.frames = stream["nb_frames"]
-                    .as_str()
-                    .and_then(|value| value.parse().ok())
-                    .or_else(|| {
-                        stream["nb_read_frames"]
-                            .as_str()
-                            .and_then(|value| value.parse().ok())
-                    });
-                metadata.fps = stream["r_frame_rate"]
-                    .as_str()
-                    .and_then(parse_ffprobe_fps)
-                    .or_else(|| stream["avg_frame_rate"].as_str().and_then(parse_ffprobe_fps))
-                    .unwrap_or_default();
-            }
-            Some("audio") => {
-                metadata.has_audio = true;
-                metadata.audio_sample_rate = stream["sample_rate"]
-                    .as_str()
-                    .and_then(|value| value.parse().ok());
-                metadata.audio_channels = stream["channels"].as_u64().map(|value| value as u32);
-            }
-            _ => {}
-        }
-    }
-    metadata.duration_ms = value["format"]["duration"]
-        .as_str()
-        .and_then(|value| value.parse::<f64>().ok())
-        .map(|seconds| (seconds * 1000.0).round() as u64);
-
-    if metadata.width == 0 || metadata.height == 0 {
-        bail!("ffprobe did not return valid video dimensions");
-    }
-    if metadata.fps == 0 {
-        bail!("ffprobe did not return a valid video frame rate");
-    }
-
-    Ok(metadata)
-}
-
-pub(crate) fn parse_ffprobe_fps(value: &str) -> Option<u32> {
-    let (num, den) = value.split_once('/')?;
-    let num: f64 = num.parse().ok()?;
-    let den: f64 = den.parse().ok()?;
-    if den == 0.0 {
-        return None;
-    }
-    Some((num / den).round() as u32)
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "mp4"))]
 mod tests {
     use super::*;
-    use serde_json::json;
+    #[cfg(feature = "mp4")]
+    use image::{ImageBuffer, Rgb};
+    #[cfg(feature = "mp4")]
+    use mp4_rs::{
+        AacConfig, AudioObjectType, ChannelConfig, Mp4Config, Mp4Reader, Mp4Sample, Mp4Writer,
+        SampleFreqIndex,
+    };
+    #[cfg(feature = "mp4")]
+    use tempfile::tempdir;
 
-    #[test]
-    fn parse_ffprobe_fps_rounds_fraction() {
-        assert_eq!(parse_ffprobe_fps("24/1"), Some(24));
-        assert_eq!(parse_ffprobe_fps("30000/1001"), Some(30));
+    #[cfg(feature = "mp4")]
+    use crate::ltx_video::video_enc;
+
+    #[cfg(feature = "mp4")]
+    fn sample_frames() -> Vec<RgbImage> {
+        let colors = [[255, 64, 32], [32, 192, 255], [16, 224, 96], [240, 224, 64]];
+        colors
+            .into_iter()
+            .map(|rgb| ImageBuffer::from_pixel(64, 64, Rgb(rgb)))
+            .collect()
     }
 
-    #[test]
-    fn parse_probe_metadata_rejects_missing_video_dimensions() {
-        let err = parse_probe_metadata(json!({
-            "streams": [{
-                "codec_type": "video",
-                "r_frame_rate": "24/1"
-            }],
-            "format": { "duration": "1.0" }
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("valid video dimensions"));
+    #[cfg(feature = "mp4")]
+    fn write_mp4(frames: &[RgbImage], fps: u32) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+        let dir = tempdir()?;
+        let path = dir.path().join("video.mp4");
+        fs::write(&path, video_enc::encode_mp4(frames, fps)?)?;
+        Ok((dir, path))
     }
 
+    #[cfg(feature = "mp4")]
+    fn write_mp4_with_dummy_aac(
+        source_mp4: &Path,
+    ) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+        let bytes = fs::read(source_mp4)?;
+        let size = bytes.len() as u64;
+        let mut reader = Mp4Reader::read_header(Cursor::new(bytes), size)?;
+        let video = find_video_track(&reader)?;
+
+        let mut writer = Mp4Writer::write_start(
+            Cursor::new(Vec::new()),
+            &Mp4Config {
+                major_brand: "isom".parse()?,
+                minor_version: 0x200,
+                compatible_brands: vec![
+                    "isom".parse()?,
+                    "iso2".parse()?,
+                    "avc1".parse()?,
+                    "mp41".parse()?,
+                ],
+                timescale: 1_000,
+            },
+        )?;
+        writer.add_track(&video_only_track_config(&video))?;
+        writer.add_track(&TrackConfig {
+            track_type: TrackType::Audio,
+            timescale: 48_000,
+            language: "und".to_string(),
+            media_conf: MediaConfig::AacConfig(AacConfig {
+                bitrate: 128_000,
+                profile: AudioObjectType::AacLowComplexity,
+                freq_index: SampleFreqIndex::Freq48000,
+                chan_conf: ChannelConfig::Stereo,
+            }),
+        })?;
+
+        for sample_id in 1..=video.frames.unwrap_or_default() {
+            if let Some(sample) = reader.read_sample(video.track_id, sample_id)? {
+                writer.write_sample(1, &sample)?;
+            }
+        }
+
+        writer.write_sample(
+            2,
+            &Mp4Sample {
+                start_time: 0,
+                duration: 1_024,
+                rendering_offset: 0,
+                is_sync: true,
+                bytes: mp4_rs::Bytes::from_static(&[0x21, 0x10, 0x56, 0xE5]),
+            },
+        )?;
+        writer.write_end()?;
+
+        let dir = tempdir()?;
+        let path = dir.path().join("video-audio.mp4");
+        fs::write(&path, writer.into_writer().into_inner())?;
+        Ok((dir, path))
+    }
+
+    #[cfg(feature = "mp4")]
     #[test]
-    fn parse_probe_metadata_uses_avg_frame_rate_fallback() {
-        let metadata = parse_probe_metadata(json!({
-            "streams": [{
-                "codec_type": "video",
-                "width": 960,
-                "height": 576,
-                "avg_frame_rate": "12/1",
-                "nb_frames": "17"
-            }],
-            "format": { "duration": "1.42" }
-        }))
-        .unwrap();
-        assert_eq!(metadata.width, 960);
-        assert_eq!(metadata.height, 576);
+    fn probe_video_reads_native_mp4_metadata() {
+        let frames = sample_frames();
+        let (_dir, path) = write_mp4(&frames, 12).unwrap();
+        let metadata = probe_video(&path).unwrap();
+        assert_eq!(metadata.width, 64);
+        assert_eq!(metadata.height, 64);
         assert_eq!(metadata.fps, 12);
-        assert_eq!(metadata.frames, Some(17));
-        assert_eq!(metadata.duration_ms, Some(1420));
+        assert_eq!(metadata.frames, Some(4));
+        assert!(!metadata.has_audio);
+        assert!(metadata.duration_ms.is_some());
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn strip_audio_track_removes_audio_metadata() {
+        let frames = sample_frames();
+        let (_source_dir, source_path) = write_mp4(&frames, 10).unwrap();
+        let (_audio_dir, audio_path) = write_mp4_with_dummy_aac(&source_path).unwrap();
+        let stripped_dir = tempdir().unwrap();
+        let stripped_path = stripped_dir.path().join("silent.mp4");
+
+        let before = probe_video(&audio_path).unwrap();
+        assert!(before.has_audio);
+        assert_eq!(before.audio_sample_rate, Some(48_000));
+        assert_eq!(before.audio_channels, Some(2));
+
+        strip_audio_track(&audio_path, &stripped_path).unwrap();
+        let after = probe_video(&stripped_path).unwrap();
+        assert!(!after.has_audio);
+        assert_eq!(after.audio_sample_rate, None);
+        assert_eq!(after.audio_channels, None);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn native_transcode_and_preview_outputs_are_generated_without_shellouts() {
+        let frames = sample_frames();
+        let (_dir, source_path) = write_mp4(&frames, 8).unwrap();
+        let out_dir = tempdir().unwrap();
+        let gif_path = out_dir.path().join("out.gif");
+        let apng_path = out_dir.path().join("out.png");
+        let thumb_path = out_dir.path().join("thumb.png");
+        let preview_path = out_dir.path().join("preview.gif");
+
+        transcode_output(&source_path, OutputFormat::Gif, &gif_path).unwrap();
+        transcode_output(&source_path, OutputFormat::Apng, &apng_path).unwrap();
+        extract_thumbnail(&source_path, &thumb_path).unwrap();
+        extract_gif_preview(&source_path, &preview_path).unwrap();
+
+        assert_eq!(&fs::read(&gif_path).unwrap()[..6], b"GIF89a");
+        assert_eq!(&fs::read(&apng_path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&fs::read(&thumb_path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&fs::read(&preview_path).unwrap()[..6], b"GIF89a");
     }
 }

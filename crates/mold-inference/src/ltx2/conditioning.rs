@@ -36,7 +36,10 @@ pub(crate) fn stage_input_file(
     Ok(path)
 }
 
-pub(crate) fn stage_conditioning(req: &GenerateRequest, work_dir: &Path) -> Result<StagedConditioning> {
+pub(crate) fn stage_conditioning(
+    req: &GenerateRequest,
+    work_dir: &Path,
+) -> Result<StagedConditioning> {
     let mut images = Vec::new();
     if let Some(source_image) = &req.source_image {
         let path = stage_input_file(work_dir, "source-image", source_image, "png")?;
