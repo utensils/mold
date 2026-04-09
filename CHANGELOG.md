@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LTX-2 manifest accounting**: model-size and download-path resolution now treat the single-file LTX-2 checkpoints correctly without requiring a standalone VAE asset.
 - **LTX-2 camera-control presets**: `--camera-control dolly-in|dolly-left|dolly-out|dolly-right|jib-down|jib-up|static` now resolves the published LTX-2 19B camera LoRAs instead of failing validation.
 - **LTX-2 local Ada runtime**: local 24 GB FP8 runs now use bridge-side layer streaming with the upstream `fp8-cast` path instead of Hopper-only `fp8-scaled-mm`, fixing the 4090 smoke path and avoiding the TensorRT-LLM dependency.
+- **LTX-2.3 x1.5 spatial upscale requests**: `--spatial-upscale x1.5` now passes validation and resolves the published `ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors` asset on demand instead of failing before the request reaches the engine.
 - **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine ([#158](https://github.com/utensils/mold/issues/158)):
   - Info panel queries `/api/status` for memory, GPU, and busy state when connected to a remote server
   - Model parameter defaults (steps, guidance, width, height) come from the server's catalog instead of local `config.toml`

@@ -1,114 +1,33 @@
 use anyhow::{anyhow, bail, Context, Result};
 use mold_core::{
-    GenerateRequest, GenerateResponse, LoraWeight, Ltx2PipelineMode, ModelPaths, OutputFormat,
-    VideoData,
+    GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat, VideoData,
 };
-use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use super::assets;
+use super::backend::Ltx2Backend;
+use super::conditioning;
+use super::lora;
+use super::media::{self, ProbeMetadata};
+use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::progress::ProgressCallback;
-
-#[derive(Debug, Clone, Copy)]
-struct CameraControlPreset {
-    repo: &'static str,
-    filename: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PipelineKind {
-    OneStage,
-    TwoStage,
-    TwoStageHq,
-    Distilled,
-    IcLora,
-    Keyframe,
-    A2Vid,
-    Retake,
-}
-
-impl PipelineKind {
-    fn module_name(self) -> &'static str {
-        match self {
-            Self::OneStage => "ltx_pipelines.ti2vid_one_stage",
-            Self::TwoStage => "ltx_pipelines.ti2vid_two_stages",
-            Self::TwoStageHq => "ltx_pipelines.ti2vid_two_stages_hq",
-            Self::Distilled => "ltx_pipelines.distilled",
-            Self::IcLora => "ltx_pipelines.ic_lora",
-            Self::Keyframe => "ltx_pipelines.keyframe_interpolation",
-            Self::A2Vid => "ltx_pipelines.a2vid_two_stage",
-            Self::Retake => "ltx_pipelines.retake",
-        }
-    }
-
-    fn requires_distilled_checkpoint(self) -> bool {
-        matches!(self, Self::Distilled | Self::IcLora | Self::Retake)
-    }
-}
-
-#[derive(Serialize)]
-struct BridgeRequest {
-    module: String,
-    checkpoint_path: String,
-    distilled_checkpoint_path: Option<String>,
-    distilled_lora_path: Option<String>,
-    spatial_upsampler_path: Option<String>,
-    gemma_root: String,
-    output_path: String,
-    prompt: String,
-    negative_prompt: Option<String>,
-    seed: u64,
-    width: u32,
-    height: u32,
-    num_frames: u32,
-    frame_rate: u32,
-    num_inference_steps: u32,
-    quantization: Option<String>,
-    streaming_prefetch_count: Option<u32>,
-    images: Vec<BridgeImage>,
-    loras: Vec<LoraWeight>,
-    audio_path: Option<String>,
-    video_path: Option<String>,
-    retake_start_seconds: Option<f32>,
-    retake_end_seconds: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct BridgeImage {
-    path: String,
-    frame: u32,
-    strength: f32,
-}
-
-#[derive(Default)]
-struct ProbeMetadata {
-    width: u32,
-    height: u32,
-    fps: u32,
-    frames: Option<u32>,
-    duration_ms: Option<u64>,
-    has_audio: bool,
-    audio_sample_rate: Option<u32>,
-    audio_channels: Option<u32>,
-}
 
 pub struct Ltx2Engine {
     model_name: String,
     paths: ModelPaths,
-    _load_strategy: LoadStrategy,
     loaded: bool,
     on_progress: Option<ProgressCallback>,
 }
 
 impl Ltx2Engine {
-    pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
+    pub fn new(model_name: String, paths: ModelPaths, _load_strategy: LoadStrategy) -> Self {
         Self {
             model_name,
             paths,
-            _load_strategy: load_strategy,
             loaded: false,
             on_progress: None,
         }
@@ -122,25 +41,85 @@ impl Ltx2Engine {
         }
     }
 
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+    fn search_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.extend(cwd.ancestors().map(Path::to_path_buf));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                roots.extend(parent.ancestors().map(Path::to_path_buf));
+            }
+        }
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
-    fn upstream_root(&self) -> PathBuf {
-        Self::repo_root().join("tmp/LTX-2-upstream")
+    fn find_runtime_path(relatives: &[&str]) -> Option<PathBuf> {
+        for root in Self::search_roots() {
+            for relative in relatives {
+                let candidate = root.join(relative);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
-    fn bridge_script(&self) -> PathBuf {
-        Self::repo_root().join("scripts/ltx2_bridge.py")
+    fn upstream_root(&self) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("MOLD_LTX2_UPSTREAM_ROOT").map(PathBuf::from) {
+            return Ok(path);
+        }
+
+        Self::find_runtime_path(&["tmp/LTX-2-upstream"]).ok_or_else(|| {
+            anyhow!(
+                "could not locate the LTX-2 upstream checkout; set MOLD_LTX2_UPSTREAM_ROOT or clone it into tmp/LTX-2-upstream"
+            )
+        })
+    }
+
+    fn bridge_script(&self) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("MOLD_LTX2_BRIDGE_PATH").map(PathBuf::from) {
+            return Ok(path);
+        }
+
+        Self::find_runtime_path(&["scripts/ltx2_bridge.py", "share/mold/ltx2_bridge.py"])
+            .ok_or_else(|| {
+                anyhow!(
+                    "could not locate ltx2_bridge.py; set MOLD_LTX2_BRIDGE_PATH or run from a checkout/package that includes the bridge script"
+                )
+            })
+    }
+
+    fn venv_python(upstream_root: &Path) -> PathBuf {
+        upstream_root.join(".venv/bin/python")
+    }
+
+    fn python_env_ready(upstream_root: &Path) -> bool {
+        let venv_python = Self::venv_python(upstream_root);
+        if !venv_python.is_file() {
+            return false;
+        }
+
+        Command::new(&venv_python)
+            .arg("-c")
+            .arg("import ltx_pipelines")
+            .current_dir(upstream_root)
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     fn ensure_python_env(&self) -> Result<()> {
-        let upstream_root = self.upstream_root();
-        let venv_python = upstream_root.join(".venv/bin/python");
-        if venv_python.exists() {
+        let upstream_root = self.upstream_root()?;
+        if !upstream_root.join("pyproject.toml").exists() {
+            bail!(
+                "LTX-2 upstream root '{}' does not look valid (missing pyproject.toml)",
+                upstream_root.display()
+            );
+        }
+        if Self::python_env_ready(&upstream_root) {
             return Ok(());
         }
 
@@ -154,15 +133,17 @@ impl Ltx2Engine {
         if !status.success() {
             bail!("uv sync failed for {}", upstream_root.display());
         }
+        if !Self::python_env_ready(&upstream_root) {
+            bail!(
+                "LTX-2 Python environment is still not importable after uv sync in {}",
+                upstream_root.display()
+            );
+        }
         Ok(())
     }
 
     fn gemma_root(&self) -> Result<PathBuf> {
-        self.paths
-            .text_encoder_files
-            .first()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or_else(|| anyhow!("LTX-2 requires Gemma text encoder files to be available"))
+        assets::gemma_root(&self.paths)
     }
 
     fn select_pipeline(&self, req: &GenerateRequest) -> Result<PipelineKind> {
@@ -198,81 +179,12 @@ impl Ltx2Engine {
     }
 
     fn request_quantization(&self) -> Option<String> {
-        self.model_name.contains(":fp8").then(|| {
-            // Use the no-extra-deps FP8 path by default. Hopper-specific
-            // `fp8-scaled-mm` requires TensorRT-LLM and does not fit the
-            // normal local 4090 workflow.
-            "fp8-cast".to_string()
-        })
+        assets::request_quantization(&self.model_name)
     }
 
-    fn camera_control_preset(name: &str) -> Option<CameraControlPreset> {
-        let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
-        match normalized.as_str() {
-            "dolly-in" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-In",
-                filename: "ltx-2-19b-lora-camera-control-dolly-in.safetensors",
-            }),
-            "dolly-left" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Left",
-                filename: "ltx-2-19b-lora-camera-control-dolly-left.safetensors",
-            }),
-            "dolly-out" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Out",
-                filename: "ltx-2-19b-lora-camera-control-dolly-out.safetensors",
-            }),
-            "dolly-right" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Dolly-Right",
-                filename: "ltx-2-19b-lora-camera-control-dolly-right.safetensors",
-            }),
-            "jib-down" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Down",
-                filename: "ltx-2-19b-lora-camera-control-jib-down.safetensors",
-            }),
-            "jib-up" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Jib-Up",
-                filename: "ltx-2-19b-lora-camera-control-jib-up.safetensors",
-            }),
-            "static" => Some(CameraControlPreset {
-                repo: "Lightricks/LTX-2-19b-LoRA-Camera-Control-Static",
-                filename: "ltx-2-19b-lora-camera-control-static.safetensors",
-            }),
-            _ => None,
-        }
-    }
-
-    fn resolve_camera_control_preset(&self, name: &str) -> Result<PathBuf> {
-        if self.model_name.contains("ltx-2.3") {
-            bail!(
-                "camera-control presets are currently published for LTX-2 19B only; pass an explicit .safetensors path for LTX-2.3"
-            );
-        }
-
-        let preset = Self::camera_control_preset(name).ok_or_else(|| {
-            anyhow!(
-                "unknown camera-control preset '{name}' (expected one of: dolly-in, dolly-left, dolly-out, dolly-right, jib-down, jib-up, static)"
-            )
-        })?;
-
-        mold_core::download::download_single_file_sync(
-            preset.repo,
-            preset.filename,
-            Some("shared/ltx2-camera-control"),
-        )
-        .map_err(|err| anyhow!("failed to download camera-control preset '{name}': {err}"))
-    }
-
-    fn stage_input_file(dir: &Path, stem: &str, data: &[u8], default_ext: &str) -> Result<PathBuf> {
-        let ext = if data.starts_with(&[0x89, b'P', b'N', b'G']) {
-            "png"
-        } else if data.starts_with(&[0xFF, 0xD8]) {
-            "jpg"
-        } else {
-            default_ext
-        };
-        let path = dir.join(format!("{stem}.{ext}"));
-        fs::write(&path, data)?;
-        Ok(path)
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn camera_control_preset(name: &str) -> Option<lora::CameraControlPreset> {
+        lora::camera_control_preset(name)
     }
 
     fn materialize_request(
@@ -280,74 +192,19 @@ impl Ltx2Engine {
         req: &GenerateRequest,
         work_dir: &Path,
         output_path: &Path,
-    ) -> Result<BridgeRequest> {
+    ) -> Result<Ltx2GeneratePlan> {
         let pipeline = self.select_pipeline(req)?;
         if req.temporal_upscale.is_some() {
             bail!("temporal upscaling is not implemented in the current upstream LTX-2 bridge");
         }
-        if req.spatial_upscale.is_some()
-            && self
-                .paths
-                .spatial_upscaler
-                .as_ref()
-                .is_some_and(|path| path.to_string_lossy().contains("x2"))
-            && matches!(
-                req.spatial_upscale,
-                Some(mold_core::Ltx2SpatialUpscale::X1_5)
-            )
-        {
-            bail!("x1.5 spatial upscaling is not wired to a downloaded asset yet");
-        }
+        let conditioning = conditioning::stage_conditioning(req, work_dir)?;
+        let loras = lora::resolve_loras(&self.model_name, req)?;
+        let spatial_upsampler_path =
+            assets::resolve_spatial_upscaler_path(&self.model_name, &self.paths, req.spatial_upscale)?
+                .map(|path| path.to_string_lossy().to_string());
 
-        let mut images = Vec::new();
-        if let Some(source_image) = &req.source_image {
-            let path = Self::stage_input_file(work_dir, "source-image", source_image, "png")?;
-            images.push(BridgeImage {
-                path: path.to_string_lossy().to_string(),
-                frame: 0,
-                strength: req.strength as f32,
-            });
-        }
-        if let Some(keyframes) = &req.keyframes {
-            for (index, keyframe) in keyframes.iter().enumerate() {
-                let path = Self::stage_input_file(
-                    work_dir,
-                    &format!("keyframe-{index:02}"),
-                    &keyframe.image,
-                    "png",
-                )?;
-                images.push(BridgeImage {
-                    path: path.to_string_lossy().to_string(),
-                    frame: keyframe.frame,
-                    strength: 1.0,
-                });
-            }
-        }
-
-        let audio_path = req
-            .audio_file
-            .as_ref()
-            .map(|bytes| Self::stage_input_file(work_dir, "conditioning-audio", bytes, "wav"))
-            .transpose()?
-            .map(|path| path.to_string_lossy().to_string());
-
-        let video_path = req
-            .source_video
-            .as_ref()
-            .map(|bytes| Self::stage_input_file(work_dir, "source-video", bytes, "mp4"))
-            .transpose()?
-            .map(|path| path.to_string_lossy().to_string());
-
-        let mut loras = req.loras.clone().unwrap_or_default();
-        for lora in &mut loras {
-            if let Some(name) = lora.path.strip_prefix("camera-control:") {
-                let resolved = self.resolve_camera_control_preset(name)?;
-                lora.path = resolved.to_string_lossy().to_string();
-            }
-        }
-
-        Ok(BridgeRequest {
-            module: pipeline.module_name().to_string(),
+        Ok(Ltx2GeneratePlan {
+            pipeline,
             checkpoint_path: self.paths.transformer.to_string_lossy().to_string(),
             distilled_checkpoint_path: pipeline
                 .requires_distilled_checkpoint()
@@ -357,11 +214,7 @@ impl Ltx2Engine {
                 .distilled_lora
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
-            spatial_upsampler_path: self
-                .paths
-                .spatial_upscaler
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
+            spatial_upsampler_path,
             gemma_root: self.gemma_root()?.to_string_lossy().to_string(),
             output_path: output_path.to_string_lossy().to_string(),
             prompt: req.prompt.clone(),
@@ -374,45 +227,29 @@ impl Ltx2Engine {
             num_inference_steps: req.steps,
             quantization: self.request_quantization(),
             streaming_prefetch_count: Some(2),
-            images,
+            conditioning,
             loras,
-            audio_path,
-            video_path,
-            retake_start_seconds: req.retake_range.as_ref().map(|range| range.start_seconds),
-            retake_end_seconds: req.retake_range.as_ref().map(|range| range.end_seconds),
+            retake_range: req.retake_range.clone(),
         })
     }
 
     fn run_bridge(&self, request_path: &Path) -> Result<()> {
-        let upstream_root = self.upstream_root();
+        let upstream_root = self.upstream_root()?;
         let status = Command::new("uv")
             .arg("run")
             .arg("--project")
             .arg(&upstream_root)
             .arg("python")
-            .arg(self.bridge_script())
+            .arg(self.bridge_script()?)
             .arg("--request")
             .arg(request_path)
+            .arg("--upstream-root")
+            .arg(&upstream_root)
             .env("PYTORCH_ALLOC_CONF", "expandable_segments:True")
             .status()
             .context("failed to invoke LTX-2 bridge")?;
         if !status.success() {
             bail!("LTX-2 bridge process failed");
-        }
-        Ok(())
-    }
-
-    fn run_ffmpeg<I, S>(&self, args: I, context_message: &str) -> Result<()>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        let status = Command::new("ffmpeg")
-            .args(args)
-            .status()
-            .with_context(|| format!("failed to run ffmpeg for {context_message}"))?;
-        if !status.success() {
-            bail!("ffmpeg failed while {context_message}");
         }
         Ok(())
     }
@@ -423,147 +260,28 @@ impl Ltx2Engine {
         output_format: OutputFormat,
         out_path: &Path,
     ) -> Result<()> {
-        match output_format {
-            OutputFormat::Mp4 => {
-                fs::copy(input_mp4, out_path)?;
-            }
-            OutputFormat::Gif => {
-                self.run_ffmpeg(
-                    [
-                        "-y",
-                        "-i",
-                        input_mp4.to_string_lossy().as_ref(),
-                        out_path.to_string_lossy().as_ref(),
-                    ],
-                    "encoding GIF",
-                )?;
-            }
-            OutputFormat::Apng => {
-                self.run_ffmpeg(
-                    [
-                        "-y",
-                        "-i",
-                        input_mp4.to_string_lossy().as_ref(),
-                        "-plays",
-                        "0",
-                        out_path.to_string_lossy().as_ref(),
-                    ],
-                    "encoding APNG",
-                )?;
-            }
-            OutputFormat::Webp => {
-                self.run_ffmpeg(
-                    [
-                        "-y",
-                        "-i",
-                        input_mp4.to_string_lossy().as_ref(),
-                        "-loop",
-                        "0",
-                        out_path.to_string_lossy().as_ref(),
-                    ],
-                    "encoding WebP",
-                )?;
-            }
-            other => bail!("{other:?} is not supported for LTX-2 video output"),
-        }
-        Ok(())
+        media::transcode_output(input_mp4, output_format, out_path)
     }
 
     fn strip_audio_track(&self, input_mp4: &Path, out_path: &Path) -> Result<()> {
-        self.run_ffmpeg(
-            [
-                "-y",
-                "-i",
-                input_mp4.to_string_lossy().as_ref(),
-                "-an",
-                "-c:v",
-                "copy",
-                out_path.to_string_lossy().as_ref(),
-            ],
-            "stripping audio track",
-        )
+        media::strip_audio_track(input_mp4, out_path)
     }
 
     fn extract_thumbnail(&self, input_video: &Path, output_png: &Path) -> Result<()> {
-        self.run_ffmpeg(
-            [
-                "-y",
-                "-i",
-                input_video.to_string_lossy().as_ref(),
-                "-update",
-                "1",
-                "-frames:v",
-                "1",
-                output_png.to_string_lossy().as_ref(),
-            ],
-            "extracting thumbnail",
-        )
+        media::extract_thumbnail(input_video, output_png)
     }
 
     fn extract_gif_preview(&self, input_video: &Path, output_gif: &Path) -> Result<()> {
-        self.run_ffmpeg(
-            [
-                "-y",
-                "-i",
-                input_video.to_string_lossy().as_ref(),
-                output_gif.to_string_lossy().as_ref(),
-            ],
-            "encoding GIF preview",
-        )
+        media::extract_gif_preview(input_video, output_gif)
     }
 
     fn probe_video(&self, input_video: &Path) -> Result<ProbeMetadata> {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-of",
-                "json",
-                input_video.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .context("failed to run ffprobe")?;
-        if !output.status.success() {
-            bail!("ffprobe failed for {}", input_video.display());
-        }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        let mut metadata = ProbeMetadata::default();
-        let streams = value["streams"].as_array().cloned().unwrap_or_default();
-        for stream in streams {
-            match stream["codec_type"].as_str() {
-                Some("video") => {
-                    metadata.width = stream["width"].as_u64().unwrap_or_default() as u32;
-                    metadata.height = stream["height"].as_u64().unwrap_or_default() as u32;
-                    metadata.frames = stream["nb_frames"]
-                        .as_str()
-                        .and_then(|value| value.parse().ok())
-                        .or_else(|| {
-                            stream["nb_read_frames"]
-                                .as_str()
-                                .and_then(|value| value.parse().ok())
-                        });
-                    metadata.fps = stream["r_frame_rate"]
-                        .as_str()
-                        .and_then(parse_ffprobe_fps)
-                        .unwrap_or(24);
-                }
-                Some("audio") => {
-                    metadata.has_audio = true;
-                    metadata.audio_sample_rate = stream["sample_rate"]
-                        .as_str()
-                        .and_then(|value| value.parse().ok());
-                    metadata.audio_channels = stream["channels"].as_u64().map(|value| value as u32);
-                }
-                _ => {}
-            }
-        }
-        metadata.duration_ms = value["format"]["duration"]
-            .as_str()
-            .and_then(|value| value.parse::<f64>().ok())
-            .map(|seconds| (seconds * 1000.0).round() as u64);
-        Ok(metadata)
+        media::probe_video(input_video)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn parse_probe_metadata(value: serde_json::Value) -> Result<ProbeMetadata> {
+        media::parse_probe_metadata(value)
     }
 }
 
@@ -580,7 +298,8 @@ impl InferenceEngine for Ltx2Engine {
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let upstream_output = work_dir.path().join("ltx2-output.mp4");
-        let bridge_request = self.materialize_request(req, work_dir.path(), &upstream_output)?;
+        let plan = self.materialize_request(req, work_dir.path(), &upstream_output)?;
+        let bridge_request = plan.to_bridge_request();
         let bridge_request_path = work_dir.path().join("request.json");
         fs::write(
             &bridge_request_path,
@@ -616,7 +335,7 @@ impl InferenceEngine for Ltx2Engine {
         let final_bytes = fs::read(&final_output)?;
         let thumbnail_bytes = fs::read(thumbnail_path)?;
         let probe = self.probe_video(&working_mp4)?;
-        let seed = bridge_request.seed;
+        let seed = plan.seed;
 
         Ok(GenerateResponse {
             images: vec![],
@@ -664,6 +383,7 @@ impl InferenceEngine for Ltx2Engine {
                 self.paths.transformer.display()
             );
         }
+        Ltx2Backend::detect().ensure_supported()?;
         self.ensure_python_env()?;
         self.loaded = true;
         Ok(())
@@ -686,19 +406,15 @@ impl InferenceEngine for Ltx2Engine {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_ffprobe_fps(value: &str) -> Option<u32> {
-    let (num, den) = value.split_once('/')?;
-    let num: f64 = num.parse().ok()?;
-    let den: f64 = den.parse().ok()?;
-    if den == 0.0 {
-        return None;
-    }
-    Some((num / den).round() as u32)
+    media::parse_ffprobe_fps(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn dummy_paths() -> ModelPaths {
@@ -851,5 +567,38 @@ mod tests {
         assert_eq!(bridge.height, 576);
         assert_eq!(bridge.num_frames, 17);
         assert_eq!(bridge.frame_rate, 12);
+    }
+
+    #[test]
+    fn parse_probe_metadata_rejects_missing_video_dimensions() {
+        let err = Ltx2Engine::parse_probe_metadata(json!({
+            "streams": [{
+                "codec_type": "video",
+                "r_frame_rate": "24/1"
+            }],
+            "format": { "duration": "1.0" }
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("valid video dimensions"));
+    }
+
+    #[test]
+    fn parse_probe_metadata_uses_avg_frame_rate_fallback() {
+        let metadata = Ltx2Engine::parse_probe_metadata(json!({
+            "streams": [{
+                "codec_type": "video",
+                "width": 960,
+                "height": 576,
+                "avg_frame_rate": "12/1",
+                "nb_frames": "17"
+            }],
+            "format": { "duration": "1.42" }
+        }))
+        .unwrap();
+        assert_eq!(metadata.width, 960);
+        assert_eq!(metadata.height, 576);
+        assert_eq!(metadata.fps, 12);
+        assert_eq!(metadata.frames, Some(17));
+        assert_eq!(metadata.duration_ms, Some(1420));
     }
 }

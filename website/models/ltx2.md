@@ -34,7 +34,8 @@ and a checked-out upstream tree at `tmp/LTX-2-upstream`.
 
 - Default output is `mp4` for this family. `gif`, `apng`, and `webp` are also
   supported, but they are treated as silent exports.
-- `x2` spatial upscaling is wired. `x1.5` is not.
+- `x2` spatial upscaling is wired across the family. `x1.5` is wired for
+  `ltx-2.3-*` by resolving the published upstream asset on demand.
 - Temporal upscaling is not wired yet.
 - Camera-control preset aliases are currently published for LTX-2 19B only. For
   LTX-2.3, pass an explicit `.safetensors` path.
