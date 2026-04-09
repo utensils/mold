@@ -4,7 +4,7 @@ mod conditioning;
 mod execution;
 mod guidance;
 mod lora;
-mod media;
+pub mod media;
 mod model;
 mod pipeline;
 mod plan;

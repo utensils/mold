@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, bail, Context, Result};
-use image::RgbImage;
+use image::{GenericImage, Rgb, RgbImage};
 use mold_core::OutputFormat;
 use std::fs;
 use std::io::Cursor;
@@ -19,15 +19,15 @@ use openh264::formats::YUVSource;
 use crate::ltx_video::video_enc;
 
 #[derive(Debug, Default)]
-pub(crate) struct ProbeMetadata {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) fps: u32,
-    pub(crate) frames: Option<u32>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) has_audio: bool,
-    pub(crate) audio_sample_rate: Option<u32>,
-    pub(crate) audio_channels: Option<u32>,
+pub struct ProbeMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frames: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub has_audio: bool,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channels: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -466,21 +466,33 @@ pub(crate) fn strip_audio_track(input_mp4: &Path, out_path: &Path) -> Result<()>
     copy_video_only_mp4(input_mp4, out_path)
 }
 
-pub(crate) fn extract_thumbnail(input_video: &Path, output_png: &Path) -> Result<()> {
+pub fn extract_thumbnail(input_video: &Path, output_png: &Path) -> Result<()> {
     let video = decode_video(input_video)?;
     let thumbnail = video_enc::first_frame_png(&video.frames)?;
     fs::write(output_png, thumbnail)?;
     Ok(())
 }
 
-pub(crate) fn extract_gif_preview(input_video: &Path, output_gif: &Path) -> Result<()> {
+pub fn extract_gif_preview(input_video: &Path, output_gif: &Path) -> Result<()> {
     let video = decode_video(input_video)?;
     let gif = video_enc::encode_gif(&video.frames, video.metadata.fps)?;
     fs::write(output_gif, gif)?;
     Ok(())
 }
 
-pub(crate) fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
+pub fn write_contact_sheet(input_video: &Path, output_png: &Path) -> Result<()> {
+    let video = decode_video(input_video)?;
+    let sheet = contact_sheet_image(&video.frames)?;
+    let mut buf = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(sheet)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .context("failed to encode contact sheet PNG")?;
+    fs::write(output_png, buf.into_inner())
+        .with_context(|| format!("failed to write {}", output_png.display()))?;
+    Ok(())
+}
+
+pub fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
     let reader = read_mp4(input_video)?;
     let video = find_video_track(&reader)?;
     let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
@@ -494,6 +506,33 @@ pub(crate) fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
         audio_sample_rate,
         audio_channels,
     })
+}
+
+fn contact_sheet_image(frames: &[RgbImage]) -> Result<RgbImage> {
+    anyhow::ensure!(!frames.is_empty(), "no frames for contact sheet");
+
+    let frame_width = frames[0].width();
+    let frame_height = frames[0].height();
+    let columns = ((frames.len() as f64).sqrt().ceil() as u32).max(1);
+    let rows = (frames.len() as u32).div_ceil(columns);
+    let gutter = 8u32;
+    let margin = 12u32;
+    let sheet_width = columns * frame_width + (columns.saturating_sub(1) * gutter) + margin * 2;
+    let sheet_height = rows * frame_height + (rows.saturating_sub(1) * gutter) + margin * 2;
+    let mut sheet = RgbImage::from_pixel(sheet_width, sheet_height, Rgb([18, 18, 18]));
+
+    for (index, frame) in frames.iter().enumerate() {
+        let index = index as u32;
+        let row = index / columns;
+        let col = index % columns;
+        let x = margin + col * (frame_width + gutter);
+        let y = margin + row * (frame_height + gutter);
+        sheet
+            .copy_from(frame, x, y)
+            .with_context(|| format!("failed to place frame {} in contact sheet", index))?;
+    }
+
+    Ok(sheet)
 }
 
 #[cfg(all(test, feature = "mp4"))]
@@ -634,15 +673,35 @@ mod tests {
         let apng_path = out_dir.path().join("out.png");
         let thumb_path = out_dir.path().join("thumb.png");
         let preview_path = out_dir.path().join("preview.gif");
+        let contact_sheet_path = out_dir.path().join("contact-sheet.png");
 
         transcode_output(&source_path, OutputFormat::Gif, &gif_path).unwrap();
         transcode_output(&source_path, OutputFormat::Apng, &apng_path).unwrap();
         extract_thumbnail(&source_path, &thumb_path).unwrap();
         extract_gif_preview(&source_path, &preview_path).unwrap();
+        write_contact_sheet(&source_path, &contact_sheet_path).unwrap();
 
         assert_eq!(&fs::read(&gif_path).unwrap()[..6], b"GIF89a");
         assert_eq!(&fs::read(&apng_path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&fs::read(&thumb_path).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&fs::read(&preview_path).unwrap()[..6], b"GIF89a");
+        assert_eq!(
+            &fs::read(&contact_sheet_path).unwrap()[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn contact_sheet_layout_covers_all_frames() {
+        let frames = sample_frames();
+        let sheet = contact_sheet_image(&frames).unwrap();
+
+        assert_eq!(sheet.width(), 160);
+        assert_eq!(sheet.height(), 160);
+        assert_eq!(*sheet.get_pixel(12, 12), Rgb([255, 64, 32]));
+        assert_eq!(*sheet.get_pixel(84, 12), Rgb([32, 192, 255]));
+        assert_eq!(*sheet.get_pixel(12, 84), Rgb([16, 224, 96]));
+        assert_eq!(*sheet.get_pixel(84, 84), Rgb([240, 224, 64]));
     }
 }
