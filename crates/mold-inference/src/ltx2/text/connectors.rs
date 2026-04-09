@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor, D};
+use candle_nn::{linear_b, Activation, Linear, Module, VarBuilder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaddingSide {
@@ -187,6 +188,369 @@ pub fn replace_padded_with_registers(
     ))
 }
 
+#[derive(Debug, Clone)]
+pub enum EmbeddingsFeatureExtractor {
+    V1(FeatureExtractorV1),
+    V2(FeatureExtractorV2),
+}
+
+impl EmbeddingsFeatureExtractor {
+    pub fn forward(
+        &self,
+        hidden_states: &[Tensor],
+        attention_mask: &Tensor,
+        padding_side: PaddingSide,
+    ) -> Result<(Tensor, Option<Tensor>)> {
+        match self {
+            Self::V1(extractor) => extractor.forward(hidden_states, attention_mask, padding_side),
+            Self::V2(extractor) => extractor.forward(hidden_states, attention_mask),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingsProcessorOutput {
+    pub video_encoding: Tensor,
+    pub audio_encoding: Option<Tensor>,
+    pub attention_mask: Tensor,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingsProcessor {
+    feature_extractor: EmbeddingsFeatureExtractor,
+    video_connector: Embeddings1DConnector,
+    audio_connector: Option<Embeddings1DConnector>,
+}
+
+impl EmbeddingsProcessor {
+    pub fn new(
+        feature_extractor: EmbeddingsFeatureExtractor,
+        video_connector: Embeddings1DConnector,
+        audio_connector: Option<Embeddings1DConnector>,
+    ) -> Self {
+        Self {
+            feature_extractor,
+            video_connector,
+            audio_connector,
+        }
+    }
+
+    pub fn create_embeddings(
+        &self,
+        video_features: &Tensor,
+        audio_features: Option<&Tensor>,
+        additive_attention_mask: &Tensor,
+    ) -> Result<(Tensor, Option<Tensor>, Tensor)> {
+        if self.audio_connector.is_some() && audio_features.is_none() {
+            bail!("audio connector is configured but no audio features were provided");
+        }
+        if self.audio_connector.is_none() && audio_features.is_some() {
+            bail!("audio features were provided but no audio connector is configured");
+        }
+
+        let (video_encoded, video_mask) = self
+            .video_connector
+            .forward(video_features, additive_attention_mask)?;
+        let (video_encoded, binary_mask) = to_binary_mask(&video_encoded, &video_mask)?;
+
+        let audio_encoded = match (&self.audio_connector, audio_features) {
+            (Some(connector), Some(features)) => {
+                Some(connector.forward(features, additive_attention_mask)?.0)
+            }
+            _ => None,
+        };
+
+        Ok((
+            video_encoded,
+            audio_encoded,
+            binary_mask.squeeze(D::Minus1)?,
+        ))
+    }
+
+    pub fn process_hidden_states(
+        &self,
+        hidden_states: &[Tensor],
+        attention_mask: &Tensor,
+        padding_side: PaddingSide,
+    ) -> Result<EmbeddingsProcessorOutput> {
+        let (video_features, audio_features) =
+            self.feature_extractor
+                .forward(hidden_states, attention_mask, padding_side)?;
+        let additive_mask = convert_to_additive_mask(attention_mask, video_features.dtype())?;
+        let (video_encoding, audio_encoding, binary_mask) =
+            self.create_embeddings(&video_features, audio_features.as_ref(), &additive_mask)?;
+        Ok(EmbeddingsProcessorOutput {
+            video_encoding,
+            audio_encoding,
+            attention_mask: binary_mask,
+        })
+    }
+}
+
+pub fn convert_to_additive_mask(attention_mask: &Tensor, dtype: DType) -> Result<Tensor> {
+    let (batch, seq) = attention_mask.dims2()?;
+    let mask = attention_mask
+        .to_dtype(DType::F32)?
+        .reshape((batch, 1, 1, seq))?;
+    let invalid = (mask.ones_like()? - &mask)?;
+    invalid
+        .affine(-1e30f64, 0.0)?
+        .to_dtype(dtype)
+        .map_err(Into::into)
+}
+
+pub fn to_binary_mask(encoded: &Tensor, encoded_mask: &Tensor) -> Result<(Tensor, Tensor)> {
+    let binary_mask =
+        additive_mask_to_binary(encoded_mask)?.reshape((encoded.dim(0)?, encoded.dim(1)?, 1))?;
+    Ok((
+        encoded.broadcast_mul(&binary_mask.to_dtype(encoded.dtype())?)?,
+        binary_mask,
+    ))
+}
+
+fn additive_mask_to_binary(mask: &Tensor) -> Result<Tensor> {
+    match mask.rank() {
+        4 => {
+            let (batch, _heads, _query, seq) = mask.dims4()?;
+            let mask = mask.narrow(1, 0, 1)?.narrow(2, 0, 1)?;
+            let values = mask.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let binary = values
+                .into_iter()
+                .map(|value| u8::from(value > -1.0))
+                .collect::<Vec<_>>();
+            Ok(Tensor::from_vec(binary, (batch, seq), mask.device())?)
+        }
+        2 => Ok(mask.clone()),
+        rank => bail!("unsupported attention mask rank {rank}; expected [B, T] or [B, 1, 1, T]"),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConnectorAttention {
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+    out_proj: Linear,
+    heads: usize,
+    dim_head: usize,
+    positional_embedding_theta: f64,
+}
+
+impl ConnectorAttention {
+    fn new(
+        dim: usize,
+        heads: usize,
+        dim_head: usize,
+        positional_embedding_theta: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let inner_dim = heads * dim_head;
+        Ok(Self {
+            q_proj: linear_b(dim, inner_dim, true, vb.pp("to_q"))?,
+            k_proj: linear_b(dim, inner_dim, true, vb.pp("to_k"))?,
+            v_proj: linear_b(dim, inner_dim, true, vb.pp("to_v"))?,
+            out_proj: linear_b(inner_dim, dim, true, vb.pp("to_out").pp("0"))?,
+            heads,
+            dim_head,
+            positional_embedding_theta,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+        let (batch, seq, dim) = xs.dims3()?;
+        let inner_dim = self.heads * self.dim_head;
+        let q = scale_free_rms_norm(&self.q_proj.forward(xs)?, 1e-6)?;
+        let k = scale_free_rms_norm(&self.k_proj.forward(xs)?, 1e-6)?;
+        let v = self.v_proj.forward(xs)?;
+
+        let q = q
+            .reshape((batch, seq, self.heads, self.dim_head))?
+            .transpose(1, 2)?;
+        let k = k
+            .reshape((batch, seq, self.heads, self.dim_head))?
+            .transpose(1, 2)?;
+        let v = v
+            .reshape((batch, seq, self.heads, self.dim_head))?
+            .transpose(1, 2)?;
+
+        let (cos, sin) = rotary_emb_cache(
+            xs.device(),
+            xs.dtype(),
+            seq,
+            self.dim_head,
+            self.positional_embedding_theta,
+        )?;
+        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
+        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+
+        let scale = 1f64 / (self.dim_head as f64).sqrt();
+        let scores = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let scores = match attention_mask {
+            Some(mask) => scores.broadcast_add(mask)?,
+            None => scores,
+        };
+        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        let context = probs.matmul(&v)?;
+        let context = context.transpose(1, 2)?.reshape((batch, seq, inner_dim))?;
+        let output = self.out_proj.forward(&context)?;
+        if output.dim(D::Minus1)? != dim {
+            bail!("connector attention output dimension mismatch");
+        }
+        Ok(output)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConnectorFeedForward {
+    proj_in: Linear,
+    proj_out: Linear,
+}
+
+impl ConnectorFeedForward {
+    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+        let inner_dim = dim * 4;
+        Ok(Self {
+            proj_in: linear_b(dim, inner_dim, true, vb.pp("net").pp("0").pp("proj"))?,
+            proj_out: linear_b(inner_dim, dim, true, vb.pp("net").pp("2"))?,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let hidden = self.proj_in.forward(xs)?;
+        let hidden = Activation::GeluPytorchTanh.forward(&hidden)?;
+        self.proj_out.forward(&hidden).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BasicTransformerBlock1D {
+    attn1: ConnectorAttention,
+    ff: ConnectorFeedForward,
+}
+
+impl BasicTransformerBlock1D {
+    fn new(
+        dim: usize,
+        heads: usize,
+        dim_head: usize,
+        positional_embedding_theta: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        Ok(Self {
+            attn1: ConnectorAttention::new(
+                dim,
+                heads,
+                dim_head,
+                positional_embedding_theta,
+                vb.pp("attn1"),
+            )?,
+            ff: ConnectorFeedForward::new(dim, vb.pp("ff"))?,
+        })
+    }
+
+    fn forward(&self, hidden_states: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+        let attn_input = scale_free_rms_norm(hidden_states, 1e-6)?;
+        let hidden_states = (self.attn1.forward(&attn_input, attention_mask)? + hidden_states)?;
+        let ff_input = scale_free_rms_norm(&hidden_states, 1e-6)?;
+        Ok(self.ff.forward(&ff_input)?.broadcast_add(&hidden_states)?)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Embeddings1DConnector {
+    transformer_1d_blocks: Vec<BasicTransformerBlock1D>,
+    learnable_registers: Option<Tensor>,
+    positional_embedding_theta: f64,
+}
+
+impl Embeddings1DConnector {
+    pub fn new(
+        num_attention_heads: usize,
+        attention_head_dim: usize,
+        num_layers: usize,
+        positional_embedding_theta: f64,
+        num_learnable_registers: Option<usize>,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let inner_dim = num_attention_heads * attention_head_dim;
+        let blocks = (0..num_layers)
+            .map(|index| {
+                BasicTransformerBlock1D::new(
+                    inner_dim,
+                    num_attention_heads,
+                    attention_head_dim,
+                    positional_embedding_theta,
+                    vb.pp("transformer_1d_blocks").pp(index),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let learnable_registers = num_learnable_registers
+            .map(|count| vb.get((count, inner_dim), "learnable_registers"))
+            .transpose()?;
+        Ok(Self {
+            transformer_1d_blocks: blocks,
+            learnable_registers,
+            positional_embedding_theta,
+        })
+    }
+
+    pub fn forward(
+        &self,
+        hidden_states: &Tensor,
+        attention_mask: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let mut hidden_states = hidden_states.clone();
+        let mut attention_mask = attention_mask.clone();
+
+        if let Some(registers) = &self.learnable_registers {
+            let binary_mask = additive_mask_to_binary(&attention_mask)?;
+            let (packed, packed_mask) =
+                replace_padded_with_registers(&hidden_states, &binary_mask, registers)?;
+            hidden_states = packed;
+            attention_mask = convert_to_additive_mask(&packed_mask, hidden_states.dtype())?;
+        }
+
+        for block in &self.transformer_1d_blocks {
+            hidden_states = block.forward(&hidden_states, Some(&attention_mask))?;
+        }
+        hidden_states = scale_free_rms_norm(&hidden_states, 1e-6)?;
+        Ok((hidden_states, attention_mask))
+    }
+
+    pub fn positional_embedding_theta(&self) -> f64 {
+        self.positional_embedding_theta
+    }
+}
+
+fn scale_free_rms_norm(xs: &Tensor, eps: f64) -> Result<Tensor> {
+    let dtype = xs.dtype();
+    let hidden_size = xs.dim(D::Minus1)?;
+    let xs = xs.to_dtype(DType::F32)?;
+    let variance = (xs.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+    xs.broadcast_div(&(variance + eps)?.sqrt()?)?
+        .to_dtype(dtype)
+        .map_err(Into::into)
+}
+
+fn rotary_emb_cache(
+    device: &Device,
+    dtype: DType,
+    seq_len: usize,
+    dim_head: usize,
+    theta: f64,
+) -> Result<(Tensor, Tensor)> {
+    let inv_freq = (0..dim_head)
+        .step_by(2)
+        .map(|index| (1.0 / theta.powf(index as f64 / dim_head as f64)) as f32)
+        .collect::<Vec<_>>();
+    let inv_freq = Tensor::from_vec(inv_freq, (1, dim_head / 2), device)?.to_dtype(dtype)?;
+    let positions = Tensor::arange(0u32, seq_len as u32, device)?
+        .to_dtype(dtype)?
+        .reshape((seq_len, 1))?;
+    let freqs = positions.matmul(&inv_freq)?;
+    Ok((freqs.cos()?, freqs.sin()?))
+}
+
 fn norm_and_concat_padded_batch(
     encoded_text: &Tensor,
     attention_mask: &Tensor,
@@ -258,11 +622,15 @@ fn rescale_norm(xs: &Tensor, target_dim: usize, source_dim: usize) -> Result<Ten
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
 
     use super::{
-        replace_padded_with_registers, FeatureExtractorV1, FeatureExtractorV2, PaddingSide,
-        Projection,
+        convert_to_additive_mask, replace_padded_with_registers, Embeddings1DConnector,
+        EmbeddingsFeatureExtractor, EmbeddingsProcessor, FeatureExtractorV1, FeatureExtractorV2,
+        PaddingSide, Projection,
     };
 
     fn projection(in_features: usize, out_features: usize) -> Projection {
@@ -279,6 +647,49 @@ mod tests {
             Tensor::from_vec(weight, (out_features, in_features), &device).unwrap(),
             None,
         )
+    }
+
+    fn zero_connector_var_builder(
+        dim: usize,
+        num_layers: usize,
+        num_registers: Option<usize>,
+    ) -> VarBuilder<'static> {
+        let mut tensors = HashMap::new();
+        for layer in 0..num_layers {
+            for linear_name in ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0"] {
+                tensors.insert(
+                    format!("transformer_1d_blocks.{layer}.{linear_name}.weight"),
+                    Tensor::zeros((dim, dim), DType::F32, &Device::Cpu).unwrap(),
+                );
+                tensors.insert(
+                    format!("transformer_1d_blocks.{layer}.{linear_name}.bias"),
+                    Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+            tensors.insert(
+                format!("transformer_1d_blocks.{layer}.ff.net.0.proj.weight"),
+                Tensor::zeros((dim * 4, dim), DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("transformer_1d_blocks.{layer}.ff.net.0.proj.bias"),
+                Tensor::zeros(dim * 4, DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("transformer_1d_blocks.{layer}.ff.net.2.weight"),
+                Tensor::zeros((dim, dim * 4), DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("transformer_1d_blocks.{layer}.ff.net.2.bias"),
+                Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        if let Some(count) = num_registers {
+            tensors.insert(
+                "learnable_registers".to_string(),
+                Tensor::zeros((count, dim), DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
     #[test]
@@ -340,5 +751,99 @@ mod tests {
             ]]
         );
         assert_eq!(packed_mask.to_vec2::<u8>().unwrap(), vec![vec![1, 1, 1, 1]]);
+    }
+
+    #[test]
+    fn additive_mask_conversion_marks_invalid_positions() {
+        let mask = Tensor::new(&[[1u8, 0, 1]], &Device::Cpu).unwrap();
+        let additive = convert_to_additive_mask(&mask, DType::F32).unwrap();
+        let values = additive.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(values[0], 0.0);
+        assert!(values[1] < -1e20);
+        assert_eq!(values[2], 0.0);
+    }
+
+    #[test]
+    fn embeddings_processor_runs_video_connector_and_preserves_binary_mask() {
+        let device = Device::Cpu;
+        let hidden_state_0 = Tensor::ones((1, 3, 2), DType::F32, &device).unwrap();
+        let hidden_state_1 = Tensor::ones((1, 3, 2), DType::F32, &device)
+            .unwrap()
+            .affine(2.0, 0.0)
+            .unwrap();
+        let attention_mask = Tensor::new(&[[1u8, 1, 0]], &device).unwrap();
+        let extractor =
+            EmbeddingsFeatureExtractor::V1(FeatureExtractorV1::new(projection(4, 4), false));
+        let connector = Embeddings1DConnector::new(
+            1,
+            4,
+            1,
+            10_000.0,
+            None,
+            zero_connector_var_builder(4, 1, None),
+        )
+        .unwrap();
+        let processor = EmbeddingsProcessor::new(extractor, connector, None);
+
+        let output = processor
+            .process_hidden_states(
+                &[hidden_state_0, hidden_state_1],
+                &attention_mask,
+                PaddingSide::Right,
+            )
+            .unwrap();
+
+        assert_eq!(output.video_encoding.dims3().unwrap(), (1, 3, 4));
+        assert!(output.audio_encoding.is_none());
+        assert_eq!(
+            output.attention_mask.to_vec2::<u8>().unwrap(),
+            vec![vec![1, 1, 0]]
+        );
+    }
+
+    #[test]
+    fn embeddings_processor_runs_dual_connectors_for_audio_video() {
+        let device = Device::Cpu;
+        let hidden_state_0 = Tensor::ones((1, 3, 2), DType::F32, &device).unwrap();
+        let hidden_state_1 = Tensor::ones((1, 3, 2), DType::F32, &device)
+            .unwrap()
+            .affine(3.0, 0.0)
+            .unwrap();
+        let attention_mask = Tensor::new(&[[1u8, 1, 0]], &device).unwrap();
+        let extractor = EmbeddingsFeatureExtractor::V2(FeatureExtractorV2::new(
+            projection(4, 4),
+            Some(projection(4, 6)),
+            4,
+        ));
+        let video_connector = Embeddings1DConnector::new(
+            1,
+            4,
+            1,
+            10_000.0,
+            None,
+            zero_connector_var_builder(4, 1, None),
+        )
+        .unwrap();
+        let audio_connector = Embeddings1DConnector::new(
+            3,
+            2,
+            1,
+            10_000.0,
+            None,
+            zero_connector_var_builder(6, 1, None),
+        )
+        .unwrap();
+        let processor = EmbeddingsProcessor::new(extractor, video_connector, Some(audio_connector));
+
+        let output = processor
+            .process_hidden_states(
+                &[hidden_state_0, hidden_state_1],
+                &attention_mask,
+                PaddingSide::Left,
+            )
+            .unwrap();
+
+        assert_eq!(output.video_encoding.dims3().unwrap(), (1, 3, 4));
+        assert_eq!(output.audio_encoding.unwrap().dims3().unwrap(), (1, 3, 6));
     }
 }
