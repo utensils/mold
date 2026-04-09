@@ -40,6 +40,9 @@ and a checked-out upstream tree at `tmp/LTX-2-upstream`.
   LTX-2.3, pass an explicit `.safetensors` path.
 - The Gemma text encoder source is gated on Hugging Face, so you must have
   access approved before `mold pull` will complete.
+- On 24 GB Ada GPUs such as the RTX 4090, mold runs the bridge with layer
+  streaming and the upstream `fp8-cast` path rather than Hopper-only
+  `fp8-scaled-mm`.
 
 ## Examples
 

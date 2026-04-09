@@ -43,6 +43,11 @@ audio-video stack, larger checkpoints, and a Python bridge into the upstream
 Lightricks pipelines. Treat it as a quality-first workflow, not a quick draft
 path.
 
+On a 24 GB RTX 4090-class card, the practical local path is the distilled FP8
+checkpoint with layer streaming enabled through the bridge. mold currently uses
+the upstream `fp8-cast` path there rather than Hopper-only
+`fp8-scaled-mm`/TensorRT-LLM.
+
 ### Offloading
 
 `--offload` can drop FLUX-class VRAM usage from roughly 24 GB to roughly 2-4 GB,

@@ -471,7 +471,7 @@
               {
                 category = "run";
                 name = "contact-sheet";
-                help = "extract frames from a clip and build a contact sheet via ffmpeg + ImageMagick";
+                help = "build a contact sheet from a clip via ffmpeg";
                 command = ''
                   set -euo pipefail
                   if [ "$#" -lt 2 ]; then
@@ -480,11 +480,17 @@
                   fi
                   input="$1"
                   output="$2"
-                  tile="''${3:-4x}"
-                  tmp_dir="$(mktemp -d)"
-                  trap 'rm -rf "$tmp_dir"' EXIT
-                  ffmpeg -v error -i "$input" "$tmp_dir/frame-%04d.png"
-                  montage "$tmp_dir"/frame-*.png -tile "$tile" -geometry +4+4 "$output"
+                  tile="''${3:-4x5}"
+                  cols="''${tile%x*}"
+                  rows="''${tile#*x}"
+                  if [ -z "$cols" ] || [ "$cols" = "$tile" ]; then
+                    echo "tile must be in CxR format, for example 4x5"
+                    exit 1
+                  fi
+                  if [ -z "$rows" ] || [ "$rows" = "$tile" ]; then
+                    rows=5
+                  fi
+                  ffmpeg -y -v error -i "$input" -vf "tile=''${cols}x''${rows}" -frames:v 1 "$output"
                 '';
               }
               {

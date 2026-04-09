@@ -67,6 +67,7 @@ struct BridgeRequest {
     frame_rate: u32,
     num_inference_steps: u32,
     quantization: Option<String>,
+    streaming_prefetch_count: Option<u32>,
     images: Vec<BridgeImage>,
     loras: Vec<LoraWeight>,
     audio_path: Option<String>,
@@ -197,9 +198,12 @@ impl Ltx2Engine {
     }
 
     fn request_quantization(&self) -> Option<String> {
-        self.model_name
-            .contains(":fp8")
-            .then(|| "fp8-scaled-mm".to_string())
+        self.model_name.contains(":fp8").then(|| {
+            // Use the no-extra-deps FP8 path by default. Hopper-specific
+            // `fp8-scaled-mm` requires TensorRT-LLM and does not fit the
+            // normal local 4090 workflow.
+            "fp8-cast".to_string()
+        })
     }
 
     fn camera_control_preset(name: &str) -> Option<CameraControlPreset> {
@@ -369,6 +373,7 @@ impl Ltx2Engine {
             frame_rate: req.fps.unwrap_or(24),
             num_inference_steps: req.steps,
             quantization: self.request_quantization(),
+            streaming_prefetch_count: Some(2),
             images,
             loras,
             audio_path,
@@ -388,6 +393,7 @@ impl Ltx2Engine {
             .arg(self.bridge_script())
             .arg("--request")
             .arg(request_path)
+            .env("PYTORCH_ALLOC_CONF", "expandable_segments:True")
             .status()
             .context("failed to invoke LTX-2 bridge")?;
         if !status.success() {
@@ -484,6 +490,8 @@ impl Ltx2Engine {
                 "-y",
                 "-i",
                 input_video.to_string_lossy().as_ref(),
+                "-update",
+                "1",
                 "-frames:v",
                 "1",
                 output_png.to_string_lossy().as_ref(),
@@ -777,5 +785,15 @@ mod tests {
             "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
         );
         assert!(Ltx2Engine::camera_control_preset("unknown").is_none());
+    }
+
+    #[test]
+    fn fp8_models_use_fp8_cast_quantization() {
+        let engine = Ltx2Engine::new(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            LoadStrategy::Sequential,
+        );
+        assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
     }
 }

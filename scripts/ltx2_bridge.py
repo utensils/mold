@@ -56,6 +56,8 @@ def build_command(request: dict) -> list[str]:
         cmd.extend(["--negative-prompt", request["negative_prompt"]])
     if request.get("quantization"):
         cmd.extend(["--quantization", request["quantization"]])
+    if request.get("streaming_prefetch_count") is not None:
+        cmd.extend(["--streaming-prefetch-count", str(request["streaming_prefetch_count"])])
     if uses_two_stage and request.get("spatial_upsampler_path"):
         cmd.extend(["--spatial-upsampler-path", request["spatial_upsampler_path"]])
     if request.get("distilled_lora_path") and module in {
