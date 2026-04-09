@@ -834,6 +834,7 @@ impl ZImageEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -1200,6 +1201,7 @@ impl InferenceEngine for ZImageEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

@@ -1404,6 +1404,7 @@ impl LtxVideoEngine {
             generation_time_ms,
             model: self.base.model_name.clone(),
             seed_used: seed,
+            gpu: None,
         })
     }
 }

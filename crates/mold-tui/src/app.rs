@@ -6251,6 +6251,7 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
             video: None,
+            gpu: None,
         };
         app.bg_tx
             .send(BackgroundEvent::GenerationComplete(Box::new(response)))

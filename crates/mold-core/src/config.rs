@@ -388,6 +388,14 @@ pub struct Config {
     #[serde(default)]
     pub runpod: crate::runpod::RunPodSettings,
 
+    /// GPU ordinals to use (None = all available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<Vec<usize>>,
+
+    /// Max queued requests before 503 (default: 200).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_size: Option<usize>,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -477,12 +485,29 @@ impl Default for Config {
             expand: ExpandSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
+            gpus: None,
+            queue_size: None,
             models: HashMap::new(),
         }
     }
 }
 
 impl Config {
+    /// Build a `GpuSelection` from the config's `gpus` field.
+    pub fn gpu_selection(&self) -> crate::types::GpuSelection {
+        match &self.gpus {
+            Some(ordinals) if !ordinals.is_empty() => {
+                crate::types::GpuSelection::Specific(ordinals.clone())
+            }
+            _ => crate::types::GpuSelection::All,
+        }
+    }
+
+    /// Return the configured queue size or the default (200).
+    pub fn queue_size(&self) -> usize {
+        self.queue_size.unwrap_or(200)
+    }
+
     pub fn install_runtime_models_dir_override(models_dir: PathBuf) {
         let _ = RUNTIME_MODELS_DIR_OVERRIDE.get_or_init(|| models_dir);
     }

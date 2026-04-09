@@ -2017,6 +2017,7 @@ impl QwenImageEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 
@@ -2769,6 +2770,7 @@ impl InferenceEngine for QwenImageEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

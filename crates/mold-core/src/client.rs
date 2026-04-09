@@ -128,6 +128,7 @@ impl MoldClient {
             model,
             seed_used,
             video,
+            gpu: None,
         })
     }
 
@@ -291,6 +292,7 @@ impl MoldClient {
                             model,
                             seed_used: complete.seed_used,
                             video,
+                            gpu: None,
                         }));
                     }
                     "error" => {

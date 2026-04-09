@@ -522,6 +522,7 @@ pub async fn run(
             generation_time_ms: total_time_ms,
             model: last_model,
             seed_used: last_seed_used,
+            gpu: None,
         }
     };
 
@@ -1214,6 +1215,7 @@ async fn generate_local_batch(
         generation_time_ms: total_time_ms,
         model: last_model,
         seed_used: last_seed_used,
+        gpu: None,
     })
 }
 

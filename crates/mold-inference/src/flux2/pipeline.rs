@@ -716,6 +716,7 @@ impl Flux2Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -953,6 +954,7 @@ impl InferenceEngine for Flux2Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

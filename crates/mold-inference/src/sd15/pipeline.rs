@@ -815,6 +815,7 @@ impl SD15Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -992,6 +993,7 @@ impl InferenceEngine for SD15Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

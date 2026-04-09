@@ -712,6 +712,7 @@ impl SD3Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }

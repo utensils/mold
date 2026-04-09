@@ -1130,6 +1130,9 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         memory_status: mold_inference::device::memory_status_string(),
+        gpus: None,
+        queue_depth: None,
+        queue_capacity: None,
     })
 }
 

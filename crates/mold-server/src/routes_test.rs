@@ -207,6 +207,7 @@ mod tests {
                 model: req.model.clone(),
                 seed_used: req.seed.unwrap_or(42),
                 video: None,
+                gpu: None,
             })
         }
 

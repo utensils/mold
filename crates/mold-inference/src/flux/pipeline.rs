@@ -1618,6 +1618,7 @@ impl FluxEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -2081,6 +2082,7 @@ impl FluxEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }

@@ -417,6 +417,9 @@ pub struct GenerateResponse {
     pub model: String,
     #[schema(example = 42)]
     pub seed_used: u64,
+    /// Which GPU ordinal handled this request (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 /// Video output from a video model family.
@@ -711,6 +714,15 @@ pub struct ServerStatus {
     /// Human-readable memory status (e.g. "VRAM: 16.2 GB free"). Added in v0.6.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_status: Option<String>,
+    /// Per-GPU worker status (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<Vec<GpuWorkerStatus>>,
+    /// Current request queue depth (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<usize>,
+    /// Maximum queue capacity (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -721,6 +733,60 @@ pub struct GpuInfo {
     pub vram_total_mb: u64,
     #[schema(example = 8192)]
     pub vram_used_mb: u64,
+}
+
+/// GPU selection for multi-GPU setups.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum GpuSelection {
+    /// Use all discovered GPUs (default).
+    All,
+    /// Use only these specific GPU ordinals.
+    Specific(Vec<usize>),
+}
+
+impl Default for GpuSelection {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+impl GpuSelection {
+    /// Parse from comma-separated string like "0,1,2".
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        if s.is_empty() || s.to_lowercase() == "all" {
+            return Ok(Self::All);
+        }
+        let ordinals: Vec<usize> = s
+            .split(',')
+            .map(|s| s.trim().parse::<usize>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("invalid GPU ordinal: {e}"))?;
+        if ordinals.is_empty() {
+            return Ok(Self::All);
+        }
+        Ok(Self::Specific(ordinals))
+    }
+}
+
+/// Per-GPU worker status for multi-GPU status reporting.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GpuWorkerStatus {
+    pub ordinal: usize,
+    pub name: String,
+    pub vram_total_bytes: u64,
+    pub vram_used_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_model: Option<String>,
+    pub state: GpuWorkerState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuWorkerState {
+    Idle,
+    Generating,
+    Loading,
+    Degraded,
 }
 
 // ── SSE streaming wire types ─────────────────────────────────────────────────
