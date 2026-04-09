@@ -346,14 +346,23 @@ pub struct GemmaHiddenStates {
     pub attention_mask: Tensor,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GemmaHiddenStateEncoder {
     embed_tokens: Embedding,
-    layers: Vec<DecoderLayer>,
+    layer_source: GemmaLayerSource,
     hidden_size: usize,
     device: Device,
     dtype: DType,
     sliding_window: usize,
+}
+
+#[derive(Clone)]
+enum GemmaLayerSource {
+    Eager(Vec<DecoderLayer>),
+    Streaming {
+        cfg: GemmaConfig,
+        layers_vb: VarBuilder<'static>,
+    },
 }
 
 impl GemmaHiddenStateEncoder {
@@ -373,7 +382,24 @@ impl GemmaHiddenStateEncoder {
         }
         Ok(Self {
             embed_tokens,
-            layers,
+            layer_source: GemmaLayerSource::Eager(layers),
+            hidden_size: cfg.hidden_size,
+            device: vb.device().clone(),
+            dtype: vb.dtype(),
+            sliding_window: cfg.sliding_window,
+        })
+    }
+
+    pub fn new_streaming(cfg: &GemmaConfig, vb: VarBuilder<'static>) -> Result<Self> {
+        let model_vb = vb.pp("model");
+        let embed_tokens =
+            candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, model_vb.pp("embed_tokens"))?;
+        Ok(Self {
+            embed_tokens,
+            layer_source: GemmaLayerSource::Streaming {
+                cfg: cfg.clone(),
+                layers_vb: model_vb.pp("layers"),
+            },
             hidden_size: cfg.hidden_size,
             device: vb.device().clone(),
             dtype: vb.dtype(),
@@ -383,9 +409,10 @@ impl GemmaHiddenStateEncoder {
 
     pub fn load_from_assets(assets: &GemmaAssets, device: &Device, dtype: DType) -> Result<Self> {
         let weights = discover_weight_files(&assets.root)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weights, dtype, device)? };
+        let vb: VarBuilder<'static> =
+            unsafe { VarBuilder::from_mmaped_safetensors(&weights, dtype, device)? };
         let vb = vb.rename_f(map_gemma_weight_key);
-        Self::new(&ltx_gemma_config(), vb)
+        Self::new_streaming(&ltx_gemma_config(), vb)
     }
 
     pub fn load_from_root(root: &Path, device: &Device, dtype: DType) -> Result<Self> {
@@ -412,7 +439,7 @@ impl GemmaHiddenStateEncoder {
         let (batch, seq) = input_ids.dims2()?;
         let mut xs = self.embed_tokens.forward(input_ids)?;
         xs = (xs * (self.hidden_size as f64).sqrt())?;
-        let mut hidden_states = Vec::with_capacity(self.layers.len() + 1);
+        let mut hidden_states = Vec::with_capacity(self.layer_count() + 1);
         hidden_states.push(xs.clone());
 
         let full_mask = build_attention_mask(attention_mask, None, self.dtype, self.device())?;
@@ -423,14 +450,34 @@ impl GemmaHiddenStateEncoder {
             self.device(),
         )?;
 
-        for layer in &self.layers {
-            let mask = if layer.sliding_window.is_some() {
-                Some(&sliding_mask)
-            } else {
-                Some(&full_mask)
-            };
-            xs = layer.forward(&xs, mask)?;
-            hidden_states.push(xs.clone());
+        match &self.layer_source {
+            GemmaLayerSource::Eager(layers) => {
+                for (index, layer) in layers.iter().enumerate() {
+                    let mask = if layer.sliding_window.is_some() {
+                        Some(&sliding_mask)
+                    } else {
+                        Some(&full_mask)
+                    };
+                    xs = layer
+                        .forward(&xs, mask)
+                        .with_context(|| format!("Gemma eager decoder layer {index} failed"))?;
+                    hidden_states.push(xs.clone());
+                }
+            }
+            GemmaLayerSource::Streaming { cfg, layers_vb } => {
+                for index in 0..cfg.num_hidden_layers {
+                    let layer = Self::streaming_layer(cfg, layers_vb.clone(), index)?;
+                    let mask = if layer.sliding_window.is_some() {
+                        Some(&sliding_mask)
+                    } else {
+                        Some(&full_mask)
+                    };
+                    xs = layer
+                        .forward(&xs, mask)
+                        .with_context(|| format!("Gemma streaming decoder layer {index} failed"))?;
+                    hidden_states.push(xs.clone());
+                }
+            }
         }
 
         if hidden_states
@@ -444,6 +491,26 @@ impl GemmaHiddenStateEncoder {
 
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    fn layer_count(&self) -> usize {
+        match &self.layer_source {
+            GemmaLayerSource::Eager(layers) => layers.len(),
+            GemmaLayerSource::Streaming { cfg, .. } => cfg.num_hidden_layers,
+        }
+    }
+
+    fn streaming_layer(
+        cfg: &GemmaConfig,
+        layers_vb: VarBuilder<'static>,
+        index: usize,
+    ) -> Result<DecoderLayer> {
+        let uses_sliding = (index + 1) % cfg.sliding_window_pattern > 0;
+        DecoderLayer::new(
+            cfg,
+            layers_vb.pp(index),
+            uses_sliding.then_some(cfg.sliding_window),
+        )
     }
 }
 
@@ -567,6 +634,24 @@ mod tests {
     fn hidden_state_encoder_emits_embedding_plus_each_layer() {
         let cfg = tiny_config();
         let mut encoder = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
+        let input_ids = Tensor::new(&[[1u32, 2, 3, 4]], &Device::Cpu).unwrap();
+        let attention_mask = Tensor::new(&[[0u8, 0, 1, 1]], &Device::Cpu).unwrap();
+
+        let hidden_states = encoder
+            .forward_hidden_states(&input_ids, &attention_mask)
+            .unwrap();
+
+        assert_eq!(hidden_states.len(), cfg.num_hidden_layers + 1);
+        for state in &hidden_states {
+            assert_eq!(state.dims3().unwrap(), (1, 4, cfg.hidden_size));
+        }
+    }
+
+    #[test]
+    fn streaming_hidden_state_encoder_emits_embedding_plus_each_layer() {
+        let cfg = tiny_config();
+        let vb: VarBuilder<'static> = zero_gemma_var_builder(&cfg);
+        let mut encoder = GemmaHiddenStateEncoder::new_streaming(&cfg, vb).unwrap();
         let input_ids = Tensor::new(&[[1u32, 2, 3, 4]], &Device::Cpu).unwrap();
         let attention_mask = Tensor::new(&[[0u8, 0, 1, 1]], &Device::Cpu).unwrap();
 

@@ -34,11 +34,32 @@ impl Projection {
         if hidden != in_features {
             bail!("projection input dimension mismatch: expected {in_features}, got {hidden}");
         }
+        let compute_dtype =
+            if xs.device().is_cpu() && matches!(self.weight.dtype(), DType::BF16 | DType::F16) {
+                DType::F32
+            } else {
+                self.weight.dtype()
+            };
+        let xs = if xs.dtype() == compute_dtype {
+            xs.clone()
+        } else {
+            xs.to_dtype(compute_dtype)?
+        };
+        let weight = if self.weight.dtype() == compute_dtype {
+            self.weight.clone()
+        } else {
+            self.weight.to_dtype(compute_dtype)?
+        };
         let ys = xs
             .reshape((batch * seq, hidden))?
-            .matmul(&self.weight.transpose(0, 1)?)?;
+            .matmul(&weight.transpose(0, 1)?)?;
         let ys = if let Some(bias) = &self.bias {
-            ys.broadcast_add(bias)?
+            let bias = if bias.dtype() == compute_dtype {
+                bias.clone()
+            } else {
+                bias.to_dtype(compute_dtype)?
+            };
+            ys.broadcast_add(&bias)?
         } else {
             ys
         };
@@ -154,9 +175,21 @@ pub fn replace_padded_with_registers(
     registers: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
     let device = hidden_states.device().clone();
-    let hidden_states = hidden_states.to_device(&Device::Cpu)?.to_vec3::<f32>()?;
+    let output_dtype =
+        if device.is_cpu() && matches!(hidden_states.dtype(), DType::BF16 | DType::F16) {
+            DType::F32
+        } else {
+            hidden_states.dtype()
+        };
+    let hidden_states = hidden_states
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::F32)?
+        .to_vec3::<f32>()?;
     let attention_mask = attention_mask.to_device(&Device::Cpu)?.to_vec2::<u8>()?;
-    let registers = registers.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
+    let registers = registers
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::F32)?
+        .to_vec2::<f32>()?;
     let batch = hidden_states.len();
     let seq = hidden_states.first().map(Vec::len).unwrap_or(0);
     let dim = registers.first().map(Vec::len).unwrap_or(0);
@@ -183,7 +216,7 @@ pub fn replace_padded_with_registers(
 
     let binary_mask = vec![1u8; batch * seq];
     Ok((
-        Tensor::from_vec(packed, (batch, seq, dim), &device)?,
+        Tensor::from_vec(packed, (batch, seq, dim), &device)?.to_dtype(output_dtype)?,
         Tensor::from_vec(binary_mask, (batch, seq), &device)?,
     ))
 }
@@ -380,18 +413,22 @@ impl ConnectorAttention {
             self.dim_head,
             self.positional_embedding_theta,
         )?;
-        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?.contiguous()?;
+        let k = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?.contiguous()?;
+        let v = v.contiguous()?;
 
         let scale = 1f64 / (self.dim_head as f64).sqrt();
-        let scores = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
         let scores = match attention_mask {
             Some(mask) => scores.broadcast_add(mask)?,
             None => scores,
         };
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
-        let context = probs.matmul(&v)?;
-        let context = context.transpose(1, 2)?.reshape((batch, seq, inner_dim))?;
+        let context = probs.contiguous()?.matmul(&v)?;
+        let context = context
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((batch, seq, inner_dim))?;
         let output = self.out_proj.forward(&context)?;
         if output.dim(D::Minus1)? != dim {
             bail!("connector attention output dimension mismatch");
@@ -557,7 +594,7 @@ fn norm_and_concat_padded_batch(
     padding_side: PaddingSide,
 ) -> Result<Tensor> {
     let device = encoded_text.device().clone();
-    let encoded = encoded_text.to_device(&Device::Cpu)?;
+    let encoded = encoded_text.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let attention_mask = attention_mask.to_device(&Device::Cpu)?.to_vec2::<u8>()?;
     let (batch, seq, hidden, layers) = encoded.dims4()?;
     let flat = encoded.flatten_all()?.to_vec1::<f32>()?;
@@ -647,6 +684,25 @@ mod tests {
             Tensor::from_vec(weight, (out_features, in_features), &device).unwrap(),
             None,
         )
+    }
+
+    #[test]
+    fn projection_forward_uses_cpu_safe_compute_dtype_for_bf16_weights() {
+        let xs = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let weight = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (2, 2), &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let bias = Tensor::zeros(2, DType::BF16, &Device::Cpu).unwrap();
+        let projection = Projection::new(weight, Some(bias));
+
+        let ys = projection.forward(&xs).unwrap();
+
+        assert_eq!(ys.dtype(), DType::F32);
+        assert_eq!(
+            ys.to_vec3::<f32>().unwrap(),
+            vec![vec![vec![1.0, 2.0], vec![3.0, 4.0]]]
+        );
     }
 
     fn zero_connector_var_builder(
@@ -741,6 +797,38 @@ mod tests {
 
         let (packed, packed_mask) =
             replace_padded_with_registers(&hidden_states, &mask, &registers).unwrap();
+        assert_eq!(
+            packed.to_vec3::<f32>().unwrap(),
+            vec![vec![
+                vec![30.0, 3.0],
+                vec![40.0, 4.0],
+                vec![100.0, 7.0],
+                vec![200.0, 8.0]
+            ]]
+        );
+        assert_eq!(packed_mask.to_vec2::<u8>().unwrap(), vec![vec![1, 1, 1, 1]]);
+    }
+
+    #[test]
+    fn register_replacement_uses_cpu_safe_compute_dtype_for_bf16_inputs() {
+        let device = Device::Cpu;
+        let hidden_states = Tensor::new(
+            &[[[10.0f32, 1.0], [20.0, 2.0], [30.0, 3.0], [40.0, 4.0]]],
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let mask = Tensor::new(&[[0u8, 0, 1, 1]], &device).unwrap();
+        let registers = Tensor::new(&[[100.0f32, 7.0], [200.0, 8.0]], &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let (packed, packed_mask) =
+            replace_padded_with_registers(&hidden_states, &mask, &registers).unwrap();
+
+        assert_eq!(packed.dtype(), DType::F32);
         assert_eq!(
             packed.to_vec3::<f32>().unwrap(),
             vec![vec![

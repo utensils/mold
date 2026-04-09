@@ -101,20 +101,32 @@ impl NativePromptEncoder {
     }
 
     pub fn encode_prompt_pair(&mut self, pair: &EncodedPromptPair) -> Result<NativePromptEncoding> {
-        let conditional = self.gemma.encode_prompt_tokens(&pair.conditional)?;
-        let unconditional = self.gemma.encode_prompt_tokens(&pair.unconditional)?;
+        let conditional = self
+            .gemma
+            .encode_prompt_tokens(&pair.conditional)
+            .context("failed to encode conditional Gemma prompt tokens")?;
+        let unconditional = self
+            .gemma
+            .encode_prompt_tokens(&pair.unconditional)
+            .context("failed to encode unconditional Gemma prompt tokens")?;
 
         Ok(NativePromptEncoding {
-            conditional: self.embeddings_processor.process_hidden_states(
-                &conditional.hidden_states,
-                &conditional.attention_mask,
-                self.padding_side,
-            )?,
-            unconditional: self.embeddings_processor.process_hidden_states(
-                &unconditional.hidden_states,
-                &unconditional.attention_mask,
-                self.padding_side,
-            )?,
+            conditional: self
+                .embeddings_processor
+                .process_hidden_states(
+                    &conditional.hidden_states,
+                    &conditional.attention_mask,
+                    self.padding_side,
+                )
+                .context("failed to build conditional native LTX-2 embeddings")?,
+            unconditional: self
+                .embeddings_processor
+                .process_hidden_states(
+                    &unconditional.hidden_states,
+                    &unconditional.attention_mask,
+                    self.padding_side,
+                )
+                .context("failed to build unconditional native LTX-2 embeddings")?,
         })
     }
 

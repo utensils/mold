@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
 use image::{imageops, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -235,12 +235,17 @@ impl RenderSummary {
 }
 
 fn tensor_mean(tensor: &Tensor) -> Result<f32> {
-    Ok(tensor.flatten_all()?.mean_all()?.to_scalar::<f32>()?)
+    Ok(tensor
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .mean_all()?
+        .to_scalar::<f32>()?)
 }
 
 fn tensor_energy(tensor: &Tensor) -> Result<f32> {
     Ok(tensor
         .flatten_all()?
+        .to_dtype(DType::F32)?
         .abs()?
         .mean_all()?
         .to_scalar::<f32>()?)
@@ -761,6 +766,41 @@ mod tests {
 
         assert_eq!(prepared.video_pixel_shape.width, 608);
         assert_eq!(prepared.video_pixel_shape.height, 352);
+        assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+    }
+
+    #[test]
+    fn runtime_render_native_video_accepts_bf16_prompt_encodings() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let mut prepared = session.prepare(&plan).unwrap();
+        prepared.prompt.conditional.video_encoding = prepared
+            .prompt
+            .conditional
+            .video_encoding
+            .to_dtype(DType::BF16)
+            .unwrap();
+        prepared.prompt.unconditional.video_encoding = prepared
+            .prompt
+            .unconditional
+            .video_encoding
+            .to_dtype(DType::BF16)
+            .unwrap();
+        prepared.prompt.conditional.audio_encoding = prepared
+            .prompt
+            .conditional
+            .audio_encoding
+            .take()
+            .map(|tensor| tensor.to_dtype(DType::BF16).unwrap());
+
+        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+
+        assert_eq!(rendered.frames.len(), 97);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
     }
 }
