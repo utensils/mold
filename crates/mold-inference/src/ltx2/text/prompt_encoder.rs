@@ -117,17 +117,21 @@ impl NativePromptEncoder {
             )?,
         })
     }
+
+    pub fn device(&self) -> &Device {
+        self.gemma.device()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ConnectorSpec<'a> {
-    prefix: &'a str,
-    num_attention_heads: usize,
-    attention_head_dim: usize,
-    num_layers: usize,
+pub(crate) struct ConnectorSpec<'a> {
+    pub(crate) prefix: &'a str,
+    pub(crate) num_attention_heads: usize,
+    pub(crate) attention_head_dim: usize,
+    pub(crate) num_layers: usize,
 }
 
-fn build_embeddings_processor(
+pub(crate) fn build_embeddings_processor(
     vb: VarBuilder,
     feature_extractor_kind: GemmaFeatureExtractorKind,
     gemma_hidden_size: usize,

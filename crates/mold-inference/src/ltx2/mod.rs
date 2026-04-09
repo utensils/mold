@@ -9,6 +9,7 @@ mod model;
 mod pipeline;
 mod plan;
 mod preset;
+mod runtime;
 mod sampler;
 mod text;
 
