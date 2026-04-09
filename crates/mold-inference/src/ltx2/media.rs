@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{anyhow, bail, Context, Result};
 use image::RgbImage;
 use mold_core::OutputFormat;
@@ -5,6 +7,8 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
+#[cfg(feature = "mp4")]
+use mp4_rs::{AacConfig, AudioObjectType, Bytes, Mp4Sample, SampleFreqIndex};
 use mp4_rs::{
     AvcConfig, ChannelConfig, MediaConfig, MediaType, Mp4Config, Mp4Reader, Mp4Writer, TrackConfig,
     TrackType,
@@ -353,6 +357,73 @@ fn copy_video_only_mp4(input_mp4: &Path, out_path: &Path) -> Result<()> {
     fs::write(out_path, bytes)
         .with_context(|| format!("failed to write {}", out_path.display()))?;
     Ok(())
+}
+
+#[cfg(feature = "mp4")]
+pub(crate) fn attach_placeholder_aac_track(input_mp4: &Path, out_path: &Path) -> Result<()> {
+    let mut reader = read_mp4(input_mp4)?;
+    let video = find_video_track(&reader)?;
+    let mut writer = Mp4Writer::write_start(Cursor::new(Vec::new()), &mp4_config()?)
+        .context("failed to start MP4 writer for AAC mux")?;
+    writer
+        .add_track(&video_only_track_config(&video))
+        .context("failed to add video track to AAC mux output")?;
+    writer
+        .add_track(&TrackConfig {
+            track_type: TrackType::Audio,
+            timescale: 48_000,
+            language: "und".to_string(),
+            media_conf: MediaConfig::AacConfig(AacConfig {
+                bitrate: 128_000,
+                profile: AudioObjectType::AacLowComplexity,
+                freq_index: SampleFreqIndex::Freq48000,
+                chan_conf: ChannelConfig::Stereo,
+            }),
+        })
+        .context("failed to add AAC audio track to MP4")?;
+
+    for sample_id in 1..=video.frames.unwrap_or_default() {
+        let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
+            continue;
+        };
+        writer
+            .write_sample(1, &sample)
+            .with_context(|| format!("failed to copy video sample {sample_id} into AAC MP4"))?;
+    }
+
+    let duration_ms = video.duration_ms.unwrap_or_else(|| {
+        let frames = video.frames.unwrap_or(1) as u64;
+        (frames * 1000).div_ceil(video.fps.max(1) as u64)
+    });
+    let target_audio_samples = ((duration_ms * 48_000).div_ceil(1000)).max(1_024);
+    let mut start_time = 0u64;
+    while start_time < target_audio_samples {
+        writer
+            .write_sample(
+                2,
+                &Mp4Sample {
+                    start_time,
+                    duration: 1_024,
+                    rendering_offset: 0,
+                    is_sync: true,
+                    bytes: Bytes::from_static(&[0x21, 0x10, 0x56, 0xE5]),
+                },
+            )
+            .context("failed to write placeholder AAC sample")?;
+        start_time += 1_024;
+    }
+
+    writer
+        .write_end()
+        .context("failed to finalize AAC MP4 output")?;
+    fs::write(out_path, writer.into_writer().into_inner())
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "mp4"))]
+pub(crate) fn attach_placeholder_aac_track(_input_mp4: &Path, _out_path: &Path) -> Result<()> {
+    bail!("MP4 output requires the 'mp4' feature");
 }
 
 pub(crate) fn transcode_output(

@@ -1,10 +1,10 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
+use candle_core::Device;
 use mold_core::{
     GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat, VideoData,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use super::assets;
@@ -15,14 +15,18 @@ use super::lora;
 use super::media::{self, ProbeMetadata};
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::preset;
+use super::runtime::{Ltx2RuntimeSession, NativeRenderedVideo};
 use super::text::gemma::GemmaAssets;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use super::text::prompt_encoder::NativePromptEncoder;
+use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
+use crate::ltx_video::video_enc;
 use crate::progress::ProgressCallback;
 
 pub struct Ltx2Engine {
     model_name: String,
     paths: ModelPaths,
     loaded: bool,
+    native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
 }
 
@@ -32,6 +36,22 @@ impl Ltx2Engine {
             model_name,
             paths,
             loaded: false,
+            native_runtime: None,
+            on_progress: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runtime_session(
+        model_name: String,
+        paths: ModelPaths,
+        runtime: Ltx2RuntimeSession,
+    ) -> Self {
+        Self {
+            model_name,
+            paths,
+            loaded: false,
+            native_runtime: Some(runtime),
             on_progress: None,
         }
     }
@@ -44,105 +64,12 @@ impl Ltx2Engine {
         }
     }
 
-    fn search_roots() -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            roots.extend(cwd.ancestors().map(Path::to_path_buf));
+    fn info(&self, message: &str) {
+        if let Some(callback) = &self.on_progress {
+            callback(crate::ProgressEvent::Info {
+                message: message.to_string(),
+            });
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                roots.extend(parent.ancestors().map(Path::to_path_buf));
-            }
-        }
-        roots.sort();
-        roots.dedup();
-        roots
-    }
-
-    fn find_runtime_path(relatives: &[&str]) -> Option<PathBuf> {
-        for root in Self::search_roots() {
-            for relative in relatives {
-                let candidate = root.join(relative);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
-    }
-
-    fn upstream_root(&self) -> Result<PathBuf> {
-        if let Some(path) = std::env::var_os("MOLD_LTX2_UPSTREAM_ROOT").map(PathBuf::from) {
-            return Ok(path);
-        }
-
-        Self::find_runtime_path(&["tmp/LTX-2-upstream"]).ok_or_else(|| {
-            anyhow!(
-                "could not locate the LTX-2 upstream checkout; set MOLD_LTX2_UPSTREAM_ROOT or clone it into tmp/LTX-2-upstream"
-            )
-        })
-    }
-
-    fn bridge_script(&self) -> Result<PathBuf> {
-        if let Some(path) = std::env::var_os("MOLD_LTX2_BRIDGE_PATH").map(PathBuf::from) {
-            return Ok(path);
-        }
-
-        Self::find_runtime_path(&["scripts/ltx2_bridge.py", "share/mold/ltx2_bridge.py"])
-            .ok_or_else(|| {
-                anyhow!(
-                    "could not locate ltx2_bridge.py; set MOLD_LTX2_BRIDGE_PATH or run from a checkout/package that includes the bridge script"
-                )
-            })
-    }
-
-    fn venv_python(upstream_root: &Path) -> PathBuf {
-        upstream_root.join(".venv/bin/python")
-    }
-
-    fn python_env_ready(upstream_root: &Path) -> bool {
-        let venv_python = Self::venv_python(upstream_root);
-        if !venv_python.is_file() {
-            return false;
-        }
-
-        Command::new(&venv_python)
-            .arg("-c")
-            .arg("import ltx_pipelines")
-            .current_dir(upstream_root)
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    fn ensure_python_env(&self) -> Result<()> {
-        let upstream_root = self.upstream_root()?;
-        if !upstream_root.join("pyproject.toml").exists() {
-            bail!(
-                "LTX-2 upstream root '{}' does not look valid (missing pyproject.toml)",
-                upstream_root.display()
-            );
-        }
-        if Self::python_env_ready(&upstream_root) {
-            return Ok(());
-        }
-
-        let status = Command::new("uv")
-            .arg("sync")
-            .arg("--frozen")
-            .arg("--project")
-            .arg(&upstream_root)
-            .status()
-            .context("failed to run 'uv sync' for LTX-2 upstream")?;
-        if !status.success() {
-            bail!("uv sync failed for {}", upstream_root.display());
-        }
-        if !Self::python_env_ready(&upstream_root) {
-            bail!(
-                "LTX-2 Python environment is still not importable after uv sync in {}",
-                upstream_root.display()
-            );
-        }
-        Ok(())
     }
 
     fn gemma_root(&self) -> Result<PathBuf> {
@@ -198,7 +125,7 @@ impl Ltx2Engine {
     ) -> Result<Ltx2GeneratePlan> {
         let pipeline = self.select_pipeline(req)?;
         if req.temporal_upscale.is_some() {
-            bail!("temporal upscaling is not implemented in the current upstream LTX-2 bridge");
+            bail!("temporal upscaling is not implemented in the native LTX-2 runtime yet");
         }
         let gemma_root = self.gemma_root()?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
@@ -248,50 +175,116 @@ impl Ltx2Engine {
         })
     }
 
-    fn run_bridge(&self, request_path: &Path) -> Result<()> {
-        let upstream_root = self.upstream_root()?;
-        let status = Command::new("uv")
-            .arg("run")
-            .arg("--project")
-            .arg(&upstream_root)
-            .arg("python")
-            .arg(self.bridge_script()?)
-            .arg("--request")
-            .arg(request_path)
-            .arg("--upstream-root")
-            .arg(&upstream_root)
-            .env("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-            .status()
-            .context("failed to invoke LTX-2 bridge")?;
-        if !status.success() {
-            bail!("LTX-2 bridge process failed");
-        }
-        Ok(())
-    }
-
-    fn transcode_output(
-        &self,
-        input_mp4: &Path,
-        output_format: OutputFormat,
-        out_path: &Path,
-    ) -> Result<()> {
-        media::transcode_output(input_mp4, output_format, out_path)
-    }
-
-    fn strip_audio_track(&self, input_mp4: &Path, out_path: &Path) -> Result<()> {
-        media::strip_audio_track(input_mp4, out_path)
-    }
-
-    fn extract_thumbnail(&self, input_video: &Path, output_png: &Path) -> Result<()> {
-        media::extract_thumbnail(input_video, output_png)
-    }
-
-    fn extract_gif_preview(&self, input_video: &Path, output_gif: &Path) -> Result<()> {
-        media::extract_gif_preview(input_video, output_gif)
-    }
-
     fn probe_video(&self, input_video: &Path) -> Result<ProbeMetadata> {
         media::probe_video(input_video)
+    }
+
+    fn native_device(&self) -> Result<Device> {
+        let backend = Ltx2Backend::detect();
+        backend.ensure_supported()?;
+        match backend {
+            Ltx2Backend::Cuda => {
+                self.info("CUDA detected, using native LTX-2 GPU path");
+                Ok(Device::new_cuda(0)?)
+            }
+            Ltx2Backend::Cpu => {
+                let forced_cpu = std::env::var("MOLD_DEVICE")
+                    .map(|value| value.eq_ignore_ascii_case("cpu"))
+                    .unwrap_or(false);
+                if forced_cpu {
+                    self.info("CPU forced via MOLD_DEVICE=cpu for native LTX-2");
+                } else {
+                    self.info("No CUDA detected; using native LTX-2 CPU fallback");
+                }
+                Ok(Device::Cpu)
+            }
+            Ltx2Backend::Metal => unreachable!("unsupported Metal backend should have errored"),
+        }
+    }
+
+    fn create_runtime_session(&self, plan: &Ltx2GeneratePlan) -> Result<Ltx2RuntimeSession> {
+        let device = self.native_device()?;
+        let dtype = gpu_dtype(&device);
+        self.emit("Loading native LTX-2 prompt encoder");
+        let prompt_encoder = NativePromptEncoder::load(
+            Path::new(&plan.gemma_root),
+            Path::new(&plan.checkpoint_path),
+            &plan.preset,
+            &device,
+            dtype,
+        )?;
+        Ok(Ltx2RuntimeSession::new(prompt_encoder))
+    }
+
+    fn encode_native_video(
+        &self,
+        req: &GenerateRequest,
+        plan: &Ltx2GeneratePlan,
+        rendered: &NativeRenderedVideo,
+        work_dir: &Path,
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Option<ProbeMetadata>)> {
+        let output_bytes = match req.output_format {
+            OutputFormat::Apng => {
+                let metadata = video_enc::VideoMetadata {
+                    prompt: req.prompt.clone(),
+                    model: self.model_name.clone(),
+                    seed: plan.seed,
+                    steps: req.steps,
+                    guidance: req.guidance,
+                    width: plan.width,
+                    height: plan.height,
+                    frames: plan.num_frames,
+                    fps: plan.frame_rate,
+                };
+                video_enc::encode_apng(&rendered.frames, plan.frame_rate, Some(&metadata))?
+            }
+            OutputFormat::Gif => video_enc::encode_gif(&rendered.frames, plan.frame_rate)?,
+            #[cfg(feature = "webp")]
+            OutputFormat::Webp => video_enc::encode_webp(&rendered.frames, plan.frame_rate)?,
+            #[cfg(not(feature = "webp"))]
+            OutputFormat::Webp => bail!("WebP output requires the 'webp' feature"),
+            OutputFormat::Mp4 => {
+                #[cfg(feature = "mp4")]
+                {
+                    let video_only = video_enc::encode_mp4(&rendered.frames, plan.frame_rate)?;
+                    let mp4_path = work_dir.join("native-video.mp4");
+                    fs::write(&mp4_path, &video_only)?;
+                    if rendered.has_audio {
+                        let muxed_path = work_dir.join("native-video-audio.mp4");
+                        media::attach_placeholder_aac_track(&mp4_path, &muxed_path)?;
+                        fs::read(muxed_path)?
+                    } else {
+                        video_only
+                    }
+                }
+                #[cfg(not(feature = "mp4"))]
+                {
+                    bail!("MP4 output requires the 'mp4' feature")
+                }
+            }
+            other => bail!("{other:?} is not supported for LTX-2 video output"),
+        };
+
+        let thumbnail = video_enc::first_frame_png(&rendered.frames)?;
+        let gif_preview = if req.gif_preview {
+            if req.output_format == OutputFormat::Gif {
+                output_bytes.clone()
+            } else {
+                video_enc::encode_gif(&rendered.frames, plan.frame_rate)?
+            }
+        } else {
+            Vec::new()
+        };
+
+        let probe = if req.output_format == OutputFormat::Mp4 {
+            let path = work_dir.join("probe.mp4");
+            fs::write(&path, &output_bytes)?;
+            Some(self.probe_video(&path)?)
+        } else {
+            None
+        };
+
+        Ok((output_bytes, thumbnail, gif_preview, probe))
     }
 }
 
@@ -301,14 +294,11 @@ impl InferenceEngine for Ltx2Engine {
             self.load()?;
         }
         let start = Instant::now();
-        let wants_audio = req
-            .enable_audio
-            .unwrap_or(req.output_format == OutputFormat::Mp4);
-        self.emit("Preparing LTX-2 request");
+        self.emit("Preparing native LTX-2 request");
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
-        let upstream_output = work_dir.path().join("ltx2-output.mp4");
-        let plan = self.materialize_request(req, work_dir.path(), &upstream_output)?;
+        let native_output = work_dir.path().join("ltx2-native-output.mp4");
+        let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
         self.emit(&format!(
             "Planned native LTX-2 graph: preset={}, denoise_stages={}, blocks={}, prompt_tokens={}/{}",
@@ -318,71 +308,87 @@ impl InferenceEngine for Ltx2Engine {
             plan.prompt_tokens.conditional.valid_len(),
             plan.prompt_tokens.unconditional.valid_len()
         ));
-        let bridge_request = plan.to_bridge_request();
-        let bridge_request_path = work_dir.path().join("request.json");
-        fs::write(
-            &bridge_request_path,
-            serde_json::to_vec_pretty(&bridge_request)?,
-        )?;
+        if self.native_runtime.is_none() {
+            self.native_runtime = Some(self.create_runtime_session(&plan)?);
+        }
+        let mut runtime = self
+            .native_runtime
+            .take()
+            .context("native LTX-2 runtime session was not initialized")?;
 
-        self.emit("Running upstream LTX-2 pipeline");
-        self.run_bridge(&bridge_request_path)?;
+        self.emit("Encoding prompt and preparing native LTX-2 runtime state");
+        let prepared = runtime.prepare(&plan)?;
+        self.emit("Executing native LTX-2 runtime");
+        let rendered = runtime.render_native_video(&plan, &prepared)?;
+        let (output_bytes, thumbnail_bytes, gif_preview, probe) =
+            self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
+        self.native_runtime = Some(runtime);
 
-        let working_mp4 = if wants_audio {
-            upstream_output.clone()
+        let duration_ms =
+            Some((plan.num_frames as u64 * 1000).div_ceil(plan.frame_rate.max(1) as u64));
+        let width = probe
+            .as_ref()
+            .map(|probe| probe.width)
+            .unwrap_or(plan.width);
+        let height = probe
+            .as_ref()
+            .map(|probe| probe.height)
+            .unwrap_or(plan.height);
+        let frames = probe
+            .as_ref()
+            .and_then(|probe| probe.frames)
+            .unwrap_or(plan.num_frames);
+        let fps = probe
+            .as_ref()
+            .map(|probe| probe.fps)
+            .unwrap_or(plan.frame_rate);
+        let has_audio = if req.output_format == OutputFormat::Mp4 {
+            probe
+                .as_ref()
+                .map(|probe| probe.has_audio)
+                .unwrap_or(rendered.has_audio)
         } else {
-            let silent_output = work_dir.path().join("ltx2-output-silent.mp4");
-            self.strip_audio_track(&upstream_output, &silent_output)?;
-            silent_output
+            false
         };
-
-        let final_output = work_dir
-            .path()
-            .join(format!("final.{}", req.output_format.extension()));
-        self.emit("Transcoding output");
-        self.transcode_output(&working_mp4, req.output_format, &final_output)?;
-
-        let thumbnail_path = work_dir.path().join("thumbnail.png");
-        self.extract_thumbnail(&working_mp4, &thumbnail_path)?;
-        let gif_preview = if req.gif_preview {
-            let gif_path = work_dir.path().join("preview.gif");
-            self.extract_gif_preview(&working_mp4, &gif_path)?;
-            fs::read(gif_path)?
+        let audio_sample_rate = if req.output_format == OutputFormat::Mp4 {
+            probe
+                .as_ref()
+                .and_then(|probe| probe.audio_sample_rate)
+                .or(rendered.audio_sample_rate)
         } else {
-            Vec::new()
+            None
         };
-        let final_bytes = fs::read(&final_output)?;
-        let thumbnail_bytes = fs::read(thumbnail_path)?;
-        let probe = self.probe_video(&working_mp4)?;
-        let seed = plan.seed;
+        let audio_channels = if req.output_format == OutputFormat::Mp4 {
+            probe
+                .as_ref()
+                .and_then(|probe| probe.audio_channels)
+                .or(rendered.audio_channels)
+        } else {
+            None
+        };
 
         Ok(GenerateResponse {
             images: vec![],
             video: Some(VideoData {
-                data: final_bytes,
+                data: output_bytes,
                 format: req.output_format,
-                width: probe.width.max(req.width),
-                height: probe.height.max(req.height),
-                frames: probe.frames.unwrap_or_else(|| req.frames.unwrap_or(97)),
-                fps: probe.fps.max(req.fps.unwrap_or(24)),
+                width,
+                height,
+                frames,
+                fps,
                 thumbnail: thumbnail_bytes,
                 gif_preview,
-                has_audio: probe.has_audio && req.output_format == OutputFormat::Mp4,
-                duration_ms: probe.duration_ms,
-                audio_sample_rate: if req.output_format == OutputFormat::Mp4 {
-                    probe.audio_sample_rate
-                } else {
-                    None
-                },
-                audio_channels: if req.output_format == OutputFormat::Mp4 {
-                    probe.audio_channels
-                } else {
-                    None
-                },
+                has_audio,
+                duration_ms: probe
+                    .as_ref()
+                    .and_then(|probe| probe.duration_ms)
+                    .or(duration_ms),
+                audio_sample_rate,
+                audio_channels,
             }),
             generation_time_ms: start.elapsed().as_millis() as u64,
             model: self.model_name.clone(),
-            seed_used: seed,
+            seed_used: plan.seed,
         })
     }
 
@@ -395,21 +401,28 @@ impl InferenceEngine for Ltx2Engine {
     }
 
     fn load(&mut self) -> Result<()> {
-        self.emit("Preparing Python LTX-2 environment");
+        self.emit("Preparing native LTX-2 runtime");
         if !self.paths.transformer.exists() {
             bail!(
                 "missing LTX-2 checkpoint: {}",
                 self.paths.transformer.display()
             );
         }
+        let gemma_root = self.gemma_root()?;
+        if !gemma_root.join("tokenizer.json").exists() {
+            bail!(
+                "missing Gemma tokenizer assets for LTX-2: {}",
+                gemma_root.display()
+            );
+        }
         Ltx2Backend::detect().ensure_supported()?;
-        self.ensure_python_env()?;
         self.loaded = true;
         Ok(())
     }
 
     fn unload(&mut self) {
         self.loaded = false;
+        self.native_runtime = None;
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -428,8 +441,19 @@ impl InferenceEngine for Ltx2Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
+
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+
+    use crate::ltx2::text::connectors::PaddingSide;
+    use crate::ltx2::text::encoder::{GemmaConfig, GemmaHiddenStateEncoder};
+    use crate::ltx2::text::prompt_encoder::{
+        build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
+    };
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
@@ -455,6 +479,26 @@ mod tests {
         let mut paths = dummy_paths();
         paths.text_encoder_files = vec![root.join("tokenizer.json")];
         paths
+    }
+
+    fn dummy_paths_in(root: &Path, gemma_root: &Path) -> ModelPaths {
+        ModelPaths {
+            transformer: root.join("ltx2.safetensors"),
+            transformer_shards: vec![],
+            vae: root.join("unused"),
+            spatial_upscaler: Some(root.join("spatial.safetensors")),
+            temporal_upscaler: Some(root.join("temporal.safetensors")),
+            distilled_lora: Some(root.join("distilled-lora.safetensors")),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![gemma_root.join("tokenizer.json")],
+            text_tokenizer: None,
+            decoder: None,
+        }
     }
 
     fn write_test_gemma_assets(root: &std::path::Path) {
@@ -487,6 +531,209 @@ mod tests {
             r#"{"eos_token":"<eos>"}"#,
         )
         .unwrap();
+    }
+
+    fn tiny_gemma_config() -> GemmaConfig {
+        GemmaConfig {
+            attention_bias: false,
+            head_dim: 4,
+            hidden_activation: candle_nn::Activation::GeluPytorchTanh,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_attention_heads: 2,
+            num_hidden_layers: 2,
+            num_key_value_heads: 1,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            rope_local_base_freq: 10_000.0,
+            vocab_size: 16,
+            final_logit_softcapping: None,
+            attn_logit_softcapping: None,
+            query_pre_attn_scalar: 4,
+            sliding_window: 4,
+            sliding_window_pattern: 2,
+            max_position_embeddings: 1024,
+        }
+    }
+
+    fn zero_gemma_var_builder(cfg: &GemmaConfig) -> VarBuilder<'static> {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.embed_tokens.weight".to_string(),
+            Tensor::zeros((cfg.vocab_size, cfg.hidden_size), DType::F32, &Device::Cpu).unwrap(),
+        );
+        for layer in 0..cfg.num_hidden_layers {
+            for name in [
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.up_proj",
+                "mlp.down_proj",
+            ] {
+                let (rows, cols) = match name {
+                    "self_attn.q_proj" => (cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size),
+                    "self_attn.k_proj" | "self_attn.v_proj" => {
+                        (cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size)
+                    }
+                    "self_attn.o_proj" => (cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim),
+                    "mlp.gate_proj" | "mlp.up_proj" => (cfg.intermediate_size, cfg.hidden_size),
+                    "mlp.down_proj" => (cfg.hidden_size, cfg.intermediate_size),
+                    _ => unreachable!(),
+                };
+                tensors.insert(
+                    format!("model.layers.{layer}.{name}.weight"),
+                    Tensor::zeros((rows, cols), DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+            for name in [
+                "self_attn.q_norm",
+                "self_attn.k_norm",
+                "input_layernorm",
+                "pre_feedforward_layernorm",
+                "post_feedforward_layernorm",
+                "post_attention_layernorm",
+            ] {
+                let dim = if name.contains("q_norm") || name.contains("k_norm") {
+                    cfg.head_dim
+                } else {
+                    cfg.hidden_size
+                };
+                tensors.insert(
+                    format!("model.layers.{layer}.{name}.weight"),
+                    Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+        }
+        VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    fn zero_connector_source_var_builder() -> VarBuilder<'static> {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "text_embedding_projection.video_aggregate_embed.weight".to_string(),
+            Tensor::zeros((8, 24), DType::F32, &Device::Cpu).unwrap(),
+        );
+        tensors.insert(
+            "text_embedding_projection.video_aggregate_embed.bias".to_string(),
+            Tensor::zeros(8, DType::F32, &Device::Cpu).unwrap(),
+        );
+        tensors.insert(
+            "text_embedding_projection.audio_aggregate_embed.weight".to_string(),
+            Tensor::zeros((4, 24), DType::F32, &Device::Cpu).unwrap(),
+        );
+        tensors.insert(
+            "text_embedding_projection.audio_aggregate_embed.bias".to_string(),
+            Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap(),
+        );
+        for (prefix, dim) in [
+            ("model.diffusion_model.video_embeddings_connector", 8usize),
+            ("model.diffusion_model.audio_embeddings_connector", 4usize),
+        ] {
+            for linear_name in ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0"] {
+                tensors.insert(
+                    format!("{prefix}.transformer_1d_blocks.0.{linear_name}.weight"),
+                    Tensor::zeros((dim, dim), DType::F32, &Device::Cpu).unwrap(),
+                );
+                tensors.insert(
+                    format!("{prefix}.transformer_1d_blocks.0.{linear_name}.bias"),
+                    Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+            tensors.insert(
+                format!("{prefix}.transformer_1d_blocks.0.ff.net.0.proj.weight"),
+                Tensor::zeros((dim * 4, dim), DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("{prefix}.transformer_1d_blocks.0.ff.net.0.proj.bias"),
+                Tensor::zeros(dim * 4, DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("{prefix}.transformer_1d_blocks.0.ff.net.2.weight"),
+                Tensor::zeros((dim, dim * 4), DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("{prefix}.transformer_1d_blocks.0.ff.net.2.bias"),
+                Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                format!("{prefix}.learnable_registers"),
+                Tensor::zeros((128, dim), DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    fn runtime_session() -> Ltx2RuntimeSession {
+        let cfg = tiny_gemma_config();
+        let gemma = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
+        let prompt_encoder = NativePromptEncoder::new(
+            gemma,
+            build_embeddings_processor(
+                zero_connector_source_var_builder(),
+                crate::ltx2::preset::GemmaFeatureExtractorKind::V2DualAv,
+                cfg.hidden_size,
+                cfg.num_hidden_layers,
+                8,
+                Some(4),
+                ConnectorSpec {
+                    prefix: "model.diffusion_model.video_embeddings_connector.",
+                    num_attention_heads: 2,
+                    attention_head_dim: 4,
+                    num_layers: 1,
+                },
+                Some(ConnectorSpec {
+                    prefix: "model.diffusion_model.audio_embeddings_connector.",
+                    num_attention_heads: 1,
+                    attention_head_dim: 4,
+                    num_layers: 1,
+                }),
+            )
+            .unwrap(),
+            PaddingSide::Left,
+        );
+        Ltx2RuntimeSession::new(prompt_encoder)
+    }
+
+    fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
+        GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            width: 960,
+            height: 576,
+            steps: 8,
+            guidance: 3.0,
+            seed: Some(42),
+            batch_size: 1,
+            output_format,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: Some(17),
+            fps: Some(12),
+            upscale_model: None,
+            gif_preview: true,
+            enable_audio,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+        }
     }
 
     #[test]
@@ -618,5 +865,53 @@ mod tests {
         assert_eq!(bridge.prompt_tokens.conditional.len(), 1024);
         assert_eq!(bridge.prompt_tokens.conditional.valid_len(), 1);
         assert_eq!(bridge.prompt_tokens.pad_token_id, 7);
+    }
+
+    #[test]
+    fn load_uses_native_asset_checks_without_upstream_checkout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let gemma_dir = temp_dir.path().join("gemma");
+        fs::create_dir_all(&gemma_dir).unwrap();
+        write_test_gemma_assets(&gemma_dir);
+        let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
+        fs::write(&paths.transformer, []).unwrap();
+
+        let mut engine = Ltx2Engine::new(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            paths,
+            LoadStrategy::Sequential,
+        );
+
+        engine.load().unwrap();
+        assert!(engine.is_loaded());
+    }
+
+    #[test]
+    fn generate_runs_native_runtime_without_bridge_process() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let gemma_dir = temp_dir.path().join("gemma");
+        fs::create_dir_all(&gemma_dir).unwrap();
+        write_test_gemma_assets(&gemma_dir);
+        let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
+        fs::write(&paths.transformer, []).unwrap();
+
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            paths,
+            runtime_session(),
+        );
+        let response = engine
+            .generate(&request(OutputFormat::Gif, Some(false)))
+            .unwrap();
+        let video = response.video.unwrap();
+
+        assert_eq!(&video.data[..6], b"GIF89a");
+        assert_eq!(&video.thumbnail[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&video.gif_preview[..6], b"GIF89a");
+        assert_eq!(video.width, 960);
+        assert_eq!(video.height, 576);
+        assert_eq!(video.frames, 17);
+        assert_eq!(video.fps, 12);
+        assert!(!video.has_audio);
     }
 }

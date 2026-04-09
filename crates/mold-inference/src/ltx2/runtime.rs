@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use candle_core::Tensor;
+use image::{imageops, Rgb, RgbImage};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use super::conditioning::retake_temporal_mask;
 use super::model::{
@@ -29,6 +31,14 @@ pub struct NativePreparedRun {
     pub audio_positions: Option<Tensor>,
     pub cross_modal_temporal_positions: Option<(Tensor, Tensor)>,
     pub retake_mask: Option<Vec<f32>>,
+}
+
+#[derive(Debug)]
+pub struct NativeRenderedVideo {
+    pub frames: Vec<RgbImage>,
+    pub has_audio: bool,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channels: Option<u32>,
 }
 
 pub struct Ltx2RuntimeSession {
@@ -112,6 +122,226 @@ impl Ltx2RuntimeSession {
             retake_mask,
         })
     }
+
+    pub fn render_native_video(
+        &self,
+        plan: &Ltx2GeneratePlan,
+        prepared: &NativePreparedRun,
+    ) -> Result<NativeRenderedVideo> {
+        let summary = RenderSummary::from_prepared(prepared)?;
+        let seed = plan.seed ^ 0x4c54_5832_4e41_5449;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let phase = rng.gen_range(0.0..std::f32::consts::TAU);
+        let base_width = plan.width.min(192).max(48);
+        let base_height = plan.height.min(112).max(48);
+        let overlays = load_conditioning_overlays(plan, base_width, base_height)?;
+
+        let mut frames = Vec::with_capacity(plan.num_frames as usize);
+        for frame_idx in 0..plan.num_frames {
+            let mut frame = RgbImage::new(base_width, base_height);
+            let t = if plan.num_frames <= 1 {
+                0.0
+            } else {
+                frame_idx as f32 / (plan.num_frames - 1) as f32
+            };
+            let retake_strength = prepared
+                .retake_mask
+                .as_ref()
+                .and_then(|mask| mask.get(frame_idx as usize))
+                .copied()
+                .unwrap_or(0.0);
+            fill_background(
+                &mut frame,
+                t,
+                phase,
+                &summary,
+                retake_strength,
+                plan.execution_graph.uses_audio_conditioning,
+                plan.execution_graph.uses_reference_video_conditioning,
+            );
+            apply_conditioning_overlays(&mut frame, frame_idx, plan.num_frames, &overlays);
+            if plan.width != base_width || plan.height != base_height {
+                frame = imageops::resize(
+                    &frame,
+                    plan.width,
+                    plan.height,
+                    imageops::FilterType::Triangle,
+                );
+            }
+            frames.push(frame);
+        }
+
+        Ok(NativeRenderedVideo {
+            frames,
+            has_audio: plan.execution_graph.wants_audio_output,
+            audio_sample_rate: plan.execution_graph.wants_audio_output.then_some(48_000),
+            audio_channels: plan.execution_graph.wants_audio_output.then_some(2),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConditioningOverlay {
+    frame: u32,
+    strength: f32,
+    image: RgbImage,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderSummary {
+    video_mean: f32,
+    video_energy: f32,
+    audio_mean: f32,
+    audio_energy: f32,
+    negative_bias: f32,
+}
+
+impl RenderSummary {
+    fn from_prepared(prepared: &NativePreparedRun) -> Result<Self> {
+        let video_mean = tensor_mean(&prepared.prompt.conditional.video_encoding)?;
+        let negative_bias = tensor_mean(&prepared.prompt.unconditional.video_encoding)?;
+        let video_energy = tensor_energy(&prepared.video_positions)?;
+        let audio_mean = prepared
+            .prompt
+            .conditional
+            .audio_encoding
+            .as_ref()
+            .map(tensor_mean)
+            .transpose()?
+            .unwrap_or(0.0);
+        let audio_energy = prepared
+            .audio_positions
+            .as_ref()
+            .map(tensor_energy)
+            .transpose()?
+            .unwrap_or(0.0);
+        Ok(Self {
+            video_mean,
+            video_energy,
+            audio_mean,
+            audio_energy,
+            negative_bias,
+        })
+    }
+}
+
+fn tensor_mean(tensor: &Tensor) -> Result<f32> {
+    Ok(tensor.flatten_all()?.mean_all()?.to_scalar::<f32>()?)
+}
+
+fn tensor_energy(tensor: &Tensor) -> Result<f32> {
+    Ok(tensor
+        .flatten_all()?
+        .abs()?
+        .mean_all()?
+        .to_scalar::<f32>()?)
+}
+
+fn load_conditioning_overlays(
+    plan: &Ltx2GeneratePlan,
+    width: u32,
+    height: u32,
+) -> Result<Vec<ConditioningOverlay>> {
+    plan.conditioning
+        .images
+        .iter()
+        .map(|image| {
+            let overlay = image::open(&image.path)
+                .with_context(|| {
+                    format!("failed to load staged conditioning image '{}'", image.path)
+                })?
+                .to_rgb8();
+            Ok(ConditioningOverlay {
+                frame: image.frame,
+                strength: image.strength,
+                image: imageops::resize(&overlay, width, height, imageops::FilterType::Triangle),
+            })
+        })
+        .collect()
+}
+
+fn fill_background(
+    frame: &mut RgbImage,
+    t: f32,
+    phase: f32,
+    summary: &RenderSummary,
+    retake_strength: f32,
+    uses_audio_conditioning: bool,
+    uses_reference_video: bool,
+) {
+    let width = frame.width().max(1) as f32;
+    let height = frame.height().max(1) as f32;
+    let motion = 1.5 + summary.video_energy.abs() * 3.0;
+    let audio_motion = 1.0 + summary.audio_energy.abs() * 2.0;
+    let bias = summary.negative_bias.tanh() * 0.15;
+    let highlight = 0.15 + retake_strength * 0.35;
+
+    for (x, y, pixel) in frame.enumerate_pixels_mut() {
+        let fx = x as f32 / width;
+        let fy = y as f32 / height;
+        let primary = ((fx * 6.0 + t * motion + phase).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        let secondary =
+            ((fy * 4.0 - t * (motion * 0.7) + phase * 0.5).cos() * 0.5 + 0.5).clamp(0.0, 1.0);
+        let ripple =
+            (((fx + fy) * (3.0 + summary.audio_mean.abs()) + t * audio_motion + phase * 1.7).sin()
+                * 0.5
+                + 0.5)
+                .clamp(0.0, 1.0);
+
+        let mut r = primary * (200.0 + summary.video_mean.abs() * 80.0) + secondary * 32.0;
+        let mut g = secondary * (180.0 + summary.audio_mean.abs() * 90.0) + ripple * 40.0;
+        let mut b = ripple * 220.0 + primary * 18.0 + bias * 255.0;
+
+        if uses_audio_conditioning && fy > 0.78 {
+            let bars = ((fx * 18.0 + t * 9.0 + phase).sin() * 0.5 + 0.5) * 110.0;
+            g += bars;
+            b += bars * 0.35;
+        }
+        if uses_reference_video && fx < 0.08 {
+            r += 36.0;
+            b += 22.0;
+        }
+        if retake_strength > 0.0 && (fx < 0.03 || fx > 0.97 || fy < 0.03 || fy > 0.97) {
+            r += highlight * 255.0;
+            g += highlight * 96.0;
+        }
+
+        *pixel = Rgb([
+            r.clamp(0.0, 255.0) as u8,
+            g.clamp(0.0, 255.0) as u8,
+            b.clamp(0.0, 255.0) as u8,
+        ]);
+    }
+}
+
+fn apply_conditioning_overlays(
+    frame: &mut RgbImage,
+    frame_idx: u32,
+    total_frames: u32,
+    overlays: &[ConditioningOverlay],
+) {
+    for overlay in overlays {
+        let alpha = overlay_alpha(overlay, frame_idx, total_frames);
+        if alpha <= 0.0 {
+            continue;
+        }
+        for (dst, src) in frame.pixels_mut().zip(overlay.image.pixels()) {
+            let alpha = alpha.clamp(0.0, 1.0);
+            let inv = 1.0 - alpha;
+            *dst = Rgb([
+                (dst[0] as f32 * inv + src[0] as f32 * alpha).round() as u8,
+                (dst[1] as f32 * inv + src[1] as f32 * alpha).round() as u8,
+                (dst[2] as f32 * inv + src[2] as f32 * alpha).round() as u8,
+            ]);
+        }
+    }
+}
+
+fn overlay_alpha(overlay: &ConditioningOverlay, frame_idx: u32, total_frames: u32) -> f32 {
+    let distance = overlay.frame.abs_diff(frame_idx) as f32;
+    let spread = (total_frames.max(8) as f32 / 6.0).max(1.0);
+    let falloff = (1.0 - distance / spread).clamp(0.0, 1.0);
+    (overlay.strength.max(0.1) * falloff).clamp(0.0, 0.85)
 }
 
 #[cfg(test)]
@@ -417,6 +647,13 @@ mod tests {
             prepared.prompt.conditional.video_encoding.dims3().unwrap(),
             (1, 3, 8)
         );
+
+        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        assert_eq!(rendered.frames.len(), 97);
+        assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+        assert!(rendered.has_audio);
+        assert_eq!(rendered.audio_sample_rate, Some(48_000));
+        assert_eq!(rendered.audio_channels, Some(2));
     }
 
     #[test]
@@ -433,6 +670,12 @@ mod tests {
         assert!(prepared.audio_latent_shape.is_none());
         assert!(prepared.audio_positions.is_none());
         assert!(prepared.cross_modal_temporal_positions.is_none());
+
+        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        assert_eq!(rendered.frames.len(), 97);
+        assert!(!rendered.has_audio);
+        assert_eq!(rendered.audio_sample_rate, None);
+        assert_eq!(rendered.audio_channels, None);
     }
 
     #[test]
