@@ -6,29 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.6.3] - 2026-04-08
+
+*Qwen-Image-Edit-2511 support and TUI remote server awareness.*
+
 ### Added
 
-- **Qwen-Image-Edit-2511 request surface**: added `qwen-image-edit-2511:{bf16,q8,q6,q5,q4,q3,q2}` manifests, `GenerateRequest.edit_images`, family-aware validation, and distinct shared storage paths for edit-family VAE/text-encoder assets.
-- **Qwen-Image-Edit-2511 inference pipeline**: added the Qwen2.5-VL multimodal edit encoder, condition-image preprocessing, packed edit-latent concatenation with `img_shapes`, `zero_cond_t` transformer support, and true-CFG norm rescaling for local image editing.
+- **Qwen-Image-Edit-2511 request surface**: added `qwen-image-edit-2511:{bf16,q8,q6,q5,q4,q3,q2}` manifests, `GenerateRequest.edit_images`, family-aware validation, and distinct shared storage paths for edit-family VAE/text-encoder assets (#219)
+- **Qwen-Image-Edit-2511 inference pipeline**: added the Qwen2.5-VL multimodal edit encoder, condition-image preprocessing, packed edit-latent concatenation with `img_shapes`, `zero_cond_t` transformer support, and true-CFG norm rescaling for local image editing (#219)
 
 ### Changed
 
-- **`--image` CLI semantics**: `mold run --image` is now repeatable. Non-edit families still accept at most one source image; `qwen-image-edit` maps repeated `--image` flags into `edit_images`.
-- **TUI capability modeling**: `qwen-image-edit` now appears as a source-image editing family instead of img2img, so the TUI exposes a source image and negative prompt without img2img-only controls like `strength`, `mask`, `ControlNet`, or `LoRA`.
+- **`--image` CLI semantics**: `mold run --image` is now repeatable. Non-edit families still accept at most one source image; `qwen-image-edit` maps repeated `--image` flags into `edit_images` (#219)
+- **TUI capability modeling**: `qwen-image-edit` now appears as a source-image editing family instead of img2img, so the TUI exposes a source image and negative prompt without img2img-only controls like `strength`, `mask`, `ControlNet`, or `LoRA` (#219)
 
 ### Fixed
 
-- **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine ([#158](https://github.com/utensils/mold/issues/158)):
+- **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine (#218, [#158](https://github.com/utensils/mold/issues/158)):
   - Info panel queries `/api/status` for memory, GPU, and busy state when connected to a remote server
   - Model parameter defaults (steps, guidance, width, height) come from the server's catalog instead of local `config.toml`
   - Model pull routes through the server API when connected remotely
   - Reset Defaults action uses server catalog values when connected
   - Tab bar shows hostname (e.g. "hal9000") when connected to a remote server, "local" in local mode, "connecting..." during health check
   - `/api/status` now includes `hostname` and `memory_status` fields (backward-compatible, older servers omit them)
-- **Qwen edit-family encoder selection**: `qwen-image-edit` now supports quantized `--qwen2-variant` values by splitting the multimodal stack into a GGUF Qwen2.5 language path plus a safetensor-backed Qwen2.5-VL vision tower for image conditioning.
-- **Qwen edit-family RAM use**: `qwen-image-edit` now stages the Qwen2.5 encoder instead of keeping it resident after model load, drops encoder weights immediately after edit conditioning, and avoids loading the full BF16 language stack just to run multimodal edits. A local `qwen-image-edit-2511:q4 --qwen2-variant q4` smoke run completed with roughly 1.8 GB max RSS instead of the earlier tens-of-GB host spike.
-- **Qwen2.5 CPU dtype handling**: CPU Qwen2.5 encoder paths now stay in `F32` where candle CPU matmul requires it, while lower-memory edit inference uses quantized GGUF language weights plus the staged vision sidecar instead of relying on unsupported CPU `BF16` matmuls.
-- **Qwen2.5 vision progress reporting**: the staged vision-tower load now reports only the bytes for `visual.*` tensors instead of the full shared text-encoder shard set, removing the misleading `15.45 GiB` progress line during edit encoder reloads.
+- **Qwen edit-family encoder selection**: `qwen-image-edit` now supports quantized `--qwen2-variant` values by splitting the multimodal stack into a GGUF Qwen2.5 language path plus a safetensor-backed Qwen2.5-VL vision tower for image conditioning (#219)
+- **Qwen edit-family RAM use**: `qwen-image-edit` now stages the Qwen2.5 encoder instead of keeping it resident after model load, drops encoder weights immediately after edit conditioning, and avoids loading the full BF16 language stack just to run multimodal edits. A local `qwen-image-edit-2511:q4 --qwen2-variant q4` smoke run completed with roughly 1.8 GB max RSS instead of the earlier tens-of-GB host spike (#219)
+- **Qwen2.5 CPU dtype handling**: CPU Qwen2.5 encoder paths now stay in `F32` where candle CPU matmul requires it, while lower-memory edit inference uses quantized GGUF language weights plus the staged vision sidecar instead of relying on unsupported CPU `BF16` matmuls (#219)
+- **Qwen2.5 vision progress reporting**: the staged vision-tower load now reports only the bytes for `visual.*` tensors instead of the full shared text-encoder shard set, removing the misleading `15.45 GiB` progress line during edit encoder reloads (#219)
 ## [0.6.2] - 2026-04-08
 
 ### Added
