@@ -2,6 +2,8 @@ use mold_core::{LoraWeight, TimeRange};
 use serde::Serialize;
 
 use super::conditioning::{StagedConditioning, StagedImage};
+use super::execution::Ltx2ExecutionGraph;
+use super::preset::Ltx2ModelPreset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PipelineKind {
@@ -37,6 +39,8 @@ impl PipelineKind {
 #[derive(Debug, Clone)]
 pub(crate) struct Ltx2GeneratePlan {
     pub(crate) pipeline: PipelineKind,
+    pub(crate) preset: Ltx2ModelPreset,
+    pub(crate) execution_graph: Ltx2ExecutionGraph,
     pub(crate) checkpoint_path: String,
     pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,

@@ -10,9 +10,11 @@ use std::time::Instant;
 use super::assets;
 use super::backend::Ltx2Backend;
 use super::conditioning;
+use super::execution;
 use super::lora;
 use super::media::{self, ProbeMetadata};
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
+use super::preset;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
 use crate::progress::ProgressCallback;
 
@@ -187,7 +189,7 @@ impl Ltx2Engine {
         lora::camera_control_preset(name)
     }
 
-    fn materialize_request(
+    pub(crate) fn materialize_request(
         &self,
         req: &GenerateRequest,
         work_dir: &Path,
@@ -199,6 +201,9 @@ impl Ltx2Engine {
         }
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
         let loras = lora::resolve_loras(&self.model_name, req)?;
+        let preset = preset::preset_for_model(&self.model_name)?;
+        let execution_graph =
+            execution::build_execution_graph(req, pipeline, &conditioning, &preset, loras.len());
         let spatial_upsampler_path = assets::resolve_spatial_upscaler_path(
             &self.model_name,
             &self.paths,
@@ -208,6 +213,8 @@ impl Ltx2Engine {
 
         Ok(Ltx2GeneratePlan {
             pipeline,
+            preset,
+            execution_graph,
             checkpoint_path: self.paths.transformer.to_string_lossy().to_string(),
             distilled_checkpoint_path: pipeline
                 .requires_distilled_checkpoint()
@@ -229,7 +236,7 @@ impl Ltx2Engine {
             frame_rate: req.fps.unwrap_or(24),
             num_inference_steps: req.steps,
             quantization: self.request_quantization(),
-            streaming_prefetch_count: Some(2),
+            streaming_prefetch_count: Some(preset.streaming_prefetch_count),
             conditioning,
             loras,
             retake_range: req.retake_range.clone(),
@@ -297,6 +304,13 @@ impl InferenceEngine for Ltx2Engine {
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let upstream_output = work_dir.path().join("ltx2-output.mp4");
         let plan = self.materialize_request(req, work_dir.path(), &upstream_output)?;
+        let planned_stage_count = plan.execution_graph.denoise_passes.len();
+        self.emit(&format!(
+            "Planned native LTX-2 graph: preset={}, denoise_stages={}, blocks={}",
+            plan.preset.name,
+            planned_stage_count,
+            plan.execution_graph.blocks.len()
+        ));
         let bridge_request = plan.to_bridge_request();
         let bridge_request_path = work_dir.path().join("request.json");
         fs::write(

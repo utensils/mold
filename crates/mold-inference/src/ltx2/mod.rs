@@ -1,12 +1,14 @@
 mod assets;
 mod backend;
 mod conditioning;
+mod execution;
 mod guidance;
 mod lora;
 mod media;
 mod model;
 mod pipeline;
 mod plan;
+mod preset;
 mod sampler;
 mod text;
 
