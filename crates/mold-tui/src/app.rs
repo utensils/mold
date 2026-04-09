@@ -1493,7 +1493,7 @@ impl App {
 
         // Use server catalog defaults when connected to a remote server,
         // local config otherwise.
-        let used_remote = if self.server_url.is_some() {
+        let used_remote = if self.should_poll_remote() {
             if let Some(entry) = self.models.catalog.iter().find(|m| m.name == model_name) {
                 self.generate.params.steps = entry.defaults.default_steps;
                 self.generate.params.guidance = entry.defaults.default_guidance;
@@ -2980,12 +2980,13 @@ impl App {
             ParamField::ResetDefaults => {
                 let model = self.generate.params.model.clone();
 
-                // Use server catalog defaults when connected, local config otherwise
-                if let Some(entry) = self
-                    .server_url
-                    .as_ref()
-                    .and_then(|_| self.models.catalog.iter().find(|m| m.name == model))
-                {
+                // Use server catalog defaults when connected (and not in local mode),
+                // local config otherwise
+                if let Some(entry) = if self.should_poll_remote() {
+                    self.models.catalog.iter().find(|m| m.name == model)
+                } else {
+                    None
+                } {
                     self.generate.params.width = entry.defaults.default_width;
                     self.generate.params.height = entry.defaults.default_height;
                     self.generate.params.steps = entry.defaults.default_steps;
