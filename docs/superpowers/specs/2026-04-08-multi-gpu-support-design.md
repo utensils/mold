@@ -98,13 +98,19 @@ All existing VRAM functions (`free_vram_bytes`, `vram_used_estimate`, `reclaim_g
 pub struct GpuWorker {
     pub gpu: GpuInfo,
     pub model_cache: Arc<Mutex<ModelCache>>,
-    pub engine_snapshot: Arc<RwLock<EngineSnapshot>>,
+    pub active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,  // Per-GPU (not global)
     pub model_load_lock: Arc<Mutex<()>>,
-    pub shared_pool: Arc<Mutex<SharedPool>>,  // Shared across all workers
+    pub shared_pool: Arc<Mutex<SharedPool>>,           // Shared across all workers
+    pub upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>,  // Per-GPU
+    pub in_flight: AtomicUsize,                        // Dispatch-time job tracking
+    pub consecutive_failures: AtomicUsize,             // Health tracking
+    pub degraded_until: Arc<RwLock<Option<Instant>>>,  // Deprioritize after repeated failures
 }
 ```
 
 Each worker gets its own `ModelCache` instance (existing LRU type). The `SharedPool` for tokenizer caching is shared across all workers since tokenizers are CPU-side and read-only after init.
+
+**Note:** The existing global `EngineSnapshot` is eliminated. Per-GPU active generation state is tracked via `active_generation` on each worker. `GpuPool.gpu_status()` aggregates across all workers for status API responses.
 
 ### GpuPool
 
@@ -127,6 +133,10 @@ impl GpuPool {
 3. **Evict LRU** — All GPUs busy. Pick the GPU where the model fits with the most headroom after evicting its LRU model.
 4. **Doesn't fit** — Return error (model too large for any available GPU).
 
+**Degraded workers:** Skip workers with `consecutive_failures >= 3` unless `Instant::now() > degraded_until` (60-second cooldown). On successful generation, reset `consecutive_failures` to 0.
+
+**VRAM estimates:** `select_worker()` uses `CachedEngine.vram_bytes` for previously-loaded models (exact, measured post-load). For models not yet loaded, uses `estimate_peak_memory()` from manifest metadata as fallback.
+
 ### AppState Changes
 
 ```rust
@@ -145,27 +155,81 @@ Existing `model_manager.rs` functions refactored to operate on a specific `GpuWo
 
 ## 3. Queue & Concurrency
 
+### CUDA Threading Model
+
+CUDA contexts are thread-local. Using `tokio::spawn_blocking` would share OS threads across GPU workers, causing CUDA context-switching overhead or worse. Each `GpuWorker` owns a **dedicated OS thread** (via `std::thread::spawn`) with a bounded work channel:
+
+```rust
+// During GpuPool initialization, each worker spawns a dedicated thread:
+let (tx, rx) = std::sync::mpsc::sync_channel::<GpuJob>(queue_size);
+
+std::thread::Builder::new()
+    .name(format!("gpu-worker-{}", gpu.ordinal))
+    .spawn(move || {
+        // This thread owns the CUDA context for this GPU ordinal.
+        // All model loads and inference run here — no context switching.
+        for job in rx.iter() {
+            let result = process_job(&worker, job);
+            // result sent back via job.response_tx
+        }
+    })?;
+```
+
+This ensures each GPU's CUDA context lives on exactly one OS thread for its entire lifetime. No context push/pop overhead, no cross-GPU interference.
+
 ### Multi-GPU Dispatch
 
-The queue becomes a dispatcher. Multiple jobs run concurrently (one per GPU):
+The async dispatch loop routes jobs to GPU worker threads:
 
 ```rust
 loop {
     let job = queue.recv().await;
     let worker = gpu_pool.select_worker(&job.model, estimated_vram)?;
 
-    tokio::spawn(async move {
-        let _lock = worker.model_load_lock.lock().await;
-        ensure_model_ready(worker, &job.model).await?;
+    // Increment in-flight BEFORE dispatch to prevent TOCTOU race.
+    // Under burst load, multiple select_worker() calls see accurate counts.
+    worker.in_flight.fetch_add(1, Ordering::SeqCst);
 
-        let result = tokio::task::spawn_blocking(move || {
-            let mut cache = worker.model_cache.blocking_lock();
-            let engine = cache.get_mut(&job.model).unwrap();
-            engine.generate(&job.request)
-        }).await?;
+    // Send to the worker's dedicated OS thread
+    if worker.job_tx.try_send(job).is_err() {
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        job.response_tx.send(Err(anyhow!("GPU {} busy")));
+    }
+}
 
-        job.response_tx.send(result);
-    });
+// Inside each GPU worker thread's process_job():
+fn process_job(worker: &GpuWorker, job: GpuJob) {
+    let _lock = worker.model_load_lock.lock().unwrap();
+    ensure_model_ready(worker, &job.model)?;
+
+    // Take-and-restore: release cache lock during inference
+    let mut engine = {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.remove(&job.model).unwrap()
+    };
+    // Cache mutex is now FREE — status queries, model list, etc. proceed unblocked
+
+    let result = engine.generate(&job.request);
+
+    // Restore engine to cache
+    {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.insert(job.model.clone(), engine, vram_bytes);
+    }
+
+    // Update health tracking
+    match &result {
+        Ok(_) => worker.consecutive_failures.store(0, Ordering::SeqCst),
+        Err(_) => {
+            let failures = worker.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            if failures >= 3 {
+                *worker.degraded_until.write().unwrap() = Some(Instant::now() + Duration::from_secs(60));
+            }
+        }
+    }
+
+    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+    job.response_tx.send(result);
 }
 ```
 
@@ -191,7 +255,7 @@ Includes `Retry-After` header.
 
 ### In-Flight Tracking
 
-Track active jobs per GPU for placement tiebreaking. When multiple GPUs have the same model loaded, prefer the one with fewer in-flight requests.
+Each `GpuWorker` has an `in_flight: AtomicUsize` counter incremented atomically at dispatch time (before the job is sent to the worker thread) and decremented after the job completes. This prevents the TOCTOU race where burst loads all see the same stale state and route to the same GPU. The placement strategy reads `in_flight` to prefer the least-loaded GPU when multiple have the requested model.
 
 ### SSE Streaming
 
@@ -343,10 +407,36 @@ Each engine's `load()` calls `create_device(self.base.gpu_ordinal, ...)`.
 
 ### What Changes
 
-- `device.rs`: all functions take ordinal parameter
+- `device.rs`: all functions take ordinal parameter; `reclaim_gpu_memory(ordinal)` resets only the specified device's primary context
 - `factory.rs`: passes ordinal through to engines
 - `engine_base.rs`: stores `gpu_ordinal`
 - `expand.rs`: accepts ordinal, defaults to least-loaded GPU
+- `upscaler/engine.rs`: `create_upscale_engine()` takes ordinal parameter; per-worker upscaler cache in `GpuWorker`
+
+### `reclaim_gpu_memory(ordinal)`
+
+The current implementation calls `cuDevicePrimaryCtxReset_v2` on device 0, destroying all CUDA state on that device. With multi-GPU, this must be parameterized:
+
+```rust
+pub fn reclaim_gpu_memory(ordinal: usize) {
+    // Reset only the specified device's primary context.
+    // Safe because the caller holds the per-worker model_load_lock,
+    // guaranteeing exclusive access to this GPU during model swaps.
+    let cu_device = CudaDevice::new(ordinal);
+    unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) }
+}
+```
+
+Must only be called inside the per-worker `model_load_lock` to guarantee no other operation is using that GPU's context.
+
+### Upscaler Handling
+
+The Real-ESRGAN upscaler is a GPU-bound model currently cached globally on `AppState`. With multi-GPU:
+
+- Each `GpuWorker` gets its own `upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>`
+- `create_upscale_engine()` takes an `ordinal` parameter
+- `/api/upscale` and `/api/upscale/stream` requests route through `GpuPool` with least-busy GPU preference
+- No changes to the upscale request API — server decides GPU placement
 
 ### What Doesn't Change
 
@@ -363,9 +453,9 @@ Each engine's `load()` calls `create_device(self.base.gpu_ordinal, ...)`.
 
 | Crate | Changes |
 |-------|---------|
-| `mold-core` | `GpuInfo`, `GpuSelection`, `GpuStatus` types. `ServerStatus` updated with `gpus` array. `GenerateResponse` gets `gpu` field. Config gets `gpus` and `queue_size`. |
-| `mold-inference` | `device.rs` overhaul (ordinal params, `discover_gpus()`). `EngineBase` gets `gpu_ordinal`. Factory passes ordinal. `expand.rs` ordinal-aware. |
-| `mold-server` | `GpuPool`, `GpuWorker` structs. `AppState` refactored. Queue becomes multi-GPU dispatcher. Routes updated for new API fields. `model_manager.rs` scoped to per-worker. |
+| `mold-core` | `GpuInfo`, `GpuSelection`, `GpuStatus` types. `ServerStatus` updated with `gpus` array, `queue_depth`, `queue_capacity`. `GenerateResponse` gets `gpu` field. Config gets `gpus` and `queue_size`. |
+| `mold-inference` | `device.rs` overhaul (ordinal params, `discover_gpus()`, `reclaim_gpu_memory(ordinal)`). `EngineBase` gets `gpu_ordinal`. Factory passes ordinal. `expand.rs` ordinal-aware. Upscaler engine takes ordinal. |
+| `mold-server` | `GpuPool`, `GpuWorker` structs (with per-worker `active_generation`, `upscaler_cache`, `in_flight`, health tracking). `AppState` refactored — `EngineSnapshot` eliminated. Dedicated OS thread per GPU worker (CUDA context affinity). Queue becomes multi-GPU dispatcher with dispatch-time in-flight tracking. Take-and-restore pattern for cache lock during inference. `model_manager.rs` scoped to per-worker. Routes updated for new API fields including upscale endpoints. |
 | `mold-cli` | `--gpus` and `--queue-size` flags. `mold ps` multi-GPU display. `mold run --local` best-GPU selection. |
 | `mold-discord` | Minor: parse `gpu` field from `GenerateResponse` for display. |
 | `mold-tui` | Minor: display per-GPU status if connected to multi-GPU server. |
