@@ -24,6 +24,7 @@ use mold_core::types::GpuSelection;
 use mold_core::{Config, ModelPaths};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -40,17 +41,73 @@ pub async fn run_server(
     gpu_selection: GpuSelection,
     queue_size: usize,
 ) -> Result<()> {
-    let _ = (&gpu_selection, queue_size); // TODO: wire into GpuPool (Task 4-5)
     Config::install_runtime_models_dir_override(models_dir.clone());
 
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
     let model_name = config.resolved_default_model();
 
-    // Create the generation queue channel (bounded, 16 slots).
+    // ── Discover and initialize GPU workers ────────────────────────────────
+    let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(
+        mold_inference::shared_pool::SharedPool::new(),
+    ));
+
+    let discovered = mold_inference::device::discover_gpus();
+    let selected = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
+
+    if selected.is_empty() && !discovered.is_empty() {
+        anyhow::bail!(
+            "No GPUs matched selection {:?} (discovered: {:?})",
+            gpu_selection,
+            discovered.iter().map(|g| g.ordinal).collect::<Vec<_>>()
+        );
+    }
+
+    let mut workers = Vec::new();
+    let mut _gpu_thread_handles = Vec::new();
+
+    for gpu in &selected {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(queue_size);
+        let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
+            gpu: gpu.clone(),
+            model_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                model_cache::ModelCache::new(3),
+            )),
+            active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            shared_pool: shared_pool.clone(),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: std::sync::RwLock::new(None),
+            job_tx,
+        });
+
+        let handle = gpu_worker::spawn_gpu_thread(worker.clone(), job_rx);
+        _gpu_thread_handles.push(handle);
+        workers.push(worker);
+    }
+
+    let gpu_pool = std::sync::Arc::new(gpu_pool::GpuPool { workers });
+
+    // Log discovered GPUs.
+    for status in gpu_pool.gpu_status() {
+        info!(
+            gpu = status.ordinal,
+            name = %status.name,
+            vram_mb = status.vram_total_bytes / 1_000_000,
+            "GPU worker ready"
+        );
+    }
+
+    if selected.is_empty() {
+        info!("no GPUs discovered — server will operate in CPU/pull-only mode");
+    }
+
+    // ── Create generation queue ────────────────────────────────────────────
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(16);
     let queue_handle = QueueHandle::new(job_tx);
 
+    // ── Create AppState ────────────────────────────────────────────────────
     let mut state = match ModelPaths::resolve(&model_name, &config) {
         Some(paths) => {
             info!(model = %model_name, "configured model");
@@ -85,10 +142,6 @@ pub async fn run_server(
             }
 
             let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-            // Create shared pool before engine so the first engine can populate it.
-            let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            ));
             let engine = mold_inference::create_engine_with_pool(
                 model_name,
                 paths,
@@ -98,13 +151,19 @@ pub async fn run_server(
                 offload,
                 Some(shared_pool.clone()),
             )?;
-            let mut state = state::AppState::new(engine, config, queue_handle);
+            let mut state = state::AppState::new(
+                engine,
+                config,
+                queue_handle,
+                gpu_pool.clone(),
+                queue_size,
+            );
             state.shared_pool = shared_pool;
             state
         }
         None => {
             info!("no default model configured — models will be pulled on first request");
-            state::AppState::empty(config, queue_handle)
+            state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size)
         }
     };
 
@@ -125,6 +184,7 @@ pub async fn run_server(
     }
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
+    // TODO: Task 6 will replace this with the multi-GPU queue dispatcher.
     let worker_state = state.clone();
     tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
 

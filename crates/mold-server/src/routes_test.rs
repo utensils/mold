@@ -266,7 +266,8 @@ mod tests {
     fn app_empty() -> axum::Router {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        app_with_state(AppState::empty(mold_core::Config::default(), queue))
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool { workers: Vec::new() });
+        app_with_state(AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200))
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
@@ -1140,7 +1141,8 @@ mod tests {
     async fn unload_no_model_returns_200_with_message() {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        let app = app_with_state(AppState::empty(mold_core::Config::default(), queue));
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool { workers: Vec::new() });
+        let app = app_with_state(AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200));
         let resp = app
             .oneshot(
                 Request::delete("/api/models/unload")
@@ -1165,6 +1167,8 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool { workers: Vec::new() }),
+            queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
@@ -1212,6 +1216,8 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool { workers: Vec::new() }),
+            queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
@@ -1462,6 +1468,8 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool { workers: Vec::new() }),
+            queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
                 model_name: Some("mock-model".to_string()),
