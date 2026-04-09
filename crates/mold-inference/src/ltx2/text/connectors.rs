@@ -429,7 +429,9 @@ impl ConnectorAttention {
             self.double_precision_rope,
         )?;
         let q = apply_rotary_emb(
-            &q.transpose(1, 2)?.contiguous()?.reshape((batch, seq, inner_dim))?,
+            &q.transpose(1, 2)?
+                .contiguous()?
+                .reshape((batch, seq, inner_dim))?,
             &cos,
             &sin,
             self.rope_type,
@@ -440,7 +442,9 @@ impl ConnectorAttention {
         .transpose(1, 2)?
         .contiguous()?;
         let k = apply_rotary_emb(
-            &k.transpose(1, 2)?.contiguous()?.reshape((batch, seq, inner_dim))?,
+            &k.transpose(1, 2)?
+                .contiguous()?
+                .reshape((batch, seq, inner_dim))?,
             &cos,
             &sin,
             self.rope_type,
@@ -679,9 +683,12 @@ fn connector_rotary_emb_cache(
             let cos = Tensor::cat(&[freq_unsq.clone(), freq_unsq], D::Minus1)?
                 .reshape((1, seq_len, freqs.dim(D::Minus1)? * 2))?
                 .cos()?;
-            let sin = Tensor::cat(&[freqs.unsqueeze(D::Minus1)?, freqs.unsqueeze(D::Minus1)?], D::Minus1)?
-                .reshape((1, seq_len, freqs.dim(D::Minus1)? * 2))?
-                .sin()?;
+            let sin = Tensor::cat(
+                &[freqs.unsqueeze(D::Minus1)?, freqs.unsqueeze(D::Minus1)?],
+                D::Minus1,
+            )?
+            .reshape((1, seq_len, freqs.dim(D::Minus1)? * 2))?
+            .sin()?;
             Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
         }
         LtxRopeType::Split => {

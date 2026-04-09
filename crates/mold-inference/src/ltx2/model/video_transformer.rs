@@ -693,11 +693,21 @@ impl Ltx2VideoRotaryPosEmbed {
                 }
                 let (batch, seq, _) = cos.dims3()?;
                 let cos = cos
-                    .reshape((batch, seq, self.num_attention_heads, expected / self.num_attention_heads))?
+                    .reshape((
+                        batch,
+                        seq,
+                        self.num_attention_heads,
+                        expected / self.num_attention_heads,
+                    ))?
                     .transpose(1, 2)?
                     .contiguous()?;
                 let sin = sin
-                    .reshape((batch, seq, self.num_attention_heads, expected / self.num_attention_heads))?
+                    .reshape((
+                        batch,
+                        seq,
+                        self.num_attention_heads,
+                        expected / self.num_attention_heads,
+                    ))?
                     .transpose(1, 2)?
                     .contiguous()?;
                 Ok((
@@ -751,7 +761,9 @@ impl LtxAttention {
         vb: VarBuilder,
     ) -> Result<Self> {
         if qk_norm != "rms_norm_across_heads" && qk_norm != "rms_norm" {
-            candle_core::bail!("Only 'rms_norm' and 'rms_norm_across_heads' are supported as qk_norm.");
+            candle_core::bail!(
+                "Only 'rms_norm' and 'rms_norm_across_heads' are supported as qk_norm."
+            );
         }
 
         let inner_dim = dim_head * heads;
@@ -1609,7 +1621,11 @@ impl LtxAvTransformerBlock {
         })
     }
 
-    fn add_ada_values(scale_shift_table: &Tensor, timestep: &Tensor, count: usize) -> Result<Tensor> {
+    fn add_ada_values(
+        scale_shift_table: &Tensor,
+        timestep: &Tensor,
+        count: usize,
+    ) -> Result<Tensor> {
         let batch = timestep.dim(0)?;
         let tokens = timestep.dim(1)?;
         let dim = scale_shift_table.dim(1)?;
@@ -1642,7 +1658,8 @@ impl LtxAvTransformerBlock {
         gate_timestep: &Tensor,
         start_index: usize,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        let scale_shift = Self::add_ada_values(&scale_shift_table.i((0..4, ..))?, scale_shift_timestep, 4)?;
+        let scale_shift =
+            Self::add_ada_values(&scale_shift_table.i((0..4, ..))?, scale_shift_timestep, 4)?;
         let gate = Self::add_ada_values(&scale_shift_table.i((4..5, ..))?, gate_timestep, 1)?;
         Ok((
             scale_shift.i((.., .., start_index, ..))?,
@@ -1670,7 +1687,8 @@ impl LtxAvTransformerBlock {
                 candle_core::Error::msg("cross-attention AdaLN requires prompt timestep embeddings")
             })?;
             let (shift_q, scale_q, gate) = self.get_ada_triplet(scale_shift_table, timestep, 6)?;
-            let attn_input = modulate_tokens(&rms_norm_tensor(x, self.norm_eps)?, &scale_q, &shift_q)?;
+            let attn_input =
+                modulate_tokens(&rms_norm_tensor(x, self.norm_eps)?, &scale_q, &shift_q)?;
             let prompt = Self::add_ada_values(prompt_scale_shift_table, prompt_timestep, 2)?;
             let shift_kv = prompt.i((.., .., 0, ..))?;
             let scale_kv = prompt.i((.., .., 1, ..))?;
@@ -1698,7 +1716,11 @@ impl LtxAvTransformerBlock {
             self.get_ada_triplet(&self.video_scale_shift_table, &video.timesteps, 0)?;
         let mut vx = video.x.broadcast_add(&gate_tokens(
             &self.video_attn1.forward(
-                &modulate_tokens(&rms_norm_tensor(&video.x, self.norm_eps)?, &v_scale_msa, &v_shift_msa)?,
+                &modulate_tokens(
+                    &rms_norm_tensor(&video.x, self.norm_eps)?,
+                    &v_scale_msa,
+                    &v_shift_msa,
+                )?,
                 None,
                 None,
                 Some((&video.rope.0, &video.rope.1)),
@@ -1721,7 +1743,11 @@ impl LtxAvTransformerBlock {
             self.get_ada_triplet(&self.audio_scale_shift_table, &audio.timesteps, 0)?;
         let mut ax = audio.x.broadcast_add(&gate_tokens(
             &self.audio_attn1.forward(
-                &modulate_tokens(&rms_norm_tensor(&audio.x, self.norm_eps)?, &a_scale_msa, &a_shift_msa)?,
+                &modulate_tokens(
+                    &rms_norm_tensor(&audio.x, self.norm_eps)?,
+                    &a_scale_msa,
+                    &a_shift_msa,
+                )?,
                 None,
                 None,
                 Some((&audio.rope.0, &audio.rope.1)),
@@ -1743,15 +1769,21 @@ impl LtxAvTransformerBlock {
         let vx_norm3 = rms_norm_tensor(&vx, self.norm_eps)?;
         let ax_norm3 = rms_norm_tensor(&ax, self.norm_eps)?;
 
-        let video_cross_scale_shift_timestep = video.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("video cross scale-shift timestep missing for AV transformer")
-        })?;
+        let video_cross_scale_shift_timestep =
+            video.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+                candle_core::Error::msg(
+                    "video cross scale-shift timestep missing for AV transformer",
+                )
+            })?;
         let video_cross_gate_timestep = video.cross_gate_timestep.as_ref().ok_or_else(|| {
             candle_core::Error::msg("video cross gate timestep missing for AV transformer")
         })?;
-        let audio_cross_scale_shift_timestep = audio.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("audio cross scale-shift timestep missing for AV transformer")
-        })?;
+        let audio_cross_scale_shift_timestep =
+            audio.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+                candle_core::Error::msg(
+                    "audio cross scale-shift timestep missing for AV transformer",
+                )
+            })?;
         let audio_cross_gate_timestep = audio.cross_gate_timestep.as_ref().ok_or_else(|| {
             candle_core::Error::msg("audio cross gate timestep missing for AV transformer")
         })?;
@@ -1889,7 +1921,11 @@ impl Ltx2AvTransformer3DModel {
 
         Ok(Self {
             patchify_proj: nn::linear(config.in_channels, video_dim, vb.pp("patchify_proj"))?,
-            adaln_single: AdaLayerNormSingle::new_with_coefficient(video_dim, 6, vb.pp("adaln_single"))?,
+            adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                video_dim,
+                6,
+                vb.pp("adaln_single"),
+            )?,
             caption_projection: PixArtAlphaTextProjection::new_with_out_features(
                 config.caption_channels,
                 video_dim,
@@ -1917,7 +1953,11 @@ impl Ltx2AvTransformer3DModel {
             )?,
             audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
             audio_norm_out: LayerNormNoParams::new(config.norm_eps),
-            audio_proj_out: nn::linear(audio_dim, config.audio_out_channels, vb.pp("audio_proj_out"))?,
+            audio_proj_out: nn::linear(
+                audio_dim,
+                config.audio_out_channels,
+                vb.pp("audio_proj_out"),
+            )?,
             av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 video_dim,
                 4,
@@ -2015,8 +2055,7 @@ impl Ltx2AvTransformer3DModel {
         let (timesteps, embedded_timestep) = adaln_single.forward(&timestep.flatten_all()?)?;
         let batch = x.dim(0)?;
         let timesteps = timesteps.reshape((batch, 1, timesteps.dim(1)?))?;
-        let embedded_timestep =
-            embedded_timestep.reshape((batch, 1, embedded_timestep.dim(1)?))?;
+        let embedded_timestep = embedded_timestep.reshape((batch, 1, embedded_timestep.dim(1)?))?;
         let context = caption_projection.forward(context)?;
         let rope = rope.forward(&x, positions)?;
         Ok(LtxPreparedModality {
@@ -2062,7 +2101,10 @@ impl Ltx2AvTransformer3DModel {
         let scale = broadcast_to_tokens(&scale, tokens)?;
         let shift = broadcast_to_tokens(&shift, tokens)?;
         let one = Tensor::ones_like(&scale)?;
-        proj_out.forward(&x.broadcast_mul(&one.broadcast_add(&scale)?)?.broadcast_add(&shift)?)
+        proj_out.forward(
+            &x.broadcast_mul(&one.broadcast_add(&scale)?)?
+                .broadcast_add(&shift)?,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2215,16 +2257,31 @@ mod tests {
 
     #[test]
     fn text_cross_attention_ignores_video_rope_without_key_rotary_inputs() {
-        let attention =
-            LtxAttention::new(4, 1, 1, 4, 0.0, true, Some(4), true, "rms_norm", LtxRopeType::Interleaved, attention_var_builder(4))
-                .unwrap();
+        let attention = LtxAttention::new(
+            4,
+            1,
+            1,
+            4,
+            0.0,
+            true,
+            Some(4),
+            true,
+            "rms_norm",
+            LtxRopeType::Interleaved,
+            attention_var_builder(4),
+        )
+        .unwrap();
         let hidden_states = Tensor::new(
             &[[[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]],
             &Device::Cpu,
         )
         .unwrap();
         let encoder_hidden_states = Tensor::new(
-            &[[[0.5f32, 1.0, 1.5, 2.0], [2.0, 1.5, 1.0, 0.5], [1.0, 1.0, 1.0, 1.0]]],
+            &[[
+                [0.5f32, 1.0, 1.5, 2.0],
+                [2.0, 1.5, 1.0, 0.5],
+                [1.0, 1.0, 1.0, 1.0],
+            ]],
             &Device::Cpu,
         )
         .unwrap();
@@ -2234,13 +2291,22 @@ mod tests {
         )
         .unwrap();
         let sin = Tensor::new(
-            &[[[0.0f32, 0.8660254, 0.0, -0.9689124], [0.9689124, 0.0, -0.8660254, 0.0]]],
+            &[[
+                [0.0f32, 0.8660254, 0.0, -0.9689124],
+                [0.9689124, 0.0, -0.8660254, 0.0],
+            ]],
             &Device::Cpu,
         )
         .unwrap();
 
         let baseline = attention
-            .forward(&hidden_states, Some(&encoder_hidden_states), None, None, None)
+            .forward(
+                &hidden_states,
+                Some(&encoder_hidden_states),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let with_video_rope = attention
             .forward(

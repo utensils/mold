@@ -9,8 +9,8 @@ pub mod video_transformer;
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};
 #[allow(unused_imports)]
 pub use rope::{
-    audio_temporal_positions, cross_modal_temporal_positions, get_pixel_coords,
-    midpoint_positions, scale_video_time_to_seconds, video_token_positions, LtxRopeType,
+    audio_temporal_positions, cross_modal_temporal_positions, get_pixel_coords, midpoint_positions,
+    scale_video_time_to_seconds, video_token_positions, LtxRopeType,
 };
 #[allow(unused_imports)]
 pub use shapes::{AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape};

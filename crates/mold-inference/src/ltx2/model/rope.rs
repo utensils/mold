@@ -43,9 +43,7 @@ pub fn get_pixel_coords(
         (1, 3, 1, 1),
         latent_coords.device(),
     )?;
-    let mut pixel_coords = latent_coords
-        .to_dtype(DType::F32)?
-        .broadcast_mul(&scale)?;
+    let mut pixel_coords = latent_coords.to_dtype(DType::F32)?.broadcast_mul(&scale)?;
     if causal_fix {
         let temporal = pixel_coords.i((.., 0..1, .., ..))?;
         let corrected = temporal

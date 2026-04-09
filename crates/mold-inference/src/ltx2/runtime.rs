@@ -141,11 +141,8 @@ impl Ltx2RuntimeSession {
                     true,
                     0,
                 );
-                let audio_positions = audio_temporal_positions(
-                    audio_patchifier,
-                    audio_shape,
-                    &prepared_device,
-                )?;
+                let audio_positions =
+                    audio_temporal_positions(audio_patchifier, audio_shape, &prepared_device)?;
                 let cross_modal =
                     cross_modal_temporal_positions(&video_positions, &audio_positions)?;
                 (Some(audio_shape), Some(audio_positions), Some(cross_modal))
@@ -494,13 +491,28 @@ fn render_real_video_only(
     let debug_enabled = ltx_debug_enabled();
     let device = select_real_video_device()?;
     let video_patchifier = VideoLatentPatchifier::new(1);
-    let transformer = load_ltx2_video_transformer(plan, &device)?;
+    let audio_patchifier = AudioPatchifier::new(
+        LTX2_AUDIO_SAMPLE_RATE,
+        LTX2_AUDIO_HOP_LENGTH,
+        LTX2_AUDIO_LATENT_DOWNSAMPLE_FACTOR,
+        true,
+        0,
+    );
+    let transformer = load_ltx2_av_transformer(plan, &device)?;
     let mut video_scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
+    let mut audio_scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
     let sigma_count = plan
         .num_inference_steps
         .max(1)
         .min(DISTILLED_SIGMAS_NO_TERMINAL.len() as u32) as usize;
     video_scheduler.set_timesteps(
+        None,
+        &device,
+        Some(&DISTILLED_SIGMAS_NO_TERMINAL[..sigma_count]),
+        None,
+        None,
+    )?;
+    audio_scheduler.set_timesteps(
         None,
         &device,
         Some(&DISTILLED_SIGMAS_NO_TERMINAL[..sigma_count]),
@@ -519,15 +531,40 @@ fn render_real_video_only(
         &device,
         DType::F32,
     )?;
-    let mut latents = video_patchifier.patchify(&noise)?;
-    let run_sigmas = video_scheduler.sigmas().to_device(&candle_core::Device::Cpu)?;
+    let mut video_latents = video_patchifier.patchify(&noise)?;
+    let audio_latent_shape = prepared
+        .audio_latent_shape
+        .context("native LTX-2 AV inference requires prepared audio latents")?;
+    let audio_noise = seeded_randn(
+        plan.seed ^ 0xa564_494f_4c54_5832,
+        &[
+            audio_latent_shape.batch,
+            audio_latent_shape.channels,
+            audio_latent_shape.frames,
+            audio_latent_shape.mel_bins,
+        ],
+        &device,
+        DType::F32,
+    )?;
+    let mut audio_latents = audio_patchifier.patchify(&audio_noise)?;
+    let run_sigmas = video_scheduler
+        .sigmas()
+        .to_device(&candle_core::Device::Cpu)?;
     let run_sigmas = run_sigmas.to_vec1::<f32>()?;
     video_scheduler.set_begin_index(0);
+    audio_scheduler.set_begin_index(0);
 
     let cond_context = prepared
         .prompt
         .conditional
         .video_encoding
+        .to_device(&device)?;
+    let cond_audio_context = prepared
+        .prompt
+        .conditional
+        .audio_encoding
+        .as_ref()
+        .context("native LTX-2 AV inference requires conditional audio prompt embeddings")?
         .to_device(&device)?;
     let cond_mask = prepared
         .prompt
@@ -539,19 +576,52 @@ fn render_real_video_only(
         .unconditional
         .video_encoding
         .to_device(&device)?;
+    let uncond_audio_context = prepared
+        .prompt
+        .unconditional
+        .audio_encoding
+        .as_ref()
+        .context("native LTX-2 AV inference requires unconditional audio prompt embeddings")?
+        .to_device(&device)?;
     let uncond_mask = prepared
         .prompt
         .unconditional
         .attention_mask
         .to_device(&device)?;
     let video_positions = prepared.video_positions.to_device(&device)?;
+    let audio_positions = prepared
+        .audio_positions
+        .as_ref()
+        .context("native LTX-2 AV inference requires prepared audio positions")?
+        .to_device(&device)?;
+
+    let guidance_scale = plan.guidance;
+    let cfg_inputs = if guidance_scale > 1.0 {
+        Some((
+            Tensor::cat(&[uncond_context.clone(), cond_context.clone()], 0)?,
+            Tensor::cat(
+                &[uncond_audio_context.clone(), cond_audio_context.clone()],
+                0,
+            )?,
+            Tensor::cat(&[uncond_mask.clone(), cond_mask.clone()], 0)?,
+            Tensor::cat(&[video_positions.clone(), video_positions.clone()], 0)?,
+            Tensor::cat(&[audio_positions.clone(), audio_positions.clone()], 0)?,
+        ))
+    } else {
+        None
+    };
 
     if debug_enabled {
         log_tensor_stats("cond_context", &cond_context)?;
+        log_tensor_stats("cond_audio_context", &cond_audio_context)?;
         log_tensor_stats("uncond_context", &uncond_context)?;
+        log_tensor_stats("uncond_audio_context", &uncond_audio_context)?;
         let context_delta = cond_context.broadcast_sub(&uncond_context)?;
         log_tensor_stats("context_delta", &context_delta)?;
-        log_tensor_stats("initial_latents", &latents)?;
+        let audio_context_delta = cond_audio_context.broadcast_sub(&uncond_audio_context)?;
+        log_tensor_stats("audio_context_delta", &audio_context_delta)?;
+        log_tensor_stats("initial_video_latents", &video_latents)?;
+        log_tensor_stats("initial_audio_latents", &audio_latents)?;
     }
 
     for (step_idx, sigma) in run_sigmas
@@ -560,62 +630,100 @@ fn render_real_video_only(
         .take(run_sigmas.len().saturating_sub(1))
         .enumerate()
     {
-        let batch = latents.dim(0)?;
-        let timestep = Tensor::full(sigma, (batch,), &device)?;
-        let cond_video = transformer.forward(
-            &latents,
-            &cond_context,
-            &timestep,
-            Some(&cond_mask),
-            prepared.video_pixel_shape.frames,
-            prepared.video_latent_shape.height,
-            prepared.video_latent_shape.width,
-            None,
-            Some(&video_positions),
-            None,
-        )?;
-        let cond_video = cond_video.to_dtype(DType::F32)?;
-        let guidance_scale = plan.guidance;
-        let video_model_output = if guidance_scale <= 1.0 {
-            cond_video
-        } else {
-            let cond_video_denoised = denoised_from_velocity(&latents, &cond_video, sigma)?;
-            let uncond_video = transformer.forward(
-                &latents,
-                &uncond_context,
+        let batch = video_latents.dim(0)?;
+        let (video_model_output, audio_model_output) = if let Some((
+            cfg_video_context,
+            cfg_audio_context,
+            cfg_mask,
+            cfg_video_positions,
+            cfg_audio_positions,
+        )) = &cfg_inputs
+        {
+            let timestep = Tensor::full(sigma, (batch * 2,), &device)?;
+            let video_model_input =
+                Tensor::cat(&[video_latents.clone(), video_latents.clone()], 0)?;
+            let audio_model_input =
+                Tensor::cat(&[audio_latents.clone(), audio_latents.clone()], 0)?;
+            let (cfg_video, cfg_audio) = transformer.forward(
+                &video_model_input,
+                &audio_model_input,
+                cfg_video_context,
+                cfg_audio_context,
                 &timestep,
-                Some(&uncond_mask),
-                prepared.video_pixel_shape.frames,
-                prepared.video_latent_shape.height,
-                prepared.video_latent_shape.width,
-                None,
-                Some(&video_positions),
-                None,
+                Some(cfg_mask),
+                Some(cfg_mask),
+                cfg_video_positions,
+                cfg_audio_positions,
             )?;
-            let uncond_video = uncond_video.to_dtype(DType::F32)?;
+            let cfg_video = cfg_video.to_dtype(DType::F32)?;
+            let cfg_audio = cfg_audio.to_dtype(DType::F32)?;
+            let cond_video = cfg_video.narrow(0, batch, batch)?;
+            let uncond_video = cfg_video.narrow(0, 0, batch)?;
+            let cond_audio = cfg_audio.narrow(0, batch, batch)?;
+            let uncond_audio = cfg_audio.narrow(0, 0, batch)?;
+
+            let cond_video_denoised = denoised_from_velocity(&video_latents, &cond_video, sigma)?;
             let uncond_video_denoised =
-                denoised_from_velocity(&latents, &uncond_video, sigma)?;
+                denoised_from_velocity(&video_latents, &uncond_video, sigma)?;
+            let cond_audio_denoised = denoised_from_velocity(&audio_latents, &cond_audio, sigma)?;
+            let uncond_audio_denoised =
+                denoised_from_velocity(&audio_latents, &uncond_audio, sigma)?;
+
             let video_diff = cond_video_denoised.broadcast_sub(&uncond_video_denoised)?;
             let guided_video_denoised =
                 uncond_video_denoised.broadcast_add(&video_diff.affine(guidance_scale, 0.0)?)?;
+            let audio_diff = cond_audio_denoised.broadcast_sub(&uncond_audio_denoised)?;
+            let guided_audio_denoised =
+                uncond_audio_denoised.broadcast_add(&audio_diff.affine(guidance_scale, 0.0)?)?;
+
             if debug_enabled {
                 eprintln!("[ltx2-debug] step={step_idx} sigma={sigma:.6}");
-                log_tensor_stats("step_video_latents", &latents)?;
+                log_tensor_stats("step_video_latents", &video_latents)?;
+                log_tensor_stats("step_audio_latents", &audio_latents)?;
                 log_tensor_stats("cond_video_velocity", &cond_video)?;
                 log_tensor_stats("uncond_video_velocity", &uncond_video)?;
                 log_tensor_stats("guided_video_denoised", &guided_video_denoised)?;
+                log_tensor_stats("cond_audio_velocity", &cond_audio)?;
+                log_tensor_stats("uncond_audio_velocity", &uncond_audio)?;
+                log_tensor_stats("guided_audio_denoised", &guided_audio_denoised)?;
             }
-            velocity_from_denoised(&latents, &guided_video_denoised, sigma)?
+
+            (
+                velocity_from_denoised(&video_latents, &guided_video_denoised, sigma)?,
+                velocity_from_denoised(&audio_latents, &guided_audio_denoised, sigma)?,
+            )
+        } else {
+            let timestep = Tensor::full(sigma, (batch,), &device)?;
+            let (cond_video, cond_audio) = transformer.forward(
+                &video_latents,
+                &audio_latents,
+                &cond_context,
+                &cond_audio_context,
+                &timestep,
+                Some(&cond_mask),
+                Some(&cond_mask),
+                &video_positions,
+                &audio_positions,
+            )?;
+            (
+                cond_video.to_dtype(DType::F32)?,
+                cond_audio.to_dtype(DType::F32)?,
+            )
         };
 
-        latents = video_scheduler
-            .step(&video_model_output, sigma, &latents, None)?
+        video_latents = video_scheduler
+            .step(&video_model_output, sigma, &video_latents, None)?
+            .prev_sample;
+        audio_latents = audio_scheduler
+            .step(&audio_model_output, sigma, &audio_latents, None)?
             .prev_sample;
     }
 
-    let latents = video_patchifier.unpatchify(&latents, prepared.video_latent_shape)?;
+    let latents = video_patchifier.unpatchify(&video_latents, prepared.video_latent_shape)?;
     if debug_enabled {
         log_tensor_stats("final_patched_latents", &latents)?;
+        let audio_latents = audio_patchifier.unpatchify(&audio_latents, audio_latent_shape)?;
+        log_tensor_stats("final_audio_patched_latents", &audio_latents)?;
     }
     drop(transformer);
 
@@ -631,8 +739,8 @@ fn render_real_video_only(
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
-    let video = ((video.to_dtype(DType::F32)?.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?
-        .to_dtype(DType::U8)?;
+    let video =
+        ((video.to_dtype(DType::F32)?.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
     let video = video.i(0)?;
 
     let mut frames = Vec::with_capacity(video.dim(1)?);
@@ -753,7 +861,7 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         audio_out_channels: plan.preset.transformer.audio_out_channels,
         audio_cross_attention_dim: plan.preset.transformer.audio_cross_attention_dim,
         audio_positional_embedding_max_pos: vec![20],
-        av_ca_timestep_scale_multiplier: 1.0,
+        av_ca_timestep_scale_multiplier: 1000.0,
         cross_attention_adaln: plan.preset.transformer.cross_attention_adaln,
     }
 }
@@ -905,7 +1013,10 @@ fn denormalize_latents_with_vae(latents: &Tensor, vae: &AutoencoderKLLtxVideo) -
         .reshape((1, channels, 1, 1, 1))?
         .to_device(latents.device())?
         .to_dtype(latents.dtype())?;
-    latents.broadcast_mul(&std)?.broadcast_add(&mean).map_err(Into::into)
+    latents
+        .broadcast_mul(&std)?
+        .broadcast_add(&mean)
+        .map_err(Into::into)
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -947,8 +1058,16 @@ fn log_tensor_stats(name: &str, tensor: &Tensor) -> Result<()> {
     let tensor = tensor.to_device(&candle_core::Device::Cpu)?;
     let tensor = tensor.to_dtype(DType::F32)?;
     let mean = tensor.flatten_all()?.mean_all()?.to_scalar::<f32>()?;
-    let abs_mean = tensor.flatten_all()?.abs()?.mean_all()?.to_scalar::<f32>()?;
-    let sq_mean = tensor.flatten_all()?.sqr()?.mean_all()?.to_scalar::<f32>()?;
+    let abs_mean = tensor
+        .flatten_all()?
+        .abs()?
+        .mean_all()?
+        .to_scalar::<f32>()?;
+    let sq_mean = tensor
+        .flatten_all()?
+        .sqr()?
+        .mean_all()?
+        .to_scalar::<f32>()?;
     let std = (sq_mean - mean * mean).max(0.0).sqrt();
     let line = format!(
         "[ltx2-debug] {name}: shape={:?} mean={mean:.6} abs_mean={abs_mean:.6} rms={:.6} std={std:.6}",
@@ -976,8 +1095,8 @@ mod tests {
     };
 
     use super::{
-        remap_ltx2_vae_key, Ltx2RuntimeSession, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        ltx2_video_transformer_config, remap_ltx2_vae_key, Ltx2RuntimeSession,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::execution::build_execution_graph;
@@ -1329,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_prepare_skips_audio_latents_for_silent_outputs() {
+    fn runtime_prepare_keeps_audio_latents_for_silent_outputs() {
         let req = req("ltx-2-19b-distilled:fp8", OutputFormat::Gif, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -1339,9 +1458,9 @@ mod tests {
         let mut session = runtime_session();
         let prepared = session.prepare(&plan).unwrap();
 
-        assert!(prepared.audio_latent_shape.is_none());
-        assert!(prepared.audio_positions.is_none());
-        assert!(prepared.cross_modal_temporal_positions.is_none());
+        assert!(prepared.audio_latent_shape.is_some());
+        assert!(prepared.audio_positions.is_some());
+        assert!(prepared.cross_modal_temporal_positions.is_some());
 
         let rendered = session.render_native_video(&plan, &prepared).unwrap();
         assert_eq!(rendered.frames.len(), 97);
@@ -1444,5 +1563,18 @@ mod tests {
 
         assert_eq!(rendered.frames.len(), 97);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+    }
+
+    #[test]
+    fn runtime_video_transformer_config_matches_upstream_av_gate_timestep_scale() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let config = ltx2_video_transformer_config(&plan);
+
+        assert_eq!(config.av_ca_timestep_scale_multiplier, 1000.0);
     }
 }
