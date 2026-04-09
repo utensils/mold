@@ -246,7 +246,7 @@ impl SD3Engine {
             t5_tokenizer_path,
         ) = self.validate_paths()?;
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -292,7 +292,7 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Decide encoder placement based on remaining VRAM ---
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(0).unwrap_or(0);
         if free > 0 {
             self.base
                 .progress
@@ -383,7 +383,7 @@ impl SD3Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -418,7 +418,7 @@ impl SD3Engine {
             self.base.progress.cache_hit("prompt conditioning");
             (context, y)
         } else {
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -993,6 +993,7 @@ impl InferenceEngine for SD3Engine {
                 model: req.model.clone(),
                 seed_used: seed,
                 video: None,
+                gpu: None,
             })
         })()
     }

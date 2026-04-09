@@ -1012,7 +1012,7 @@ impl LtxVideoEngine {
         }
 
         // Select device
-        let device = crate::device::create_device(progress)?;
+        let device = crate::device::create_device(0, progress)?;
         let dtype = gpu_dtype(&device);
 
         progress.info(&format!(

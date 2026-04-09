@@ -204,7 +204,7 @@ pub(crate) async fn ensure_model_ready(
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
-                mold_inference::reclaim_gpu_memory();
+                mold_inference::reclaim_gpu_memory(0);
             }
 
             // Take the engine out of cache to load in spawn_blocking.
@@ -245,10 +245,10 @@ pub(crate) async fn ensure_model_ready(
                         let duration = load_start.elapsed().as_secs_f64();
                         crate::metrics::record_model_load(model_name, duration);
                         crate::metrics::set_model_loaded(model_name);
-                        let vram_est = mold_inference::device::vram_used_estimate();
+                        let vram_est = mold_inference::device::vram_used_estimate(0);
                         crate::metrics::record_gpu_memory(vram_est);
                     }
-                    let vram = mold_inference::device::vram_used_estimate();
+                    let vram = mold_inference::device::vram_used_estimate(0);
                     let mut cache = state.model_cache.lock().await;
                     cache.insert(loaded_engine, vram);
                     update_snapshot(state, &cache).await;
@@ -343,7 +343,7 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
             }
             update_snapshot(state, &cache).await;
             drop(cache);
-            mold_inference::reclaim_gpu_memory();
+            mold_inference::reclaim_gpu_memory(0);
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
@@ -385,7 +385,7 @@ async fn create_and_load_engine(
         result.is_some()
     };
     if had_active {
-        mold_inference::reclaim_gpu_memory();
+        mold_inference::reclaim_gpu_memory(0);
     }
 
     let config = state.config.read().await;
@@ -430,7 +430,7 @@ async fn create_and_load_engine(
         crate::metrics::set_model_loaded(model_name);
     }
 
-    let vram = mold_inference::device::vram_used_estimate();
+    let vram = mold_inference::device::vram_used_estimate(0);
     #[cfg(feature = "metrics")]
     crate::metrics::record_gpu_memory(vram);
 

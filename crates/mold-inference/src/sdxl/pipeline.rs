@@ -180,7 +180,7 @@ impl SDXLEngine {
 
         tracing::info!(model = %self.base.model_name, "loading SDXL model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -537,7 +537,7 @@ impl SDXLEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {

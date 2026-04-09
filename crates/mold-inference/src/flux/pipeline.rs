@@ -840,7 +840,7 @@ impl FluxEngine {
             self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let mut is_quantized = self.detect_is_quantized();
         let transformer_is_fp8 = self.check_transformer_is_fp8(is_quantized);
 
@@ -874,7 +874,7 @@ impl FluxEngine {
             let xformer_size = std::fs::metadata(&transformer_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             if free > 0 && xformer_size > free {
                 bail!(
                     "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
@@ -945,7 +945,7 @@ impl FluxEngine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Decide where to place T5 and CLIP based on remaining VRAM ---
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(0).unwrap_or(0);
         if free > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
@@ -1000,7 +1000,7 @@ impl FluxEngine {
         tracing::info!(device = %t5_device_label, "T5 encoder loaded");
 
         // Re-check VRAM after T5 (it may have consumed GPU memory)
-        let free_after_t5 = free_vram_bytes().unwrap_or(0);
+        let free_after_t5 = free_vram_bytes(0).unwrap_or(0);
         let clip_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -1073,7 +1073,7 @@ impl FluxEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
 
         // Use cached transformer path to avoid file I/O on every sequential call.
         let transformer_path = if let Some(ref cached) = self.cached_transformer_path {
@@ -1134,7 +1134,7 @@ impl FluxEngine {
             (t5_emb, clip_emb)
         } else {
             // --- Phase 1: T5 encoding ---
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -1190,7 +1190,7 @@ impl FluxEngine {
             tracing::info!("T5 encoder dropped (sequential mode)");
 
             // --- Phase 2: CLIP encoding ---
-            let free_for_clip = free_vram_bytes().unwrap_or(0);
+            let free_for_clip = free_vram_bytes(0).unwrap_or(0);
             let clip_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1254,7 +1254,7 @@ impl FluxEngine {
 
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             if self.offload || should_offload(xformer_size, free) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(

@@ -240,7 +240,7 @@ impl UpscaleEngine for UpscalerEngine {
         let load_start = Instant::now();
         self.progress.stage_start("Loading upscaler model");
 
-        let device = create_device(&self.progress)?;
+        let device = create_device(0, &self.progress)?;
 
         // Determine dtype: prefer F16 on GPU, F32 on CPU
         let dtype = if matches!(device, Device::Cpu) {
@@ -317,7 +317,7 @@ impl UpscaleEngine for UpscalerEngine {
     fn unload(&mut self) {
         if self.loaded.is_some() {
             self.loaded = None;
-            crate::reclaim_gpu_memory();
+            crate::reclaim_gpu_memory(0);
             tracing::info!("Upscaler model unloaded: {}", self.name);
         }
     }

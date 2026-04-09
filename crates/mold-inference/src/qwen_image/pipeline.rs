@@ -904,7 +904,7 @@ impl QwenImageEngine {
             let transformer_size = std::fs::metadata(&self.base.paths.transformer)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             let split_cfg_for_memory = device.is_cuda()
                 && (self.offload
                     || Self::should_split_cfg_quantized_cuda(
@@ -948,7 +948,7 @@ impl QwenImageEngine {
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             let use_offload = self.offload || crate::device::should_offload(mem_size, free);
 
             if is_fp8 {
@@ -1330,7 +1330,7 @@ impl QwenImageEngine {
         tracing::info!(model = %self.base.model_name, "loading Qwen-Image model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let transformer_cfg = self.transformer_config();
         let transformer_is_quantized = self.detect_is_quantized();
         // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
@@ -1363,7 +1363,7 @@ impl QwenImageEngine {
         tracing::info!("Qwen-Image transformer loaded");
 
         // Decide device placement for VAE and text encoder
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(0).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
         if free > 0 {
@@ -1484,7 +1484,7 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_cfg = self.transformer_config();
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -1493,7 +1493,7 @@ impl QwenImageEngine {
 
         let width = req.width as usize;
         let height = req.height as usize;
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(0).unwrap_or(0);
         let resolved_text_encoder =
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Sequential)?;
         let (plan, _device_label) =
@@ -1716,7 +1716,7 @@ impl QwenImageEngine {
         let (prepared_img2img_latents, inpaint_ctx) = if let Some(ref source_bytes) =
             req.source_image
         {
-            let free_for_encode = free_vram_bytes().unwrap_or(0);
+            let free_for_encode = free_vram_bytes(0).unwrap_or(0);
             let encode_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1944,7 +1944,7 @@ impl QwenImageEngine {
             self.base.progress.info(&status);
         }
 
-        let free_for_vae = free_vram_bytes().unwrap_or(0);
+        let free_for_vae = free_vram_bytes(0).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),

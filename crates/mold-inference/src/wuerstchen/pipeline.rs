@@ -452,7 +452,7 @@ impl WuerstchenEngine {
 
         tracing::info!(model = %self.base.model_name, "loading Wuerstchen model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         // Use F16 on GPU for ~2x throughput and ~2x less VRAM.
         // gen_r_embedding computes sincos basis in F32 internally, then casts to
         // model dtype before the matmul — patched in candle-transformers-mold 0.9.4.
@@ -833,7 +833,7 @@ impl WuerstchenEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         // Use F16 on GPU for ~2x throughput on the Prior stage.
         // Decoder and VQ-GAN use F32 explicitly (see their load calls below).
         let dtype = if device.is_cpu() {

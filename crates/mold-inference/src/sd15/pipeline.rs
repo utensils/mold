@@ -152,7 +152,7 @@ impl SD15Engine {
 
         tracing::info!(model = %self.base.model_name, "loading SD1.5 model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -573,7 +573,7 @@ impl SD15Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {

@@ -116,10 +116,10 @@ impl LocalExpander {
     /// Load model, generate text, drop model.
     fn generate_text(&self, prompt_text: &str, config: &ExpandConfig) -> Result<String> {
         // Device selection: Metal always uses GPU (unified memory), CUDA checks VRAM
-        let gpu_device = create_device(&self.progress)?;
+        let gpu_device = create_device(0, &self.progress)?;
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
-        let free_vram = free_vram_bytes().unwrap_or(0);
+        let free_vram = free_vram_bytes(0).unwrap_or(0);
 
         let device = if should_use_gpu(is_cuda, is_metal, free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
             gpu_device

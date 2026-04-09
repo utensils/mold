@@ -329,7 +329,7 @@ impl Flux2Engine {
         let text_tokenizer_path = self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
@@ -361,7 +361,7 @@ impl Flux2Engine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Resolve and load Qwen3 text encoder ---
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(0).unwrap_or(0);
         if free > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
@@ -440,7 +440,7 @@ impl Flux2Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(0, &self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -470,7 +470,7 @@ impl Flux2Engine {
             self.base.progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(0).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let resolve_start = Instant::now();
             let qwen3_size = self.qwen3_size();
