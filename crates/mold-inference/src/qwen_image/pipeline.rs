@@ -1123,7 +1123,7 @@ impl QwenImageEngine {
         }
         resolved.vision_paths = vec![];
 
-        match preference.as_deref() {
+        match preference {
             Some(tag) if tag != "auto" && tag != "bf16" => self.base.progress.info(&format!(
                 "Using quantized Qwen2.5-VL {} ({}) on {} (explicit)",
                 resolved.variant_label,

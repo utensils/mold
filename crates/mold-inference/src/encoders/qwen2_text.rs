@@ -19,6 +19,8 @@ use super::qwen2_vision::{Qwen2VisionConfig, Qwen2VisionModel};
 const TOKENIZER_WINDOW: usize = 1024;
 const MAX_SEQUENCE_LENGTH: usize = 512;
 const SYSTEM_PROMPT: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
+type ImageTokenSpan = (usize, usize);
+type ExpandedImagePadTokens = (Vec<u32>, Vec<ImageTokenSpan>);
 
 fn format_qwen_image_prompt(prompt: &str) -> String {
     format!(
@@ -72,7 +74,7 @@ fn expand_image_pad_tokens(
     input_ids: &[u32],
     image_pad_id: u32,
     image_token_counts: &[usize],
-) -> Result<(Vec<u32>, Vec<(usize, usize)>)> {
+) -> Result<ExpandedImagePadTokens> {
     let mut expanded = Vec::with_capacity(
         input_ids.len()
             + image_token_counts
