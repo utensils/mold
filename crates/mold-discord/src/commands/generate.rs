@@ -53,6 +53,7 @@ pub fn build_generate_request(
         output_format: OutputFormat::Png,
         embed_metadata: None,
         scheduler: None,
+        edit_images: None,
         source_image: None,
         strength: 0.75,
         mask_image: None,

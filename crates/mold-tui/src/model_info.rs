@@ -9,6 +9,12 @@ pub struct ModelCapabilities {
     pub supports_scheduler: bool,
     /// Whether the model supports img2img.
     pub supports_img2img: bool,
+    /// Whether the model accepts a source/reference image.
+    pub supports_source_image: bool,
+    /// Whether the model uses a denoising strength control.
+    pub supports_strength: bool,
+    /// Whether the model supports a mask image.
+    pub supports_mask: bool,
     /// Whether the model supports ControlNet.
     pub supports_controlnet: bool,
     /// Whether the model supports LoRA adapters.
@@ -26,6 +32,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: true,
             supports_scheduler: true,
             supports_img2img: true,
+            supports_source_image: true,
+            supports_strength: true,
+            supports_mask: true,
             supports_controlnet: true,
             supports_lora: false,
             supports_video: false,
@@ -35,6 +44,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: true,
             supports_scheduler: true,
             supports_img2img: true,
+            supports_source_image: true,
+            supports_strength: true,
+            supports_mask: true,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -44,6 +56,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: true,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -53,6 +68,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: true,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -62,6 +80,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: true,
+            supports_source_image: true,
+            supports_strength: true,
+            supports_mask: true,
             supports_controlnet: false, // ControlNet only supported on SD1.5
             supports_lora: true,
             supports_video: false,
@@ -71,6 +92,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -80,6 +104,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -89,6 +116,21 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: true,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: false,
+            supports_video: false,
+            default_scheduler: None,
+        },
+        "qwen-image-edit" => ModelCapabilities {
+            supports_negative_prompt: true,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: true,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -98,6 +140,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: true,
@@ -107,6 +152,9 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
             supports_video: false,
@@ -189,6 +237,15 @@ mod tests {
         assert!(caps.supports_negative_prompt);
         assert!(!caps.supports_scheduler);
         assert!(!caps.supports_controlnet);
+    }
+
+    #[test]
+    fn qwen_image_edit_supports_source_image_without_img2img_controls() {
+        let caps = capabilities_for_family("qwen-image-edit");
+        assert!(caps.supports_negative_prompt);
+        assert!(caps.supports_source_image);
+        assert!(!caps.supports_strength);
+        assert!(!caps.supports_mask);
     }
 
     #[test]

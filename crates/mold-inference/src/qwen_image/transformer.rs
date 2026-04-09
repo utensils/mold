@@ -18,7 +18,9 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::with_tracing::RmsNorm;
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 
-use super::quantized_transformer::QwenRopeEmbedder;
+use super::quantized_transformer::{
+    build_edit_modulation_index, select_modulation_params, QwenRopeEmbedder,
+};
 
 // ==================== FP8 Linear (per-layer dequant) ====================
 
@@ -220,6 +222,8 @@ pub(crate) struct QwenImageConfig {
     pub axes_dims_rope: Vec<usize>,
     /// RMSNorm epsilon.
     pub norm_eps: f64,
+    /// Zero conditioning timestep for edit-family input-image tokens.
+    pub zero_cond_t: bool,
 }
 
 impl Default for QwenImageConfig {
@@ -244,7 +248,14 @@ impl QwenImageConfig {
             patch_size: 2,
             axes_dims_rope: vec![16, 56, 56],
             norm_eps: 1e-6,
+            zero_cond_t: false,
         }
+    }
+
+    pub fn qwen_image_edit_2511() -> Self {
+        let mut cfg = Self::qwen_image_2512();
+        cfg.zero_cond_t = true;
+        cfg
     }
 
     /// Hidden dimension for FFN: int(inner_dim / 3 * 8) = 8192 for inner_dim=3072.
@@ -628,11 +639,17 @@ impl QwenImageTransformerBlock {
         img_sin: &Tensor,
         txt_cos: &Tensor,
         txt_sin: &Tensor,
+        modulate_index: Option<&Tensor>,
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
 
         // --- AdaLN modulation (6 params: shift, scale, gate for attention + MLP) ---
-        let img_mod = temb.silu()?.apply(&self.adaln_modulation)?.unsqueeze(1)?;
+        let img_mod = temb.silu()?.apply(&self.adaln_modulation)?;
+        let img_mod = if let Some(modulate_index) = modulate_index {
+            select_modulation_params(&img_mod, modulate_index)?
+        } else {
+            img_mod.unsqueeze(1)?
+        };
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
         let (
             img_shift_msa,
@@ -650,7 +667,12 @@ impl QwenImageTransformerBlock {
             &img_chunks[5],
         );
 
-        let txt_mod = temb
+        let txt_temb = if modulate_index.is_some() {
+            temb.narrow(0, 0, txt_hidden.dim(0)?)?
+        } else {
+            temb.clone()
+        };
+        let txt_mod = txt_temb
             .silu()?
             .apply(&self.adaln_context_modulation)?
             .unsqueeze(1)?;
@@ -941,6 +963,7 @@ impl QwenImageTransformer2DModel {
                 &img_sin,
                 &txt_cos,
                 &txt_sin,
+                None,
             )?;
             img = new_img;
             txt = new_txt;
@@ -957,5 +980,60 @@ impl QwenImageTransformer2DModel {
             .reshape((_b, self.cfg.out_channels, h, w))?
             .contiguous()?;
         Ok(x_out)
+    }
+
+    pub fn forward_packed(
+        &self,
+        packed_hidden_states: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
+        img_shapes: &[(usize, usize, usize)],
+    ) -> candle_core::Result<Tensor> {
+        let device = packed_hidden_states.device();
+        let batch = packed_hidden_states.dim(0)?;
+
+        let mut timestep = t.clone();
+        let modulate_index = if self.cfg.zero_cond_t {
+            timestep = Tensor::cat(&[&timestep, &(timestep.zeros_like()?)], 0)?;
+            Some(build_edit_modulation_index(img_shapes, batch, device)?)
+        } else {
+            None
+        };
+
+        let temb = self
+            .time_embed
+            .forward(&timestep, crate::engine::gpu_dtype(device))?;
+        let mut img = packed_hidden_states.apply(&self.img_in)?;
+        let txt_normed = self.txt_norm.forward(encoder_hidden_states)?;
+        let mut txt = txt_normed.apply(&self.txt_in)?;
+
+        let txt_seq_len = encoder_hidden_states.dim(1)?;
+        let (img_cos, img_sin, txt_cos, txt_sin) =
+            self.rope_embedder
+                .forward_shapes(img_shapes, txt_seq_len, device)?;
+
+        for block in &self.blocks {
+            let (new_img, new_txt) = block.forward(
+                &img,
+                &txt,
+                encoder_attention_mask,
+                &temb,
+                &img_cos,
+                &img_sin,
+                &txt_cos,
+                &txt_sin,
+                modulate_index.as_ref(),
+            )?;
+            img = new_img;
+            txt = new_txt;
+        }
+
+        let out_temb = if self.cfg.zero_cond_t {
+            temb.narrow(0, 0, batch)?
+        } else {
+            temb
+        };
+        self.output_layer.forward(&img, &out_temb)
     }
 }

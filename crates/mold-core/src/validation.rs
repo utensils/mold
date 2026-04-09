@@ -57,9 +57,25 @@ fn is_valid_image_format(data: &[u8]) -> bool {
     is_png || is_jpeg
 }
 
+fn model_family(model_name: &str) -> Option<&str> {
+    crate::manifest::find_manifest(model_name)
+        .map(|m| m.family.as_str())
+        .or_else(|| {
+            if model_name.starts_with("qwen-image-edit") {
+                Some("qwen-image-edit")
+            } else if model_name.starts_with("qwen-image") {
+                Some("qwen-image")
+            } else {
+                None
+            }
+        })
+}
+
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
 /// Shared between the HTTP server and local CLI inference paths.
 pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
+    let family = model_family(&req.model);
+
     if req.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -113,6 +129,35 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
                 neg.len()
             ));
         }
+    }
+    if let Some(ref images) = req.edit_images {
+        if images.is_empty() {
+            return Err("edit_images must contain at least one PNG or JPEG image".to_string());
+        }
+        for image in images {
+            if !is_valid_image_format(image) {
+                return Err("edit_images must contain only PNG or JPEG images".to_string());
+            }
+        }
+    }
+    if family == Some("qwen-image-edit") {
+        if req.edit_images.as_ref().is_none_or(Vec::is_empty) {
+            return Err("qwen-image-edit requires edit_images to be provided".to_string());
+        }
+        if req.batch_size != 1 {
+            return Err("qwen-image-edit only supports batch_size = 1".to_string());
+        }
+        if req.source_image.is_some() {
+            return Err("qwen-image-edit uses edit_images instead of source_image".to_string());
+        }
+        if req.mask_image.is_some() {
+            return Err("qwen-image-edit does not support mask_image".to_string());
+        }
+        if req.control_image.is_some() || req.control_model.is_some() {
+            return Err("qwen-image-edit does not support ControlNet inputs".to_string());
+        }
+    } else if req.edit_images.is_some() {
+        return Err("edit_images are only supported for qwen-image-edit models".to_string());
     }
     // img2img validation
     if let Some(ref img) = req.source_image {
@@ -300,6 +345,7 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "flux2" => FLUX_DIMS,
         "z-image" => ZIMAGE_DIMS,
         "qwen-image" => QWEN_IMAGE_DIMS,
+        "qwen-image-edit" => QWEN_IMAGE_DIMS,
         "wuerstchen" => WUERSTCHEN_DIMS,
         "ltx-video" => LTX_VIDEO_DIMS,
         _ => &[],
@@ -357,6 +403,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -677,6 +724,58 @@ mod tests {
         req.source_image = None;
         req.strength = 0.0; // Would fail if source_image present, but should pass without
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn qwen_image_edit_requires_edit_images() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit:q4".to_string();
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("requires edit_images"), "got: {err}");
+    }
+
+    #[test]
+    fn qwen_image_edit_rejects_batch_size_above_one() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit:q4".to_string();
+        req.edit_images = Some(vec![png_bytes()]);
+        req.batch_size = 2;
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("batch_size = 1"), "got: {err}");
+    }
+
+    #[test]
+    fn qwen_image_edit_accepts_edit_images() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit:q4".to_string();
+        req.edit_images = Some(vec![png_bytes()]);
+        req.guidance = 4.0;
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn qwen_image_edit_rejects_source_image_field() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit:q4".to_string();
+        req.edit_images = Some(vec![png_bytes()]);
+        req.source_image = Some(png_bytes());
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("edit_images instead of source_image"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_edit_models_reject_edit_images() {
+        let mut req = valid_req();
+        req.model = "flux-schnell:q8".to_string();
+        req.edit_images = Some(vec![png_bytes()]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("only supported for qwen-image-edit"),
+            "got: {err}"
+        );
     }
 
     // ── ControlNet validation tests ────────────────────────────────────────
@@ -1014,6 +1113,15 @@ mod tests {
     }
 
     #[test]
+    fn dimension_warning_qwen_image_edit_reuses_qwen_dimensions() {
+        assert_eq!(
+            recommended_dimensions("qwen-image-edit"),
+            recommended_dimensions("qwen-image")
+        );
+        assert_eq!(dimension_warning(1024, 1024, "qwen-image-edit"), None);
+    }
+
+    #[test]
     fn dimension_warning_flux2_uses_flux_dims() {
         assert_eq!(
             recommended_dimensions("flux2"),
@@ -1034,6 +1142,7 @@ mod tests {
             ("flux2", 1024, 1024),
             ("z-image", 1024, 1024),
             ("qwen-image", 1024, 1024),
+            ("qwen-image-edit", 1024, 1024),
             ("wuerstchen", 1024, 1024),
             ("ltx-video", 768, 512),
         ];

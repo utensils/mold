@@ -74,6 +74,14 @@ fn resolve_run_args(
 /// - `--mask`: must exist
 /// - `--control`: must exist
 /// - `--output`: parent directory must exist; if path is a directory, error with hint
+fn resolve_family(model_name: &str, config: &Config) -> String {
+    config
+        .resolved_model_config(model_name)
+        .family
+        .or_else(|| mold_core::manifest::find_manifest(model_name).map(|m| m.family.clone()))
+        .unwrap_or_else(|| "flux".to_string())
+}
+
 fn validate_file_args(
     lora: Option<&str>,
     image: Option<&str>,
@@ -201,7 +209,7 @@ pub async fn run(
     offload: bool,
     lora: Option<String>,
     lora_scale: f64,
-    image: Option<String>,
+    image: Vec<String>,
     strength: f64,
     mask: Option<String>,
     control: Option<String>,
@@ -216,29 +224,48 @@ pub async fn run(
 ) -> Result<()> {
     let config = Config::load_or_default();
 
+    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
+    let family = resolve_family(&model, &config);
+
     // Validate file-based arguments early — before expansion or inference.
     validate_file_args(
         lora.as_deref(),
-        image.as_deref(),
+        image.first().map(String::as_str),
         mask.as_deref(),
         control.as_deref(),
         output.as_deref(),
     )?;
+    for extra_image in image.iter().skip(1) {
+        validate_file_args(None, Some(extra_image.as_str()), None, None, None)?;
+    }
 
-    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
+    if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
+        anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
+    }
+    if family != "qwen-image-edit" && image.len() > 1 {
+        anyhow::bail!("multiple --image values are only supported for qwen-image-edit models");
+    }
 
-    // Read source image if --image specified
-    let source_image = if let Some(ref img_path) = image {
-        let bytes = if img_path == "-" {
-            // Read binary image from stdin
-            let mut buf = Vec::new();
-            std::io::stdin().read_to_end(&mut buf)?;
-            buf
-        } else {
-            std::fs::read(img_path)
-                .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))?
-        };
-        Some(bytes)
+    let loaded_images = image
+        .iter()
+        .map(|img_path| {
+            if img_path == "-" {
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                Ok(buf)
+            } else {
+                std::fs::read(img_path)
+                    .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let source_image = if family == "qwen-image-edit" {
+        None
+    } else {
+        loaded_images.first().cloned()
+    };
+    let edit_images = if family == "qwen-image-edit" && !loaded_images.is_empty() {
+        Some(loaded_images)
     } else {
         None
     };
@@ -265,7 +292,7 @@ pub async fn run(
     // When --image - is used, stdin is consumed for the image, so prompt must come from args.
     let prompt = match prompt {
         Some(p) => Some(p),
-        None if image.as_deref() != Some("-") && !std::io::stdin().is_terminal() => {
+        None if !image.iter().any(|img| img == "-") && !std::io::stdin().is_terminal() => {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf)?;
             let trimmed = buf.trim().to_string();
@@ -512,6 +539,7 @@ pub async fn run(
         eager,
         offload,
         source_image,
+        edit_images,
         strength,
         mask_image,
         control_image,

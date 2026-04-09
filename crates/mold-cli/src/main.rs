@@ -248,9 +248,9 @@ Examples:
         #[arg(long, default_value = "1.0", help_heading = "LoRA")]
         lora_scale: f64,
 
-        /// Source image for img2img (file path or - for stdin)
+        /// Source image(s). Repeat for multi-image edit models; use `-` for stdin on single-image families only.
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
-        image: Option<String>,
+        image: Vec<String>,
 
         /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
         #[arg(long, default_value = "0.75", help_heading = "img2img")]
@@ -1442,7 +1442,7 @@ mod tests {
     fn run_image_flag() {
         let cli = parse(&["run", "model", "test", "--image", "photo.png"]);
         match cli.command {
-            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("photo.png")),
+            Commands::Run { image, .. } => assert_eq!(image, vec!["photo.png"]),
             _ => panic!("expected Run"),
         }
     }
@@ -1451,7 +1451,7 @@ mod tests {
     fn run_image_stdin() {
         let cli = parse(&["run", "model", "test", "--image", "-"]);
         match cli.command {
-            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("-")),
+            Commands::Run { image, .. } => assert_eq!(image, vec!["-"]),
             _ => panic!("expected Run"),
         }
     }
@@ -1460,7 +1460,7 @@ mod tests {
     fn run_image_short_flag() {
         let cli = parse(&["run", "model", "test", "-i", "input.jpg"]);
         match cli.command {
-            Commands::Run { image, .. } => assert_eq!(image.as_deref(), Some("input.jpg")),
+            Commands::Run { image, .. } => assert_eq!(image, vec!["input.jpg"]),
             _ => panic!("expected Run"),
         }
     }
@@ -1487,7 +1487,18 @@ mod tests {
     fn run_image_defaults_none() {
         let cli = parse(&["run", "model", "test"]);
         match cli.command {
-            Commands::Run { image, .. } => assert!(image.is_none()),
+            Commands::Run { image, .. } => assert!(image.is_empty()),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_image_flag_repeats() {
+        let cli = parse(&[
+            "run", "model", "test", "--image", "a.png", "--image", "b.png",
+        ]);
+        match cli.command {
+            Commands::Run { image, .. } => assert_eq!(image, vec!["a.png", "b.png"]),
             _ => panic!("expected Run"),
         }
     }

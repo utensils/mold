@@ -35,6 +35,49 @@ mod base64_opt {
     }
 }
 
+/// Serde helpers for `Option<Vec<Vec<u8>>>` as base64 strings in JSON.
+mod base64_vec_opt {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(data: &Option<Vec<Vec<u8>>>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match data {
+            Some(items) => {
+                let encoded: Vec<String> = items
+                    .iter()
+                    .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+                    .collect();
+                s.serialize_some(&encoded)
+            }
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Option<Vec<Vec<u8>>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<Vec<String>> = Option::deserialize(d)?;
+        match opt {
+            Some(items) => {
+                let mut decoded = Vec::with_capacity(items.len());
+                for encoded in items {
+                    decoded.push(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&encoded)
+                            .map_err(serde::de::Error::custom)?,
+                    );
+                }
+                Ok(Some(decoded))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 /// Serde helpers for `Vec<u8>` as base64 in JSON (required field).
 mod base64_required {
     use base64::Engine as _;
@@ -207,6 +250,14 @@ pub struct GenerateRequest {
     /// Source image for img2img generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
     pub source_image: Option<Vec<u8>>,
+    /// Source images for Qwen-Image-Edit generation (raw PNG/JPEG bytes, base64-encoded in JSON).
+    /// The first image is the primary edit target; additional images are reference images.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "base64_vec_opt"
+    )]
+    pub edit_images: Option<Vec<Vec<u8>>>,
     /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise / txt2img).
     #[serde(default = "default_strength")]
     pub strength: f64,
@@ -754,6 +805,7 @@ mod tests {
             embed_metadata: Some(true),
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -900,6 +952,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -936,6 +989,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -969,6 +1023,7 @@ mod tests {
             embed_metadata: Some(true),
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -1004,6 +1059,7 @@ mod tests {
             embed_metadata: Some(true),
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -1037,6 +1093,7 @@ mod tests {
             embed_metadata: Some(true),
             scheduler: Some(Scheduler::UniPc),
             source_image: Some(vec![1, 2, 3]),
+            edit_images: None,
             strength: 0.5,
             mask_image: None,
             control_image: None,
@@ -1224,6 +1281,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: Some(image_bytes.clone()),
+            edit_images: None,
             strength: 0.5,
             mask_image: None,
             control_image: None,
@@ -1278,6 +1336,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -1315,6 +1374,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: None,
+            edit_images: None,
             strength: 0.75,
             mask_image: None,
             control_image: Some(control_bytes.clone()),
@@ -1373,6 +1433,7 @@ mod tests {
             embed_metadata: None,
             scheduler: None,
             source_image: Some(source_bytes),
+            edit_images: None,
             strength: 0.75,
             mask_image: Some(mask_bytes.clone()),
             control_image: None,

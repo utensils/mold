@@ -7,13 +7,14 @@
 //! - prompt embeddings truncated to 512 tokens after template stripping
 //! - last hidden states (no final RMSNorm)
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::VarBuilder;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::qwen2_text_gguf::GgufQwen2TextEncoder;
+use super::qwen2_vision::{Qwen2VisionConfig, Qwen2VisionModel};
 
 const TOKENIZER_WINDOW: usize = 1024;
 const MAX_SEQUENCE_LENGTH: usize = 512;
@@ -65,6 +66,43 @@ fn window_qwen_image_tokens(
         .min(MAX_SEQUENCE_LENGTH);
     input_ids.resize(total_window, pad_id);
     (input_ids, valid_len)
+}
+
+fn expand_image_pad_tokens(
+    input_ids: &[u32],
+    image_pad_id: u32,
+    image_token_counts: &[usize],
+) -> Result<(Vec<u32>, Vec<(usize, usize)>)> {
+    let mut expanded = Vec::with_capacity(
+        input_ids.len()
+            + image_token_counts
+                .iter()
+                .sum::<usize>()
+                .saturating_sub(image_token_counts.len()),
+    );
+    let mut spans = Vec::with_capacity(image_token_counts.len());
+    let mut image_idx = 0usize;
+    for &token in input_ids {
+        if token == image_pad_id {
+            let Some(&count) = image_token_counts.get(image_idx) else {
+                bail!("multimodal prompt contained more <|image_pad|> tokens than input images");
+            };
+            let start = expanded.len();
+            expanded.extend(std::iter::repeat_n(image_pad_id, count));
+            spans.push((start, expanded.len()));
+            image_idx += 1;
+        } else {
+            expanded.push(token);
+        }
+    }
+    if image_idx != image_token_counts.len() {
+        bail!(
+            "multimodal prompt referenced {} images but only {} <|image_pad|> placeholders were found",
+            image_token_counts.len(),
+            image_idx
+        );
+    }
+    Ok((expanded, spans))
 }
 
 #[derive(Debug, Clone)]
@@ -307,13 +345,13 @@ impl DecoderLayer {
     }
 }
 
-#[derive(Debug, Clone)]
 pub(crate) struct Bf16Qwen2TextModel {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<DecoderLayer>,
     sliding_window: usize,
     device: Device,
     dtype: DType,
+    hidden_size: usize,
 }
 
 impl Bf16Qwen2TextModel {
@@ -337,6 +375,7 @@ impl Bf16Qwen2TextModel {
             sliding_window: cfg.max_position_embeddings,
             device: vb.device().clone(),
             dtype: vb.dtype(),
+            hidden_size: cfg.hidden_size,
         })
     }
 
@@ -416,6 +455,51 @@ impl Bf16Qwen2TextModel {
         }
         anyhow::bail!("Qwen2 text model has too few layers")
     }
+
+    fn forward_last_hidden_with_image_embeds(
+        &self,
+        input_ids: &Tensor,
+        image_spans: &[(usize, usize)],
+        image_embeds: &[Tensor],
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let (b_size, seq_len) = input_ids.dims2()?;
+        let attention_mask = match attn_mask {
+            Some(mask) => Some(self.prepare_attention_mask(mask)?),
+            None => {
+                if seq_len <= 1 {
+                    None
+                } else {
+                    Some(self.prepare_causal_attention_mask(b_size, seq_len, 0)?)
+                }
+            }
+        };
+
+        let mut xs = self.embed_tokens.forward(input_ids)?;
+        for ((start, end), embeds) in image_spans.iter().zip(image_embeds.iter()) {
+            if embeds.dim(0)? != end - start {
+                bail!(
+                    "image embedding length {} did not match placeholder span {}",
+                    embeds.dim(0)?,
+                    end - start
+                );
+            }
+            let embeds = embeds.to_device(&self.device)?.to_dtype(self.dtype)?;
+            xs = xs.slice_assign(
+                &[0..1, *start..*end, 0..self.hidden_size],
+                &embeds.unsqueeze(0)?,
+            )?;
+        }
+
+        let target_layer = self.layers.len().saturating_sub(1);
+        for (idx, layer) in self.layers.iter().enumerate() {
+            xs = layer.forward(&xs, attention_mask.as_ref(), 0)?;
+            if idx == target_layer {
+                return Ok(xs);
+            }
+        }
+        bail!("Qwen2 text model has too few layers")
+    }
 }
 
 /// Qwen2.5 text encoder configuration for Qwen-Image-2512.
@@ -470,28 +554,135 @@ impl Qwen2TextModel {
             Self::Quantized(model) => model.forward_last_hidden(input_ids, attn_mask),
         }
     }
+
+    fn forward_last_hidden_with_image_embeds(
+        &mut self,
+        input_ids: &Tensor,
+        image_spans: &[(usize, usize)],
+        image_embeds: &[Tensor],
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        match self {
+            Self::Bf16(model) => {
+                model.forward_last_hidden_with_image_embeds(
+                    input_ids,
+                    image_spans,
+                    image_embeds,
+                    attn_mask,
+                )
+            }
+            Self::Quantized(model) => {
+                model.forward_last_hidden_with_image_embeds(
+                    input_ids,
+                    image_spans,
+                    image_embeds,
+                    attn_mask,
+                )
+            }
+        }
+    }
 }
 
 pub(crate) struct Qwen2TextEncoder {
     pub model: Option<Qwen2TextModel>,
+    vision: Option<Qwen2VisionModel>,
     pub tokenizer: tokenizers::Tokenizer,
     pub device: Device,
     pub on_gpu: bool,
     pub is_quantized: bool,
     encoder_paths: Vec<PathBuf>,
+    vision_encoder_paths: Vec<PathBuf>,
     dtype: DType,
     config: Qwen2TextEncoderConfig,
 }
 
 impl Qwen2TextEncoder {
+    fn load_tokenizer(tokenizer_path: &PathBuf) -> Result<tokenizers::Tokenizer> {
+        tokenizers::Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))
+    }
+
+    fn build_vision(vb: VarBuilder) -> Result<Qwen2VisionModel> {
+        Qwen2VisionModel::new(&Qwen2VisionConfig::qwen25_vl(), vb.pp("visual"))
+    }
+
+    fn load_vision_from_paths(
+        encoder_paths: &[PathBuf],
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Qwen2VisionModel> {
+        let vb = crate::weight_loader::load_safetensors_with_filtered_progress(
+            encoder_paths,
+            dtype,
+            device,
+            "Qwen2.5-VL vision encoder",
+            progress,
+            |name| name.starts_with("visual."),
+        )?;
+        Self::build_vision(vb)
+    }
+
+    pub fn prepare_bf16(
+        encoder_paths: &[PathBuf],
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        enable_vision: bool,
+    ) -> Result<Self> {
+        let config = Qwen2TextEncoderConfig::qwen_image();
+        let tokenizer = Self::load_tokenizer(tokenizer_path)?;
+        let on_gpu = crate::device::is_gpu(device);
+        Ok(Self {
+            model: None,
+            vision: None,
+            tokenizer,
+            device: device.clone(),
+            on_gpu,
+            is_quantized: false,
+            encoder_paths: encoder_paths.to_vec(),
+            vision_encoder_paths: if enable_vision {
+                encoder_paths.to_vec()
+            } else {
+                Vec::new()
+            },
+            dtype,
+            config,
+        })
+    }
+
+    pub fn prepare_gguf(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        vision_encoder_paths: &[PathBuf],
+    ) -> Result<Self> {
+        let config = Qwen2TextEncoderConfig::qwen_image();
+        let tokenizer = Self::load_tokenizer(tokenizer_path)?;
+        let on_gpu = crate::device::is_gpu(device);
+        Ok(Self {
+            model: None,
+            vision: None,
+            tokenizer,
+            device: device.clone(),
+            on_gpu,
+            is_quantized: true,
+            encoder_paths: vec![gguf_path.to_path_buf()],
+            vision_encoder_paths: vision_encoder_paths.to_vec(),
+            dtype,
+            config,
+        })
+    }
+
     pub fn load_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
         device: &Device,
         dtype: DType,
+        enable_vision: bool,
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let config = Qwen2TextEncoderConfig::qwen_image();
         let vb = crate::weight_loader::load_safetensors_with_progress(
             encoder_paths,
             dtype,
@@ -499,42 +690,48 @@ impl Qwen2TextEncoder {
             "Qwen2.5-VL encoder",
             progress,
         )?;
-        let model = Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(&config, vb)?);
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
-        let on_gpu = crate::device::is_gpu(device);
-        Ok(Self {
-            model: Some(model),
-            tokenizer,
-            device: device.clone(),
-            on_gpu,
-            is_quantized: false,
-            encoder_paths: encoder_paths.to_vec(),
+        let mut encoder = Self::prepare_bf16(
+            encoder_paths,
+            tokenizer_path,
+            device,
             dtype,
-            config,
-        })
+            enable_vision,
+        )?;
+        if enable_vision {
+            encoder.vision = Some(Self::build_vision(vb.clone())?);
+        }
+        encoder.model = Some(Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(
+            &encoder.config,
+            vb,
+        )?));
+        Ok(encoder)
     }
 
-    pub fn load_gguf(gguf_path: &Path, tokenizer_path: &PathBuf, device: &Device) -> Result<Self> {
-        let config = Qwen2TextEncoderConfig::qwen_image();
-        let model = Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(gguf_path, device)?);
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))?;
-        let on_gpu = crate::device::is_gpu(device);
-        Ok(Self {
-            model: Some(model),
-            tokenizer,
-            device: device.clone(),
-            on_gpu,
-            is_quantized: true,
-            encoder_paths: vec![gguf_path.to_path_buf()],
-            dtype: DType::F32,
-            config,
-        })
+    pub fn load_gguf(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        vision_encoder_paths: &[PathBuf],
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        let mut encoder =
+            Self::prepare_gguf(gguf_path, tokenizer_path, device, dtype, vision_encoder_paths)?;
+        encoder.model = Some(Qwen2TextModel::Quantized(GgufQwen2TextEncoder::load(
+            gguf_path, device,
+        )?));
+        if !encoder.vision_encoder_paths.is_empty() {
+            encoder.vision = Some(Self::load_vision_from_paths(
+                &encoder.vision_encoder_paths,
+                device,
+                dtype,
+                progress,
+            )?);
+        }
+        Ok(encoder)
     }
 
-    fn encode_ids(&self, prompt: &str) -> Result<(Vec<u32>, usize, usize)> {
-        let formatted = format_qwen_image_prompt(prompt);
+    fn encode_ids_from_formatted(&self, formatted: &str) -> Result<(Vec<u32>, usize, usize)> {
         let input_ids = self
             .tokenizer
             .encode(formatted, false)
@@ -553,15 +750,19 @@ impl Qwen2TextEncoder {
         Ok((input_ids, strip_idx, valid_len))
     }
 
-    /// Returns variable-length embeddings and a matching mask after stripping
-    /// the system prefix, matching the upstream diffusers pipeline.
-    pub fn encode(
+    fn encode_ids(&self, prompt: &str) -> Result<(Vec<u32>, usize, usize)> {
+        let formatted = format_qwen_image_prompt(prompt);
+        self.encode_ids_from_formatted(&formatted)
+    }
+
+    fn encode_token_window(
         &mut self,
-        prompt: &str,
+        tokens: Vec<u32>,
+        strip_idx: usize,
+        valid_len: usize,
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<(Tensor, Tensor, usize)> {
-        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
         let model = self
             .model
             .as_mut()
@@ -587,8 +788,87 @@ impl Qwen2TextEncoder {
         ))
     }
 
+    /// Returns variable-length embeddings and a matching mask after stripping
+    /// the system prefix, matching the upstream diffusers pipeline.
+    pub fn encode(
+        &mut self,
+        prompt: &str,
+        target_device: &Device,
+        target_dtype: DType,
+    ) -> Result<(Tensor, Tensor, usize)> {
+        let (tokens, strip_idx, valid_len) = self.encode_ids(prompt)?;
+        self.encode_token_window(tokens, strip_idx, valid_len, target_device, target_dtype)
+    }
+
+    pub fn encode_formatted_multimodal(
+        &mut self,
+        formatted_prompt: &str,
+        images: &[Vec<u8>],
+        target_device: &Device,
+        target_dtype: DType,
+    ) -> Result<(Tensor, Tensor, usize)> {
+        let image_pad_id = *self
+            .tokenizer
+            .get_vocab(true)
+            .get("<|image_pad|>")
+            .ok_or_else(|| anyhow::anyhow!("Qwen2.5 tokenizer missing <|image_pad|>"))?;
+        let input_ids = self
+            .tokenizer
+            .encode(formatted_prompt, false)
+            .map_err(|e| anyhow::anyhow!("Qwen2.5 multimodal tokenization failed: {e}"))?
+            .get_ids()
+            .to_vec();
+
+        let model = self
+            .model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Qwen2.5 model unavailable (weights dropped)"))?;
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Qwen2.5 vision encoder was not loaded"))?;
+
+        let image_embeds = images
+            .iter()
+            .map(|image| vision.encode_image_bytes(image, &self.device, self.dtype))
+            .collect::<Result<Vec<_>>>()?;
+        let image_token_counts = image_embeds
+            .iter()
+            .map(|embeds| embeds.dim(0))
+            .collect::<candle_core::Result<Vec<_>>>()?;
+        let (expanded_ids, image_spans) =
+            expand_image_pad_tokens(&input_ids, image_pad_id, &image_token_counts)?;
+        let strip_idx = template_strip_index(&expanded_ids);
+        if expanded_ids.len().saturating_sub(strip_idx) > TOKENIZER_WINDOW {
+            bail!(
+                "Qwen2.5 multimodal prompt exceeded the {} token window after image expansion",
+                TOKENIZER_WINDOW
+            );
+        }
+        let valid_len = expanded_ids.len().saturating_sub(strip_idx);
+        let input_ids = Tensor::from_vec(expanded_ids, (1, strip_idx + valid_len), &self.device)?;
+        let attention_mask = Tensor::ones((1, strip_idx + valid_len), DType::U8, &self.device)?;
+        let hidden_states = model
+            .forward_last_hidden_with_image_embeds(
+                &input_ids,
+                &image_spans,
+                &image_embeds,
+                Some(&attention_mask),
+            )?
+            .narrow(1, strip_idx, valid_len)?;
+        let attention_mask = Tensor::ones((1, valid_len), DType::U8, &self.device)?;
+        Ok((
+            hidden_states
+                .to_device(target_device)?
+                .to_dtype(target_dtype)?,
+            attention_mask.to_device(target_device)?,
+            valid_len,
+        ))
+    }
+
     pub fn drop_weights(&mut self) {
         self.model = None;
+        self.vision = None;
     }
 
     pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
@@ -605,11 +885,22 @@ impl Qwen2TextEncoder {
                 "Qwen2.5-VL encoder",
                 progress,
             )?;
+            if !self.vision_encoder_paths.is_empty() {
+                self.vision = Some(Self::build_vision(vb.clone())?);
+            }
             Some(Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(
                 &self.config,
                 vb,
             )?))
         };
+        if self.is_quantized && !self.vision_encoder_paths.is_empty() {
+            self.vision = Some(Self::load_vision_from_paths(
+                &self.vision_encoder_paths,
+                &self.device,
+                self.dtype,
+                progress,
+            )?);
+        }
         Ok(())
     }
 }
@@ -652,5 +943,12 @@ mod tests {
         assert_eq!(windowed.len(), TOKENIZER_WINDOW + strip_idx);
         assert_eq!(&windowed[..5], &[10, 11, 12, 13, 14]);
         assert!(windowed[5..].iter().all(|&id| id == 99));
+    }
+
+    #[test]
+    fn expand_image_pad_tokens_repeats_each_placeholder_with_span_tracking() {
+        let (expanded, spans) = expand_image_pad_tokens(&[1, 9, 2, 9, 3], 9, &[4, 2]).unwrap();
+        assert_eq!(expanded, vec![1, 9, 9, 9, 9, 2, 9, 9, 3]);
+        assert_eq!(spans, vec![(1, 5), (6, 8)]);
     }
 }

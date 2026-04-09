@@ -143,6 +143,12 @@ pub fn create_engine_with_pool(
             load_strategy,
             offload,
         ))),
+        "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
+            model_name,
+            paths,
+            load_strategy,
+            offload,
+        ))),
         "ltx-video" | "ltx_video" => {
             let t5_variant = std::env::var("MOLD_T5_VARIANT")
                 .ok()
@@ -317,6 +323,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_family_from_manifest_qwen_image_edit() {
+        let config = Config::default();
+        assert_eq!(
+            resolve_family("qwen-image-edit-2511:q4", &config),
+            "qwen-image-edit"
+        );
+    }
+
+    #[test]
     fn create_engine_qwen_image() {
         let mut config = Config::default();
         config.models.insert(
@@ -357,6 +372,18 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.err().unwrap());
         assert!(err.contains("nosuchfamily"));
+    }
+
+    #[test]
+    fn create_engine_qwen_image_edit_routes_to_qwen_engine() {
+        let result = create_engine(
+            "qwen-image-edit-2511:q4".to_string(),
+            dummy_paths(),
+            &Config::default(),
+            LoadStrategy::Sequential,
+            false,
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

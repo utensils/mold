@@ -17,6 +17,7 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
+mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --image swatch.png --qwen2-variant q4
 mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
 ```
@@ -220,7 +221,8 @@ Default model if none specified: `flux2-klein:q8`
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 - On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) to reduce memory pressure
-- On CUDA, `auto` keeps the existing BF16 path unless an explicit `--qwen2-variant` is set
+- On CUDA, `auto` prefers BF16 when there is enough post-transformer headroom and falls back to quantized GGUF variants for resident/edit paths when BF16 would be too heavy
+- `qwen-image-edit-2511:*` uses repeatable `--image` inputs and a distinct `qwen-image-edit` family. Local inference is implemented with the Qwen2.5-VL vision tower, packed edit latents, and true-CFG norm rescaling. Quantized `--qwen2-variant` values are supported for the edit family through a GGUF language path plus staged vision sidecar.
 **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
 **Utility (LLM)**: `qwen3-expand:q8`, `qwen3-expand-small:q8`

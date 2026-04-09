@@ -31,7 +31,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--offload`                        | CPU↔GPU block streaming (less VRAM)              |
 | `--lora <PATH>`                    | LoRA adapter safetensors                         |
 | `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                          |
-| `-i, --image <PATH>`               | Source image for img2img (`-` for stdin)         |
+| `-i, --image <PATH>`               | Source image. Repeat for `qwen-image-edit`; `-` stdin is single-image only |
 | `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                     |
 | `--mask <PATH>`                    | Inpainting mask                                  |
 | `--control <PATH>`                 | ControlNet control image                         |
@@ -57,11 +57,21 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 
-`auto` keeps CUDA behavior unchanged. On Apple Metal/MPS, `auto` now prefers
+`auto` prefers BF16 on CUDA when enough headroom remains after the transformer
+load, and falls back to quantized GGUF variants for resident/edit paths when
+that BF16 encoder would be too heavy. On Apple Metal/MPS, `auto` now prefers
 quantized Qwen2.5-VL GGUF text encoders for Qwen-Image (`q6`, then `q4`) to
 avoid the BF16 text-encoder memory spike. If you force `bf16` on Metal,
 sequential mode still stages prompt conditioning through CPU after encoding to
 reduce unified-memory pressure during denoising.
+
+### Repeated `--image`
+
+- Non-edit families still accept at most one `--image`; it maps to `source_image`.
+- `qwen-image-edit-2511:*` treats repeated `--image` flags as ordered `edit_images`.
+- `qwen-image-edit` does not support `--image -`.
+- `qwen-image-edit` supports quantized `--qwen2-variant` values by pairing GGUF language weights with the staged Qwen2.5-VL vision tower used for image conditioning.
+- The first edit image drives the default output width/height when you omit both flags.
 
 ## `mold expand`
 

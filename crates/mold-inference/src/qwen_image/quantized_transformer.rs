@@ -288,6 +288,23 @@ impl QwenRopeEmbedder {
         self.axis_slice(table, axis)?.narrow(0, 0, len)
     }
 
+    fn leading_axis_freqs_with_offset(
+        &self,
+        table: &Tensor,
+        axis: usize,
+        len: usize,
+        offset: usize,
+    ) -> Result<Tensor> {
+        if offset + len > ROPE_CACHE_LEN {
+            candle_core::bail!(
+                "Qwen RoPE slice [{}..{}) exceeds cache size {ROPE_CACHE_LEN}",
+                offset,
+                offset + len
+            );
+        }
+        self.axis_slice(table, axis)?.narrow(0, offset, len)
+    }
+
     fn centered_axis_freqs(
         &self,
         pos_table: &Tensor,
@@ -416,6 +433,153 @@ impl QwenRopeEmbedder {
         self.cache.lock().unwrap().insert(key, value.clone());
         Ok(value)
     }
+
+    pub(crate) fn forward_shapes(
+        &self,
+        img_shapes: &[(usize, usize, usize)],
+        max_txt_seq_len: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        if img_shapes.is_empty() {
+            candle_core::bail!("img_shapes must contain at least one image shape");
+        }
+        if self.axes_dims.len() != 3 {
+            candle_core::bail!(
+                "Qwen RoPE expects exactly 3 axes, got {}",
+                self.axes_dims.len()
+            );
+        }
+
+        let frame_half = self.axis_half_dims[0];
+        let height_half = self.axis_half_dims[1];
+        let width_half = self.axis_half_dims[2];
+        let total_half = frame_half + height_half + width_half;
+
+        let mut img_cos_parts = Vec::with_capacity(img_shapes.len());
+        let mut img_sin_parts = Vec::with_capacity(img_shapes.len());
+        let mut max_vid_index = 0usize;
+
+        for (shape_index, &(frame, height, width)) in img_shapes.iter().enumerate() {
+            let frame_cos =
+                self.leading_axis_freqs_with_offset(&self.pos_cos, 0, frame, shape_index)?;
+            let frame_sin =
+                self.leading_axis_freqs_with_offset(&self.pos_sin, 0, frame, shape_index)?;
+            let height_cos = self.centered_axis_freqs(&self.pos_cos, &self.neg_cos, 1, height)?;
+            let height_sin = self.centered_axis_freqs(&self.pos_sin, &self.neg_sin, 1, height)?;
+            let width_cos = self.centered_axis_freqs(&self.pos_cos, &self.neg_cos, 2, width)?;
+            let width_sin = self.centered_axis_freqs(&self.pos_sin, &self.neg_sin, 2, width)?;
+            let seq_len = frame * height * width;
+
+            img_cos_parts.push(
+                Tensor::cat(
+                    &[
+                        frame_cos
+                            .reshape((frame, 1, 1, frame_half))?
+                            .expand((frame, height, width, frame_half))?,
+                        height_cos.reshape((1, height, 1, height_half))?.expand((
+                            frame,
+                            height,
+                            width,
+                            height_half,
+                        ))?,
+                        width_cos
+                            .reshape((1, 1, width, width_half))?
+                            .expand((frame, height, width, width_half))?,
+                    ],
+                    D::Minus1,
+                )?
+                .reshape((seq_len, total_half))?,
+            );
+            img_sin_parts.push(
+                Tensor::cat(
+                    &[
+                        frame_sin
+                            .reshape((frame, 1, 1, frame_half))?
+                            .expand((frame, height, width, frame_half))?,
+                        height_sin.reshape((1, height, 1, height_half))?.expand((
+                            frame,
+                            height,
+                            width,
+                            height_half,
+                        ))?,
+                        width_sin
+                            .reshape((1, 1, width, width_half))?
+                            .expand((frame, height, width, width_half))?,
+                    ],
+                    D::Minus1,
+                )?
+                .reshape((seq_len, total_half))?,
+            );
+            max_vid_index = max_vid_index.max(height / 2).max(width / 2);
+        }
+
+        if max_vid_index + max_txt_seq_len > ROPE_CACHE_LEN {
+            candle_core::bail!(
+                "Qwen text RoPE slice [{}..{}) exceeds cache size {}",
+                max_vid_index,
+                max_vid_index + max_txt_seq_len,
+                ROPE_CACHE_LEN
+            );
+        }
+
+        Ok((
+            self.to_target(
+                Tensor::cat(&img_cos_parts.iter().collect::<Vec<_>>(), 0)?,
+                device,
+            )?,
+            self.to_target(
+                Tensor::cat(&img_sin_parts.iter().collect::<Vec<_>>(), 0)?,
+                device,
+            )?,
+            self.to_target(
+                self.pos_cos.narrow(0, max_vid_index, max_txt_seq_len)?,
+                device,
+            )?,
+            self.to_target(
+                self.pos_sin.narrow(0, max_vid_index, max_txt_seq_len)?,
+                device,
+            )?,
+        ))
+    }
+}
+
+pub(crate) fn build_edit_modulation_index(
+    img_shapes: &[(usize, usize, usize)],
+    batch_size: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    let output_tokens = img_shapes
+        .first()
+        .map(|(f, h, w)| f * h * w)
+        .unwrap_or_default();
+    let condition_tokens: usize = img_shapes.iter().skip(1).map(|(f, h, w)| f * h * w).sum();
+    let row: Vec<u32> = std::iter::repeat_n(0u32, output_tokens)
+        .chain(std::iter::repeat_n(1u32, condition_tokens))
+        .collect();
+    let rows = vec![row; batch_size];
+    Tensor::from_vec(
+        rows.into_iter().flatten().collect(),
+        (batch_size, output_tokens + condition_tokens),
+        device,
+    )
+}
+
+pub(crate) fn select_modulation_params(
+    mod_params: &Tensor,
+    modulate_index: &Tensor,
+) -> Result<Tensor> {
+    let (batch, seq_len) = modulate_index.dims2()?;
+    let hidden = mod_params.dim(1)?;
+    let selector = modulate_index.to_vec2::<u32>()?;
+    let mut flat = Vec::with_capacity(batch * seq_len);
+    for (batch_idx, row) in selector.into_iter().enumerate() {
+        let base = (batch_idx as u32) * 2;
+        flat.extend(row.into_iter().map(|value| base + value));
+    }
+    let indices = Tensor::from_vec(flat, batch * seq_len, modulate_index.device())?;
+    mod_params
+        .index_select(&indices, 0)?
+        .reshape((batch, seq_len, hidden))
 }
 
 struct TimestepProjEmbeddings {
@@ -707,11 +871,22 @@ impl QwenImageTransformerBlock {
         img_sin: &Tensor,
         txt_cos: &Tensor,
         txt_sin: &Tensor,
+        modulate_index: Option<&Tensor>,
     ) -> Result<(Tensor, Tensor)> {
         let img_seq_len = img_hidden.dim(1)?;
         let temb = temb.silu()?;
-        let img_mod = temb.apply(&self.img_mod)?.unsqueeze(1)?;
-        let txt_mod = temb.apply(&self.txt_mod)?.unsqueeze(1)?;
+        let img_mod = temb.apply(&self.img_mod)?;
+        let img_mod = if let Some(modulate_index) = modulate_index {
+            select_modulation_params(&img_mod, modulate_index)?
+        } else {
+            img_mod.unsqueeze(1)?
+        };
+        let txt_temb = if modulate_index.is_some() {
+            temb.narrow(0, 0, txt_hidden.dim(0)?)?
+        } else {
+            temb.clone()
+        };
+        let txt_mod = txt_temb.apply(&self.txt_mod)?.unsqueeze(1)?;
         let img_chunks = img_mod.chunk(6, D::Minus1)?;
         let txt_chunks = txt_mod.chunk(6, D::Minus1)?;
         let (
@@ -945,6 +1120,7 @@ impl QuantizedQwenImageTransformer2DModel {
                 &img_sin,
                 &txt_cos,
                 &txt_sin,
+                None,
             )?;
             if i == 0 || i + 1 == self.blocks.len() {
                 debug_stage(&format!("block {}", i + 1));
@@ -968,6 +1144,64 @@ impl QuantizedQwenImageTransformer2DModel {
             .contiguous()?;
 
         x_out.to_dtype(out_dtype)
+    }
+
+    pub fn forward_packed(
+        &self,
+        packed_hidden_states: &Tensor,
+        t: &Tensor,
+        encoder_hidden_states: &Tensor,
+        encoder_attention_mask: &Tensor,
+        img_shapes: &[(usize, usize, usize)],
+    ) -> Result<Tensor> {
+        let out_dtype = packed_hidden_states.dtype();
+        let device = packed_hidden_states.device();
+        let dtype = working_dtype(device);
+        let mut timestep = t.to_dtype(dtype)?;
+        let encoder_hidden_states = encoder_hidden_states.to_dtype(dtype)?;
+        let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
+        let packed_hidden_states = packed_hidden_states.to_dtype(dtype)?;
+        let batch = packed_hidden_states.dim(0)?;
+
+        let modulate_index = if self.cfg.zero_cond_t {
+            timestep = Tensor::cat(&[&timestep, &(timestep.zeros_like()?)], 0)?;
+            Some(build_edit_modulation_index(img_shapes, batch, device)?)
+        } else {
+            None
+        };
+
+        let temb = self.time_embed.forward(&timestep)?;
+        let mut img = packed_hidden_states.apply(&self.img_in)?;
+        let txt_normed = self.txt_norm.forward(&encoder_hidden_states)?;
+        let mut txt = txt_normed.apply(&self.txt_in)?;
+
+        let txt_seq_len = encoder_hidden_states.dim(1)?;
+        let (img_cos, img_sin, txt_cos, txt_sin) =
+            self.rope_embedder
+                .forward_shapes(img_shapes, txt_seq_len, device)?;
+
+        for block in &self.blocks {
+            (img, txt) = block.forward(
+                &img,
+                &txt,
+                &encoder_attention_mask,
+                &temb,
+                &img_cos,
+                &img_sin,
+                &txt_cos,
+                &txt_sin,
+                modulate_index.as_ref(),
+            )?;
+        }
+
+        let out_temb = if self.cfg.zero_cond_t {
+            temb.narrow(0, 0, batch)?
+        } else {
+            temb
+        };
+        self.output_layer
+            .forward(&img, &out_temb)?
+            .to_dtype(out_dtype)
     }
 }
 

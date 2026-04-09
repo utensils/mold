@@ -392,6 +392,20 @@ fn build_request(
         .as_ref()
         .and_then(|p| std::fs::read(p).ok());
 
+    let family = mold_core::manifest::find_manifest(&params.model)
+        .map(|m| m.family.as_str().to_string())
+        .unwrap_or_default();
+    let (edit_images, source_image, strength, mask_image) = if family == "qwen-image-edit" {
+        (
+            source_image.clone().map(|image| vec![image]),
+            None,
+            0.75,
+            None,
+        )
+    } else {
+        (None, source_image, params.strength, mask_image)
+    };
+
     GenerateRequest {
         prompt: prompt.to_string(),
         negative_prompt: negative_prompt.clone(),
@@ -405,8 +419,9 @@ fn build_request(
         output_format: params.format,
         embed_metadata: Some(mold_core::Config::load_or_default().effective_embed_metadata(None)),
         scheduler: params.scheduler,
+        edit_images,
         source_image,
-        strength: params.strength,
+        strength,
         mask_image,
         control_image,
         control_model: params.control_model.clone(),

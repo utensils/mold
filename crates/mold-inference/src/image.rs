@@ -402,6 +402,7 @@ mod tests {
             output_format: OutputFormat::Png,
             embed_metadata: Some(false),
             scheduler: None,
+            edit_images: None,
             source_image: None,
             strength: 0.75,
             mask_image: None,
