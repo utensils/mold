@@ -118,37 +118,39 @@ fn validate_file_args(
 fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
     // -- --lora validation --
     if let Some(lora_path) = args.lora {
-        let p = Path::new(lora_path);
-        if p.is_dir() {
-            // List .safetensors files in the directory as suggestions
-            let mut suggestions: Vec<String> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if let Some(name_str) = name.to_str() {
-                        if name_str.ends_with(".safetensors") {
-                            suggestions.push(entry.path().display().to_string());
+        if !is_virtual_lora_alias(lora_path) {
+            let p = Path::new(lora_path);
+            if p.is_dir() {
+                // List .safetensors files in the directory as suggestions
+                let mut suggestions: Vec<String> = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(p) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        if let Some(name_str) = name.to_str() {
+                            if name_str.ends_with(".safetensors") {
+                                suggestions.push(entry.path().display().to_string());
+                            }
                         }
                     }
                 }
-            }
-            suggestions.sort();
-            let mut msg = format!("--lora path '{}' is a directory, not a file", lora_path);
-            if suggestions.is_empty() {
-                msg.push_str(" (no .safetensors files found inside)");
-            } else {
-                msg.push_str(". Did you mean one of these?");
-                for s in &suggestions {
-                    msg.push_str(&format!("\n    {s}"));
+                suggestions.sort();
+                let mut msg = format!("--lora path '{}' is a directory, not a file", lora_path);
+                if suggestions.is_empty() {
+                    msg.push_str(" (no .safetensors files found inside)");
+                } else {
+                    msg.push_str(". Did you mean one of these?");
+                    for s in &suggestions {
+                        msg.push_str(&format!("\n    {s}"));
+                    }
                 }
+                anyhow::bail!(msg);
             }
-            anyhow::bail!(msg);
-        }
-        if !p.exists() {
-            anyhow::bail!("--lora file not found: {lora_path}");
-        }
-        if !lora_path.ends_with(".safetensors") {
-            anyhow::bail!("--lora file must be a .safetensors file, got: {lora_path}");
+            if !p.exists() {
+                anyhow::bail!("--lora file not found: {lora_path}");
+            }
+            if !lora_path.ends_with(".safetensors") {
+                anyhow::bail!("--lora file must be a .safetensors file, got: {lora_path}");
+            }
         }
     }
 
@@ -242,6 +244,12 @@ fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_virtual_lora_alias(value: &str) -> bool {
+    value
+        .strip_prefix("camera-control:")
+        .is_some_and(|preset| !preset.trim().is_empty())
 }
 
 fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> {
@@ -1002,6 +1010,11 @@ mod tests {
         assert!(validate_file_args(Some(path.to_str().unwrap()), None, None, None, None,).is_ok());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn validate_lora_camera_control_alias() {
+        assert!(validate_file_args(Some("camera-control:static"), None, None, None, None).is_ok());
     }
 
     // -- --image tests --
