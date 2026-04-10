@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::sampling::{
-    FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+    FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
 };
 use image::{imageops, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -24,6 +24,7 @@ use super::model::{
     VideoLatentShape, VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
+use super::sampler::euler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
 use crate::engine::{gpu_dtype, seeded_randn};
@@ -529,28 +530,9 @@ fn render_real_distilled_av(
         .as_ref()
         .context("native distilled LTX-2 inference requires audio prompt conditioning")?
         .to_device(&device)?;
-    let uncond_context = prepared
-        .prompt
-        .unconditional
-        .video_encoding
-        .to_device(&device)?;
-    let uncond_audio_context = prepared
-        .prompt
-        .unconditional
-        .audio_encoding
-        .as_ref()
-        .context(
-            "native distilled LTX-2 inference requires unconditional audio prompt conditioning",
-        )?
-        .to_device(&device)?;
     let cond_mask = prepared
         .prompt
         .conditional
-        .attention_mask
-        .to_device(&device)?;
-    let uncond_mask = prepared
-        .prompt
-        .unconditional
         .attention_mask
         .to_device(&device)?;
     let video_positions = prepared.video_positions.to_device(&device)?;
@@ -603,12 +585,8 @@ fn render_real_distilled_av(
         &video_positions,
         Some(&audio_positions),
         &cond_context,
-        Some(&uncond_context),
         Some(&audio_context),
-        Some(&uncond_audio_context),
         Some(&cond_mask),
-        Some(&uncond_mask),
-        plan.guidance,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage1"),
     )?;
@@ -678,12 +656,8 @@ fn render_real_distilled_av(
         &stage2_video_positions,
         Some(&audio_positions),
         &cond_context,
-        Some(&uncond_context),
         Some(&audio_context),
-        Some(&uncond_audio_context),
         Some(&cond_mask),
-        Some(&uncond_mask),
-        plan.guidance,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage2"),
     )?;
@@ -733,12 +707,8 @@ fn run_real_distilled_stage(
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
     cond_context: &Tensor,
-    uncond_context: Option<&Tensor>,
     audio_context: Option<&Tensor>,
-    audio_uncond_context: Option<&Tensor>,
     cond_mask: Option<&Tensor>,
-    uncond_mask: Option<&Tensor>,
-    guidance_scale: f64,
     sigmas_no_terminal: &[f32],
     debug_stage: Option<&str>,
 ) -> Result<(Tensor, Option<Tensor>)> {
@@ -751,21 +721,8 @@ fn run_real_distilled_stage(
         true,
         0,
     );
-    let mut video_scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
-    video_scheduler.set_timesteps(None, &device, Some(sigmas_no_terminal), None, None)?;
-    video_scheduler.set_begin_index(0);
-    let mut audio_scheduler = if audio_shape.is_some() {
-        let mut scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
-        scheduler.set_timesteps(None, &device, Some(sigmas_no_terminal), None, None)?;
-        scheduler.set_begin_index(0);
-        Some(scheduler)
-    } else {
-        None
-    };
-    let run_sigmas = video_scheduler
-        .sigmas()
-        .to_device(&candle_core::Device::Cpu)?
-        .to_vec1::<f32>()?;
+    let mut run_sigmas = sigmas_no_terminal.to_vec();
+    run_sigmas.push(0.0);
     let mut video_latents = video_patchifier.patchify(video_start_latents)?;
     let mut audio_latents = match (audio_shape, audio_start_latents) {
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
@@ -778,8 +735,6 @@ fn run_real_distilled_stage(
         .take(run_sigmas.len().saturating_sub(1))
         .enumerate()
     {
-        let batch = video_latents.dim(0)?;
-        let use_cfg = guidance_scale > 1.0;
         let audio_latents_ref = audio_latents
             .as_ref()
             .context("audio latents missing for multimodal distilled stage")?;
@@ -789,116 +744,41 @@ fn run_real_distilled_stage(
         let audio_context_ref = audio_context
             .as_ref()
             .context("audio prompt conditioning missing for multimodal distilled stage")?;
-        let timestep = Tensor::full(sigma, (if use_cfg { batch * 2 } else { batch },), &device)?;
-        let video_input = if use_cfg {
-            duplicate_cfg_batch(&video_latents)?
-        } else {
-            video_latents.clone()
-        };
-        let audio_input = if use_cfg {
-            duplicate_cfg_batch(audio_latents_ref)?
-        } else {
-            audio_latents_ref.clone()
-        };
-        let video_context = if use_cfg {
-            cat_cfg_conditioning(
-                uncond_context
-                    .context("unconditional video prompt conditioning missing for CFG")?,
-                cond_context,
-            )?
-        } else {
-            cond_context.clone()
-        };
-        let audio_context = if use_cfg {
-            cat_cfg_conditioning(
-                audio_uncond_context
-                    .context("unconditional audio prompt conditioning missing for CFG")?,
-                audio_context_ref,
-            )?
-        } else {
-            (*audio_context_ref).clone()
-        };
-        let video_mask = if use_cfg {
-            cat_optional_cfg_conditioning(uncond_mask, cond_mask)?
-        } else {
-            cond_mask.cloned()
-        };
-        let audio_mask = video_mask.clone();
-        let video_positions = if use_cfg {
-            duplicate_cfg_batch(video_positions)?
-        } else {
-            video_positions.clone()
-        };
-        let audio_positions = if use_cfg {
-            duplicate_optional_cfg_batch(Some(audio_positions_ref))?
-                .context("duplicated audio positions missing for CFG")?
-        } else {
-            (*audio_positions_ref).clone()
-        };
-        let (video_model_output, audio_model_output) = transformer.forward(
-            &video_input,
-            &audio_input,
-            &video_context,
-            &audio_context,
+        let timestep = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
+        let (video_velocity, audio_velocity) = transformer.forward(
+            &video_latents,
+            audio_latents_ref,
+            cond_context,
+            audio_context_ref,
             &timestep,
-            video_mask.as_ref(),
-            audio_mask.as_ref(),
-            &video_positions,
-            &audio_positions,
+            cond_mask,
+            cond_mask,
+            video_positions,
+            audio_positions_ref,
         )?;
-        let video_model_output = if use_cfg {
-            let outputs = video_model_output.chunk(2, 0)?;
-            let video_uncond_velocity = outputs
-                .first()
-                .context("video CFG unconditional branch missing")?;
-            let video_cond_velocity = outputs
-                .get(1)
-                .context("video CFG conditional branch missing")?;
-            guided_velocity_from_cfg(
-                &video_latents,
-                &video_cond_velocity.to_dtype(DType::F32)?,
-                &video_uncond_velocity.to_dtype(DType::F32)?,
-                sigma,
-                guidance_scale,
-            )?
-        } else {
-            video_model_output.to_dtype(DType::F32)?
-        };
-        video_latents = video_scheduler
-            .step(&video_model_output, sigma, &video_latents, None)?
-            .prev_sample;
+        let video_velocity = video_velocity.to_dtype(DType::F32)?;
+        let video_denoised = denoised_from_velocity(&video_latents, &video_velocity, sigma)?;
+        video_latents = euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?;
 
-        if let (Some(audio_scheduler), Some(audio_latents)) =
-            (audio_scheduler.as_mut(), audio_latents.as_mut())
-        {
-            let audio_model_output = if use_cfg {
-                let outputs = audio_model_output.chunk(2, 0)?;
-                let audio_uncond_velocity = outputs
-                    .first()
-                    .context("audio CFG unconditional branch missing")?;
-                let audio_cond_velocity = outputs
-                    .get(1)
-                    .context("audio CFG conditional branch missing")?;
-                guided_velocity_from_cfg(
-                    audio_latents,
-                    &audio_cond_velocity.to_dtype(DType::F32)?,
-                    &audio_uncond_velocity.to_dtype(DType::F32)?,
-                    sigma,
-                    guidance_scale,
-                )?
-            } else {
-                audio_model_output.to_dtype(DType::F32)?
-            };
-            *audio_latents = audio_scheduler
-                .step(&audio_model_output, sigma, audio_latents, None)?
-                .prev_sample;
+        if let Some(audio_latents) = audio_latents.as_mut() {
+            let audio_velocity = audio_velocity.to_dtype(DType::F32)?;
+            let audio_denoised = denoised_from_velocity(audio_latents, &audio_velocity, sigma)?;
+            *audio_latents = euler_step(audio_latents, &audio_denoised, &run_sigmas, step_idx)?;
+        }
 
-            if let Some(stage) = debug_stage {
-                eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
-                log_tensor_stats("step_video_latents", &video_latents)?;
+        if let Some(stage) = debug_stage {
+            eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
+            log_tensor_stats("step_video_latents", &video_latents)?;
+            if let Some(audio_latents) = audio_latents.as_ref() {
                 log_tensor_stats("step_audio_latents", audio_latents)?;
-                log_tensor_stats("video_velocity", &video_model_output)?;
-                log_tensor_stats("audio_velocity", &audio_model_output)?;
+            }
+            log_tensor_stats("video_x0", &video_denoised)?;
+            log_tensor_stats("video_velocity", &video_velocity)?;
+            if let Some(audio_latents) = audio_latents.as_ref() {
+                let audio_velocity = audio_velocity.to_dtype(DType::F32)?;
+                let audio_denoised = denoised_from_velocity(audio_latents, &audio_velocity, sigma)?;
+                log_tensor_stats("audio_x0", &audio_denoised)?;
+                log_tensor_stats("audio_velocity", &audio_velocity)?;
             }
         }
     }

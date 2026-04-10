@@ -176,6 +176,7 @@ enum LtxLinear {
     Fp8 {
         weight: Tensor,
         weight_scale: Option<Tensor>,
+        input_scale: Option<Tensor>,
         bias: Option<Tensor>,
     },
 }
@@ -188,6 +189,11 @@ impl LtxLinear {
         } else {
             None
         };
+        let input_scale = if vb.contains_tensor("input_scale") {
+            Some(vb.get((), "input_scale")?)
+        } else {
+            None
+        };
         let bias = if has_bias {
             Some(vb.get(out_dim, "bias")?)
         } else {
@@ -197,6 +203,7 @@ impl LtxLinear {
             Ok(Self::Fp8 {
                 weight,
                 weight_scale,
+                input_scale,
                 bias,
             })
         } else {
@@ -219,6 +226,7 @@ impl Module for LtxLinear {
             Self::Fp8 {
                 weight,
                 weight_scale,
+                input_scale,
                 bias,
             } => {
                 let dtype = match xs.dtype() {
@@ -229,6 +237,14 @@ impl Module for LtxLinear {
                     xs.clone()
                 } else {
                     xs.to_dtype(dtype)?
+                };
+                // Public fp8-cast checkpoints also carry per-layer `input_scale`
+                // tensors for static activation quantization. Emulate the
+                // quantize/dequantize path in Rust so the math matches upstream
+                // without requiring TensorRT-LLM scaled-mm kernels.
+                let xs = match input_scale {
+                    Some(scale) => emulate_static_fp8_input_quantization(&xs, scale, dtype)?,
+                    None => xs,
                 };
                 // The public LTX-2 fp8-cast policy stores transformer weights in
                 // float8 but runs the actual matmul in the normal compute dtype.
@@ -259,6 +275,18 @@ impl Module for LtxLinear {
             }
         }
     }
+}
+
+fn emulate_static_fp8_input_quantization(
+    xs: &Tensor,
+    input_scale: &Tensor,
+    compute_dtype: DType,
+) -> Result<Tensor> {
+    let scale = input_scale.to_dtype(compute_dtype)?;
+    xs.broadcast_div(&scale)?
+        .to_dtype(DType::F8E4M3)?
+        .to_dtype(compute_dtype)?
+        .broadcast_mul(&scale)
 }
 
 // ---------------------------------------------------------------------------
@@ -2231,7 +2259,7 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Module, VarBuilder};
 
-    use super::{LtxAttention, LtxLinear, LtxRopeType};
+    use super::{emulate_static_fp8_input_quantization, LtxAttention, LtxLinear, LtxRopeType};
 
     fn attention_var_builder(dim: usize) -> VarBuilder<'static> {
         let device = Device::Cpu;
@@ -2346,6 +2374,7 @@ mod tests {
         let linear = LtxLinear::Fp8 {
             weight: weight.clone(),
             weight_scale: None,
+            input_scale: None,
             bias: Some(bias.clone()),
         };
 
@@ -2383,6 +2412,7 @@ mod tests {
         let linear = LtxLinear::Fp8 {
             weight: weight.clone(),
             weight_scale: Some(weight_scale.clone()),
+            input_scale: None,
             bias: None,
         };
 
@@ -2401,6 +2431,40 @@ mod tests {
             )
             .unwrap()
             .reshape((1, 1, 1))
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_linear_applies_optional_input_scale_before_matmul() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let input_scale = Tensor::new(0.125f32, &device).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: None,
+            input_scale: Some(input_scale.clone()),
+            bias: None,
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+        let quantized_input = emulate_static_fp8_input_quantization(&xs, &input_scale, DType::F32)
+            .unwrap()
+            .reshape((2, 2))
+            .unwrap();
+        let expected = quantized_input
+            .matmul(&weight.to_dtype(DType::F32).unwrap().t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
             .unwrap();
 
         let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();

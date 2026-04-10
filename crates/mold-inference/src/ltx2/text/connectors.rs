@@ -198,7 +198,6 @@ pub fn replace_padded_with_registers(
     if registers.is_empty() {
         bail!("register replacement requires at least one learnable register");
     }
-
     let mut packed = Vec::with_capacity(batch * seq * dim);
     for (batch_hidden, batch_mask) in hidden_states.iter().zip(attention_mask.iter()) {
         let mut valid = batch_hidden
@@ -207,9 +206,8 @@ pub fn replace_padded_with_registers(
             .filter(|(_, mask)| **mask != 0)
             .map(|(token, _)| token.clone())
             .collect::<Vec<_>>();
-        let pad = seq.saturating_sub(valid.len());
-        for index in 0..pad {
-            valid.push(registers[index % registers.len()].clone());
+        for position in valid.len()..seq {
+            valid.push(registers[position % registers.len()].clone());
         }
         for token in valid {
             packed.extend(token);
@@ -968,6 +966,57 @@ mod tests {
             ]]
         );
         assert_eq!(packed_mask.to_vec2::<u8>().unwrap(), vec![vec![1, 1, 1, 1]]);
+    }
+
+    #[test]
+    fn register_replacement_preserves_upstream_register_offset() {
+        let device = Device::Cpu;
+        let hidden_states = Tensor::new(
+            &[[
+                [1.0f32, 1.0],
+                [2.0, 2.0],
+                [3.0, 3.0],
+                [4.0, 4.0],
+                [5.0, 5.0],
+                [6.0, 6.0],
+                [7.0, 7.0],
+                [8.0, 8.0],
+            ]],
+            &device,
+        )
+        .unwrap();
+        let mask = Tensor::new(&[[0u8, 0, 0, 1, 1, 1, 1, 1]], &device).unwrap();
+        let registers = Tensor::new(
+            &[
+                [100.0f32, 10.0],
+                [200.0, 20.0],
+                [300.0, 30.0],
+                [400.0, 40.0],
+            ],
+            &device,
+        )
+        .unwrap();
+
+        let (packed, packed_mask) =
+            replace_padded_with_registers(&hidden_states, &mask, &registers).unwrap();
+
+        assert_eq!(
+            packed.to_vec3::<f32>().unwrap(),
+            vec![vec![
+                vec![4.0, 4.0],
+                vec![5.0, 5.0],
+                vec![6.0, 6.0],
+                vec![7.0, 7.0],
+                vec![8.0, 8.0],
+                vec![200.0, 20.0],
+                vec![300.0, 30.0],
+                vec![400.0, 40.0]
+            ]]
+        );
+        assert_eq!(
+            packed_mask.to_vec2::<u8>().unwrap(),
+            vec![vec![1, 1, 1, 1, 1, 1, 1, 1]]
+        );
     }
 
     #[test]
