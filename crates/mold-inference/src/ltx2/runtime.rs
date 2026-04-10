@@ -41,6 +41,7 @@ pub const LTX2_AUDIO_LATENT_DOWNSAMPLE_FACTOR: usize = 4;
 #[derive(Debug)]
 pub struct NativePreparedRun {
     pub prompt: NativePromptEncoding,
+    pub debug_alt_prompt: Option<EmbeddingsProcessorOutput>,
     pub video_pixel_shape: VideoPixelShape,
     pub video_latent_shape: VideoLatentShape,
     pub audio_latent_shape: Option<AudioLatentShape>,
@@ -169,8 +170,32 @@ impl Ltx2RuntimeSession {
             prompt_encoder.encode_prompt_pair(&plan.prompt_tokens)?,
             &prepared_device,
         )?;
+        let debug_alt_prompt = match ltx_debug_alt_prompt() {
+            Some(alt_prompt) => {
+                let assets = super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
+                    .with_context(|| {
+                        format!(
+                            "failed to discover Gemma assets for alternate prompt debug at '{}'",
+                            plan.gemma_root
+                        )
+                    })?;
+                let alt_tokens =
+                    assets.encode_prompt_pair(&alt_prompt, plan.negative_prompt.as_deref())?;
+                let alt_prompt = prompt_encoder
+                    .encode_prompt_pair(&alt_tokens)
+                    .context("failed to encode alternate debug prompt")?;
+                Some(move_embeddings_output_to_device(
+                    alt_prompt.conditional,
+                    &prepared_device,
+                )?)
+            }
+            None => None,
+        };
         if ltx_debug_enabled() {
             log_prompt_debug_stats(plan, &prompt)?;
+            if let Some(alt_prompt) = debug_alt_prompt.as_ref() {
+                log_alt_prompt_debug_stats(plan, &prompt.conditional, alt_prompt)?;
+            }
         }
         drop(prompt_encoder);
         if prompt_device_is_cuda {
@@ -247,6 +272,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativePreparedRun {
             prompt,
+            debug_alt_prompt,
             video_pixel_shape: pixel_shape,
             video_latent_shape,
             audio_latent_shape,
@@ -618,6 +644,17 @@ fn render_real_distilled_av(
         .as_ref()
         .map(|tensor| tensor.to_device(device))
         .transpose()?;
+    let alt_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .map(|prompt| prompt.video_encoding.to_device(device))
+        .transpose()?;
+    let alt_audio_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.audio_encoding.as_ref())
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
     let cond_mask = prepared
         .prompt
         .conditional
@@ -628,6 +665,11 @@ fn render_real_distilled_av(
         .unconditional
         .attention_mask
         .to_device(device)?;
+    let alt_mask = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .map(|prompt| prompt.attention_mask.to_device(device))
+        .transpose()?;
     let video_positions = prepared.video_positions.to_device(device)?;
     let audio_positions = prepared
         .audio_positions
@@ -686,10 +728,13 @@ fn render_real_distilled_av(
         audio_positions.as_ref(),
         &cond_context,
         Some(&uncond_context),
+        alt_context.as_ref(),
         audio_context.as_ref(),
         uncond_audio_context.as_ref(),
+        alt_audio_context.as_ref(),
         Some(&cond_mask),
         Some(&uncond_mask),
+        alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage1"),
@@ -786,10 +831,13 @@ fn render_real_distilled_av(
         audio_positions.as_ref(),
         &cond_context,
         Some(&uncond_context),
+        alt_context.as_ref(),
         audio_context.as_ref(),
         uncond_audio_context.as_ref(),
+        alt_audio_context.as_ref(),
         Some(&cond_mask),
         Some(&uncond_mask),
+        alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage2"),
@@ -825,10 +873,13 @@ fn render_real_distilled_av(
     drop(stage1_video_noise);
     drop(audio_positions);
     drop(video_positions);
+    drop(alt_mask);
     drop(uncond_mask);
     drop(cond_mask);
+    drop(alt_audio_context);
     drop(uncond_audio_context);
     drop(audio_context);
+    drop(alt_context);
     drop(uncond_context);
     drop(cond_context);
     drop(latent_stats);
@@ -855,10 +906,13 @@ fn run_real_distilled_stage(
     audio_positions: Option<&Tensor>,
     cond_context: &Tensor,
     uncond_context: Option<&Tensor>,
+    alt_context: Option<&Tensor>,
     audio_context: Option<&Tensor>,
     uncond_audio_context: Option<&Tensor>,
+    alt_audio_context: Option<&Tensor>,
     cond_mask: Option<&Tensor>,
     uncond_mask: Option<&Tensor>,
+    alt_mask: Option<&Tensor>,
     guidance_scale: f64,
     sigmas_no_terminal: &[f32],
     debug_stage: Option<&str>,
@@ -985,6 +1039,34 @@ fn run_real_distilled_stage(
                             )?;
                         }
                     }
+                    if step_idx == 0 {
+                        if let (Some(alt_video_context), Some(alt_audio_context)) =
+                            (alt_context, alt_audio_context.as_ref())
+                        {
+                            let (alt_video_velocity, alt_audio_velocity) = transformer.forward(
+                                &video_latents,
+                                Some(audio_latents_ref),
+                                alt_video_context,
+                                Some(alt_audio_context),
+                                &timestep,
+                                alt_mask,
+                                alt_mask,
+                                video_positions,
+                                Some(audio_positions_ref),
+                            )?;
+                            log_distilled_alternate_prompt_sensitivity(
+                                debug_stage,
+                                step_idx,
+                                sigma,
+                                &video_latents,
+                                &cond_video_velocity,
+                                &alt_video_velocity,
+                                Some(audio_latents_ref),
+                                cond_audio_velocity.as_ref(),
+                                alt_audio_velocity.as_ref(),
+                            )?;
+                        }
+                    }
                     (cond_video_velocity, cond_audio_velocity)
                 }
             } else if use_cfg {
@@ -1054,6 +1136,32 @@ fn run_real_distilled_stage(
                             &video_latents,
                             &cond_video_velocity,
                             &uncond_video_velocity,
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+                if step_idx == 0 {
+                    if let Some(alt_video_context) = alt_context {
+                        let (alt_video_velocity, _) = transformer.forward(
+                            &video_latents,
+                            None,
+                            alt_video_context,
+                            None,
+                            &timestep,
+                            alt_mask,
+                            None,
+                            video_positions,
+                            None,
+                        )?;
+                        log_distilled_alternate_prompt_sensitivity(
+                            debug_stage,
+                            step_idx,
+                            sigma,
+                            &video_latents,
+                            &cond_video_velocity,
+                            &alt_video_velocity,
                             None,
                             None,
                             None,
@@ -1454,6 +1562,13 @@ fn ltx_debug_compare_uncond_enabled() -> bool {
     env::var_os("MOLD_LTX_DEBUG_COMPARE_UNCOND").is_some()
 }
 
+fn ltx_debug_alt_prompt() -> Option<String> {
+    env::var("MOLD_LTX_DEBUG_ALT_PROMPT")
+        .ok()
+        .map(|prompt| prompt.trim().to_string())
+        .filter(|prompt| !prompt.is_empty())
+}
+
 fn ltx_debug_disable_audio_branch_enabled() -> bool {
     env::var_os("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
 }
@@ -1602,6 +1717,40 @@ fn log_prompt_debug_stats(plan: &Ltx2GeneratePlan, prompt: &NativePromptEncoding
     Ok(())
 }
 
+fn log_alt_prompt_debug_stats(
+    plan: &Ltx2GeneratePlan,
+    primary: &EmbeddingsProcessorOutput,
+    alternate: &EmbeddingsProcessorOutput,
+) -> Result<()> {
+    if !ltx_debug_enabled() {
+        return Ok(());
+    }
+    let alt_prompt = ltx_debug_alt_prompt().unwrap_or_else(|| "<unset>".to_string());
+    let line = format!(
+        "[ltx2-debug] alternate_prompt primary={:?} alternate={alt_prompt:?}",
+        plan.prompt
+    );
+    eprintln!("{line}");
+    if let Ok(mut guard) = ltx_debug_log_file().lock() {
+        if let Some(file) = guard.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
+    log_tensor_pair_stats(
+        "alt_prompt_video_context",
+        &primary.video_encoding,
+        &alternate.video_encoding,
+    )?;
+    if let (Some(primary_audio), Some(alternate_audio)) = (
+        primary.audio_encoding.as_ref(),
+        alternate.audio_encoding.as_ref(),
+    ) {
+        log_tensor_pair_stats("alt_prompt_audio_context", primary_audio, alternate_audio)?;
+    }
+    Ok(())
+}
+
 fn log_tensor_pair_stats(name: &str, lhs: &Tensor, rhs: &Tensor) -> Result<()> {
     let delta = lhs.broadcast_sub(rhs)?;
     log_tensor_stats(&format!("{name}_delta"), &delta)?;
@@ -1673,6 +1822,60 @@ fn log_distilled_prompt_sensitivity(
             &format!("{prefix}_audio_x0_cond_vs_uncond"),
             &conditional_audio_x0,
             &unconditional_audio_x0,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn log_distilled_alternate_prompt_sensitivity(
+    stage: Option<&str>,
+    step_idx: usize,
+    sigma: f32,
+    video_sample: &Tensor,
+    primary_video_velocity: &Tensor,
+    alternate_video_velocity: &Tensor,
+    audio_sample: Option<&Tensor>,
+    primary_audio_velocity: Option<&Tensor>,
+    alternate_audio_velocity: Option<&Tensor>,
+) -> Result<()> {
+    if !ltx_debug_enabled() {
+        return Ok(());
+    }
+    let prefix = format!(
+        "{}_step{step_idx}_sigma{sigma:.6}",
+        stage.unwrap_or("stage")
+    );
+    log_tensor_pair_stats(
+        &format!("{prefix}_video_velocity_prompt_vs_alt"),
+        primary_video_velocity,
+        alternate_video_velocity,
+    )?;
+    let primary_video_x0 = convert_velocity_to_x0(video_sample, primary_video_velocity, sigma)?;
+    let alternate_video_x0 = convert_velocity_to_x0(video_sample, alternate_video_velocity, sigma)?;
+    log_tensor_pair_stats(
+        &format!("{prefix}_video_x0_prompt_vs_alt"),
+        &primary_video_x0,
+        &alternate_video_x0,
+    )?;
+
+    if let (Some(audio_sample), Some(primary_audio_velocity), Some(alternate_audio_velocity)) = (
+        audio_sample,
+        primary_audio_velocity,
+        alternate_audio_velocity,
+    ) {
+        log_tensor_pair_stats(
+            &format!("{prefix}_audio_velocity_prompt_vs_alt"),
+            primary_audio_velocity,
+            alternate_audio_velocity,
+        )?;
+        let primary_audio_x0 = convert_velocity_to_x0(audio_sample, primary_audio_velocity, sigma)?;
+        let alternate_audio_x0 =
+            convert_velocity_to_x0(audio_sample, alternate_audio_velocity, sigma)?;
+        log_tensor_pair_stats(
+            &format!("{prefix}_audio_x0_prompt_vs_alt"),
+            &primary_audio_x0,
+            &alternate_audio_x0,
         )?;
     }
 
