@@ -322,6 +322,10 @@ mod tests {
                 );
             }
         }
+        tensors.insert(
+            "model.norm.weight".to_string(),
+            Tensor::zeros(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap(),
+        );
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 

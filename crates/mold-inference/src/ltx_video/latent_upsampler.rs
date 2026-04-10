@@ -19,6 +19,10 @@ struct LatentUpsamplerConfig {
     spatial_upsample: bool,
     #[serde(default)]
     temporal_upsample: bool,
+    #[serde(default = "default_spatial_scale")]
+    spatial_scale: f32,
+    #[serde(default)]
+    rational_resampler: bool,
 }
 
 impl Default for LatentUpsamplerConfig {
@@ -30,6 +34,8 @@ impl Default for LatentUpsamplerConfig {
             dims: default_dims(),
             spatial_upsample: default_spatial_upsample(),
             temporal_upsample: false,
+            spatial_scale: default_spatial_scale(),
+            rational_resampler: false,
         }
     }
 }
@@ -52,6 +58,10 @@ fn default_dims() -> usize {
 
 fn default_spatial_upsample() -> bool {
     true
+}
+
+fn default_spatial_scale() -> f32 {
+    2.0
 }
 
 #[derive(Clone, Debug)]
@@ -218,9 +228,41 @@ pub struct LatentUpsampler {
     initial_conv: NonCausalConv3d,
     initial_norm: GroupNorm,
     res_blocks: Vec<ResBlock3d>,
-    upsample_conv: Conv2d,
+    spatial_upsampler: SpatialUpsampler2d,
     post_upsample_res_blocks: Vec<ResBlock3d>,
     final_conv: NonCausalConv3d,
+}
+
+enum SpatialUpsampler2d {
+    PixelShuffle {
+        conv: Conv2d,
+        scale: usize,
+    },
+    Rational {
+        conv: Conv2d,
+        scale: usize,
+        blur_down: Conv2d,
+    },
+}
+
+impl SpatialUpsampler2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::PixelShuffle { conv, scale } => {
+                let x = conv.forward(x)?;
+                Ok(candle_nn::ops::pixel_shuffle(&x, *scale)?)
+            }
+            Self::Rational {
+                conv,
+                scale,
+                blur_down,
+            } => {
+                let x = conv.forward(x)?;
+                let x = candle_nn::ops::pixel_shuffle(&x, *scale)?;
+                Ok(blur_down.forward(&x)?)
+            }
+        }
+    }
 }
 
 impl LatentUpsampler {
@@ -255,11 +297,59 @@ impl LatentUpsampler {
                     path.display()
                 )
             })?;
+        let tensors = safetensors::SafeTensors::deserialize(&data).with_context(|| {
+            format!(
+                "failed to parse latent upsampler tensors from {}",
+                path.display()
+            )
+        })?;
         let metadata = metadata.metadata().as_ref();
-        let Some(config_json) = metadata.and_then(|metadata| metadata.get("config")) else {
-            return Ok(LatentUpsamplerConfig::default());
+        let mut config =
+            if let Some(config_json) = metadata.and_then(|metadata| metadata.get("config")) {
+                serde_json::from_str(config_json)?
+            } else {
+                LatentUpsamplerConfig::default()
+            };
+
+        if let Ok(tensor) = tensors.tensor("initial_conv.bias") {
+            config.mid_channels = tensor.shape()[0];
+        }
+        if let Ok(tensor) = tensors.tensor("final_conv.bias") {
+            config.in_channels = tensor.shape()[0];
+        }
+        if tensors.tensor("upsampler.conv.weight").is_ok() {
+            config.rational_resampler = true;
+        }
+
+        let upsampler_weight = if let Ok(tensor) = tensors.tensor("upsampler.conv.weight") {
+            Some(tensor)
+        } else {
+            tensors.tensor("upsampler.0.weight").ok()
         };
-        Ok(serde_json::from_str(config_json)?)
+        if let Some(weight) = upsampler_weight {
+            let ratio = weight.shape()[0] / config.mid_channels.max(1);
+            config.spatial_scale = match ratio {
+                4 => 2.0,
+                9 => 1.5,
+                16 => 4.0,
+                _ => config.spatial_scale,
+            };
+        }
+
+        let mut block_count = 0usize;
+        loop {
+            let key = format!("res_blocks.{block_count}.conv1.weight");
+            if tensors.tensor(&key).is_ok() {
+                block_count += 1;
+            } else {
+                break;
+            }
+        }
+        if block_count > 0 {
+            config.num_blocks_per_stage = block_count;
+        }
+
+        Ok(config)
     }
 
     fn new(config: LatentUpsamplerConfig, vb: VarBuilder) -> Result<Self> {
@@ -282,16 +372,61 @@ impl LatentUpsampler {
             )?);
         }
 
-        let upsample_conv = conv2d(
-            config.mid_channels,
-            4 * config.mid_channels,
-            3,
-            Conv2dConfig {
-                padding: 1,
-                ..Default::default()
-            },
-            vb.pp("upsampler.0"),
-        )?;
+        let spatial_upsampler = if config.rational_resampler {
+            let scale = match config.spatial_scale {
+                scale if (scale - 1.5).abs() < f32::EPSILON => 3,
+                scale if (scale - 2.0).abs() < f32::EPSILON => 2,
+                scale if (scale - 4.0).abs() < f32::EPSILON => 4,
+                other => bail!("unsupported rational latent upsampler scale: {other}"),
+            };
+            let den = match scale {
+                3 => 2,
+                2 | 4 => 1,
+                _ => unreachable!("validated scale above"),
+            };
+            let conv = conv2d(
+                config.mid_channels,
+                scale * scale * config.mid_channels,
+                3,
+                Conv2dConfig {
+                    padding: 1,
+                    ..Default::default()
+                },
+                vb.pp("upsampler").pp("conv"),
+            )?;
+            let blur_kernel = vb
+                .pp("upsampler")
+                .pp("blur_down")
+                .get((1, 1, 5, 5), "kernel")?
+                .repeat((config.mid_channels, 1, 1, 1))?;
+            let blur_down = Conv2d::new(
+                blur_kernel,
+                None,
+                Conv2dConfig {
+                    padding: 2,
+                    stride: den,
+                    groups: config.mid_channels,
+                    ..Default::default()
+                },
+            );
+            SpatialUpsampler2d::Rational {
+                conv,
+                scale,
+                blur_down,
+            }
+        } else {
+            let conv = conv2d(
+                config.mid_channels,
+                4 * config.mid_channels,
+                3,
+                Conv2dConfig {
+                    padding: 1,
+                    ..Default::default()
+                },
+                vb.pp("upsampler.0"),
+            )?;
+            SpatialUpsampler2d::PixelShuffle { conv, scale: 2 }
+        };
 
         let mut post_upsample_res_blocks = Vec::with_capacity(config.num_blocks_per_stage);
         for i in 0..config.num_blocks_per_stage {
@@ -316,7 +451,7 @@ impl LatentUpsampler {
             initial_conv,
             initial_norm,
             res_blocks,
-            upsample_conv,
+            spatial_upsampler,
             post_upsample_res_blocks,
             final_conv,
         })
@@ -336,8 +471,7 @@ impl LatentUpsampler {
         let x2 = x
             .permute((0, 2, 1, 3, 4))?
             .reshape((b * f, self.config.mid_channels, h, w))?;
-        let x2 = self.upsample_conv.forward(&x2)?;
-        let x2 = candle_nn::ops::pixel_shuffle(&x2, 2)?;
+        let x2 = self.spatial_upsampler.forward(&x2)?;
         let (_bf, c2, h2, w2) = x2.dims4()?;
         let mut x = x2.reshape((b, f, c2, h2, w2))?.permute((0, 2, 1, 3, 4))?;
 

@@ -4,6 +4,7 @@ pub mod shapes;
 pub mod transformer;
 pub mod upsampler;
 pub mod video_transformer;
+pub mod video_vae;
 
 #[allow(unused_imports)]
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};

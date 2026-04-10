@@ -187,6 +187,7 @@ pub(crate) fn preset_for_model(model_name: &str) -> Result<Ltx2ModelPreset> {
 #[cfg(test)]
 mod tests {
     use super::{preset_for_model, CaptionProjectionPlacement, GemmaFeatureExtractorKind};
+    use crate::ltx2::model::LtxRopeType;
 
     #[test]
     fn preset_selection_distinguishes_19b_and_22b_profiles() {
@@ -206,6 +207,8 @@ mod tests {
         assert_eq!(preset_19b.video_connector_inner_dim(), 3840);
         assert_eq!(preset_19b.audio_connector_inner_dim(), 3840);
         assert_eq!(preset_19b.gemma_flat_dim(), 188_160);
+        assert_eq!(preset_19b.connectors.rope_type, LtxRopeType::Split);
+        assert_eq!(preset_19b.connectors.positional_embedding_max_pos, &[4096]);
 
         let preset_22b = preset_for_model("ltx-2.3-22b-dev:fp8").unwrap();
         assert_eq!(preset_22b.name, "ltx-2.3-22b");
@@ -221,5 +224,7 @@ mod tests {
         assert_eq!(preset_22b.streaming_prefetch_count, 2);
         assert_eq!(preset_22b.video_connector_inner_dim(), 3840);
         assert_eq!(preset_22b.audio_connector_inner_dim(), 2048);
+        assert_eq!(preset_22b.connectors.rope_type, LtxRopeType::Split);
+        assert_eq!(preset_22b.connectors.positional_embedding_max_pos, &[4096]);
     }
 }

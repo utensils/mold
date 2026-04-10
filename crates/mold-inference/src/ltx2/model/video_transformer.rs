@@ -175,8 +175,7 @@ enum LtxLinear {
     Standard(nn::Linear),
     Fp8 {
         weight: Tensor,
-        scale: Option<Tensor>,
-        input_scale: Option<Tensor>,
+        weight_scale: Option<Tensor>,
         bias: Option<Tensor>,
     },
 }
@@ -184,18 +183,20 @@ enum LtxLinear {
 impl LtxLinear {
     fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
         let weight = vb.get((out_dim, in_dim), "weight")?;
-        let scale = vb.get_unchecked("weight_scale").ok();
-        let input_scale = vb.get_unchecked("input_scale").ok();
+        let weight_scale = if vb.contains_tensor("weight_scale") {
+            Some(vb.get((), "weight_scale")?)
+        } else {
+            None
+        };
         let bias = if has_bias {
             Some(vb.get(out_dim, "bias")?)
         } else {
             None
         };
-        if weight.dtype() == DType::F8E4M3 || scale.is_some() || input_scale.is_some() {
+        if weight.dtype() == DType::F8E4M3 {
             Ok(Self::Fp8 {
                 weight,
-                scale,
-                input_scale,
+                weight_scale,
                 bias,
             })
         } else {
@@ -217,8 +218,7 @@ impl Module for LtxLinear {
             Self::Standard(linear) => linear.forward(xs),
             Self::Fp8 {
                 weight,
-                scale,
-                input_scale: _input_scale,
+                weight_scale,
                 bias,
             } => {
                 let dtype = match xs.dtype() {
@@ -230,10 +230,16 @@ impl Module for LtxLinear {
                 } else {
                     xs.to_dtype(dtype)?
                 };
-                let mut weight = weight.to_dtype(dtype)?;
-                if let Some(scale) = scale {
-                    weight = weight.broadcast_mul(&scale.to_dtype(dtype)?)?;
-                }
+                // The public LTX-2 fp8-cast policy stores transformer weights in
+                // float8 but runs the actual matmul in the normal compute dtype.
+                // Public FP8 manifests can still carry pre-quantized transformer
+                // weights with a per-tensor `weight_scale`; apply it during
+                // dequantization so we can keep the runtime TensorRT-free.
+                let weight = weight.to_dtype(dtype)?;
+                let weight = match weight_scale {
+                    Some(scale) => weight.broadcast_mul(&scale.to_dtype(dtype)?)?,
+                    None => weight,
+                };
                 let weight_t = weight.t()?;
                 let out = match *xs.dims() {
                     [batch0, batch1, tokens, hidden] => xs
@@ -2223,9 +2229,9 @@ mod tests {
     use std::collections::HashMap;
 
     use candle_core::{DType, Device, Tensor};
-    use candle_nn::VarBuilder;
+    use candle_nn::{Module, VarBuilder};
 
-    use super::{LtxAttention, LtxRopeType};
+    use super::{LtxAttention, LtxLinear, LtxRopeType};
 
     fn attention_var_builder(dim: usize) -> VarBuilder<'static> {
         let device = Device::Cpu;
@@ -2322,5 +2328,85 @@ mod tests {
             baseline.to_vec3::<f32>().unwrap(),
             with_video_rope.to_vec3::<f32>().unwrap()
         );
+    }
+
+    #[test]
+    fn fp8_linear_upcasts_weights_without_scaled_mm_quantization() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![0.95f32, -0.41, 0.26, 0.73], (1, 2, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![0.5f32, -0.75, 1.25, 0.25], (2, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let bias = Tensor::new(&[0.1f32, -0.2], &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: None,
+            bias: Some(bias.clone()),
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+
+        let expected_w = weight.to_dtype(DType::F32).unwrap();
+        let expected = xs
+            .reshape((2, 2))
+            .unwrap()
+            .matmul(&expected_w.t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
+            .unwrap()
+            .broadcast_add(&bias.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_linear_applies_optional_weight_scale_during_dequantization() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![1.0f32, -2.0], (1, 1, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.25f32, &device).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: Some(weight_scale.clone()),
+            bias: None,
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+        let expected = xs
+            .reshape((1, 2))
+            .unwrap()
+            .matmul(
+                &weight
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .broadcast_mul(&weight_scale)
+                    .unwrap()
+                    .t()
+                    .unwrap(),
+            )
+            .unwrap()
+            .reshape((1, 1, 1))
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
     }
 }

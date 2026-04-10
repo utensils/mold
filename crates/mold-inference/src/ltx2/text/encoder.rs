@@ -11,6 +11,7 @@ pub use candle_transformers::models::gemma3::Config as GemmaConfig;
 use super::gemma::{GemmaAssets, PromptTokens};
 
 const MASK_NEGATIVE: f32 = -1e30;
+const GEMMA_GLOBAL_ROPE_LINEAR_SCALING_FACTOR: f64 = 8.0;
 
 pub fn ltx_gemma_config() -> GemmaConfig {
     GemmaConfig {
@@ -120,9 +121,16 @@ impl RotaryEmbedding {
         } else {
             cfg.rope_theta
         };
+        let rope_scaling_factor = if sliding_window.is_some() {
+            1.0
+        } else {
+            GEMMA_GLOBAL_ROPE_LINEAR_SCALING_FACTOR
+        };
         let inv_freq = (0..dim)
             .step_by(2)
-            .map(|index| (1f64 / rope_freq.powf(index as f64 / dim as f64)) as f32)
+            .map(|index| {
+                ((1f64 / rope_freq.powf(index as f64 / dim as f64)) / rope_scaling_factor) as f32
+            })
             .collect::<Vec<_>>();
         let inv_freq = Tensor::from_vec(inv_freq, (1, dim / 2), device)?.to_dtype(dtype)?;
         let positions = Tensor::arange(0u32, max_seq_len as u32, device)?
@@ -349,6 +357,7 @@ pub struct GemmaHiddenStates {
 #[derive(Clone)]
 pub struct GemmaHiddenStateEncoder {
     embed_tokens: Embedding,
+    norm: RmsNorm,
     layer_source: GemmaLayerSource,
     hidden_size: usize,
     device: Device,
@@ -370,6 +379,7 @@ impl GemmaHiddenStateEncoder {
         let model_vb = vb.pp("model");
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, model_vb.pp("embed_tokens"))?;
+        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, model_vb.pp("norm"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let layers_vb = model_vb.pp("layers");
         for index in 0..cfg.num_hidden_layers {
@@ -382,6 +392,7 @@ impl GemmaHiddenStateEncoder {
         }
         Ok(Self {
             embed_tokens,
+            norm,
             layer_source: GemmaLayerSource::Eager(layers),
             hidden_size: cfg.hidden_size,
             device: vb.device().clone(),
@@ -394,8 +405,10 @@ impl GemmaHiddenStateEncoder {
         let model_vb = vb.pp("model");
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, model_vb.pp("embed_tokens"))?;
+        let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, model_vb.pp("norm"))?;
         Ok(Self {
             embed_tokens,
+            norm,
             layer_source: GemmaLayerSource::Streaming {
                 cfg: cfg.clone(),
                 layers_vb: model_vb.pp("layers"),
@@ -449,6 +462,7 @@ impl GemmaHiddenStateEncoder {
             self.dtype,
             self.device(),
         )?;
+        let last_layer_index = self.layer_count().saturating_sub(1);
 
         match &self.layer_source {
             GemmaLayerSource::Eager(layers) => {
@@ -461,7 +475,9 @@ impl GemmaHiddenStateEncoder {
                     xs = layer
                         .forward(&xs, mask)
                         .with_context(|| format!("Gemma eager decoder layer {index} failed"))?;
-                    hidden_states.push(xs.clone());
+                    if index != last_layer_index {
+                        hidden_states.push(xs.clone());
+                    }
                 }
             }
             GemmaLayerSource::Streaming { cfg, layers_vb } => {
@@ -475,10 +491,17 @@ impl GemmaHiddenStateEncoder {
                     xs = layer
                         .forward(&xs, mask)
                         .with_context(|| format!("Gemma streaming decoder layer {index} failed"))?;
-                    hidden_states.push(xs.clone());
+                    if index != last_layer_index {
+                        hidden_states.push(xs.clone());
+                    }
                 }
             }
         }
+        xs = self
+            .norm
+            .forward(&xs)
+            .context("Gemma final RMSNorm failed")?;
+        hidden_states.push(xs.clone());
 
         if hidden_states
             .iter()
@@ -627,6 +650,10 @@ mod tests {
                 );
             }
         }
+        tensors.insert(
+            "model.norm.weight".to_string(),
+            Tensor::zeros(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap(),
+        );
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
@@ -663,6 +690,115 @@ mod tests {
         for state in &hidden_states {
             assert_eq!(state.dims3().unwrap(), (1, 4, cfg.hidden_size));
         }
+    }
+
+    #[test]
+    fn hidden_state_encoder_replaces_last_slot_with_final_rms_norm_output() {
+        let mut cfg = tiny_config();
+        cfg.num_hidden_layers = 1;
+
+        let mut tensors = HashMap::new();
+        let mut embeddings = vec![0.0f32; cfg.vocab_size * cfg.hidden_size];
+        for feature in 0..cfg.hidden_size {
+            embeddings[cfg.hidden_size + feature] = (feature + 1) as f32;
+        }
+        tensors.insert(
+            "model.embed_tokens.weight".to_string(),
+            Tensor::from_vec(embeddings, (cfg.vocab_size, cfg.hidden_size), &Device::Cpu).unwrap(),
+        );
+        for name in [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ] {
+            let (rows, cols) = match name {
+                "self_attn.q_proj" => (cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size),
+                "self_attn.k_proj" | "self_attn.v_proj" => {
+                    (cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size)
+                }
+                "self_attn.o_proj" => (cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim),
+                "mlp.gate_proj" | "mlp.up_proj" => (cfg.intermediate_size, cfg.hidden_size),
+                "mlp.down_proj" => (cfg.hidden_size, cfg.intermediate_size),
+                _ => unreachable!(),
+            };
+            tensors.insert(
+                format!("model.layers.0.{name}.weight"),
+                Tensor::zeros((rows, cols), DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        for name in [
+            "self_attn.q_norm",
+            "self_attn.k_norm",
+            "input_layernorm",
+            "pre_feedforward_layernorm",
+            "post_feedforward_layernorm",
+            "post_attention_layernorm",
+        ] {
+            let dim = if name.contains("q_norm") || name.contains("k_norm") {
+                cfg.head_dim
+            } else {
+                cfg.hidden_size
+            };
+            tensors.insert(
+                format!("model.layers.0.{name}.weight"),
+                Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        tensors.insert(
+            "model.norm.weight".to_string(),
+            Tensor::zeros(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap(),
+        );
+
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let mut encoder = GemmaHiddenStateEncoder::new(&cfg, vb).unwrap();
+        let input_ids = Tensor::new(&[[1u32]], &Device::Cpu).unwrap();
+        let attention_mask = Tensor::new(&[[1u8]], &Device::Cpu).unwrap();
+
+        let hidden_states = encoder
+            .forward_hidden_states(&input_ids, &attention_mask)
+            .unwrap();
+        assert_eq!(hidden_states.len(), 2);
+
+        let embedding = hidden_states[0]
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let final_state = hidden_states[1]
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let mean_square =
+            embedding.iter().map(|value| value * value).sum::<f32>() / embedding.len() as f32;
+        let denom = (mean_square + cfg.rms_norm_eps as f32).sqrt();
+        let expected = embedding
+            .iter()
+            .map(|value| *value / denom)
+            .collect::<Vec<_>>();
+
+        for (actual, expected) in final_state.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn global_rotary_embedding_applies_linear_rope_scaling() {
+        let cfg = tiny_config();
+        let global = super::RotaryEmbedding::new(DType::F32, &cfg, &Device::Cpu, None).unwrap();
+        let local =
+            super::RotaryEmbedding::new(DType::F32, &cfg, &Device::Cpu, Some(cfg.sliding_window))
+                .unwrap();
+
+        let global_cos = global.cos.to_vec2::<f32>().unwrap();
+        let local_cos = local.cos.to_vec2::<f32>().unwrap();
+
+        assert!((global_cos[1][0] - (0.125f32).cos()).abs() < 1e-6);
+        assert!((local_cos[1][0] - 1.0f32.cos()).abs() < 1e-6);
     }
 
     #[test]
