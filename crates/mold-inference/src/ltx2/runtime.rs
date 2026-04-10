@@ -6,7 +6,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::sampling::{
     FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
 };
-use image::{imageops, Rgb, RgbImage};
+use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::env;
 use std::path::Path;
@@ -590,6 +590,13 @@ fn render_real_distilled_av(
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage1"),
     )?;
+    maybe_write_debug_stage_video(
+        "stage1",
+        &vae,
+        &stage1_video_latents,
+        prepared.video_pixel_shape,
+        dtype,
+    )?;
     let stage1_audio_latents = stage1_audio_latents
         .context("native distilled LTX-2 stage 1 must produce audio latents")?;
     let spatial_upsampler_path = plan
@@ -669,25 +676,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
-    let video =
-        ((video.to_dtype(DType::F32)?.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
-    let video = video.i(0)?;
-
-    let mut frames = Vec::with_capacity(video.dim(1)?);
-    for index in 0..video.dim(1)? {
-        let frame = video
-            .i((.., index, .., ..))?
-            .permute((1, 2, 0))?
-            .contiguous()?;
-        let data: Vec<u8> = frame.flatten_all()?.to_vec1()?;
-        let rgb = RgbImage::from_raw(
-            final_pixel_shape.width as u32,
-            final_pixel_shape.height as u32,
-            data,
-        )
-        .context("failed to build an RGB frame from the decoded LTX-2 tensor")?;
-        frames.push(rgb);
-    }
+    let frames = decoded_video_to_frames(&video, final_pixel_shape)?;
 
     Ok(NativeRenderedVideo {
         frames,
@@ -823,6 +812,82 @@ fn mix_clean_latents_with_noise(
         .affine(clean_scale, 0.0)?
         .broadcast_add(&noise.affine(noise_scale, 0.0)?)
         .map_err(Into::into)
+}
+
+fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
+    let video =
+        ((video.to_dtype(DType::F32)?.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
+    let video = video.i(0)?;
+
+    let mut frames = Vec::with_capacity(video.dim(1)?);
+    for index in 0..video.dim(1)? {
+        let frame = video
+            .i((.., index, .., ..))?
+            .permute((1, 2, 0))?
+            .contiguous()?;
+        let data: Vec<u8> = frame.flatten_all()?.to_vec1()?;
+        let rgb = RgbImage::from_raw(pixel_shape.width as u32, pixel_shape.height as u32, data)
+            .context("failed to build an RGB frame from the decoded LTX-2 tensor")?;
+        frames.push(rgb);
+    }
+    Ok(frames)
+}
+
+fn maybe_write_debug_stage_video(
+    stage: &str,
+    vae: &AutoencoderKLLtx2Video,
+    latents: &Tensor,
+    pixel_shape: VideoPixelShape,
+    dtype: DType,
+) -> Result<()> {
+    let Some(prefix) = env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX") else {
+        return Ok(());
+    };
+
+    let (_decoded, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let frames = decoded_video_to_frames(&video, pixel_shape)?;
+    let prefix = prefix.to_string_lossy();
+    let first_frame_path = std::path::PathBuf::from(format!("{prefix}-{stage}-first-frame.png"));
+    let contact_sheet_path =
+        std::path::PathBuf::from(format!("{prefix}-{stage}-contact-sheet.png"));
+    if let Some(first) = frames.first() {
+        first.save(&first_frame_path)?;
+    }
+    write_contact_sheet_from_frames(&frames, &contact_sheet_path)?;
+    eprintln!(
+        "[ltx2-debug] wrote stage video: stage={stage} first_frame={} contact_sheet={}",
+        first_frame_path.display(),
+        contact_sheet_path.display()
+    );
+    Ok(())
+}
+
+fn write_contact_sheet_from_frames(
+    frames: &[RgbImage],
+    output_png: &std::path::Path,
+) -> Result<()> {
+    if frames.is_empty() {
+        return Ok(());
+    }
+
+    let columns = 3usize;
+    let rows = frames.len().div_ceil(columns);
+    let frame_width = frames[0].width();
+    let frame_height = frames[0].height();
+    let mut sheet = RgbImage::from_pixel(
+        frame_width * columns as u32,
+        frame_height * rows as u32,
+        Rgb([0, 0, 0]),
+    );
+
+    for (index, frame) in frames.iter().enumerate() {
+        let x = (index % columns) as u32 * frame_width;
+        let y = (index / columns) as u32 * frame_height;
+        sheet.copy_from(frame, x, y)?;
+    }
+
+    sheet.save(output_png)?;
+    Ok(())
 }
 
 fn duplicate_cfg_batch(xs: &Tensor) -> Result<Tensor> {

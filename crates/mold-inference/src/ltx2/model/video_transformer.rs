@@ -8,6 +8,18 @@ use nn::{Module, VarBuilder};
 
 use super::rope::LtxRopeType;
 
+fn ltx2_block_debug_enabled() -> bool {
+    std::env::var_os("MOLD_LTX2_DEBUG_BLOCKS").is_some()
+}
+
+fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
+    let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
+    let mean = flat.mean_all()?.to_scalar::<f32>()?;
+    let abs_mean = flat.abs()?.mean_all()?.to_scalar::<f32>()?;
+    let abs_max = flat.abs()?.max_all()?.to_scalar::<f32>()?;
+    Ok((mean, abs_mean, abs_max))
+}
+
 // ---------------------------------------------------------------------------
 // Output wrapper
 // ---------------------------------------------------------------------------
@@ -183,8 +195,8 @@ enum LtxLinear {
 
 impl LtxLinear {
     fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
-        let weight = vb.get((out_dim, in_dim), "weight")?;
-        let weight_scale = if vb.contains_tensor("weight_scale") {
+        let mut weight = vb.get((out_dim, in_dim), "weight")?;
+        let mut weight_scale = if vb.contains_tensor("weight_scale") {
             Some(vb.get((), "weight_scale")?)
         } else {
             None
@@ -200,6 +212,10 @@ impl LtxLinear {
             None
         };
         if weight.dtype() == DType::F8E4M3 {
+            let runtime_dtype = crate::device::gpu_dtype(weight.device());
+            weight =
+                dequantize_fp8_weight_for_runtime(&weight, weight_scale.as_ref(), runtime_dtype)?;
+            weight_scale = None;
             Ok(Self::Fp8 {
                 weight,
                 weight_scale,
@@ -216,6 +232,38 @@ impl LtxLinear {
             Self::Standard(linear) => linear.weight().dtype(),
             Self::Fp8 { weight, .. } => weight.dtype(),
         }
+    }
+}
+
+fn dequantize_fp8_weight_for_runtime(
+    weight: &Tensor,
+    weight_scale: Option<&Tensor>,
+    runtime_dtype: DType,
+) -> Result<Tensor> {
+    let cpu = Device::Cpu;
+    let cpu_weight = if weight.device().is_cpu() {
+        weight.clone()
+    } else {
+        weight.to_device(&cpu)?
+    };
+    let mut dequantized = cpu_weight.to_dtype(DType::F32)?;
+    if let Some(scale) = weight_scale {
+        let cpu_scale = if scale.device().is_cpu() {
+            scale.clone()
+        } else {
+            scale.to_device(&cpu)?
+        };
+        dequantized = dequantized.broadcast_mul(&cpu_scale.to_dtype(DType::F32)?)?;
+    }
+    let dequantized = if runtime_dtype == DType::F32 {
+        dequantized
+    } else {
+        dequantized.to_dtype(runtime_dtype)?
+    };
+    if weight.device().is_cpu() {
+        Ok(dequantized)
+    } else {
+        dequantized.to_device(weight.device())
     }
 }
 
@@ -2214,10 +2262,17 @@ impl Ltx2AvTransformer3DModel {
 
         match &self.transformer_blocks {
             AvTransformerBlockSource::Eager(blocks) => {
-                for block in blocks {
+                for (index, block) in blocks.iter().enumerate() {
                     let (vx, ax) = block.forward(&video, &audio)?;
                     video.x = vx;
                     audio.x = ax;
+                    if ltx2_block_debug_enabled() {
+                        let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
+                        let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
+                        eprintln!(
+                            "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
+                        );
+                    }
                 }
             }
             AvTransformerBlockSource::Streaming(blocks_vb) => {
@@ -2226,6 +2281,13 @@ impl Ltx2AvTransformer3DModel {
                     let (vx, ax) = block.forward(&video, &audio)?;
                     video.x = vx;
                     audio.x = ax;
+                    if ltx2_block_debug_enabled() {
+                        let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
+                        let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
+                        eprintln!(
+                            "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
+                        );
+                    }
                     if video.x.device().is_cuda() {
                         video.x.device().synchronize()?;
                     }
@@ -2468,6 +2530,32 @@ mod tests {
             .unwrap();
 
         let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_weight_dequantization_absorbs_weight_scale_once_at_load_time() {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.25f32, &device).unwrap();
+
+        let dequantized =
+            super::dequantize_fp8_weight_for_runtime(&weight, Some(&weight_scale), DType::F32)
+                .unwrap();
+        let expected = weight
+            .to_dtype(DType::F32)
+            .unwrap()
+            .broadcast_mul(&weight_scale)
+            .unwrap();
+
+        assert_eq!(dequantized.dtype(), DType::F32);
+        let actual = dequantized.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
