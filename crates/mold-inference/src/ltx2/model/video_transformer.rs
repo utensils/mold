@@ -135,12 +135,14 @@ impl LayerNormNoParams {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let last_dim = xs.dim(D::Minus1)?;
-        let mean = (xs.sum_keepdim(D::Minus1)? / (last_dim as f64))?;
-        let xc = xs.broadcast_sub(&mean)?;
+        let dtype = xs.dtype();
+        let xs_f32 = xs.to_dtype(DType::F32)?;
+        let last_dim = xs_f32.dim(D::Minus1)?;
+        let mean = (xs_f32.sum_keepdim(D::Minus1)? / (last_dim as f64))?;
+        let xc = xs_f32.broadcast_sub(&mean)?;
         let var = (xc.sqr()?.sum_keepdim(D::Minus1)? / (last_dim as f64))?;
         let denom = (var + self.eps)?.sqrt()?;
-        xc.broadcast_div(&denom)
+        xc.broadcast_div(&denom)?.to_dtype(dtype)
     }
 }
 
@@ -225,6 +227,12 @@ enum Fp8InputScaleMode {
     EmulateMultiply,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fp8WeightScaleMode {
+    Skip,
+    Apply,
+}
+
 impl LtxLinear {
     fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
         let mut weight = vb.get((out_dim, in_dim), "weight")?;
@@ -245,8 +253,11 @@ impl LtxLinear {
         };
         if weight.dtype() == DType::F8E4M3 {
             let runtime_dtype = crate::device::gpu_dtype(weight.device());
-            weight =
-                dequantize_fp8_weight_for_runtime(&weight, weight_scale.as_ref(), runtime_dtype)?;
+            let load_weight_scale = match fp8_weight_scale_mode() {
+                Fp8WeightScaleMode::Skip => None,
+                Fp8WeightScaleMode::Apply => weight_scale.as_ref(),
+            };
+            weight = dequantize_fp8_weight_for_runtime(&weight, load_weight_scale, runtime_dtype)?;
             weight_scale = None;
             Ok(Self::Fp8 {
                 weight,
@@ -318,9 +329,10 @@ impl Module for LtxLinear {
                 };
                 // The public LTX-2 fp8-cast policy stores transformer weights in
                 // float8 but runs the actual matmul in the normal compute dtype.
-                // Public FP8 manifests can still carry pre-quantized transformer
-                // weights with a per-tensor `weight_scale`; apply it during
-                // dequantization so we can keep the runtime TensorRT-free.
+                // Some published checkpoints still carry `weight_scale` tensors
+                // from the scaled-mm export path, but upstream fp8-cast ignores
+                // them. Respect that default here to avoid distorting native
+                // inference unless an explicit debug override enables them.
                 let weight = weight.to_dtype(dtype)?;
                 let weight = match weight_scale {
                     Some(scale) => weight.broadcast_mul(&scale.to_dtype(dtype)?)?,
@@ -371,6 +383,14 @@ fn emulate_static_fp8_input_quantization(
             .to_dtype(DType::F8E4M3)?
             .to_dtype(compute_dtype)?
             .broadcast_mul(&scale),
+    }
+}
+
+fn fp8_weight_scale_mode() -> Fp8WeightScaleMode {
+    match std::env::var("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE").as_deref() {
+        Ok("apply") | Ok("scaled-mm") => Fp8WeightScaleMode::Apply,
+        Ok("skip") | Err(_) => Fp8WeightScaleMode::Skip,
+        Ok(_) => Fp8WeightScaleMode::Skip,
     }
 }
 
@@ -2585,9 +2605,17 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Module, VarBuilder};
 
-    use super::{emulate_static_fp8_input_quantization, LtxAttention, LtxLinear, LtxRopeType};
+    use super::{
+        emulate_static_fp8_input_quantization, LayerNormNoParams, LtxAttention, LtxLinear,
+        LtxRopeType,
+    };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fp8_weight_scale_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -2722,6 +2750,57 @@ mod tests {
     }
 
     #[test]
+    fn layer_norm_no_params_matches_f32_reference_for_bf16_inputs() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(
+            vec![
+                -3.5f32, 0.25, 1.5, 7.0, 2.5, -1.25, 0.0, 4.5, 8.0, -2.0, 1.0, -6.5,
+            ],
+            (1, 3, 4),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let norm = LayerNormNoParams::new(1e-6);
+
+        let actual = norm.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+
+        let xs_f32 = xs.to_dtype(DType::F32).unwrap();
+        let last_dim = xs_f32.dim(candle_core::D::Minus1).unwrap();
+        let mean =
+            (xs_f32.sum_keepdim(candle_core::D::Minus1).unwrap() / (last_dim as f64)).unwrap();
+        let centered = xs_f32.broadcast_sub(&mean).unwrap();
+        let var = (centered
+            .sqr()
+            .unwrap()
+            .sum_keepdim(candle_core::D::Minus1)
+            .unwrap()
+            / (last_dim as f64))
+            .unwrap();
+        let reference = centered
+            .broadcast_div(&(var + 1e-6).unwrap().sqrt().unwrap())
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+
+        let max_diff = actual
+            .broadcast_sub(&reference)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .fold(0.0f32, f32::max);
+        assert!(max_diff < 1e-5, "max diff {max_diff}");
+    }
+
+    #[test]
     fn fp8_linear_upcasts_weights_without_scaled_mm_quantization() {
         let device = Device::Cpu;
         let xs = Tensor::from_vec(vec![0.95f32, -0.41, 0.26, 0.73], (1, 2, 2), &device).unwrap();
@@ -2764,39 +2843,59 @@ mod tests {
     }
 
     #[test]
-    fn fp8_linear_applies_optional_weight_scale_during_dequantization() {
+    fn fp8_weight_scale_is_ignored_by_default_in_fp8_cast_mode() {
+        let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "skip");
         let device = Device::Cpu;
-        let xs = Tensor::from_vec(vec![1.0f32, -2.0], (1, 1, 2), &device).unwrap();
         let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
             .unwrap()
             .to_dtype(DType::F8E4M3)
             .unwrap();
         let weight_scale = Tensor::new(0.25f32, &device).unwrap();
-        let linear = LtxLinear::Fp8 {
-            weight: weight.clone(),
-            weight_scale: Some(weight_scale.clone()),
-            input_scale: None,
-            bias: None,
-        };
+        let dequantized = super::dequantize_fp8_weight_for_runtime(
+            &weight,
+            match super::fp8_weight_scale_mode() {
+                super::Fp8WeightScaleMode::Skip => None,
+                super::Fp8WeightScaleMode::Apply => Some(&weight_scale),
+            },
+            DType::F32,
+        )
+        .unwrap();
+        let expected = weight.to_dtype(DType::F32).unwrap();
 
-        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
-        let expected = xs
-            .reshape((1, 2))
+        let actual = dequantized.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_weight_scale_can_be_applied_when_requested() {
+        let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "apply");
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
             .unwrap()
-            .matmul(
-                &weight
-                    .to_dtype(DType::F32)
-                    .unwrap()
-                    .broadcast_mul(&weight_scale)
-                    .unwrap()
-                    .t()
-                    .unwrap(),
-            )
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.25f32, &device).unwrap();
+        let dequantized = super::dequantize_fp8_weight_for_runtime(
+            &weight,
+            match super::fp8_weight_scale_mode() {
+                super::Fp8WeightScaleMode::Skip => None,
+                super::Fp8WeightScaleMode::Apply => Some(&weight_scale),
+            },
+            DType::F32,
+        )
+        .unwrap();
+        let expected = weight
+            .to_dtype(DType::F32)
             .unwrap()
-            .reshape((1, 1, 1))
+            .broadcast_mul(&weight_scale)
             .unwrap();
 
-        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let actual = dequantized.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
@@ -2873,7 +2972,7 @@ mod tests {
     }
 
     #[test]
-    fn fp8_weight_dequantization_absorbs_weight_scale_once_at_load_time() {
+    fn fp8_weight_dequantization_can_apply_weight_scale_once_at_load_time() {
         let device = Device::Cpu;
         let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
             .unwrap()
