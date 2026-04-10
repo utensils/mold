@@ -12,12 +12,37 @@ fn ltx2_block_debug_enabled() -> bool {
     std::env::var_os("MOLD_LTX2_DEBUG_BLOCKS").is_some()
 }
 
+fn ltx2_block_detail_target() -> Option<usize> {
+    std::env::var("MOLD_LTX2_DEBUG_BLOCK_DETAIL")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn ltx2_block_detail_enabled(index: usize) -> bool {
+    ltx2_block_detail_target() == Some(index)
+}
+
+fn ltx2_load_debug_enabled() -> bool {
+    std::env::var_os("MOLD_LTX2_DEBUG_LOAD_BLOCKS").is_some()
+}
+
 fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
     let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
     let mean = flat.mean_all()?.to_scalar::<f32>()?;
     let abs_mean = flat.abs()?.mean_all()?.to_scalar::<f32>()?;
     let abs_max = flat.abs()?.max_all()?.to_scalar::<f32>()?;
     Ok((mean, abs_mean, abs_max))
+}
+
+fn log_detail_tensor(index: usize, label: &str, xs: &Tensor) -> Result<()> {
+    if !ltx2_block_detail_enabled(index) {
+        return Ok(());
+    }
+    let (mean, abs_mean, abs_max) = tensor_debug_stats(xs)?;
+    eprintln!(
+        "[ltx2-block-detail] block={index} {label}(mean={mean:.6}, abs_mean={abs_mean:.6}, abs_max={abs_max:.6})"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -240,30 +265,19 @@ fn dequantize_fp8_weight_for_runtime(
     weight_scale: Option<&Tensor>,
     runtime_dtype: DType,
 ) -> Result<Tensor> {
-    let cpu = Device::Cpu;
-    let cpu_weight = if weight.device().is_cpu() {
-        weight.clone()
-    } else {
-        weight.to_device(&cpu)?
-    };
-    let mut dequantized = cpu_weight.to_dtype(DType::F32)?;
+    let mut dequantized = weight.to_dtype(DType::F32)?;
     if let Some(scale) = weight_scale {
-        let cpu_scale = if scale.device().is_cpu() {
-            scale.clone()
+        let scale = if scale.device().same_device(weight.device()) {
+            scale.to_dtype(DType::F32)?
         } else {
-            scale.to_device(&cpu)?
+            scale.to_device(weight.device())?.to_dtype(DType::F32)?
         };
-        dequantized = dequantized.broadcast_mul(&cpu_scale.to_dtype(DType::F32)?)?;
+        dequantized = dequantized.broadcast_mul(&scale)?;
     }
-    let dequantized = if runtime_dtype == DType::F32 {
-        dequantized
-    } else {
-        dequantized.to_dtype(runtime_dtype)?
-    };
-    if weight.device().is_cpu() {
+    if runtime_dtype == DType::F32 {
         Ok(dequantized)
     } else {
-        dequantized.to_device(weight.device())
+        dequantized.to_dtype(runtime_dtype)
     }
 }
 
@@ -331,10 +345,19 @@ fn emulate_static_fp8_input_quantization(
     compute_dtype: DType,
 ) -> Result<Tensor> {
     let scale = input_scale.to_dtype(compute_dtype)?;
-    xs.broadcast_div(&scale)?
-        .to_dtype(DType::F8E4M3)?
-        .to_dtype(compute_dtype)?
-        .broadcast_mul(&scale)
+    match std::env::var("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
+        Ok("skip") => Ok(xs.clone()),
+        Ok("multiply") => xs
+            .broadcast_mul(&scale)?
+            .to_dtype(DType::F8E4M3)?
+            .to_dtype(compute_dtype)?
+            .broadcast_mul(&scale),
+        _ => xs
+            .broadcast_div(&scale)?
+            .to_dtype(DType::F8E4M3)?
+            .to_dtype(compute_dtype)?
+            .broadcast_mul(&scale),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,162 +1814,223 @@ impl LtxAvTransformerBlock {
 
     fn forward(
         &self,
-        video: &LtxPreparedModality,
-        audio: &LtxPreparedModality,
-    ) -> Result<(Tensor, Tensor)> {
-        let (v_shift_msa, v_scale_msa, v_gate_msa) =
-            self.get_ada_triplet(&self.video_scale_shift_table, &video.timesteps, 0)?;
-        let mut vx = video.x.broadcast_add(&gate_tokens(
-            &self.video_attn1.forward(
-                &modulate_tokens(
-                    &rms_norm_tensor(&video.x, self.norm_eps)?,
-                    &v_scale_msa,
-                    &v_shift_msa,
+        index: usize,
+        video: Option<&LtxPreparedModality>,
+        audio: Option<&LtxPreparedModality>,
+    ) -> Result<(Option<Tensor>, Option<Tensor>)> {
+        if video.is_none() && audio.is_none() {
+            candle_core::bail!("AV transformer block requires at least one modality");
+        }
+
+        let mut vx = None;
+        if let Some(video) = video {
+            let (v_shift_msa, v_scale_msa, v_gate_msa) =
+                self.get_ada_triplet(&self.video_scale_shift_table, &video.timesteps, 0)?;
+            let v_self_input = modulate_tokens(
+                &rms_norm_tensor(&video.x, self.norm_eps)?,
+                &v_scale_msa,
+                &v_shift_msa,
+            )?;
+            let v_self = gate_tokens(
+                &self.video_attn1.forward(
+                    &v_self_input,
+                    None,
+                    None,
+                    Some((&video.rope.0, &video.rope.1)),
+                    None,
                 )?,
-                None,
-                None,
-                Some((&video.rope.0, &video.rope.1)),
-                None,
-            )?,
-            &v_gate_msa,
-        )?)?;
-        vx = vx.broadcast_add(&self.apply_text_cross_attention(
-            &vx,
-            &video.context,
-            &self.video_attn2,
-            &self.video_scale_shift_table,
-            self.prompt_scale_shift_table.as_ref(),
-            &video.timesteps,
-            video.prompt_timestep.as_ref(),
-            video.context_mask.as_ref(),
-        )?)?;
+                &v_gate_msa,
+            )?;
+            log_detail_tensor(index, "video_input", &video.x)?;
+            log_detail_tensor(index, "video_timesteps", &video.timesteps)?;
+            log_detail_tensor(index, "video_embedded_timestep", &video.embedded_timestep)?;
+            log_detail_tensor(index, "video_context", &video.context)?;
+            log_detail_tensor(index, "video_self_input", &v_self_input)?;
+            log_detail_tensor(index, "video_self_out", &v_self)?;
+            let mut current_vx = video.x.broadcast_add(&v_self)?;
+            log_detail_tensor(index, "video_after_self", &current_vx)?;
+            current_vx = current_vx.broadcast_add(&self.apply_text_cross_attention(
+                &current_vx,
+                &video.context,
+                &self.video_attn2,
+                &self.video_scale_shift_table,
+                self.prompt_scale_shift_table.as_ref(),
+                &video.timesteps,
+                video.prompt_timestep.as_ref(),
+                video.context_mask.as_ref(),
+            )?)?;
+            log_detail_tensor(index, "video_after_text_cross", &current_vx)?;
+            vx = Some(current_vx);
+        }
 
-        let (a_shift_msa, a_scale_msa, a_gate_msa) =
-            self.get_ada_triplet(&self.audio_scale_shift_table, &audio.timesteps, 0)?;
-        let mut ax = audio.x.broadcast_add(&gate_tokens(
-            &self.audio_attn1.forward(
-                &modulate_tokens(
-                    &rms_norm_tensor(&audio.x, self.norm_eps)?,
-                    &a_scale_msa,
-                    &a_shift_msa,
+        let mut ax = None;
+        if let Some(audio) = audio {
+            let (a_shift_msa, a_scale_msa, a_gate_msa) =
+                self.get_ada_triplet(&self.audio_scale_shift_table, &audio.timesteps, 0)?;
+            let a_self_input = modulate_tokens(
+                &rms_norm_tensor(&audio.x, self.norm_eps)?,
+                &a_scale_msa,
+                &a_shift_msa,
+            )?;
+            let a_self = gate_tokens(
+                &self.audio_attn1.forward(
+                    &a_self_input,
+                    None,
+                    None,
+                    Some((&audio.rope.0, &audio.rope.1)),
+                    None,
                 )?,
-                None,
-                None,
-                Some((&audio.rope.0, &audio.rope.1)),
-                None,
-            )?,
-            &a_gate_msa,
-        )?)?;
-        ax = ax.broadcast_add(&self.apply_text_cross_attention(
-            &ax,
-            &audio.context,
-            &self.audio_attn2,
-            &self.audio_scale_shift_table,
-            self.audio_prompt_scale_shift_table.as_ref(),
-            &audio.timesteps,
-            audio.prompt_timestep.as_ref(),
-            audio.context_mask.as_ref(),
-        )?)?;
+                &a_gate_msa,
+            )?;
+            log_detail_tensor(index, "audio_input", &audio.x)?;
+            log_detail_tensor(index, "audio_timesteps", &audio.timesteps)?;
+            log_detail_tensor(index, "audio_embedded_timestep", &audio.embedded_timestep)?;
+            log_detail_tensor(index, "audio_context", &audio.context)?;
+            log_detail_tensor(index, "audio_self_input", &a_self_input)?;
+            log_detail_tensor(index, "audio_self_out", &a_self)?;
+            let mut current_ax = audio.x.broadcast_add(&a_self)?;
+            log_detail_tensor(index, "audio_after_self", &current_ax)?;
+            current_ax = current_ax.broadcast_add(&self.apply_text_cross_attention(
+                &current_ax,
+                &audio.context,
+                &self.audio_attn2,
+                &self.audio_scale_shift_table,
+                self.audio_prompt_scale_shift_table.as_ref(),
+                &audio.timesteps,
+                audio.prompt_timestep.as_ref(),
+                audio.context_mask.as_ref(),
+            )?)?;
+            log_detail_tensor(index, "audio_after_text_cross", &current_ax)?;
+            ax = Some(current_ax);
+        }
 
-        let vx_norm3 = rms_norm_tensor(&vx, self.norm_eps)?;
-        let ax_norm3 = rms_norm_tensor(&ax, self.norm_eps)?;
+        if let (Some(video), Some(audio), Some(vx_before_cross), Some(ax_before_cross)) =
+            (video, audio, vx.as_ref(), ax.as_ref())
+        {
+            let vx_norm3 = rms_norm_tensor(vx_before_cross, self.norm_eps)?;
+            let ax_norm3 = rms_norm_tensor(ax_before_cross, self.norm_eps)?;
 
-        let video_cross_scale_shift_timestep =
-            video.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+            let video_cross_scale_shift_timestep =
+                video.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg(
+                        "video cross scale-shift timestep missing for AV transformer",
+                    )
+                })?;
+            let video_cross_gate_timestep =
+                video.cross_gate_timestep.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg("video cross gate timestep missing for AV transformer")
+                })?;
+            let audio_cross_scale_shift_timestep =
+                audio.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg(
+                        "audio cross scale-shift timestep missing for AV transformer",
+                    )
+                })?;
+            let audio_cross_gate_timestep =
+                audio.cross_gate_timestep.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg("audio cross gate timestep missing for AV transformer")
+                })?;
+            let video_cross_rope = video.cross_rope.as_ref().ok_or_else(|| {
                 candle_core::Error::msg(
-                    "video cross scale-shift timestep missing for AV transformer",
+                    "video cross positional embeddings missing for AV transformer",
                 )
             })?;
-        let video_cross_gate_timestep = video.cross_gate_timestep.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("video cross gate timestep missing for AV transformer")
-        })?;
-        let audio_cross_scale_shift_timestep =
-            audio.cross_scale_shift_timestep.as_ref().ok_or_else(|| {
+            let audio_cross_rope = audio.cross_rope.as_ref().ok_or_else(|| {
                 candle_core::Error::msg(
-                    "audio cross scale-shift timestep missing for AV transformer",
+                    "audio cross positional embeddings missing for AV transformer",
                 )
             })?;
-        let audio_cross_gate_timestep = audio.cross_gate_timestep.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("audio cross gate timestep missing for AV transformer")
-        })?;
-        let video_cross_rope = video.cross_rope.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("video cross positional embeddings missing for AV transformer")
-        })?;
-        let audio_cross_rope = audio.cross_rope.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("audio cross positional embeddings missing for AV transformer")
-        })?;
 
-        let (v_ca_scale, v_ca_shift, v_gate) = self.get_cross_ada_values(
-            &self.scale_shift_table_a2v_ca_video,
-            video_cross_scale_shift_timestep,
-            video_cross_gate_timestep,
-            0,
-        )?;
-        let (a_ca_scale, a_ca_shift, _) = self.get_cross_ada_values(
-            &self.scale_shift_table_a2v_ca_audio,
-            audio_cross_scale_shift_timestep,
-            audio_cross_gate_timestep,
-            0,
-        )?;
-        let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
-        let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
-        vx = vx.broadcast_add(&gate_tokens(
-            &self.audio_to_video_attn.forward(
-                &vx_scaled,
-                Some(&ax_scaled),
-                None,
-                Some((&video_cross_rope.0, &video_cross_rope.1)),
-                Some((&audio_cross_rope.0, &audio_cross_rope.1)),
-            )?,
-            &v_gate,
-        )?)?;
+            let (v_ca_scale, v_ca_shift, v_gate) = self.get_cross_ada_values(
+                &self.scale_shift_table_a2v_ca_video,
+                video_cross_scale_shift_timestep,
+                video_cross_gate_timestep,
+                0,
+            )?;
+            let (a_ca_scale, a_ca_shift, _) = self.get_cross_ada_values(
+                &self.scale_shift_table_a2v_ca_audio,
+                audio_cross_scale_shift_timestep,
+                audio_cross_gate_timestep,
+                0,
+            )?;
+            let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
+            let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
+            let a2v = gate_tokens(
+                &self.audio_to_video_attn.forward(
+                    &vx_scaled,
+                    Some(&ax_scaled),
+                    None,
+                    Some((&video_cross_rope.0, &video_cross_rope.1)),
+                    Some((&audio_cross_rope.0, &audio_cross_rope.1)),
+                )?,
+                &v_gate,
+            )?;
+            log_detail_tensor(index, "video_av_cross_out", &a2v)?;
+            let current_vx = vx_before_cross.broadcast_add(&a2v)?;
+            log_detail_tensor(index, "video_after_av_cross", &current_vx)?;
+            vx = Some(current_vx);
 
-        let (a_ca_scale, a_ca_shift, a_gate) = self.get_cross_ada_values(
-            &self.scale_shift_table_a2v_ca_audio,
-            audio_cross_scale_shift_timestep,
-            audio_cross_gate_timestep,
-            2,
-        )?;
-        let (v_ca_scale, v_ca_shift, _) = self.get_cross_ada_values(
-            &self.scale_shift_table_a2v_ca_video,
-            video_cross_scale_shift_timestep,
-            video_cross_gate_timestep,
-            2,
-        )?;
-        let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
-        let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
-        ax = ax.broadcast_add(&gate_tokens(
-            &self.video_to_audio_attn.forward(
-                &ax_scaled,
-                Some(&vx_scaled),
-                None,
-                Some((&audio_cross_rope.0, &audio_cross_rope.1)),
-                Some((&video_cross_rope.0, &video_cross_rope.1)),
-            )?,
-            &a_gate,
-        )?)?;
+            let (a_ca_scale, a_ca_shift, a_gate) = self.get_cross_ada_values(
+                &self.scale_shift_table_a2v_ca_audio,
+                audio_cross_scale_shift_timestep,
+                audio_cross_gate_timestep,
+                2,
+            )?;
+            let (v_ca_scale, v_ca_shift, _) = self.get_cross_ada_values(
+                &self.scale_shift_table_a2v_ca_video,
+                video_cross_scale_shift_timestep,
+                video_cross_gate_timestep,
+                2,
+            )?;
+            let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
+            let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
+            let v2a = gate_tokens(
+                &self.video_to_audio_attn.forward(
+                    &ax_scaled,
+                    Some(&vx_scaled),
+                    None,
+                    Some((&audio_cross_rope.0, &audio_cross_rope.1)),
+                    Some((&video_cross_rope.0, &video_cross_rope.1)),
+                )?,
+                &a_gate,
+            )?;
+            log_detail_tensor(index, "audio_av_cross_out", &v2a)?;
+            let current_ax = ax_before_cross.broadcast_add(&v2a)?;
+            log_detail_tensor(index, "audio_after_av_cross", &current_ax)?;
+            ax = Some(current_ax);
+        }
 
-        let (v_shift_mlp, v_scale_mlp, v_gate_mlp) =
-            self.get_ada_triplet(&self.video_scale_shift_table, &video.timesteps, 3)?;
-        vx = vx.broadcast_add(&gate_tokens(
-            &self.video_ff.forward(&modulate_tokens(
-                &rms_norm_tensor(&vx, self.norm_eps)?,
+        if let (Some(video), Some(vx_before_ff)) = (video, vx.as_ref()) {
+            let (v_shift_mlp, v_scale_mlp, v_gate_mlp) =
+                self.get_ada_triplet(&self.video_scale_shift_table, &video.timesteps, 3)?;
+            let v_ff_input = modulate_tokens(
+                &rms_norm_tensor(vx_before_ff, self.norm_eps)?,
                 &v_scale_mlp,
                 &v_shift_mlp,
-            )?)?,
-            &v_gate_mlp,
-        )?)?;
+            )?;
+            let v_ff = gate_tokens(&self.video_ff.forward(&v_ff_input)?, &v_gate_mlp)?;
+            log_detail_tensor(index, "video_ff_input", &v_ff_input)?;
+            log_detail_tensor(index, "video_ff_out", &v_ff)?;
+            let current_vx = vx_before_ff.broadcast_add(&v_ff)?;
+            log_detail_tensor(index, "video_after_ff", &current_vx)?;
+            vx = Some(current_vx);
+        }
 
-        let (a_shift_mlp, a_scale_mlp, a_gate_mlp) =
-            self.get_ada_triplet(&self.audio_scale_shift_table, &audio.timesteps, 3)?;
-        ax = ax.broadcast_add(&gate_tokens(
-            &self.audio_ff.forward(&modulate_tokens(
-                &rms_norm_tensor(&ax, self.norm_eps)?,
+        if let (Some(audio), Some(ax_before_ff)) = (audio, ax.as_ref()) {
+            let (a_shift_mlp, a_scale_mlp, a_gate_mlp) =
+                self.get_ada_triplet(&self.audio_scale_shift_table, &audio.timesteps, 3)?;
+            let a_ff_input = modulate_tokens(
+                &rms_norm_tensor(ax_before_ff, self.norm_eps)?,
                 &a_scale_mlp,
                 &a_shift_mlp,
-            )?)?,
-            &a_gate_mlp,
-        )?)?;
+            )?;
+            let a_ff = gate_tokens(&self.audio_ff.forward(&a_ff_input)?, &a_gate_mlp)?;
+            log_detail_tensor(index, "audio_ff_input", &a_ff_input)?;
+            log_detail_tensor(index, "audio_ff_out", &a_ff)?;
+            let current_ax = ax_before_ff.broadcast_add(&a_ff)?;
+            log_detail_tensor(index, "audio_after_ff", &current_ax)?;
+            ax = Some(current_ax);
+        }
 
         Ok((vx, ax))
     }
@@ -1982,6 +2066,127 @@ pub struct Ltx2AvTransformer3DModel {
 }
 
 impl Ltx2AvTransformer3DModel {
+    pub fn new(config: &Ltx2VideoTransformer3DModelConfig, vb: VarBuilder) -> Result<Self> {
+        let video_dim = config.inner_dim();
+        let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+        let cross_max = config
+            .positional_embedding_max_pos
+            .first()
+            .copied()
+            .unwrap_or(20)
+            .max(
+                config
+                    .audio_positional_embedding_max_pos
+                    .first()
+                    .copied()
+                    .unwrap_or(20),
+            );
+        let mut transformer_blocks = Vec::with_capacity(config.num_layers);
+        for layer_idx in 0..config.num_layers {
+            transformer_blocks.push(LtxAvTransformerBlock::new(
+                config,
+                vb.pp("transformer_blocks").pp(layer_idx.to_string()),
+            )?);
+            if ltx2_load_debug_enabled() {
+                eprintln!(
+                    "[ltx2-load] eager_av_block={}/{}",
+                    layer_idx + 1,
+                    config.num_layers
+                );
+            }
+        }
+
+        Ok(Self {
+            patchify_proj: nn::linear(config.in_channels, video_dim, vb.pp("patchify_proj"))?,
+            adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                video_dim,
+                6,
+                vb.pp("adaln_single"),
+            )?,
+            caption_projection: PixArtAlphaTextProjection::new_with_out_features(
+                config.caption_channels,
+                video_dim,
+                video_dim,
+                vb.pp("caption_projection"),
+            )?,
+            scale_shift_table: vb.get((2, video_dim), "scale_shift_table")?,
+            norm_out: LayerNormNoParams::new(config.norm_eps),
+            proj_out: nn::linear(video_dim, config.out_channels, vb.pp("proj_out"))?,
+            audio_patchify_proj: nn::linear(
+                config.audio_in_channels,
+                audio_dim,
+                vb.pp("audio_patchify_proj"),
+            )?,
+            audio_adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                audio_dim,
+                6,
+                vb.pp("audio_adaln_single"),
+            )?,
+            audio_caption_projection: PixArtAlphaTextProjection::new_with_out_features(
+                config.caption_channels,
+                audio_dim,
+                audio_dim,
+                vb.pp("audio_caption_projection"),
+            )?,
+            audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
+            audio_norm_out: LayerNormNoParams::new(config.norm_eps),
+            audio_proj_out: nn::linear(
+                audio_dim,
+                config.audio_out_channels,
+                vb.pp("audio_proj_out"),
+            )?,
+            av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                video_dim,
+                4,
+                vb.pp("av_ca_video_scale_shift_adaln_single"),
+            )?,
+            av_ca_audio_scale_shift_adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                audio_dim,
+                4,
+                vb.pp("av_ca_audio_scale_shift_adaln_single"),
+            )?,
+            av_ca_a2v_gate_adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                video_dim,
+                1,
+                vb.pp("av_ca_a2v_gate_adaln_single"),
+            )?,
+            av_ca_v2a_gate_adaln_single: AdaLayerNormSingle::new_with_coefficient(
+                audio_dim,
+                1,
+                vb.pp("av_ca_v2a_gate_adaln_single"),
+            )?,
+            video_rope: Ltx2VideoRotaryPosEmbed::new(
+                video_dim,
+                config.positional_embedding_theta,
+                config.positional_embedding_max_pos.clone(),
+                config.use_middle_indices_grid,
+                config.num_attention_heads,
+                config.rope_type,
+                config.double_precision_rope,
+            ),
+            audio_rope: Ltx2VideoRotaryPosEmbed::new(
+                audio_dim,
+                config.positional_embedding_theta,
+                config.audio_positional_embedding_max_pos.clone(),
+                config.use_middle_indices_grid,
+                config.audio_num_attention_heads,
+                config.rope_type,
+                config.double_precision_rope,
+            ),
+            cross_rope: Ltx2VideoRotaryPosEmbed::new(
+                config.audio_cross_attention_dim,
+                config.positional_embedding_theta,
+                vec![cross_max],
+                true,
+                config.audio_num_attention_heads,
+                config.rope_type,
+                config.double_precision_rope,
+            ),
+            transformer_blocks: AvTransformerBlockSource::Eager(transformer_blocks),
+            config: config.clone(),
+        })
+    }
+
     pub fn new_streaming(
         config: &Ltx2VideoTransformer3DModelConfig,
         vb: VarBuilder<'static>,
@@ -2193,15 +2398,15 @@ impl Ltx2AvTransformer3DModel {
     pub fn forward(
         &self,
         video_hidden_states: &Tensor,
-        audio_hidden_states: &Tensor,
+        audio_hidden_states: Option<&Tensor>,
         video_encoder_hidden_states: &Tensor,
-        audio_encoder_hidden_states: &Tensor,
+        audio_encoder_hidden_states: Option<&Tensor>,
         timestep: &Tensor,
         video_encoder_attention_mask: Option<&Tensor>,
         audio_encoder_attention_mask: Option<&Tensor>,
         video_positions: &Tensor,
-        audio_positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+        audio_positions: Option<&Tensor>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let compute_dtype = match self.patchify_proj.weight().dtype() {
             DType::F8E4M3 => DType::BF16,
             other => other,
@@ -2218,75 +2423,112 @@ impl Ltx2AvTransformer3DModel {
             &self.caption_projection,
             &self.video_rope,
         )?;
-        let mut audio = self.prepare_modality(
-            &audio_hidden_states.to_dtype(compute_dtype)?,
-            &audio_encoder_hidden_states.to_dtype(compute_dtype)?,
-            audio_encoder_attention_mask,
-            &timestep,
+        let mut audio = match (
+            audio_hidden_states,
+            audio_encoder_hidden_states,
             audio_positions,
-            &self.audio_patchify_proj,
-            &self.audio_adaln_single,
-            &self.audio_caption_projection,
-            &self.audio_rope,
-        )?;
+        ) {
+            (
+                Some(audio_hidden_states),
+                Some(audio_encoder_hidden_states),
+                Some(audio_positions),
+            ) => Some(self.prepare_modality(
+                &audio_hidden_states.to_dtype(compute_dtype)?,
+                &audio_encoder_hidden_states.to_dtype(compute_dtype)?,
+                audio_encoder_attention_mask,
+                &timestep,
+                audio_positions,
+                &self.audio_patchify_proj,
+                &self.audio_adaln_single,
+                &self.audio_caption_projection,
+                &self.audio_rope,
+            )?),
+            (None, None, None) => None,
+            _ => candle_core::bail!(
+                "audio hidden states, contexts, and positions must be provided together"
+            ),
+        };
         let batch = video.x.dim(0)?;
         let av_scale = self.config.av_ca_timestep_scale_multiplier / 1000.0;
-        let video_cross_positions = self.temporal_cross_positions(video_positions, 1)?;
-        let audio_cross_positions = self.temporal_cross_positions(audio_positions, 1)?;
-        video.cross_rope = Some(self.cross_rope.forward(&video.x, &video_cross_positions)?);
-        audio.cross_rope = Some(self.cross_rope.forward(&audio.x, &audio_cross_positions)?);
-        video.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
-            &self.av_ca_video_scale_shift_adaln_single,
-            &timestep,
-            1.0,
-            batch,
-        )?);
-        audio.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
-            &self.av_ca_audio_scale_shift_adaln_single,
-            &timestep,
-            1.0,
-            batch,
-        )?);
-        video.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
-            &self.av_ca_a2v_gate_adaln_single,
-            &timestep,
-            av_scale,
-            batch,
-        )?);
-        audio.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
-            &self.av_ca_v2a_gate_adaln_single,
-            &timestep,
-            av_scale,
-            batch,
-        )?);
+        if let Some(audio) = audio.as_mut() {
+            let video_cross_positions = self.temporal_cross_positions(video_positions, 1)?;
+            let audio_positions = audio_positions.expect("audio positions already validated");
+            let audio_cross_positions = self.temporal_cross_positions(audio_positions, 1)?;
+            video.cross_rope = Some(self.cross_rope.forward(&video.x, &video_cross_positions)?);
+            audio.cross_rope = Some(self.cross_rope.forward(&audio.x, &audio_cross_positions)?);
+            video.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
+                &self.av_ca_video_scale_shift_adaln_single,
+                &timestep,
+                1.0,
+                batch,
+            )?);
+            audio.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
+                &self.av_ca_audio_scale_shift_adaln_single,
+                &timestep,
+                1.0,
+                batch,
+            )?);
+            video.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
+                &self.av_ca_a2v_gate_adaln_single,
+                &timestep,
+                av_scale,
+                batch,
+            )?);
+            audio.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
+                &self.av_ca_v2a_gate_adaln_single,
+                &timestep,
+                av_scale,
+                batch,
+            )?);
+        }
 
         match &self.transformer_blocks {
             AvTransformerBlockSource::Eager(blocks) => {
                 for (index, block) in blocks.iter().enumerate() {
-                    let (vx, ax) = block.forward(&video, &audio)?;
-                    video.x = vx;
-                    audio.x = ax;
+                    let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
+                    video.x = vx.ok_or_else(|| {
+                        candle_core::Error::msg("video branch unexpectedly returned no output")
+                    })?;
+                    if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
+                        audio.x = ax;
+                    }
                     if ltx2_block_debug_enabled() {
                         let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
-                        let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
-                        eprintln!(
-                            "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
-                        );
+                        if let Some(audio) = audio.as_ref() {
+                            let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
+                            );
+                        } else {
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6})"
+                            );
+                        }
                     }
                 }
             }
             AvTransformerBlockSource::Streaming(blocks_vb) => {
                 for index in 0..self.config.num_layers {
                     let block = self.streaming_block(blocks_vb.clone(), index)?;
-                    let (vx, ax) = block.forward(&video, &audio)?;
-                    video.x = vx;
-                    audio.x = ax;
+                    let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
+                    video.x = vx.ok_or_else(|| {
+                        candle_core::Error::msg("video branch unexpectedly returned no output")
+                    })?;
+                    if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
+                        audio.x = ax;
+                    }
                     if ltx2_block_debug_enabled() {
                         let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
-                        let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
-                        eprintln!(
-                            "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
-                        );
+                        if let Some(audio) = audio.as_ref() {
+                            let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
+                            );
+                        } else {
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6})"
+                            );
+                        }
                     }
                     if video.x.device().is_cuda() {
                         video.x.device().synchronize()?;
@@ -2295,22 +2537,25 @@ impl Ltx2AvTransformer3DModel {
             }
         }
 
-        Ok((
-            Self::process_output(
-                &self.scale_shift_table,
-                &self.norm_out,
-                &self.proj_out,
-                &video.x,
-                &video.embedded_timestep,
-            )?,
-            Self::process_output(
+        let video = Self::process_output(
+            &self.scale_shift_table,
+            &self.norm_out,
+            &self.proj_out,
+            &video.x,
+            &video.embedded_timestep,
+        )?;
+        let audio = match audio {
+            Some(audio) => Some(Self::process_output(
                 &self.audio_scale_shift_table,
                 &self.audio_norm_out,
                 &self.audio_proj_out,
                 &audio.x,
                 &audio.embedded_timestep,
-            )?,
-        ))
+            )?),
+            None => None,
+        };
+
+        Ok((video, audio))
     }
 }
 

@@ -194,7 +194,9 @@ impl Ltx2Engine {
         match backend {
             Ltx2Backend::Cuda => {
                 self.info("CUDA detected, using native LTX-2 GPU path");
-                Ok(Device::new_cuda(0)?)
+                let device = Device::new_cuda(0)?;
+                configure_native_ltx2_cuda_device(&device)?;
+                Ok(device)
             }
             Ltx2Backend::Cpu => {
                 let forced_cpu = std::env::var("MOLD_DEVICE")
@@ -315,6 +317,23 @@ impl Ltx2Engine {
 
         Ok((output_bytes, thumbnail, gif_preview, probe))
     }
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if device.is_cuda() {
+        let cuda = device.as_cuda_device()?;
+        if cuda.is_event_tracking() {
+            // Native LTX-2 runs on a single dedicated stream. Disabling CUDA event
+            // tracking avoids teardown crashes in cudarc/candle when large native
+            // video runs drop many tensors at the end of the request.
+            unsafe {
+                cuda.disable_event_tracking();
+            }
+        }
+    }
+    Ok(())
 }
 
 impl InferenceEngine for Ltx2Engine {
