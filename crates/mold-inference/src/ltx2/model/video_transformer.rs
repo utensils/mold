@@ -1849,7 +1849,7 @@ impl LtxAvTransformerBlock {
             log_detail_tensor(index, "video_self_out", &v_self)?;
             let mut current_vx = video.x.broadcast_add(&v_self)?;
             log_detail_tensor(index, "video_after_self", &current_vx)?;
-            current_vx = current_vx.broadcast_add(&self.apply_text_cross_attention(
+            let v_text_cross = self.apply_text_cross_attention(
                 &current_vx,
                 &video.context,
                 &self.video_attn2,
@@ -1858,7 +1858,9 @@ impl LtxAvTransformerBlock {
                 &video.timesteps,
                 video.prompt_timestep.as_ref(),
                 video.context_mask.as_ref(),
-            )?)?;
+            )?;
+            log_detail_tensor(index, "video_text_cross_out", &v_text_cross)?;
+            current_vx = current_vx.broadcast_add(&v_text_cross)?;
             log_detail_tensor(index, "video_after_text_cross", &current_vx)?;
             vx = Some(current_vx);
         }
@@ -1890,7 +1892,7 @@ impl LtxAvTransformerBlock {
             log_detail_tensor(index, "audio_self_out", &a_self)?;
             let mut current_ax = audio.x.broadcast_add(&a_self)?;
             log_detail_tensor(index, "audio_after_self", &current_ax)?;
-            current_ax = current_ax.broadcast_add(&self.apply_text_cross_attention(
+            let a_text_cross = self.apply_text_cross_attention(
                 &current_ax,
                 &audio.context,
                 &self.audio_attn2,
@@ -1899,7 +1901,9 @@ impl LtxAvTransformerBlock {
                 &audio.timesteps,
                 audio.prompt_timestep.as_ref(),
                 audio.context_mask.as_ref(),
-            )?)?;
+            )?;
+            log_detail_tensor(index, "audio_text_cross_out", &a_text_cross)?;
+            current_ax = current_ax.broadcast_add(&a_text_cross)?;
             log_detail_tensor(index, "audio_after_text_cross", &current_ax)?;
             ax = Some(current_ax);
         }
