@@ -529,6 +529,30 @@ fn render_real_distilled_av(
         .as_ref()
         .context("native distilled LTX-2 inference requires audio prompt conditioning")?
         .to_device(&device)?;
+    let uncond_context = prepared
+        .prompt
+        .unconditional
+        .video_encoding
+        .to_device(&device)?;
+    let uncond_audio_context = prepared
+        .prompt
+        .unconditional
+        .audio_encoding
+        .as_ref()
+        .context(
+            "native distilled LTX-2 inference requires unconditional audio prompt conditioning",
+        )?
+        .to_device(&device)?;
+    let cond_mask = prepared
+        .prompt
+        .conditional
+        .attention_mask
+        .to_device(&device)?;
+    let uncond_mask = prepared
+        .prompt
+        .unconditional
+        .attention_mask
+        .to_device(&device)?;
     let video_positions = prepared.video_positions.to_device(&device)?;
     let audio_positions = prepared
         .audio_positions
@@ -579,8 +603,12 @@ fn render_real_distilled_av(
         &video_positions,
         Some(&audio_positions),
         &cond_context,
+        Some(&uncond_context),
         Some(&audio_context),
-        None,
+        Some(&uncond_audio_context),
+        Some(&cond_mask),
+        Some(&uncond_mask),
+        plan.guidance,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage1"),
     )?;
@@ -650,8 +678,12 @@ fn render_real_distilled_av(
         &stage2_video_positions,
         Some(&audio_positions),
         &cond_context,
+        Some(&uncond_context),
         Some(&audio_context),
-        None,
+        Some(&uncond_audio_context),
+        Some(&cond_mask),
+        Some(&uncond_mask),
+        plan.guidance,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage2"),
     )?;
@@ -701,8 +733,12 @@ fn run_real_distilled_stage(
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
     cond_context: &Tensor,
+    uncond_context: Option<&Tensor>,
     audio_context: Option<&Tensor>,
+    audio_uncond_context: Option<&Tensor>,
     cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    guidance_scale: f64,
     sigmas_no_terminal: &[f32],
     debug_stage: Option<&str>,
 ) -> Result<(Tensor, Option<Tensor>)> {
@@ -743,25 +779,91 @@ fn run_real_distilled_stage(
         .enumerate()
     {
         let batch = video_latents.dim(0)?;
-        let timestep = Tensor::full(sigma, (batch,), &device)?;
+        let use_cfg = guidance_scale > 1.0;
+        let audio_latents_ref = audio_latents
+            .as_ref()
+            .context("audio latents missing for multimodal distilled stage")?;
+        let audio_positions_ref = audio_positions
+            .as_ref()
+            .context("audio positions missing for multimodal distilled stage")?;
+        let audio_context_ref = audio_context
+            .as_ref()
+            .context("audio prompt conditioning missing for multimodal distilled stage")?;
+        let timestep = Tensor::full(sigma, (if use_cfg { batch * 2 } else { batch },), &device)?;
+        let video_input = if use_cfg {
+            duplicate_cfg_batch(&video_latents)?
+        } else {
+            video_latents.clone()
+        };
+        let audio_input = if use_cfg {
+            duplicate_cfg_batch(audio_latents_ref)?
+        } else {
+            audio_latents_ref.clone()
+        };
+        let video_context = if use_cfg {
+            cat_cfg_conditioning(
+                uncond_context
+                    .context("unconditional video prompt conditioning missing for CFG")?,
+                cond_context,
+            )?
+        } else {
+            cond_context.clone()
+        };
+        let audio_context = if use_cfg {
+            cat_cfg_conditioning(
+                audio_uncond_context
+                    .context("unconditional audio prompt conditioning missing for CFG")?,
+                audio_context_ref,
+            )?
+        } else {
+            (*audio_context_ref).clone()
+        };
+        let video_mask = if use_cfg {
+            cat_optional_cfg_conditioning(uncond_mask, cond_mask)?
+        } else {
+            cond_mask.cloned()
+        };
+        let audio_mask = video_mask.clone();
+        let video_positions = if use_cfg {
+            duplicate_cfg_batch(video_positions)?
+        } else {
+            video_positions.clone()
+        };
+        let audio_positions = if use_cfg {
+            duplicate_optional_cfg_batch(Some(audio_positions_ref))?
+                .context("duplicated audio positions missing for CFG")?
+        } else {
+            (*audio_positions_ref).clone()
+        };
         let (video_model_output, audio_model_output) = transformer.forward(
-            &video_latents,
-            audio_latents
-                .as_ref()
-                .context("audio latents missing for multimodal distilled stage")?,
-            cond_context,
-            audio_context
-                .as_ref()
-                .context("audio prompt conditioning missing for multimodal distilled stage")?,
+            &video_input,
+            &audio_input,
+            &video_context,
+            &audio_context,
             &timestep,
-            cond_mask,
-            cond_mask,
-            video_positions,
-            audio_positions
-                .as_ref()
-                .context("audio positions missing for multimodal distilled stage")?,
+            video_mask.as_ref(),
+            audio_mask.as_ref(),
+            &video_positions,
+            &audio_positions,
         )?;
-        let video_model_output = video_model_output.to_dtype(DType::F32)?;
+        let video_model_output = if use_cfg {
+            let outputs = video_model_output.chunk(2, 0)?;
+            let video_uncond_velocity = outputs
+                .first()
+                .context("video CFG unconditional branch missing")?;
+            let video_cond_velocity = outputs
+                .get(1)
+                .context("video CFG conditional branch missing")?;
+            guided_velocity_from_cfg(
+                &video_latents,
+                &video_cond_velocity.to_dtype(DType::F32)?,
+                &video_uncond_velocity.to_dtype(DType::F32)?,
+                sigma,
+                guidance_scale,
+            )?
+        } else {
+            video_model_output.to_dtype(DType::F32)?
+        };
         video_latents = video_scheduler
             .step(&video_model_output, sigma, &video_latents, None)?
             .prev_sample;
@@ -769,7 +871,24 @@ fn run_real_distilled_stage(
         if let (Some(audio_scheduler), Some(audio_latents)) =
             (audio_scheduler.as_mut(), audio_latents.as_mut())
         {
-            let audio_model_output = audio_model_output.to_dtype(DType::F32)?;
+            let audio_model_output = if use_cfg {
+                let outputs = audio_model_output.chunk(2, 0)?;
+                let audio_uncond_velocity = outputs
+                    .first()
+                    .context("audio CFG unconditional branch missing")?;
+                let audio_cond_velocity = outputs
+                    .get(1)
+                    .context("audio CFG conditional branch missing")?;
+                guided_velocity_from_cfg(
+                    audio_latents,
+                    &audio_cond_velocity.to_dtype(DType::F32)?,
+                    &audio_uncond_velocity.to_dtype(DType::F32)?,
+                    sigma,
+                    guidance_scale,
+                )?
+            } else {
+                audio_model_output.to_dtype(DType::F32)?
+            };
             *audio_latents = audio_scheduler
                 .step(&audio_model_output, sigma, audio_latents, None)?
                 .prev_sample;
@@ -824,6 +943,68 @@ fn mix_clean_latents_with_noise(
         .affine(clean_scale, 0.0)?
         .broadcast_add(&noise.affine(noise_scale, 0.0)?)
         .map_err(Into::into)
+}
+
+fn duplicate_cfg_batch(xs: &Tensor) -> Result<Tensor> {
+    Tensor::cat(&[xs, xs], 0).map_err(Into::into)
+}
+
+fn duplicate_optional_cfg_batch(xs: Option<&Tensor>) -> Result<Option<Tensor>> {
+    xs.map(duplicate_cfg_batch).transpose()
+}
+
+fn cat_cfg_conditioning(unconditional: &Tensor, conditional: &Tensor) -> Result<Tensor> {
+    Tensor::cat(&[unconditional, conditional], 0).map_err(Into::into)
+}
+
+fn cat_optional_cfg_conditioning(
+    unconditional: Option<&Tensor>,
+    conditional: Option<&Tensor>,
+) -> Result<Option<Tensor>> {
+    match (unconditional, conditional) {
+        (Some(unconditional), Some(conditional)) => {
+            Ok(Some(cat_cfg_conditioning(unconditional, conditional)?))
+        }
+        (None, None) => Ok(None),
+        _ => {
+            anyhow::bail!("conditional and unconditional CFG inputs must both be present or absent")
+        }
+    }
+}
+
+fn convert_velocity_to_x0(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
+    sample
+        .broadcast_sub(&velocity.affine(sigma as f64, 0.0)?)
+        .map_err(Into::into)
+}
+
+fn convert_x0_to_velocity(sample: &Tensor, denoised: &Tensor, sigma: f32) -> Result<Tensor> {
+    if sigma.abs() <= f32::EPSILON {
+        anyhow::bail!("cannot convert x0 to velocity at zero sigma");
+    }
+    sample
+        .broadcast_sub(denoised)?
+        .affine(1.0 / sigma as f64, 0.0)
+        .map_err(Into::into)
+}
+
+fn guided_velocity_from_cfg(
+    sample: &Tensor,
+    conditional_velocity: &Tensor,
+    unconditional_velocity: &Tensor,
+    sigma: f32,
+    guidance_scale: f64,
+) -> Result<Tensor> {
+    if guidance_scale <= 1.0 {
+        return Ok(conditional_velocity.clone());
+    }
+    let conditional_x0 = convert_velocity_to_x0(sample, conditional_velocity, sigma)?;
+    let unconditional_x0 = convert_velocity_to_x0(sample, unconditional_velocity, sigma)?;
+    let guidance_delta = conditional_x0
+        .broadcast_sub(&unconditional_x0)?
+        .affine(guidance_scale - 1.0, 0.0)?;
+    let guided_x0 = conditional_x0.broadcast_add(&guidance_delta)?;
+    convert_x0_to_velocity(sample, &guided_x0, sigma)
 }
 
 fn load_ltx2_av_transformer(
@@ -1074,6 +1255,7 @@ mod tests {
     };
 
     use super::{
+        convert_velocity_to_x0, convert_x0_to_velocity, guided_velocity_from_cfg,
         ltx2_video_transformer_config, Ltx2RuntimeSession, LTX2_AUDIO_LATENT_CHANNELS,
         LTX2_VIDEO_LATENT_CHANNELS,
     };
@@ -1544,5 +1726,38 @@ mod tests {
         let config = ltx2_video_transformer_config(&plan);
 
         assert_eq!(config.av_ca_timestep_scale_multiplier, 1000.0);
+    }
+
+    #[test]
+    fn velocity_x0_roundtrip_preserves_sample_velocity_pair() {
+        let sample = Tensor::new(&[[10.0f32, 4.0]], &Device::Cpu).unwrap();
+        let velocity = Tensor::new(&[[2.0f32, -1.0]], &Device::Cpu).unwrap();
+        let sigma = 0.5f32;
+
+        let x0 = convert_velocity_to_x0(&sample, &velocity, sigma).unwrap();
+        let roundtrip = convert_x0_to_velocity(&sample, &x0, sigma).unwrap();
+
+        let values = roundtrip.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!((values[0] - 2.0).abs() < 1e-5);
+        assert!((values[1] + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cfg_guidance_is_applied_in_x0_space_before_velocity_conversion() {
+        let sample = Tensor::new(&[[10.0f32]], &Device::Cpu).unwrap();
+        let conditional_velocity = Tensor::new(&[[2.0f32]], &Device::Cpu).unwrap();
+        let unconditional_velocity = Tensor::new(&[[4.0f32]], &Device::Cpu).unwrap();
+
+        let guided = guided_velocity_from_cfg(
+            &sample,
+            &conditional_velocity,
+            &unconditional_velocity,
+            0.5,
+            3.0,
+        )
+        .unwrap();
+        let value = guided.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+
+        assert!((value + 2.0).abs() < 1e-5);
     }
 }
