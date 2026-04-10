@@ -655,21 +655,15 @@ fn render_real_distilled_av(
         .and_then(|prompt| prompt.audio_encoding.as_ref())
         .map(|tensor| tensor.to_device(device))
         .transpose()?;
-    let cond_mask = prepared
-        .prompt
-        .conditional
-        .attention_mask
-        .to_device(device)?;
-    let uncond_mask = prepared
-        .prompt
-        .unconditional
-        .attention_mask
-        .to_device(device)?;
-    let alt_mask = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .map(|prompt| prompt.attention_mask.to_device(device))
-        .transpose()?;
+    // Upstream LTX-2 diffusion stages pass connector outputs directly as the
+    // text context and leave `context_mask=None` in the transformer modality
+    // wrapper. The connector has already packed padded tokens into registers
+    // and zeroed masked positions, so feeding the binary mask back into text
+    // cross-attention here over-constrains the prompt path and does not match
+    // the published inference stack.
+    let cond_mask = None;
+    let uncond_mask = None;
+    let alt_mask = None;
     let video_positions = prepared.video_positions.to_device(device)?;
     let audio_positions = prepared
         .audio_positions
@@ -732,8 +726,8 @@ fn render_real_distilled_av(
         audio_context.as_ref(),
         uncond_audio_context.as_ref(),
         alt_audio_context.as_ref(),
-        Some(&cond_mask),
-        Some(&uncond_mask),
+        cond_mask.as_ref(),
+        uncond_mask.as_ref(),
         alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
@@ -777,6 +771,20 @@ fn render_real_distilled_av(
         LTX2_VIDEO_LATENT_CHANNELS,
         SpatioTemporalScaleFactors::default(),
     );
+    if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        debug_vae.use_tiling = false;
+        debug_vae.use_framewise_decoding = false;
+        maybe_write_debug_stage_video(
+            "stage1-upscaled",
+            &debug_vae,
+            &stage2_clean_video_latents,
+            final_pixel_shape,
+            dtype,
+        )?;
+        drop(debug_vae);
+        device.synchronize()?;
+    }
     let stage2_video_positions = build_video_positions(final_pixel_shape, device)?;
     let stage2_video_noise = seeded_randn(
         plan.seed ^ 0x5354_4147_4532_4c54,
@@ -835,8 +843,8 @@ fn render_real_distilled_av(
         audio_context.as_ref(),
         uncond_audio_context.as_ref(),
         alt_audio_context.as_ref(),
-        Some(&cond_mask),
-        Some(&uncond_mask),
+        cond_mask.as_ref(),
+        uncond_mask.as_ref(),
         alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
@@ -1439,7 +1447,9 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         audio_out_channels: plan.preset.transformer.audio_out_channels,
         audio_cross_attention_dim: plan.preset.transformer.audio_cross_attention_dim,
         audio_positional_embedding_max_pos: vec![20],
-        av_ca_timestep_scale_multiplier: 1000.0,
+        // Upstream AV configs use the main timestep embed at 1000*sigma but keep
+        // the cross-modality gate branch on raw sigma via av_ca_factor=1/1000.
+        av_ca_timestep_scale_multiplier: 1.0,
         cross_attention_adaln: plan.preset.transformer.cross_attention_adaln,
     }
 }
@@ -2371,7 +2381,7 @@ mod tests {
 
         let config = ltx2_video_transformer_config(&plan);
 
-        assert_eq!(config.av_ca_timestep_scale_multiplier, 1000.0);
+        assert_eq!(config.av_ca_timestep_scale_multiplier, 1.0);
     }
 
     #[test]
@@ -2431,4 +2441,5 @@ mod tests {
 
         assert_eq!(effective_native_guidance_scale(&plan), 4.5);
     }
+
 }

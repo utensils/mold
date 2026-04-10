@@ -118,26 +118,26 @@ impl NonCausalConv3d {
         })
     }
 
-    fn pad_time_replicate(&self, x: &Tensor) -> Result<Tensor> {
-        let (_, _, t, _, _) = x.dims5()?;
+    fn pad_time(&self, x: &Tensor) -> Result<Tensor> {
+        let (b, c, _t, h, w) = x.dims5()?;
         if self.kt <= 1 {
             return Ok(x.clone());
         }
 
         let left = (self.kt - 1) / 2;
         let right = (self.kt - 1) / 2;
-        let first = x.i((.., .., 0, .., ..))?.unsqueeze(2)?;
-        let last = x.i((.., .., t - 1, .., ..))?.unsqueeze(2)?;
 
+        // Match upstream Conv3d(..., padding=1) semantics for the LTX-2
+        // spatial upsampler: temporal padding is zero-filled, not replicated.
         let pad_left = if left == 0 {
             None
         } else {
-            Some(first.repeat((1, 1, left, 1, 1))?)
+            Some(Tensor::zeros((b, c, left, h, w), x.dtype(), x.device())?)
         };
         let pad_right = if right == 0 {
             None
         } else {
-            Some(last.repeat((1, 1, right, 1, 1))?)
+            Some(Tensor::zeros((b, c, right, h, w), x.dtype(), x.device())?)
         };
 
         match (pad_left, pad_right) {
@@ -149,7 +149,7 @@ impl NonCausalConv3d {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.pad_time_replicate(x)?;
+        let x = self.pad_time(x)?;
         let (_, _, t_pad, _, _) = x.dims5()?;
         let needed = (self.kt - 1) * self.dil_t + 1;
         if t_pad < needed {
@@ -480,5 +480,37 @@ impl LatentUpsampler {
         }
 
         self.final_conv.forward(&x)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::{Device, Tensor};
+    use candle_nn::VarBuilder;
+
+    use super::NonCausalConv3d;
+
+    #[test]
+    fn upsampler_conv3d_matches_zero_padded_temporal_convolution() {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 4.0], (1, 1, 3, 1, 1), &device).unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::from_vec(vec![0.0f32], 1, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, candle_core::DType::F32, &device);
+        let conv = NonCausalConv3d::new(1, 1, (3, 1, 1), (1, 1, 1), (1, 1, 1), 1, vb).unwrap();
+
+        let input = Tensor::from_vec(vec![10.0f32, 20.0], (1, 1, 2, 1, 1), &device).unwrap();
+        let output = conv.forward(&input).unwrap();
+
+        let actual = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(actual, vec![100.0, 50.0]);
     }
 }

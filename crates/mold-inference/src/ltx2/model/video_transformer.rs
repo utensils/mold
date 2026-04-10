@@ -235,8 +235,8 @@ enum Fp8WeightScaleMode {
 
 impl LtxLinear {
     fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
-        let mut weight = vb.get((out_dim, in_dim), "weight")?;
-        let mut weight_scale = if vb.contains_tensor("weight_scale") {
+        let weight = vb.get((out_dim, in_dim), "weight")?;
+        let weight_scale = if vb.contains_tensor("weight_scale") {
             Some(vb.get((), "weight_scale")?)
         } else {
             None
@@ -252,13 +252,6 @@ impl LtxLinear {
             None
         };
         if weight.dtype() == DType::F8E4M3 {
-            let runtime_dtype = crate::device::gpu_dtype(weight.device());
-            let load_weight_scale = match fp8_weight_scale_mode() {
-                Fp8WeightScaleMode::Skip => None,
-                Fp8WeightScaleMode::Apply => weight_scale.as_ref(),
-            };
-            weight = dequantize_fp8_weight_for_runtime(&weight, load_weight_scale, runtime_dtype)?;
-            weight_scale = None;
             Ok(Self::Fp8 {
                 weight,
                 weight_scale,
@@ -2606,8 +2599,8 @@ mod tests {
     use candle_nn::{Module, VarBuilder};
 
     use super::{
-        emulate_static_fp8_input_quantization, LayerNormNoParams, LtxAttention, LtxLinear,
-        LtxRopeType,
+        emulate_static_fp8_input_quantization, LayerNormNoParams, Ltx2AvTransformer3DModel,
+        Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear, LtxRopeType,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -2678,6 +2671,353 @@ mod tests {
             Tensor::ones(dim, DType::F32, &device).unwrap(),
         );
         VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    fn patterned_values(len: usize, offset: usize) -> Vec<f32> {
+        (0..len)
+            .map(|index| (((index + offset) % 19) as f32 - 9.0) / 16.0)
+            .collect()
+    }
+
+    fn insert_linear(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        out_dim: usize,
+        in_dim: usize,
+        fp8: bool,
+    ) {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(
+            patterned_values(out_dim * in_dim, prefix.len()),
+            (out_dim, in_dim),
+            &device,
+        )
+        .unwrap();
+        let weight = if fp8 {
+            weight.to_dtype(DType::F8E4M3).unwrap()
+        } else {
+            weight
+        };
+        tensors.insert(format!("{prefix}.weight"), weight);
+        tensors.insert(
+            format!("{prefix}.bias"),
+            Tensor::from_vec(patterned_values(out_dim, prefix.len() + 7), out_dim, &device).unwrap(),
+        );
+        if fp8 {
+            tensors.insert(
+                format!("{prefix}.input_scale"),
+                Tensor::new(1.0f32, &device).unwrap(),
+            );
+            tensors.insert(
+                format!("{prefix}.weight_scale"),
+                Tensor::new(1.0f32, &device).unwrap(),
+            );
+        }
+    }
+
+    fn insert_rms_norm(tensors: &mut HashMap<String, Tensor>, prefix: &str, dim: usize) {
+        tensors.insert(
+            format!("{prefix}.weight"),
+            Tensor::ones(dim, DType::F32, &Device::Cpu).unwrap(),
+        );
+    }
+
+    fn insert_matrix(
+        tensors: &mut HashMap<String, Tensor>,
+        name: &str,
+        rows: usize,
+        cols: usize,
+        offset: usize,
+    ) {
+        tensors.insert(
+            name.to_string(),
+            Tensor::from_vec(patterned_values(rows * cols, offset), (rows, cols), &Device::Cpu)
+                .unwrap(),
+        );
+    }
+
+    fn insert_adaln_single(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        dim: usize,
+        coefficient: usize,
+    ) {
+        insert_linear(
+            tensors,
+            &format!("{prefix}.emb.timestep_embedder.linear_1"),
+            dim,
+            256,
+            false,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.emb.timestep_embedder.linear_2"),
+            dim,
+            dim,
+            false,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.linear"),
+            coefficient * dim,
+            dim,
+            false,
+        );
+    }
+
+    fn insert_text_projection(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        in_dim: usize,
+        hidden_dim: usize,
+        out_dim: usize,
+    ) {
+        insert_linear(tensors, &format!("{prefix}.linear_1"), hidden_dim, in_dim, false);
+        insert_linear(tensors, &format!("{prefix}.linear_2"), out_dim, hidden_dim, false);
+    }
+
+    fn insert_attention(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        query_dim: usize,
+        context_dim: usize,
+        heads: usize,
+        dim_head: usize,
+        fp8: bool,
+    ) {
+        let inner_dim = heads * dim_head;
+        insert_rms_norm(tensors, &format!("{prefix}.norm_q"), inner_dim);
+        insert_rms_norm(tensors, &format!("{prefix}.norm_k"), inner_dim);
+        insert_linear(tensors, &format!("{prefix}.to_q"), inner_dim, query_dim, fp8);
+        insert_linear(tensors, &format!("{prefix}.to_k"), inner_dim, context_dim, fp8);
+        insert_linear(tensors, &format!("{prefix}.to_v"), inner_dim, context_dim, fp8);
+        insert_linear(tensors, &format!("{prefix}.to_out.0"), query_dim, inner_dim, fp8);
+    }
+
+    fn insert_feed_forward(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        dim: usize,
+        fp8: bool,
+    ) {
+        insert_linear(tensors, &format!("{prefix}.net.0.proj"), dim * 4, dim, fp8);
+        insert_linear(tensors, &format!("{prefix}.net.2"), dim, dim * 4, fp8);
+    }
+
+    fn insert_av_block(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        config: &Ltx2VideoTransformer3DModelConfig,
+        fp8: bool,
+    ) {
+        let video_dim = config.inner_dim();
+        let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+
+        insert_attention(
+            tensors,
+            &format!("{prefix}.attn1"),
+            video_dim,
+            video_dim,
+            config.num_attention_heads,
+            config.attention_head_dim,
+            fp8,
+        );
+        insert_attention(
+            tensors,
+            &format!("{prefix}.attn2"),
+            video_dim,
+            config.cross_attention_dim,
+            config.num_attention_heads,
+            config.attention_head_dim,
+            fp8,
+        );
+        insert_feed_forward(tensors, &format!("{prefix}.ff"), video_dim, fp8);
+        insert_matrix(
+            tensors,
+            &format!("{prefix}.scale_shift_table"),
+            6,
+            video_dim,
+            prefix.len(),
+        );
+
+        insert_attention(
+            tensors,
+            &format!("{prefix}.audio_attn1"),
+            audio_dim,
+            audio_dim,
+            config.audio_num_attention_heads,
+            config.audio_attention_head_dim,
+            fp8,
+        );
+        insert_attention(
+            tensors,
+            &format!("{prefix}.audio_attn2"),
+            audio_dim,
+            config.audio_cross_attention_dim,
+            config.audio_num_attention_heads,
+            config.audio_attention_head_dim,
+            fp8,
+        );
+        insert_feed_forward(tensors, &format!("{prefix}.audio_ff"), audio_dim, fp8);
+        insert_matrix(
+            tensors,
+            &format!("{prefix}.audio_scale_shift_table"),
+            6,
+            audio_dim,
+            prefix.len() + 3,
+        );
+
+        insert_attention(
+            tensors,
+            &format!("{prefix}.audio_to_video_attn"),
+            video_dim,
+            audio_dim,
+            config.audio_num_attention_heads,
+            config.audio_attention_head_dim,
+            fp8,
+        );
+        insert_attention(
+            tensors,
+            &format!("{prefix}.video_to_audio_attn"),
+            audio_dim,
+            video_dim,
+            config.audio_num_attention_heads,
+            config.audio_attention_head_dim,
+            fp8,
+        );
+        insert_matrix(
+            tensors,
+            &format!("{prefix}.scale_shift_table_a2v_ca_audio"),
+            5,
+            audio_dim,
+            prefix.len() + 5,
+        );
+        insert_matrix(
+            tensors,
+            &format!("{prefix}.scale_shift_table_a2v_ca_video"),
+            5,
+            video_dim,
+            prefix.len() + 7,
+        );
+    }
+
+    fn tiny_av_config() -> Ltx2VideoTransformer3DModelConfig {
+        Ltx2VideoTransformer3DModelConfig {
+            in_channels: 2,
+            out_channels: 2,
+            patch_size: 1,
+            patch_size_t: 1,
+            num_attention_heads: 1,
+            attention_head_dim: 8,
+            cross_attention_dim: 8,
+            num_layers: 2,
+            qk_norm: "rms_norm".to_string(),
+            norm_elementwise_affine: false,
+            norm_eps: 1e-6,
+            caption_channels: 4,
+            attention_bias: true,
+            attention_out_bias: true,
+            positional_embedding_theta: 10_000.0,
+            positional_embedding_max_pos: vec![4, 4, 4],
+            use_middle_indices_grid: true,
+            rope_type: LtxRopeType::Split,
+            double_precision_rope: true,
+            audio_num_attention_heads: 1,
+            audio_attention_head_dim: 8,
+            audio_in_channels: 2,
+            audio_out_channels: 2,
+            audio_cross_attention_dim: 8,
+            audio_positional_embedding_max_pos: vec![4],
+            av_ca_timestep_scale_multiplier: 1000.0,
+            cross_attention_adaln: false,
+        }
+    }
+
+    fn av_transformer_var_builder() -> VarBuilder<'static> {
+        let device = Device::Cpu;
+        let config = tiny_av_config();
+        let video_dim = config.inner_dim();
+        let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+        let mut tensors = HashMap::new();
+
+        insert_linear(
+            &mut tensors,
+            "patchify_proj",
+            video_dim,
+            config.in_channels,
+            false,
+        );
+        insert_adaln_single(&mut tensors, "adaln_single", video_dim, 6);
+        insert_text_projection(
+            &mut tensors,
+            "caption_projection",
+            config.caption_channels,
+            video_dim,
+            video_dim,
+        );
+        insert_matrix(&mut tensors, "scale_shift_table", 2, video_dim, 11);
+        insert_linear(&mut tensors, "proj_out", config.out_channels, video_dim, false);
+
+        insert_linear(
+            &mut tensors,
+            "audio_patchify_proj",
+            audio_dim,
+            config.audio_in_channels,
+            false,
+        );
+        insert_adaln_single(&mut tensors, "audio_adaln_single", audio_dim, 6);
+        insert_text_projection(
+            &mut tensors,
+            "audio_caption_projection",
+            config.caption_channels,
+            audio_dim,
+            audio_dim,
+        );
+        insert_matrix(&mut tensors, "audio_scale_shift_table", 2, audio_dim, 13);
+        insert_linear(
+            &mut tensors,
+            "audio_proj_out",
+            config.audio_out_channels,
+            audio_dim,
+            false,
+        );
+
+        insert_adaln_single(
+            &mut tensors,
+            "av_ca_video_scale_shift_adaln_single",
+            video_dim,
+            4,
+        );
+        insert_adaln_single(
+            &mut tensors,
+            "av_ca_audio_scale_shift_adaln_single",
+            audio_dim,
+            4,
+        );
+        insert_adaln_single(&mut tensors, "av_ca_a2v_gate_adaln_single", video_dim, 1);
+        insert_adaln_single(&mut tensors, "av_ca_v2a_gate_adaln_single", audio_dim, 1);
+
+        insert_av_block(&mut tensors, "transformer_blocks.0", &config, false);
+        insert_av_block(&mut tensors, "transformer_blocks.1", &config, true);
+
+        VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    fn assert_tensors_close(lhs: &Tensor, rhs: &Tensor, tolerance: f32) {
+        let diff = lhs
+            .to_dtype(DType::F32)
+            .unwrap()
+            .broadcast_sub(&rhs.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .fold(0.0f32, f32::max);
+        assert!(diff <= tolerance, "max diff {diff} exceeds {tolerance}");
     }
 
     #[test]
@@ -2843,6 +3183,49 @@ mod tests {
     }
 
     #[test]
+    fn fp8_linear_load_preserves_float8_weights_for_runtime_cast_mode() {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::from_vec(vec![0.5f32, -0.75, 1.25, 0.25], (2, 2), &device)
+                .unwrap()
+                .to_dtype(DType::F8E4M3)
+                .unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::new(&[0.1f32, -0.2], &device).unwrap(),
+        );
+        tensors.insert(
+            "weight_scale".to_string(),
+            Tensor::new(0.25f32, &device).unwrap(),
+        );
+        tensors.insert(
+            "input_scale".to_string(),
+            Tensor::new(0.125f32, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F8E4M3, &device);
+
+        let linear = LtxLinear::load(2, 2, true, vb).unwrap();
+
+        match linear {
+            LtxLinear::Fp8 {
+                weight,
+                weight_scale,
+                input_scale,
+                bias,
+            } => {
+                assert_eq!(weight.dtype(), DType::F8E4M3);
+                assert!(weight_scale.is_some());
+                assert!(input_scale.is_some());
+                assert!(bias.is_some());
+            }
+            LtxLinear::Standard(_) => panic!("expected fp8 linear"),
+        }
+    }
+
+    #[test]
     fn fp8_weight_scale_is_ignored_by_default_in_fp8_cast_mode() {
         let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
         let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "skip");
@@ -2995,5 +3378,87 @@ mod tests {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn av_transformer_streaming_matches_eager_with_mixed_fp8_blocks() {
+        let device = Device::Cpu;
+        let config = tiny_av_config();
+        let vb = av_transformer_var_builder();
+        let eager = Ltx2AvTransformer3DModel::new(&config, vb.clone()).unwrap();
+        let streaming = Ltx2AvTransformer3DModel::new_streaming(&config, vb).unwrap();
+
+        let video_hidden_states = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],
+            (1, 3, config.in_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_hidden_states = Tensor::from_vec(
+            vec![0.2f32, -0.1, 0.5, -0.4],
+            (1, 2, config.audio_in_channels),
+            &device,
+        )
+        .unwrap();
+        let video_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 3),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 9),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let timestep = Tensor::new(&[0.75f32], &device).unwrap();
+        let video_attention_mask = Tensor::new(&[[1u8, 1, 0, 0]], &device).unwrap();
+        let audio_attention_mask = Tensor::new(&[[1u8, 0, 1, 0]], &device).unwrap();
+        let video_positions = Tensor::from_vec(
+            vec![
+                0.0f32, 1.0, 1.0, 2.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+                1.0, 2.0, 2.0, 3.0,
+            ],
+            (1, 3, 3, 2),
+            &device,
+        )
+        .unwrap();
+        let audio_positions =
+            Tensor::from_vec(vec![0.0f32, 1.0, 1.0, 2.0], (1, 1, 2, 2), &device).unwrap();
+
+        let (eager_video, eager_audio) = eager
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &timestep,
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                &video_positions,
+                Some(&audio_positions),
+            )
+            .unwrap();
+        let (streaming_video, streaming_audio) = streaming
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &timestep,
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                &video_positions,
+                Some(&audio_positions),
+            )
+            .unwrap();
+
+        assert_tensors_close(&eager_video, &streaming_video, 1e-4);
+        assert_tensors_close(
+            &eager_audio.unwrap(),
+            &streaming_audio.unwrap(),
+            1e-4,
+        );
     }
 }
