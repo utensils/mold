@@ -218,6 +218,13 @@ enum LtxLinear {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fp8InputScaleMode {
+    Skip,
+    EmulateDivide,
+    EmulateMultiply,
+}
+
 impl LtxLinear {
     fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
         let mut weight = vb.get((out_dim, in_dim), "weight")?;
@@ -300,10 +307,11 @@ impl Module for LtxLinear {
                 } else {
                     xs.to_dtype(dtype)?
                 };
-                // Public fp8-cast checkpoints also carry per-layer `input_scale`
-                // tensors for static activation quantization. Emulate the
-                // quantize/dequantize path in Rust so the math matches upstream
-                // without requiring TensorRT-LLM scaled-mm kernels.
+                // Public LTX-2 `fp8-cast` checkpoints can still carry
+                // `input_scale` tensors from the export path, but cast mode does
+                // not quantize activations at runtime. Keep scaled-mm-style
+                // emulation behind an explicit override for debugging and future
+                // Hopper-only work.
                 let xs = match input_scale {
                     Some(scale) => emulate_static_fp8_input_quantization(&xs, scale, dtype)?,
                     None => xs,
@@ -344,15 +352,21 @@ fn emulate_static_fp8_input_quantization(
     input_scale: &Tensor,
     compute_dtype: DType,
 ) -> Result<Tensor> {
+    let scale_mode = match std::env::var("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
+        Ok("divide") | Ok("emulate") => Fp8InputScaleMode::EmulateDivide,
+        Ok("multiply") => Fp8InputScaleMode::EmulateMultiply,
+        Ok("skip") | Err(_) => Fp8InputScaleMode::Skip,
+        Ok(_) => Fp8InputScaleMode::Skip,
+    };
     let scale = input_scale.to_dtype(compute_dtype)?;
-    match std::env::var("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
-        Ok("skip") => Ok(xs.clone()),
-        Ok("multiply") => xs
+    match scale_mode {
+        Fp8InputScaleMode::Skip => Ok(xs.clone()),
+        Fp8InputScaleMode::EmulateMultiply => xs
             .broadcast_mul(&scale)?
             .to_dtype(DType::F8E4M3)?
             .to_dtype(compute_dtype)?
             .broadcast_mul(&scale),
-        _ => xs
+        Fp8InputScaleMode::EmulateDivide => xs
             .broadcast_div(&scale)?
             .to_dtype(DType::F8E4M3)?
             .to_dtype(compute_dtype)?
@@ -2566,11 +2580,49 @@ impl Ltx2AvTransformer3DModel {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
 
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Module, VarBuilder};
 
     use super::{emulate_static_fp8_input_quantization, LtxAttention, LtxLinear, LtxRopeType};
+
+    fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: these tests serialize access to the process-wide env var
+            // through `fp8_input_scale_env_lock`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => {
+                    // SAFETY: these tests serialize access to the process-wide env var
+                    // through `fp8_input_scale_env_lock`.
+                    unsafe { std::env::set_var(self.key, previous) };
+                }
+                None => {
+                    // SAFETY: these tests serialize access to the process-wide env var
+                    // through `fp8_input_scale_env_lock`.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
 
     fn attention_var_builder(dim: usize) -> VarBuilder<'static> {
         let device = Device::Cpu;
@@ -2752,7 +2804,42 @@ mod tests {
     }
 
     #[test]
-    fn fp8_linear_applies_optional_input_scale_before_matmul() {
+    fn fp8_linear_ignores_input_scale_by_default_in_fp8_cast_mode() {
+        let _env_lock = fp8_input_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_INPUT_SCALE_MODE", "skip");
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let input_scale = Tensor::new(0.125f32, &device).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: None,
+            input_scale: Some(input_scale.clone()),
+            bias: None,
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+        let expected = xs.reshape((2, 2)).unwrap();
+        let expected = expected
+            .matmul(&weight.to_dtype(DType::F32).unwrap().t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_linear_can_emulate_input_scale_when_requested() {
+        let _env_lock = fp8_input_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_INPUT_SCALE_MODE", "emulate");
         let device = Device::Cpu;
         let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
         let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
-use candle_nn::{ops, Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, VarBuilder};
+use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
     let refs = xs.iter().collect::<Vec<_>>();
@@ -10,12 +10,6 @@ fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
 
 fn silu(x: &Tensor) -> Result<Tensor> {
     ops::silu(x)
-}
-
-fn layernorm_channels_first(norm: &LayerNorm, x: &Tensor) -> Result<Tensor> {
-    x.permute((0, 2, 3, 4, 1))?
-        .apply(norm)?
-        .permute((0, 4, 1, 2, 3))
 }
 
 #[derive(Debug, Clone)]
@@ -46,11 +40,20 @@ struct Conv3dLikeConfig {
     groups: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpatialPaddingMode {
+    Zeros,
+    Reflect,
+}
+
 #[derive(Debug, Clone)]
 pub struct Ltx2VideoCausalConv3d {
     kt: usize,
     is_causal_default: bool,
     cfg: Conv3dLikeConfig,
+    spatial_pad_h: usize,
+    spatial_pad_w: usize,
+    spatial_padding_mode: SpatialPaddingMode,
     conv2d_slices: Vec<Conv2d>,
     bias: Option<Tensor>,
 }
@@ -65,6 +68,7 @@ impl Ltx2VideoCausalConv3d {
         dilation: (usize, usize, usize),
         groups: usize,
         is_causal_default: bool,
+        spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
         let (kt, kh, kw) = kernel;
@@ -82,11 +86,9 @@ impl Ltx2VideoCausalConv3d {
         let bias = conv_vb.get(out_channels, "bias").ok();
 
         let mut conv2d_slices = Vec::with_capacity(kt);
-        let padding = kh / 2;
         for ti in 0..kt {
             let weight2d = weight.i((.., .., ti, .., ..))?.contiguous()?;
             let cfg = Conv2dConfig {
-                padding,
                 stride: sh,
                 dilation: dh,
                 groups,
@@ -104,6 +106,9 @@ impl Ltx2VideoCausalConv3d {
                 dil_t: dt,
                 groups,
             },
+            spatial_pad_h: kh / 2,
+            spatial_pad_w: kw / 2,
+            spatial_padding_mode,
             conv2d_slices,
             bias,
         })
@@ -128,6 +133,62 @@ impl Ltx2VideoCausalConv3d {
         }
     }
 
+    fn reflect_pad_4d(&self, x: &Tensor) -> Result<Tensor> {
+        let (_, _, h, w) = x.dims4()?;
+        if self.spatial_pad_h != 0 && h <= self.spatial_pad_h {
+            bail!(
+                "reflect padding requires height > pad, got height={} pad={}",
+                h,
+                self.spatial_pad_h
+            );
+        }
+        if self.spatial_pad_w != 0 && w <= self.spatial_pad_w {
+            bail!(
+                "reflect padding requires width > pad, got width={} pad={}",
+                w,
+                self.spatial_pad_w
+            );
+        }
+
+        let mut padded = x.clone();
+        if self.spatial_pad_w != 0 {
+            let left = padded
+                .i((.., .., .., 1..(self.spatial_pad_w + 1)))?
+                .contiguous()?
+                .flip(&[3])?;
+            let right = padded
+                .i((.., .., .., (w - self.spatial_pad_w - 1)..(w - 1)))?
+                .contiguous()?
+                .flip(&[3])?;
+            padded = Tensor::cat(&[left, padded, right], 3)?;
+        }
+        if self.spatial_pad_h != 0 {
+            let top = padded
+                .i((.., .., 1..(self.spatial_pad_h + 1), ..))?
+                .contiguous()?
+                .flip(&[2])?;
+            let bottom = padded
+                .i((.., .., (h - self.spatial_pad_h - 1)..(h - 1), ..))?
+                .contiguous()?
+                .flip(&[2])?;
+            padded = Tensor::cat(&[top, padded, bottom], 2)?;
+        }
+        Ok(padded)
+    }
+
+    fn pad_spatial(&self, x: &Tensor) -> Result<Tensor> {
+        if self.spatial_pad_h == 0 && self.spatial_pad_w == 0 {
+            return Ok(x.clone());
+        }
+        match self.spatial_padding_mode {
+            SpatialPaddingMode::Zeros => x
+                .pad_with_zeros(3, self.spatial_pad_w, self.spatial_pad_w)?
+                .pad_with_zeros(2, self.spatial_pad_h, self.spatial_pad_h)
+                .map_err(Into::into),
+            SpatialPaddingMode::Reflect => self.reflect_pad_4d(x),
+        }
+    }
+
     pub fn forward(&self, x: &Tensor, causal: bool) -> Result<Tensor> {
         let x = self.pad_time_replicate(x, causal)?;
         let (_, _, t_pad, _, _) = x.dims5()?;
@@ -144,7 +205,7 @@ impl Ltx2VideoCausalConv3d {
             for ki in 0..self.kt {
                 let ti = base_t + ki * self.cfg.dil_t;
                 let xt = x.i((.., .., ti, .., ..))?;
-                let yt = xt.apply(&self.conv2d_slices[ki])?;
+                let yt = self.pad_spatial(&xt)?.apply(&self.conv2d_slices[ki])?;
                 acc = Some(match acc {
                     None => yt,
                     Some(prev) => prev.add(&yt)?,
@@ -180,6 +241,7 @@ impl Ltx2VideoDownsampler3d {
         in_channels: usize,
         out_channels: usize,
         stride: (usize, usize, usize),
+        spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
         let (st, sh, sw) = stride;
@@ -193,6 +255,7 @@ impl Ltx2VideoDownsampler3d {
             (1, 1, 1),
             1,
             true,
+            spatial_padding_mode,
             vb.pp("conv"),
         )?;
         Ok(Self {
@@ -267,6 +330,7 @@ impl Ltx2VideoUpsampler3d {
         stride: (usize, usize, usize),
         residual: bool,
         out_channels_reduction_factor: usize,
+        spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
         let (st, sh, sw) = stride;
@@ -279,6 +343,7 @@ impl Ltx2VideoUpsampler3d {
             (1, 1, 1),
             1,
             true,
+            spatial_padding_mode,
             vb.pp("conv"),
         )?;
         Ok(Self {
@@ -345,7 +410,7 @@ pub struct Ltx2VideoResnetBlock3d {
     conv1: Ltx2VideoCausalConv3d,
     norm2: PerChannelRmsNorm,
     conv2: Ltx2VideoCausalConv3d,
-    norm3: Option<LayerNorm>,
+    norm3: Option<GroupNorm>,
     conv_shortcut: Option<Ltx2VideoCausalConv3d>,
     per_channel_scale1: Option<Tensor>,
     per_channel_scale2: Option<Tensor>,
@@ -357,6 +422,7 @@ impl Ltx2VideoResnetBlock3d {
         out_channels: usize,
         eps: f64,
         inject_noise: bool,
+        spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
         let norm1 = PerChannelRmsNorm::new(1, 1e-8);
@@ -368,6 +434,7 @@ impl Ltx2VideoResnetBlock3d {
             (1, 1, 1),
             1,
             true,
+            spatial_padding_mode,
             vb.pp("conv1"),
         )?;
         let norm2 = PerChannelRmsNorm::new(1, 1e-8);
@@ -379,16 +446,12 @@ impl Ltx2VideoResnetBlock3d {
             (1, 1, 1),
             1,
             true,
+            spatial_padding_mode,
             vb.pp("conv2"),
         )?;
 
         let (norm3, conv_shortcut) = if in_channels != out_channels {
-            let lncfg = LayerNormConfig {
-                eps,
-                affine: true,
-                ..Default::default()
-            };
-            let norm3 = candle_nn::layer_norm(in_channels, lncfg, vb.pp("norm3")).ok();
+            let norm3 = group_norm(1, in_channels, eps, vb.pp("norm3")).ok();
             let conv_shortcut = Ltx2VideoCausalConv3d::new(
                 in_channels,
                 out_channels,
@@ -397,6 +460,7 @@ impl Ltx2VideoResnetBlock3d {
                 (1, 1, 1),
                 1,
                 true,
+                spatial_padding_mode,
                 vb.pp("conv_shortcut"),
             )
             .ok();
@@ -465,7 +529,7 @@ impl Ltx2VideoResnetBlock3d {
 
         let mut residual = inputs.clone();
         if let Some(norm3) = &self.norm3 {
-            residual = layernorm_channels_first(norm3, &residual)?;
+            residual = residual.apply(norm3)?;
         }
         if let Some(conv_shortcut) = &self.conv_shortcut {
             residual = conv_shortcut.forward(&residual, causal)?;
@@ -487,6 +551,7 @@ impl Ltx2VideoResBlockStack {
         num_layers: usize,
         inject_noise: bool,
         eps: f64,
+        spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
         let mut res_blocks = Vec::with_capacity(num_layers);
@@ -502,6 +567,7 @@ impl Ltx2VideoResBlockStack {
                 current_out,
                 eps,
                 inject_noise,
+                spatial_padding_mode,
                 vb.pp(format!("res_blocks.{index}")),
             )?);
             current_in = current_out;
@@ -613,6 +679,8 @@ pub struct AutoencoderKLLtx2VideoConfig {
     pub latent_log_var: LatentLogVar,
     pub encoder_base_channels: usize,
     pub decoder_base_channels: usize,
+    encoder_spatial_padding_mode: SpatialPaddingMode,
+    decoder_spatial_padding_mode: SpatialPaddingMode,
     pub spatial_compression_ratio: usize,
     pub temporal_compression_ratio: usize,
     pub timestep_conditioning: bool,
@@ -653,6 +721,8 @@ impl Default for AutoencoderKLLtx2VideoConfig {
             latent_log_var: LatentLogVar::Uniform,
             encoder_base_channels: 128,
             decoder_base_channels: 128,
+            encoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            decoder_spatial_padding_mode: SpatialPaddingMode::Reflect,
             spatial_compression_ratio: 32,
             temporal_compression_ratio: 8,
             timestep_conditioning: false,
@@ -676,6 +746,7 @@ fn build_encoder_block(
     cfg: &VaeBlockConfig,
     in_channels: usize,
     eps: f64,
+    spatial_padding_mode: SpatialPaddingMode,
     vb: VarBuilder,
 ) -> Result<(EncoderBlock, usize)> {
     match cfg.name.as_str() {
@@ -686,6 +757,7 @@ fn build_encoder_block(
                 cfg.num_layers,
                 cfg.inject_noise,
                 eps,
+                spatial_padding_mode,
                 vb,
             )?),
             in_channels,
@@ -698,6 +770,7 @@ fn build_encoder_block(
                     out_channels,
                     eps,
                     cfg.inject_noise,
+                    spatial_padding_mode,
                     vb,
                 )?),
                 out_channels,
@@ -714,6 +787,7 @@ fn build_encoder_block(
                     (1, 1, 1),
                     1,
                     true,
+                    spatial_padding_mode,
                     vb,
                 )?),
                 in_channels,
@@ -730,6 +804,7 @@ fn build_encoder_block(
                     (1, 1, 1),
                     1,
                     true,
+                    spatial_padding_mode,
                     vb,
                 )?),
                 out_channels,
@@ -743,6 +818,7 @@ fn build_encoder_block(
                     in_channels,
                     out_channels,
                     stride,
+                    spatial_padding_mode,
                     vb,
                 )?),
                 out_channels,
@@ -756,6 +832,7 @@ fn build_decoder_block(
     cfg: &VaeBlockConfig,
     in_channels: usize,
     eps: f64,
+    spatial_padding_mode: SpatialPaddingMode,
     vb: VarBuilder,
 ) -> Result<(DecoderBlock, usize)> {
     match cfg.name.as_str() {
@@ -766,6 +843,7 @@ fn build_decoder_block(
                 cfg.num_layers,
                 cfg.inject_noise,
                 eps,
+                spatial_padding_mode,
                 vb,
             )?),
             in_channels,
@@ -778,6 +856,7 @@ fn build_decoder_block(
                     out_channels,
                     eps,
                     cfg.inject_noise,
+                    spatial_padding_mode,
                     vb,
                 )?),
                 out_channels,
@@ -792,6 +871,7 @@ fn build_decoder_block(
                     stride,
                     cfg.residual,
                     cfg.multiplier.max(1),
+                    spatial_padding_mode,
                     vb,
                 )?),
                 out_channels,
@@ -908,6 +988,7 @@ impl Ltx2VideoEncoder {
             (1, 1, 1),
             1,
             true,
+            config.encoder_spatial_padding_mode,
             vb.pp("conv_in"),
         )?;
 
@@ -918,6 +999,7 @@ impl Ltx2VideoEncoder {
                 block_cfg,
                 current_channels,
                 config.resnet_eps,
+                config.encoder_spatial_padding_mode,
                 vb.pp(format!("down_blocks.{index}")),
             )?;
             down_blocks.push(block);
@@ -937,6 +1019,7 @@ impl Ltx2VideoEncoder {
             (1, 1, 1),
             1,
             true,
+            config.encoder_spatial_padding_mode,
             vb.pp("conv_out"),
         )?;
 
@@ -1011,16 +1094,18 @@ impl Ltx2VideoDecoder {
             (1, 1, 1),
             1,
             config.decoder_causal,
+            config.decoder_spatial_padding_mode,
             vb.pp("conv_in"),
         )?;
 
         let mut up_blocks = Vec::with_capacity(config.decoder_blocks.len());
         let mut current_channels = conv_in_channels;
-        for (index, block_cfg) in config.decoder_blocks.iter().enumerate() {
+        for (index, block_cfg) in config.decoder_blocks.iter().rev().enumerate() {
             let (block, out_channels) = build_decoder_block(
                 block_cfg,
                 current_channels,
                 config.resnet_eps,
+                config.decoder_spatial_padding_mode,
                 vb.pp(format!("up_blocks.{index}")),
             )?;
             up_blocks.push(block);
@@ -1035,6 +1120,7 @@ impl Ltx2VideoDecoder {
             (1, 1, 1),
             1,
             config.decoder_causal,
+            config.decoder_spatial_padding_mode,
             vb.pp("conv_out"),
         )?;
 
@@ -1196,7 +1282,7 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoUpsampler3d, VaeBlockConfig,
+        Ltx2VideoDownsampler3d, Ltx2VideoUpsampler3d, SpatialPaddingMode, VaeBlockConfig,
     };
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -1310,7 +1396,7 @@ mod tests {
             decoder_channels,
             (3, 3, 3),
         );
-        for (index, block) in config.decoder_blocks.iter().enumerate() {
+        for (index, block) in config.decoder_blocks.iter().rev().enumerate() {
             match block.name.as_str() {
                 "res_x" => {
                     insert_res_stack(
@@ -1379,7 +1465,8 @@ mod tests {
             insert_conv(&mut tensors, "conv", 4, 1, (3, 3, 3));
             VarBuilder::from_tensors(tensors, DType::F32, &device)
         };
-        let down = Ltx2VideoDownsampler3d::new(4, 8, (2, 2, 2), down_vb).unwrap();
+        let down = Ltx2VideoDownsampler3d::new(4, 8, (2, 2, 2), SpatialPaddingMode::Zeros, down_vb)
+            .unwrap();
         let hidden = Tensor::zeros((1, 4, 3, 4, 4), DType::F32, &device).unwrap();
         let downsampled = down.forward(&hidden, true).unwrap();
         assert_eq!(downsampled.dims5().unwrap(), (1, 8, 2, 2, 2));
@@ -1389,7 +1476,9 @@ mod tests {
             insert_conv(&mut tensors, "conv", 8, 32, (3, 3, 3));
             VarBuilder::from_tensors(tensors, DType::F32, &device)
         };
-        let up = Ltx2VideoUpsampler3d::new(8, (2, 2, 2), true, 2, up_vb).unwrap();
+        let up =
+            Ltx2VideoUpsampler3d::new(8, (2, 2, 2), true, 2, SpatialPaddingMode::Reflect, up_vb)
+                .unwrap();
         let upsampled = up.forward(&downsampled, false).unwrap();
         assert_eq!(upsampled.dims5().unwrap(), (1, 4, 3, 4, 4));
     }
@@ -1415,6 +1504,8 @@ mod tests {
             latent_log_var: super::LatentLogVar::Uniform,
             encoder_base_channels: 4,
             decoder_base_channels: 4,
+            encoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            decoder_spatial_padding_mode: SpatialPaddingMode::Reflect,
             spatial_compression_ratio: 4,
             temporal_compression_ratio: 2,
             timestep_conditioning: false,

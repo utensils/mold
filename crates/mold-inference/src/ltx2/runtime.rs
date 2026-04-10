@@ -1471,43 +1471,7 @@ fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan) -> bool {
 }
 
 fn ltx2_video_vae_config() -> AutoencoderKLLtx2VideoConfig {
-    AutoencoderKLLtx2VideoConfig {
-        in_channels: 3,
-        out_channels: 3,
-        latent_channels: LTX2_VIDEO_LATENT_CHANNELS,
-        encoder_blocks: vec![
-            super::model::video_vae::VaeBlockConfig::res_x(4),
-            super::model::video_vae::VaeBlockConfig::compress("compress_space_res", 2, false),
-            super::model::video_vae::VaeBlockConfig::res_x(6),
-            super::model::video_vae::VaeBlockConfig::compress("compress_time_res", 2, false),
-            super::model::video_vae::VaeBlockConfig::res_x(6),
-            super::model::video_vae::VaeBlockConfig::compress("compress_all_res", 2, false),
-            super::model::video_vae::VaeBlockConfig::res_x(2),
-            super::model::video_vae::VaeBlockConfig::compress("compress_all_res", 2, false),
-            super::model::video_vae::VaeBlockConfig::res_x(2),
-        ],
-        decoder_blocks: vec![
-            super::model::video_vae::VaeBlockConfig::res_x_with_noise(5, false),
-            super::model::video_vae::VaeBlockConfig::compress("compress_all", 2, true),
-            super::model::video_vae::VaeBlockConfig::res_x_with_noise(5, false),
-            super::model::video_vae::VaeBlockConfig::compress("compress_all", 2, true),
-            super::model::video_vae::VaeBlockConfig::res_x_with_noise(5, false),
-            super::model::video_vae::VaeBlockConfig::compress("compress_all", 2, true),
-            super::model::video_vae::VaeBlockConfig::res_x_with_noise(5, false),
-        ],
-        patch_size: 4,
-        resnet_eps: 1e-6,
-        scaling_factor: 1.0,
-        latent_log_var: super::model::video_vae::LatentLogVar::Uniform,
-        encoder_base_channels: 128,
-        decoder_base_channels: 128,
-        spatial_compression_ratio: 32,
-        temporal_compression_ratio: 8,
-        timestep_conditioning: false,
-        decoder_causal: false,
-        latents_mean: vec![0.0; LTX2_VIDEO_LATENT_CHANNELS],
-        latents_std: vec![1.0; LTX2_VIDEO_LATENT_CHANNELS],
-    }
+    AutoencoderKLLtx2VideoConfig::default()
 }
 
 fn ltx2_scheduler_config() -> FlowMatchEulerDiscreteSchedulerConfig {
