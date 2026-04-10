@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(bridge.height, 576);
         assert_eq!(bridge.num_frames, 17);
         assert_eq!(bridge.frame_rate, 12);
-        assert_eq!(bridge.prompt_tokens.conditional.len(), 1024);
+        assert_eq!(bridge.prompt_tokens.conditional.len(), 256);
         assert_eq!(bridge.prompt_tokens.conditional.valid_len(), 1);
         assert_eq!(bridge.prompt_tokens.pad_token_id, 7);
     }

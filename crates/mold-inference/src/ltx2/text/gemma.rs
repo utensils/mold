@@ -9,7 +9,9 @@ use tokenizers::{
     TruncationParams, TruncationStrategy,
 };
 
-pub const DEFAULT_GEMMA_MAX_LENGTH: usize = 1024;
+// Upstream LTX-2 pads Gemma prompts to 256 tokens before the connector stage.
+// The connector/register path is sensitive to this absolute layout.
+pub const DEFAULT_GEMMA_MAX_LENGTH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptTokens {
@@ -467,5 +469,10 @@ mod tests {
         assert_eq!(encoded.eos_token_id, Some(7));
         assert_eq!(encoded.unconditional.valid_len(), 0);
         assert!(encoded.unconditional.input_ids.iter().all(|id| *id == 7));
+    }
+
+    #[test]
+    fn default_gemma_length_matches_upstream_ltx2_contract() {
+        assert_eq!(DEFAULT_GEMMA_MAX_LENGTH, 256);
     }
 }
