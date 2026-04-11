@@ -31,6 +31,7 @@ use crate::engine::{gpu_dtype, seeded_randn};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::ProgressReporter;
 use crate::weight_loader::load_fp8_safetensors;
+use mold_core::Ltx2SpatialUpscale;
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
 pub const LTX2_AUDIO_LATENT_CHANNELS: usize = 8;
@@ -164,8 +165,16 @@ impl Ltx2RuntimeSession {
             && stage1_shape.width > 16
             && stage1_shape.height > 16
         {
-            stage1_shape.width = (plan.width / 2).max(16);
-            stage1_shape.height = (plan.height / 2).max(16);
+            let implicit_x2_shape = derive_stage1_render_shape(
+                plan.width,
+                plan.height,
+                plan.num_frames,
+                plan.frame_rate,
+                Some(Ltx2SpatialUpscale::X2),
+                plan.temporal_upscale,
+            );
+            stage1_shape.width = implicit_x2_shape.width;
+            stage1_shape.height = implicit_x2_shape.height;
         }
         let prompt = move_prompt_encoding_to_device(
             prompt_encoder.encode_prompt_pair(&plan.prompt_tokens)?,
@@ -607,6 +616,28 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.loras.is_empty()
 }
 
+fn video_latent_shape_from_tensor(latents: &Tensor) -> Result<VideoLatentShape> {
+    let (batch, channels, frames, height, width) = latents.dims5()?;
+    Ok(VideoLatentShape {
+        batch,
+        channels,
+        frames,
+        height,
+        width,
+    })
+}
+
+fn pixel_shape_for_video_latents(latent_shape: VideoLatentShape, fps: u32) -> VideoPixelShape {
+    let pixel_shape = latent_shape.upscale(SpatioTemporalScaleFactors::default());
+    VideoPixelShape {
+        batch: pixel_shape.batch,
+        frames: pixel_shape.frames,
+        height: pixel_shape.height,
+        width: pixel_shape.width,
+        fps: fps as f32,
+    }
+}
+
 fn is_placeholder_checkpoint_error(err: &anyhow::Error) -> bool {
     let message = err.to_string().to_ascii_lowercase();
     message.contains("header too small")
@@ -760,18 +791,16 @@ fn render_real_distilled_av(
     )?;
     drop(upsampler);
     device.synchronize()?;
-    let final_pixel_shape = VideoPixelShape {
+    let requested_pixel_shape = VideoPixelShape {
         batch: 1,
         frames: plan.num_frames as usize,
         height: plan.height as usize,
         width: plan.width as usize,
         fps: plan.frame_rate as f32,
     };
-    let final_video_latent_shape = VideoLatentShape::from_pixel_shape(
-        final_pixel_shape,
-        LTX2_VIDEO_LATENT_CHANNELS,
-        SpatioTemporalScaleFactors::default(),
-    );
+    let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
+    let stage2_pixel_shape =
+        pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -780,21 +809,21 @@ fn render_real_distilled_av(
             "stage1-upscaled",
             &debug_vae,
             &stage2_clean_video_latents,
-            final_pixel_shape,
+            stage2_pixel_shape,
             dtype,
         )?;
         drop(debug_vae);
         device.synchronize()?;
     }
-    let stage2_video_positions = build_video_positions(final_pixel_shape, device)?;
+    let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
     let stage2_video_noise = seeded_randn(
         plan.seed ^ 0x5354_4147_4532_4c54,
         &[
-            final_video_latent_shape.batch,
-            final_video_latent_shape.channels,
-            final_video_latent_shape.frames,
-            final_video_latent_shape.height,
-            final_video_latent_shape.width,
+            stage2_video_latent_shape.batch,
+            stage2_video_latent_shape.channels,
+            stage2_video_latent_shape.frames,
+            stage2_video_latent_shape.height,
+            stage2_video_latent_shape.width,
         ],
         device,
         DType::F32,
@@ -832,7 +861,7 @@ fn render_real_distilled_av(
     let stage2_transformer = load_ltx2_av_transformer(plan, device)?;
     let (latents, _audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
-        final_video_latent_shape,
+        stage2_video_latent_shape,
         audio_shape,
         &stage2_video_start,
         stage2_audio_start.as_ref(),
@@ -863,7 +892,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
-    let frames = decoded_video_to_frames(&video, final_pixel_shape)?;
+    let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
     if device.is_cuda() {
         device.synchronize()?;
     }
@@ -2382,6 +2411,45 @@ mod tests {
 
         assert_eq!(prepared.video_pixel_shape.width, 608);
         assert_eq!(prepared.video_pixel_shape.height, 352);
+    }
+
+    #[test]
+    fn runtime_prepare_aligns_implicit_two_stage_shape_to_latent_grid_for_odd_sizes() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.width = 608;
+        req.height = 352;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 320);
+        assert_eq!(prepared.video_pixel_shape.height, 192);
+        assert_eq!(prepared.video_latent_shape.width, 10);
+        assert_eq!(prepared.video_latent_shape.height, 6);
+    }
+
+    #[test]
+    fn runtime_prepare_aligns_explicit_x2_spatial_upscale_shape_to_latent_grid_for_odd_sizes() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.width = 608;
+        req.height = 352;
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 320);
+        assert_eq!(prepared.video_pixel_shape.height, 192);
+        assert_eq!(prepared.video_latent_shape.width, 10);
+        assert_eq!(prepared.video_latent_shape.height, 6);
     }
 
     #[test]

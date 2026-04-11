@@ -1,6 +1,8 @@
 use image::{imageops, Rgb, RgbImage};
 use mold_core::{Ltx2SpatialUpscale, Ltx2TemporalUpscale};
 
+const LTX2_SPATIAL_LATENT_STRIDE: u32 = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stage1RenderShape {
     pub(crate) width: u32,
@@ -19,12 +21,12 @@ pub(crate) fn derive_stage1_render_shape(
 ) -> Stage1RenderShape {
     let (width, height) = match spatial_upscale {
         Some(Ltx2SpatialUpscale::X1_5) => (
-            aligned_downsample(target_width, 1.5),
-            aligned_downsample(target_height, 1.5),
+            latent_grid_downsample(target_width, Ltx2SpatialUpscale::X1_5),
+            latent_grid_downsample(target_height, Ltx2SpatialUpscale::X1_5),
         ),
         Some(Ltx2SpatialUpscale::X2) => (
-            aligned_downsample(target_width, 2.0),
-            aligned_downsample(target_height, 2.0),
+            latent_grid_downsample(target_width, Ltx2SpatialUpscale::X2),
+            latent_grid_downsample(target_height, Ltx2SpatialUpscale::X2),
         ),
         None => (target_width.max(16), target_height.max(16)),
     };
@@ -43,10 +45,21 @@ pub(crate) fn derive_stage1_render_shape(
     }
 }
 
-fn aligned_downsample(target: u32, scale: f32) -> u32 {
-    let raw = ((target as f32 / scale).floor() as u32).max(16);
-    let aligned = (raw / 16) * 16;
-    aligned.max(16).min(target.max(16))
+fn latent_grid_downsample(target: u32, upscale: Ltx2SpatialUpscale) -> u32 {
+    let target_latent = target
+        .max(LTX2_SPATIAL_LATENT_STRIDE)
+        .div_ceil(LTX2_SPATIAL_LATENT_STRIDE);
+    let stage1_latent = match upscale {
+        Ltx2SpatialUpscale::X2 => target_latent.div_ceil(2),
+        // The x1.5 rational upsampler emits floor((3 * latent + 1) / 2)
+        // spatial cells after the blur/downsample step. Choose the smallest
+        // stage-1 grid that still covers the requested target lattice.
+        Ltx2SpatialUpscale::X1_5 => target_latent
+            .saturating_mul(2)
+            .saturating_sub(1)
+            .div_ceil(3),
+    };
+    stage1_latent.max(1) * LTX2_SPATIAL_LATENT_STRIDE
 }
 
 pub(crate) fn spatially_upsample_frames(
@@ -158,6 +171,34 @@ mod tests {
         assert_eq!(shape.height, 576);
         assert_eq!(shape.frames, 9);
         assert_eq!(shape.fps, 6);
+    }
+
+    #[test]
+    fn derives_stage_one_shape_for_odd_x2_spatial_target_from_latent_grid() {
+        let shape = derive_stage1_render_shape(
+            608,
+            352,
+            17,
+            12,
+            Some(mold_core::Ltx2SpatialUpscale::X2),
+            None,
+        );
+        assert_eq!(shape.width, 320);
+        assert_eq!(shape.height, 192);
+    }
+
+    #[test]
+    fn derives_stage_one_shape_for_odd_x1_5_spatial_target_from_latent_grid() {
+        let shape = derive_stage1_render_shape(
+            608,
+            352,
+            17,
+            12,
+            Some(mold_core::Ltx2SpatialUpscale::X1_5),
+            None,
+        );
+        assert_eq!(shape.width, 416);
+        assert_eq!(shape.height, 224);
     }
 
     #[test]
