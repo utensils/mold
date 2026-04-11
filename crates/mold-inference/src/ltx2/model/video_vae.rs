@@ -425,7 +425,7 @@ impl Ltx2VideoResnetBlock3d {
         spatial_padding_mode: SpatialPaddingMode,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let norm1 = PerChannelRmsNorm::new(1, 1e-8);
+        let norm1 = PerChannelRmsNorm::new(1, eps);
         let conv1 = Ltx2VideoCausalConv3d::new(
             in_channels,
             out_channels,
@@ -437,7 +437,7 @@ impl Ltx2VideoResnetBlock3d {
             spatial_padding_mode,
             vb.pp("conv1"),
         )?;
-        let norm2 = PerChannelRmsNorm::new(1, 1e-8);
+        let norm2 = PerChannelRmsNorm::new(1, eps);
         let conv2 = Ltx2VideoCausalConv3d::new(
             out_channels,
             out_channels,
@@ -1027,7 +1027,7 @@ impl Ltx2VideoEncoder {
             patch_size: config.patch_size,
             conv_in,
             down_blocks,
-            norm_out: PerChannelRmsNorm::new(1, 1e-8),
+            norm_out: PerChannelRmsNorm::new(1, config.resnet_eps),
             conv_out,
             latent_log_var: config.latent_log_var,
         })
@@ -1128,7 +1128,7 @@ impl Ltx2VideoDecoder {
             patch_size: config.patch_size,
             conv_in,
             up_blocks,
-            norm_out: PerChannelRmsNorm::new(1, 1e-8),
+            norm_out: PerChannelRmsNorm::new(1, config.resnet_eps),
             conv_out,
             causal: config.decoder_causal,
         })
@@ -1282,7 +1282,8 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoUpsampler3d, SpatialPaddingMode, VaeBlockConfig,
+        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d,
+        SpatialPaddingMode, VaeBlockConfig,
     };
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -1481,6 +1482,39 @@ mod tests {
                 .unwrap();
         let upsampled = up.forward(&downsampled, false).unwrap();
         assert_eq!(upsampled.dims5().unwrap(), (1, 4, 3, 4, 4));
+    }
+
+    #[test]
+    fn vae_norm_layers_respect_configured_epsilon() {
+        let eps = 1e-6;
+        let block_vb = {
+            let mut tensors = HashMap::new();
+            insert_conv(&mut tensors, "conv1", 4, 4, (3, 3, 3));
+            insert_conv(&mut tensors, "conv2", 4, 4, (3, 3, 3));
+            VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+        };
+        let block =
+            Ltx2VideoResnetBlock3d::new(4, 4, eps, false, SpatialPaddingMode::Zeros, block_vb)
+                .unwrap();
+        assert_eq!(block.norm1.eps, eps);
+        assert_eq!(block.norm2.eps, eps);
+
+        let config = AutoencoderKLLtx2VideoConfig {
+            latent_channels: 4,
+            encoder_base_channels: 4,
+            decoder_base_channels: 4,
+            encoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            decoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            resnet_eps: eps,
+            latents_mean: vec![0.0; 4],
+            latents_std: vec![1.0; 4],
+            ..Default::default()
+        };
+        let vae =
+            AutoencoderKLLtx2Video::new(config.clone(), tiny_autoencoder_var_builder(&config))
+                .unwrap();
+        assert_eq!(vae.encoder.norm_out.eps, eps);
+        assert_eq!(vae.decoder.norm_out.eps, eps);
     }
 
     #[test]

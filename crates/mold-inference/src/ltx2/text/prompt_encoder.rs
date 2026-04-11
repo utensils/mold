@@ -361,6 +361,12 @@ mod tests {
                     Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
                 );
             }
+            for norm_name in ["attn1.q_norm", "attn1.k_norm"] {
+                tensors.insert(
+                    format!("{prefix}.transformer_1d_blocks.0.{norm_name}.weight"),
+                    Tensor::ones(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
             tensors.insert(
                 format!("{prefix}.transformer_1d_blocks.0.ff.net.0.proj.weight"),
                 Tensor::zeros((dim * 4, dim), DType::F32, &Device::Cpu).unwrap(),

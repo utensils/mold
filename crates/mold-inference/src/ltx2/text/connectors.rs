@@ -4,7 +4,10 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor, D};
 use candle_nn::{linear_b, Activation, Linear, Module, VarBuilder};
 
-use crate::ltx2::model::{video_transformer::apply_rotary_emb, LtxRopeType};
+use crate::ltx2::model::{
+    video_transformer::{apply_rotary_emb, RmsNorm},
+    LtxRopeType,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaddingSide {
@@ -364,6 +367,8 @@ struct ConnectorAttention {
     k_proj: Linear,
     v_proj: Linear,
     out_proj: Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     heads: usize,
     dim_head: usize,
     positional_embedding_theta: f64,
@@ -389,6 +394,8 @@ impl ConnectorAttention {
             k_proj: linear_b(dim, inner_dim, true, vb.pp("to_k"))?,
             v_proj: linear_b(dim, inner_dim, true, vb.pp("to_v"))?,
             out_proj: linear_b(inner_dim, dim, true, vb.pp("to_out").pp("0"))?,
+            q_norm: RmsNorm::new(inner_dim, 1e-6, true, vb.pp("q_norm"))?,
+            k_norm: RmsNorm::new(inner_dim, 1e-6, true, vb.pp("k_norm"))?,
             heads,
             dim_head,
             positional_embedding_theta,
@@ -401,8 +408,8 @@ impl ConnectorAttention {
     fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let (batch, seq, dim) = xs.dims3()?;
         let inner_dim = self.heads * self.dim_head;
-        let q = scale_free_rms_norm(&self.q_proj.forward(xs)?, 1e-6)?;
-        let k = scale_free_rms_norm(&self.k_proj.forward(xs)?, 1e-6)?;
+        let q = self.q_norm.forward(&self.q_proj.forward(xs)?)?;
+        let k = self.k_norm.forward(&self.k_proj.forward(xs)?)?;
         let v = self.v_proj.forward(xs)?;
 
         let q = q
@@ -791,9 +798,9 @@ mod tests {
     use candle_nn::VarBuilder;
 
     use super::{
-        convert_to_additive_mask, replace_padded_with_registers, Embeddings1DConnector,
-        EmbeddingsFeatureExtractor, EmbeddingsProcessor, FeatureExtractorV1, FeatureExtractorV2,
-        PaddingSide, Projection,
+        convert_to_additive_mask, replace_padded_with_registers, ConnectorAttention,
+        Embeddings1DConnector, EmbeddingsFeatureExtractor, EmbeddingsProcessor,
+        FeatureExtractorV1, FeatureExtractorV2, PaddingSide, Projection,
     };
     use crate::ltx2::model::LtxRopeType;
 
@@ -832,6 +839,60 @@ mod tests {
         );
     }
 
+    fn attention_var_builder(q_norm_scale: f32, k_norm_scale: f32) -> VarBuilder<'static> {
+        let mut tensors = HashMap::new();
+        let eye = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (2, 2), &Device::Cpu).unwrap();
+        let zeros = Tensor::zeros(2, DType::F32, &Device::Cpu).unwrap();
+        for linear_name in ["to_q", "to_k", "to_v"] {
+            tensors.insert(format!("{linear_name}.weight"), eye.clone());
+            tensors.insert(format!("{linear_name}.bias"), zeros.clone());
+        }
+        tensors.insert("to_out.0.weight".to_string(), eye);
+        tensors.insert("to_out.0.bias".to_string(), zeros.clone());
+        tensors.insert(
+            "q_norm.weight".to_string(),
+            Tensor::full(q_norm_scale, 2, &Device::Cpu).unwrap(),
+        );
+        tensors.insert(
+            "k_norm.weight".to_string(),
+            Tensor::full(k_norm_scale, 2, &Device::Cpu).unwrap(),
+        );
+        VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    #[test]
+    fn connector_attention_uses_learned_qk_norm_weights() {
+        let xs = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let zero_q = ConnectorAttention::new(
+            2,
+            1,
+            2,
+            10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
+            attention_var_builder(0.0, 1.0),
+        )
+        .unwrap();
+        let unit_q = ConnectorAttention::new(
+            2,
+            1,
+            2,
+            10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
+            attention_var_builder(1.0, 1.0),
+        )
+        .unwrap();
+
+        let zero_out = zero_q.forward(&xs, None).unwrap().to_vec3::<f32>().unwrap();
+        let unit_out = unit_q.forward(&xs, None).unwrap().to_vec3::<f32>().unwrap();
+
+        assert_eq!(zero_out[0][0], zero_out[0][1]);
+        assert_ne!(unit_out[0][0], unit_out[0][1]);
+    }
+
     fn zero_connector_var_builder(
         dim: usize,
         num_layers: usize,
@@ -847,6 +908,12 @@ mod tests {
                 tensors.insert(
                     format!("transformer_1d_blocks.{layer}.{linear_name}.bias"),
                     Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+            for norm_name in ["attn1.q_norm", "attn1.k_norm"] {
+                tensors.insert(
+                    format!("transformer_1d_blocks.{layer}.{norm_name}.weight"),
+                    Tensor::ones(dim, DType::F32, &Device::Cpu).unwrap(),
                 );
             }
             tensors.insert(

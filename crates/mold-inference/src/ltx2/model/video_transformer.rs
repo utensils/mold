@@ -326,11 +326,14 @@ impl Module for LtxLinear {
                 // from the scaled-mm export path, but upstream fp8-cast ignores
                 // them. Respect that default here to avoid distorting native
                 // inference unless an explicit debug override enables them.
-                let weight = weight.to_dtype(dtype)?;
-                let weight = match weight_scale {
-                    Some(scale) => weight.broadcast_mul(&scale.to_dtype(dtype)?)?,
-                    None => weight,
-                };
+                let weight = dequantize_fp8_weight_for_runtime(
+                    weight,
+                    match fp8_weight_scale_mode() {
+                        Fp8WeightScaleMode::Skip => None,
+                        Fp8WeightScaleMode::Apply => weight_scale.as_ref(),
+                    },
+                    dtype,
+                )?;
                 let weight_t = weight.t()?;
                 let out = match *xs.dims() {
                     [batch0, batch1, tokens, hidden] => xs
@@ -3279,6 +3282,77 @@ mod tests {
             .unwrap();
 
         let actual = dequantized.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_linear_forward_ignores_weight_scale_by_default_in_fp8_cast_mode() {
+        let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "skip");
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.125f32, &device).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: Some(weight_scale),
+            input_scale: None,
+            bias: None,
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+        let expected = xs.reshape((2, 2)).unwrap();
+        let expected = expected
+            .matmul(&weight.to_dtype(DType::F32).unwrap().t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn fp8_linear_forward_can_apply_weight_scale_when_requested() {
+        let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
+        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "apply");
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.125f32, &device).unwrap();
+        let linear = LtxLinear::Fp8 {
+            weight: weight.clone(),
+            weight_scale: Some(weight_scale.clone()),
+            input_scale: None,
+            bias: None,
+        };
+
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+        let expected_weight = weight
+            .to_dtype(DType::F32)
+            .unwrap()
+            .broadcast_mul(&weight_scale)
+            .unwrap();
+        let expected = xs.reshape((2, 2)).unwrap();
+        let expected = expected
+            .matmul(&expected_weight.t().unwrap())
+            .unwrap()
+            .reshape((1, 2, 2))
+            .unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let expected = expected.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");

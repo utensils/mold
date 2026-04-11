@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use safetensors::SafeTensors;
+use safetensors::tensor::TensorInfo;
+use serde_json::Value;
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -16,12 +18,7 @@ fn main() -> Result<()> {
         bail!("checkpoint not found: {}", checkpoint.display());
     }
 
-    let bytes = fs::read(&checkpoint)
-        .with_context(|| format!("failed to read {}", checkpoint.display()))?;
-    let (_header_size, metadata) = SafeTensors::read_metadata(&bytes)
-        .with_context(|| format!("failed to read metadata from {}", checkpoint.display()))?;
-    let tensors = SafeTensors::deserialize(&bytes)
-        .with_context(|| format!("failed to parse {}", checkpoint.display()))?;
+    let (metadata, tensors) = read_safetensors_header(&checkpoint)?;
 
     let patterns = args.collect::<Vec<_>>();
     if patterns.is_empty() {
@@ -32,9 +29,9 @@ fn main() -> Result<()> {
     for pattern in patterns {
         println!("pattern={pattern}");
         let mut matches = tensors
-            .names()
-            .into_iter()
+            .keys()
             .filter(|name| name.contains(&pattern))
+            .cloned()
             .collect::<Vec<_>>();
         matches.sort_unstable();
         if matches.is_empty() {
@@ -42,48 +39,67 @@ fn main() -> Result<()> {
             continue;
         }
         for name in matches {
-            let view = tensors.tensor(name)?;
-            if let Some(scalar) = scalar_preview(&view) {
-                println!(
-                    "  {name}: dtype={:?} shape={:?} value={scalar}",
-                    view.dtype(),
-                    view.shape()
-                );
-            } else {
-                println!(
-                    "  {name}: dtype={:?} shape={:?}",
-                    view.dtype(),
-                    view.shape()
-                );
-            }
+            let info = tensors.get(&name).expect("match came from keys()");
+            println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
         }
     }
 
     Ok(())
 }
 
-fn print_summary(metadata: &safetensors::tensor::Metadata, tensors: &SafeTensors<'_>) {
+fn read_safetensors_header(
+    path: &PathBuf,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, TensorInfo>)> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf)
+        .with_context(|| format!("failed to read header length from {}", path.display()))?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)
+        .with_context(|| format!("failed to read header bytes from {}", path.display()))?;
+    let header: BTreeMap<String, Value> = serde_json::from_slice(&header_buf)
+        .with_context(|| format!("failed to parse header JSON from {}", path.display()))?;
+
+    let mut metadata = BTreeMap::new();
+    let mut tensors = BTreeMap::new();
+    for (name, value) in header {
+        if name == "__metadata__" {
+            if let Value::Object(entries) = value {
+                for (key, value) in entries {
+                    metadata.insert(key, value.as_str().unwrap_or_default().to_string());
+                }
+            }
+            continue;
+        }
+        let info: TensorInfo = serde_json::from_value(value)
+            .with_context(|| format!("failed to parse tensor info for {name}"))?;
+        tensors.insert(name, info);
+    }
+
+    Ok((metadata, tensors))
+}
+
+fn print_summary(metadata: &BTreeMap<String, String>, tensors: &BTreeMap<String, TensorInfo>) {
     let mut dtype_counts = BTreeMap::new();
     let mut scale_keys = Vec::new();
     let mut interesting = Vec::new();
+    let mut prefixes = BTreeSet::new();
 
     println!("metadata:");
-    match metadata.metadata() {
-        Some(metadata) if metadata.is_empty() => println!("  <empty>"),
-        Some(metadata) => {
-            for (key, value) in metadata.iter() {
-                println!("  {key}={value}");
-            }
+    if metadata.is_empty() {
+        println!("  <none>");
+    } else {
+        for (key, value) in metadata {
+            println!("  {key}={value}");
         }
-        None => println!("  <none>"),
     }
 
-    for name in tensors.names() {
-        if let Ok(view) = tensors.tensor(name) {
-            *dtype_counts
-                .entry(format!("{:?}", view.dtype()))
-                .or_insert(0usize) += 1;
-        }
+    for (name, info) in tensors {
+        *dtype_counts
+            .entry(format!("{:?}", info.dtype))
+            .or_insert(0usize) += 1;
         if name.contains("weight_scale") || name.contains("input_scale") {
             scale_keys.push(name.to_string());
         }
@@ -98,21 +114,20 @@ fn print_summary(metadata: &safetensors::tensor::Metadata, tensors: &SafeTensors
         {
             interesting.push(name.to_string());
         }
+        if let Some(prefix) = name.split('.').next() {
+            prefixes.insert(prefix.to_string());
+        }
     }
 
-    println!("tensor_count={}", tensors.names().len());
+    println!("tensor_count={}", tensors.len());
     println!("dtype_counts:");
     for (dtype, count) in dtype_counts {
         println!("  {dtype}: {count}");
     }
     println!("scale_tensor_count={}", scale_keys.len());
     for name in scale_keys.iter().take(32) {
-        if let Ok(view) = tensors.tensor(name) {
-            println!(
-                "  {name}: dtype={:?} shape={:?}",
-                view.dtype(),
-                view.shape()
-            );
+        if let Some(info) = tensors.get(name) {
+            println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
         }
     }
     if scale_keys.len() > 32 {
@@ -120,33 +135,15 @@ fn print_summary(metadata: &safetensors::tensor::Metadata, tensors: &SafeTensors
     }
     println!("interesting_keys:");
     for name in interesting.iter().take(64) {
-        if let Ok(view) = tensors.tensor(name) {
-            println!(
-                "  {name}: dtype={:?} shape={:?}",
-                view.dtype(),
-                view.shape()
-            );
+        if let Some(info) = tensors.get(name) {
+            println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
         }
     }
     if interesting.len() > 64 {
         println!("  ... {} more interesting keys", interesting.len() - 64);
     }
-}
-
-fn scalar_preview(view: &safetensors::tensor::TensorView<'_>) -> Option<String> {
-    if !view.shape().is_empty() {
-        return None;
-    }
-    match view.dtype() {
-        safetensors::Dtype::F32 => {
-            let bytes: [u8; 4] = view.data().try_into().ok()?;
-            Some(format!("{:.8}", f32::from_le_bytes(bytes)))
-        }
-        safetensors::Dtype::BF16 => {
-            let bytes: [u8; 2] = view.data().try_into().ok()?;
-            let bits = u16::from_le_bytes(bytes) as u32;
-            Some(format!("{:.8}", f32::from_bits(bits << 16)))
-        }
-        _ => None,
+    println!("top_level_prefixes:");
+    for prefix in prefixes.into_iter().take(32) {
+        println!("  {prefix}");
     }
 }

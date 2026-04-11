@@ -1447,9 +1447,9 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         audio_out_channels: plan.preset.transformer.audio_out_channels,
         audio_cross_attention_dim: plan.preset.transformer.audio_cross_attention_dim,
         audio_positional_embedding_max_pos: vec![20],
-        // Upstream AV configs use the main timestep embed at 1000*sigma but keep
-        // the cross-modality gate branch on raw sigma via av_ca_factor=1/1000.
-        av_ca_timestep_scale_multiplier: 1.0,
+        // Upstream AV configs scale the main timestep path by 1000 and then
+        // recover the raw-sigma gate branch through av_ca_factor = av_ca / 1000.
+        av_ca_timestep_scale_multiplier: 1000.0,
         cross_attention_adaln: plan.preset.transformer.cross_attention_adaln,
     }
 }
@@ -2381,7 +2381,7 @@ mod tests {
 
         let config = ltx2_video_transformer_config(&plan);
 
-        assert_eq!(config.av_ca_timestep_scale_multiplier, 1.0);
+        assert_eq!(config.av_ca_timestep_scale_multiplier, 1000.0);
     }
 
     #[test]

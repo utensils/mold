@@ -143,10 +143,23 @@ impl RotaryEmbedding {
         })
     }
 
-    fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (_, _, seq, _) = q.dims4()?;
-        let cos = self.cos.narrow(0, 0, seq)?;
-        let sin = self.sin.narrow(0, 0, seq)?;
+    fn apply(&self, q: &Tensor, k: &Tensor, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (batch, _, seq, _) = q.dims4()?;
+        let (pos_batch, pos_seq) = position_ids.dims2()?;
+        if pos_batch != batch || pos_seq != seq {
+            bail!(
+                "Gemma rotary position ids shape mismatch: expected [{batch}, {seq}], got [{pos_batch}, {pos_seq}]"
+            );
+        }
+        let position_ids = position_ids.to_dtype(DType::U32)?.flatten_all()?;
+        let cos =
+            self.cos
+                .index_select(&position_ids, 0)?
+                .reshape((batch, seq, self.cos.dim(1)?))?;
+        let sin =
+            self.sin
+                .index_select(&position_ids, 0)?
+                .reshape((batch, seq, self.sin.dim(1)?))?;
         Ok((
             candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?,
             candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?,
@@ -252,7 +265,12 @@ impl Attention {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        position_ids: &Tensor,
+    ) -> Result<Tensor> {
         let (batch, seq, _) = xs.dims3()?;
         let q = self
             .q_proj
@@ -271,7 +289,7 @@ impl Attention {
             .transpose(1, 2)?;
         let q = self.q_norm.forward(&q)?;
         let k = self.k_norm.forward(&k)?;
-        let (q, k) = self.rotary_emb.apply(&q, &k)?;
+        let (q, k) = self.rotary_emb.apply(&q, &k, position_ids)?;
         let k = candle_transformers::utils::repeat_kv(k, self.num_kv_groups)?.contiguous()?;
         let v = candle_transformers::utils::repeat_kv(v, self.num_kv_groups)?.contiguous()?;
 
@@ -334,10 +352,15 @@ impl DecoderLayer {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        position_ids: &Tensor,
+    ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(&xs, attention_mask)?;
+        let xs = self.self_attn.forward(&xs, attention_mask, position_ids)?;
         let xs = xs.apply(&self.post_attention_layernorm)?;
         let xs = (xs + residual)?;
         let residual = &xs;
@@ -455,6 +478,7 @@ impl GemmaHiddenStateEncoder {
         let mut hidden_states = Vec::with_capacity(self.layer_count() + 1);
         hidden_states.push(xs.clone());
 
+        let position_ids = build_position_ids(attention_mask)?;
         let full_mask = build_attention_mask(attention_mask, None, self.dtype, self.device())?;
         let sliding_mask = build_attention_mask(
             attention_mask,
@@ -473,7 +497,7 @@ impl GemmaHiddenStateEncoder {
                         Some(&full_mask)
                     };
                     xs = layer
-                        .forward(&xs, mask)
+                        .forward(&xs, mask, &position_ids)
                         .with_context(|| format!("Gemma eager decoder layer {index} failed"))?;
                     if index != last_layer_index {
                         hidden_states.push(xs.clone());
@@ -489,7 +513,7 @@ impl GemmaHiddenStateEncoder {
                         Some(&full_mask)
                     };
                     xs = layer
-                        .forward(&xs, mask)
+                        .forward(&xs, mask, &position_ids)
                         .with_context(|| format!("Gemma streaming decoder layer {index} failed"))?;
                     if index != last_layer_index {
                         hidden_states.push(xs.clone());
@@ -537,6 +561,25 @@ impl GemmaHiddenStateEncoder {
     }
 }
 
+fn build_position_ids(attention_mask: &Tensor) -> Result<Tensor> {
+    let device = attention_mask.device().clone();
+    let mask_rows = attention_mask.to_device(&Device::Cpu)?.to_vec2::<u8>()?;
+    let batch = mask_rows.len();
+    let seq = mask_rows.first().map(Vec::len).unwrap_or(0);
+    let mut position_ids = Vec::with_capacity(batch * seq);
+
+    // Upstream Gemma3 uses absolute cache positions for prompt encoding even
+    // when the tokenizer left-pads the sequence. Match that rotary phase
+    // layout here instead of restarting valid tokens at zero.
+    for _row in mask_rows {
+        for position in 0..seq {
+            position_ids.push(position as u32);
+        }
+    }
+
+    Tensor::from_vec(position_ids, (batch, seq), &device).map_err(Into::into)
+}
+
 fn build_attention_mask(
     attention_mask: &Tensor,
     sliding_window: Option<usize>,
@@ -575,7 +618,7 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Activation, VarBuilder};
 
-    use super::{build_attention_mask, GemmaConfig, GemmaHiddenStateEncoder};
+    use super::{build_attention_mask, build_position_ids, GemmaConfig, GemmaHiddenStateEncoder};
 
     fn tiny_config() -> GemmaConfig {
         GemmaConfig {
@@ -810,5 +853,17 @@ mod tests {
         assert_eq!(values[4], 0.0);
         assert!(values[2] < -1e20);
         assert_eq!(values[8], 0.0);
+    }
+
+    #[test]
+    fn position_ids_follow_absolute_sequence_order_with_left_padding() {
+        let mask = Tensor::new(&[[0u8, 0, 1, 1, 1]], &Device::Cpu).unwrap();
+
+        let position_ids = build_position_ids(&mask).unwrap();
+
+        assert_eq!(
+            position_ids.to_vec2::<u32>().unwrap(),
+            vec![vec![0, 1, 2, 3, 4]]
+        );
     }
 }

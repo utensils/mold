@@ -237,6 +237,7 @@
               pkgs.gh
               pkgs.jq
               pkgs.viu
+              pkgs.mpv
               pkgs.cargo-llvm-cov
               pkgs.ffmpeg
               pkgs.imagemagick
