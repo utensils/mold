@@ -73,7 +73,7 @@ impl Ltx2VaeLatentStats {
                 device,
             )?
         };
-        let config = ltx2_video_vae_config();
+        let config = ltx2_video_vae_config(plan);
         let stats_vb = vb.pp("vae").pp("per_channel_statistics");
         let mean = if stats_vb.contains_tensor("mean-of-means") {
             stats_vb.get(config.latent_channels, "mean-of-means")?
@@ -1268,9 +1268,25 @@ fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Resu
             .i((.., index, .., ..))?
             .permute((1, 2, 0))?
             .contiguous()?;
+        let (decoded_height, decoded_width, decoded_channels) = frame.dims3()?;
+        if decoded_channels != 3 {
+            anyhow::bail!(
+                "expected decoded LTX-2 frame to have 3 channels, got {decoded_channels}"
+            );
+        }
         let data: Vec<u8> = frame.flatten_all()?.to_vec1()?;
-        let rgb = RgbImage::from_raw(pixel_shape.width as u32, pixel_shape.height as u32, data)
+        let rgb = RgbImage::from_raw(decoded_width as u32, decoded_height as u32, data)
             .context("failed to build an RGB frame from the decoded LTX-2 tensor")?;
+        let rgb = if decoded_width != pixel_shape.width || decoded_height != pixel_shape.height {
+            imageops::resize(
+                &rgb,
+                pixel_shape.width as u32,
+                pixel_shape.height as u32,
+                imageops::FilterType::Triangle,
+            )
+        } else {
+            rgb
+        };
         frames.push(rgb);
     }
     Ok(frames)
@@ -1415,12 +1431,16 @@ fn load_ltx2_video_vae(
         )?
     };
     Ok(AutoencoderKLLtx2Video::new(
-        ltx2_video_vae_config(),
+        ltx2_video_vae_config(plan),
         vb.pp("vae"),
     )?)
 }
 
 fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransformer3DModelConfig {
+    let cross_attention_adaln = plan.preset.transformer.cross_attention_adaln
+        && !ltx_debug_disable_cross_attention_adaln_enabled();
+    let apply_gated_attention = plan.preset.transformer.apply_gated_attention
+        && !ltx_debug_disable_transformer_gated_attention_enabled();
     Ltx2VideoTransformer3DModelConfig {
         in_channels: plan.preset.transformer.in_channels,
         out_channels: plan.preset.transformer.out_channels,
@@ -1434,6 +1454,10 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         norm_elementwise_affine: false,
         norm_eps: 1e-6,
         caption_channels: plan.preset.video_connector_inner_dim(),
+        caption_projection_in_transformer: matches!(
+            plan.preset.caption_projection,
+            crate::ltx2::preset::CaptionProjectionPlacement::Transformer
+        ),
         attention_bias: true,
         attention_out_bias: true,
         positional_embedding_theta: 10_000.0,
@@ -1447,16 +1471,18 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         audio_out_channels: plan.preset.transformer.audio_out_channels,
         audio_cross_attention_dim: plan.preset.transformer.audio_cross_attention_dim,
         audio_positional_embedding_max_pos: vec![20],
-        // Upstream AV configs scale the main timestep path by 1000 and then
-        // recover the raw-sigma gate branch through av_ca_factor = av_ca / 1000.
+        apply_gated_attention,
+        // Public LTX-2 checkpoints set this to 1000.0, which keeps the AV gate
+        // branch on the same sigma*1000 scale as the main timestep embedding.
         av_ca_timestep_scale_multiplier: 1000.0,
-        cross_attention_adaln: plan.preset.transformer.cross_attention_adaln,
+        cross_attention_adaln,
     }
 }
 
 fn transformer_weight_dtype(_plan: &Ltx2GeneratePlan, device: &candle_core::Device) -> DType {
-    // Public LTX-2 FP8 manifests use the upstream fp8-cast policy, which stores
-    // some weights in float8 but runs the transformer in the normal compute dtype.
+    // Public LTX-2 FP8 manifests keep transformer weights in float8 storage but
+    // run the native Rust matmuls in the normal compute dtype after applying the
+    // checkpoint-provided per-tensor weight scales.
     gpu_dtype(device)
 }
 
@@ -1480,8 +1506,12 @@ fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan) -> bool {
     false
 }
 
-fn ltx2_video_vae_config() -> AutoencoderKLLtx2VideoConfig {
-    AutoencoderKLLtx2VideoConfig::default()
+fn ltx2_video_vae_config(plan: &Ltx2GeneratePlan) -> AutoencoderKLLtx2VideoConfig {
+    if plan.preset.name == "ltx-2.3-22b" {
+        AutoencoderKLLtx2VideoConfig::ltx2_22b()
+    } else {
+        AutoencoderKLLtx2VideoConfig::default()
+    }
 }
 
 fn ltx2_scheduler_config() -> FlowMatchEulerDiscreteSchedulerConfig {
@@ -1545,6 +1575,14 @@ fn ltx_debug_alt_prompt() -> Option<String> {
 
 fn ltx_debug_disable_audio_branch_enabled() -> bool {
     env::var_os("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
+}
+
+fn ltx_debug_disable_cross_attention_adaln_enabled() -> bool {
+    env::var_os("MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN").is_some()
+}
+
+fn ltx_debug_disable_transformer_gated_attention_enabled() -> bool {
+    env::var_os("MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION").is_some()
 }
 
 fn ltx_debug_log_file() -> &'static Mutex<Option<std::fs::File>> {
@@ -2129,6 +2167,7 @@ mod tests {
                     num_attention_heads: 2,
                     attention_head_dim: 4,
                     num_layers: 1,
+                    apply_gated_attention: false,
                     positional_embedding_theta: 10_000.0,
                     positional_embedding_max_pos: &[32],
                     rope_type: crate::ltx2::model::LtxRopeType::Split,
@@ -2140,6 +2179,7 @@ mod tests {
                     num_attention_heads: 1,
                     attention_head_dim: 4,
                     num_layers: 1,
+                    apply_gated_attention: false,
                     positional_embedding_theta: 10_000.0,
                     positional_embedding_max_pos: &[32],
                     rope_type: crate::ltx2::model::LtxRopeType::Split,
@@ -2441,5 +2481,4 @@ mod tests {
 
         assert_eq!(effective_native_guidance_scale(&plan), 4.5);
     }
-
 }

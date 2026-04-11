@@ -63,6 +63,7 @@ pub struct Ltx2VideoTransformer3DModelConfig {
     pub norm_elementwise_affine: bool,
     pub norm_eps: f64,
     pub caption_channels: usize,
+    pub caption_projection_in_transformer: bool,
     pub attention_bias: bool,
     pub attention_out_bias: bool,
     pub positional_embedding_theta: f64,
@@ -76,6 +77,7 @@ pub struct Ltx2VideoTransformer3DModelConfig {
     pub audio_out_channels: usize,
     pub audio_cross_attention_dim: usize,
     pub audio_positional_embedding_max_pos: Vec<usize>,
+    pub apply_gated_attention: bool,
     pub av_ca_timestep_scale_multiplier: f64,
     pub cross_attention_adaln: bool,
 }
@@ -95,6 +97,7 @@ impl Default for Ltx2VideoTransformer3DModelConfig {
             norm_elementwise_affine: false,
             norm_eps: 1e-6,
             caption_channels: 3840,
+            caption_projection_in_transformer: true,
             attention_bias: true,
             attention_out_bias: true,
             positional_embedding_theta: 10_000.0,
@@ -108,7 +111,8 @@ impl Default for Ltx2VideoTransformer3DModelConfig {
             audio_out_channels: 128,
             audio_cross_attention_dim: 2048,
             audio_positional_embedding_max_pos: vec![20],
-            av_ca_timestep_scale_multiplier: 1.0,
+            apply_gated_attention: false,
+            av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
         }
     }
@@ -276,20 +280,16 @@ fn dequantize_fp8_weight_for_runtime(
     weight_scale: Option<&Tensor>,
     runtime_dtype: DType,
 ) -> Result<Tensor> {
-    let mut dequantized = weight.to_dtype(DType::F32)?;
+    let mut dequantized = weight.to_dtype(runtime_dtype)?;
     if let Some(scale) = weight_scale {
         let scale = if scale.device().same_device(weight.device()) {
-            scale.to_dtype(DType::F32)?
+            scale.to_dtype(runtime_dtype)?
         } else {
-            scale.to_device(weight.device())?.to_dtype(DType::F32)?
+            scale.to_device(weight.device())?.to_dtype(runtime_dtype)?
         };
         dequantized = dequantized.broadcast_mul(&scale)?;
     }
-    if runtime_dtype == DType::F32 {
-        Ok(dequantized)
-    } else {
-        dequantized.to_dtype(runtime_dtype)
-    }
+    Ok(dequantized)
 }
 
 impl Module for LtxLinear {
@@ -320,12 +320,11 @@ impl Module for LtxLinear {
                     Some(scale) => emulate_static_fp8_input_quantization(&xs, scale, dtype)?,
                     None => xs,
                 };
-                // The public LTX-2 fp8-cast policy stores transformer weights in
-                // float8 but runs the actual matmul in the normal compute dtype.
-                // Some published checkpoints still carry `weight_scale` tensors
-                // from the scaled-mm export path, but upstream fp8-cast ignores
-                // them. Respect that default here to avoid distorting native
-                // inference unless an explicit debug override enables them.
+                // Public LTX-2 FP8 checkpoints store transformer weights in
+                // float8 together with per-tensor dequantization scales. Apply
+                // `weight_scale` by default; keep `input_scale` emulation behind
+                // the explicit debug env knob because the shipped checkpoints do
+                // not require activation re-quantization for coherent results.
                 let weight = dequantize_fp8_weight_for_runtime(
                     weight,
                     match fp8_weight_scale_mode() {
@@ -363,7 +362,8 @@ fn emulate_static_fp8_input_quantization(
     let scale_mode = match std::env::var("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
         Ok("divide") | Ok("emulate") => Fp8InputScaleMode::EmulateDivide,
         Ok("multiply") => Fp8InputScaleMode::EmulateMultiply,
-        Ok("skip") | Err(_) => Fp8InputScaleMode::Skip,
+        Ok("skip") => Fp8InputScaleMode::Skip,
+        Err(_) => Fp8InputScaleMode::Skip,
         Ok(_) => Fp8InputScaleMode::Skip,
     };
     let scale = input_scale.to_dtype(compute_dtype)?;
@@ -385,8 +385,9 @@ fn emulate_static_fp8_input_quantization(
 fn fp8_weight_scale_mode() -> Fp8WeightScaleMode {
     match std::env::var("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE").as_deref() {
         Ok("apply") | Ok("scaled-mm") => Fp8WeightScaleMode::Apply,
-        Ok("skip") | Err(_) => Fp8WeightScaleMode::Skip,
-        Ok(_) => Fp8WeightScaleMode::Skip,
+        Ok("skip") => Fp8WeightScaleMode::Skip,
+        Err(_) => Fp8WeightScaleMode::Apply,
+        Ok(_) => Fp8WeightScaleMode::Apply,
     }
 }
 
@@ -877,6 +878,7 @@ pub struct LtxAttention {
     to_v: LtxLinear,
 
     to_out: LtxLinear,
+    to_gate_logits: Option<LtxLinear>,
     dropout: nn::Dropout,
 }
 
@@ -893,6 +895,7 @@ impl LtxAttention {
         out_bias: bool,
         qk_norm: &str,
         rope_type: LtxRopeType,
+        apply_gated_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         if qk_norm != "rms_norm_across_heads" && qk_norm != "rms_norm" {
@@ -914,6 +917,9 @@ impl LtxAttention {
         let to_v = LtxLinear::load(cross_attention_dim, inner_kv_dim, bias, vb.pp("to_v"))?;
 
         let to_out = LtxLinear::load(inner_dim, query_dim, out_bias, vb.pp("to_out").pp("0"))?;
+        let to_gate_logits = apply_gated_attention
+            .then(|| LtxLinear::load(query_dim, heads, true, vb.pp("to_gate_logits")))
+            .transpose()?;
         let dropout = nn::Dropout::new(dropout as f32);
 
         Ok(Self {
@@ -930,6 +936,7 @@ impl LtxAttention {
             to_k,
             to_v,
             to_out,
+            to_gate_logits,
             dropout,
         })
     }
@@ -1041,7 +1048,17 @@ impl LtxAttention {
         let out_f32 = att.matmul(&v_f32)?;
         let out = out_f32.to_dtype(dtype)?;
 
-        let out = out.transpose(1, 2)?.contiguous()?;
+        let mut out = out.transpose(1, 2)?.contiguous()?;
+        if let Some(to_gate_logits) = &self.to_gate_logits {
+            let gates = to_gate_logits.forward(hidden_states)?;
+            let gates = nn::ops::sigmoid(&gates)?.affine(2.0, 0.0)?;
+            let gates = if gates.dtype() == out.dtype() {
+                gates
+            } else {
+                gates.to_dtype(out.dtype())?
+            };
+            out = out.broadcast_mul(&gates.unsqueeze(D::Minus1)?)?;
+        }
         let out = out.reshape((b, q_len, self.inner_dim))?;
 
         let out = self.to_out.forward(&out)?;
@@ -1077,6 +1094,7 @@ impl LtxVideoTransformerBlock {
         attention_out_bias: bool,
         eps: f64,
         elementwise_affine: bool,
+        apply_gated_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let norm1 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm1"))?;
@@ -1091,6 +1109,7 @@ impl LtxVideoTransformerBlock {
             attention_out_bias,
             qk_norm,
             rope_type,
+            apply_gated_attention,
             vb.pp("attn1"),
         )?;
         let norm2 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm2"))?;
@@ -1105,6 +1124,7 @@ impl LtxVideoTransformerBlock {
             attention_out_bias,
             qk_norm,
             rope_type,
+            apply_gated_attention,
             vb.pp("attn2"),
         )?;
         let norm3 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm3"))?;
@@ -1297,6 +1317,7 @@ impl Ltx2VideoTransformer3DModel {
                 config.attention_out_bias,
                 config.norm_eps,
                 config.norm_elementwise_affine,
+                config.apply_gated_attention,
                 vb.pp("transformer_blocks").pp(layer_idx.to_string()),
             )?);
         }
@@ -1393,6 +1414,7 @@ impl Ltx2VideoTransformer3DModel {
             self.config.attention_out_bias,
             self.config.norm_eps,
             self.config.norm_elementwise_affine,
+            self.config.apply_gated_attention,
             blocks_vb.pp(index.to_string()),
         )
     }
@@ -1641,6 +1663,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("attn1"),
         )?;
         let video_attn2 = LtxAttention::new(
@@ -1654,6 +1677,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("attn2"),
         )?;
         let video_ff = FeedForward::new(video_dim, vb.pp("ff"))?;
@@ -1673,6 +1697,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("audio_attn1"),
         )?;
         let audio_attn2 = LtxAttention::new(
@@ -1686,6 +1711,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("audio_attn2"),
         )?;
         let audio_ff = FeedForward::new(audio_dim, vb.pp("audio_ff"))?;
@@ -1705,6 +1731,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("audio_to_video_attn"),
         )?;
         let video_to_audio_attn = LtxAttention::new(
@@ -1718,6 +1745,7 @@ impl LtxAvTransformerBlock {
             config.attention_out_bias,
             &config.qk_norm,
             config.rope_type,
+            config.apply_gated_attention,
             vb.pp("video_to_audio_attn"),
         )?;
         let scale_shift_table_a2v_ca_audio =
@@ -2078,13 +2106,15 @@ enum AvTransformerBlockSource {
 pub struct Ltx2AvTransformer3DModel {
     patchify_proj: nn::Linear,
     adaln_single: AdaLayerNormSingle,
-    caption_projection: PixArtAlphaTextProjection,
+    prompt_adaln_single: Option<AdaLayerNormSingle>,
+    caption_projection: Option<PixArtAlphaTextProjection>,
     scale_shift_table: Tensor,
     norm_out: LayerNormNoParams,
     proj_out: nn::Linear,
     audio_patchify_proj: nn::Linear,
     audio_adaln_single: AdaLayerNormSingle,
-    audio_caption_projection: PixArtAlphaTextProjection,
+    audio_prompt_adaln_single: Option<AdaLayerNormSingle>,
+    audio_caption_projection: Option<PixArtAlphaTextProjection>,
     audio_scale_shift_table: Tensor,
     audio_norm_out: LayerNormNoParams,
     audio_proj_out: nn::Linear,
@@ -2103,6 +2133,7 @@ impl Ltx2AvTransformer3DModel {
     pub fn new(config: &Ltx2VideoTransformer3DModelConfig, vb: VarBuilder) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+        let adaln_embedding_coefficient = if config.cross_attention_adaln { 9 } else { 6 };
         let cross_max = config
             .positional_embedding_max_pos
             .first()
@@ -2134,15 +2165,28 @@ impl Ltx2AvTransformer3DModel {
             patchify_proj: nn::linear(config.in_channels, video_dim, vb.pp("patchify_proj"))?,
             adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 video_dim,
-                6,
+                adaln_embedding_coefficient,
                 vb.pp("adaln_single"),
             )?,
-            caption_projection: PixArtAlphaTextProjection::new_with_out_features(
-                config.caption_channels,
-                video_dim,
-                video_dim,
-                vb.pp("caption_projection"),
-            )?,
+            prompt_adaln_single: if config.cross_attention_adaln {
+                Some(AdaLayerNormSingle::new_with_coefficient(
+                    video_dim,
+                    2,
+                    vb.pp("prompt_adaln_single"),
+                )?)
+            } else {
+                None
+            },
+            caption_projection: if config.caption_projection_in_transformer {
+                Some(PixArtAlphaTextProjection::new_with_out_features(
+                    config.caption_channels,
+                    video_dim,
+                    video_dim,
+                    vb.pp("caption_projection"),
+                )?)
+            } else {
+                None
+            },
             scale_shift_table: vb.get((2, video_dim), "scale_shift_table")?,
             norm_out: LayerNormNoParams::new(config.norm_eps),
             proj_out: nn::linear(video_dim, config.out_channels, vb.pp("proj_out"))?,
@@ -2153,15 +2197,28 @@ impl Ltx2AvTransformer3DModel {
             )?,
             audio_adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 audio_dim,
-                6,
+                adaln_embedding_coefficient,
                 vb.pp("audio_adaln_single"),
             )?,
-            audio_caption_projection: PixArtAlphaTextProjection::new_with_out_features(
-                config.caption_channels,
-                audio_dim,
-                audio_dim,
-                vb.pp("audio_caption_projection"),
-            )?,
+            audio_prompt_adaln_single: if config.cross_attention_adaln {
+                Some(AdaLayerNormSingle::new_with_coefficient(
+                    audio_dim,
+                    2,
+                    vb.pp("audio_prompt_adaln_single"),
+                )?)
+            } else {
+                None
+            },
+            audio_caption_projection: if config.caption_projection_in_transformer {
+                Some(PixArtAlphaTextProjection::new_with_out_features(
+                    config.caption_channels,
+                    audio_dim,
+                    audio_dim,
+                    vb.pp("audio_caption_projection"),
+                )?)
+            } else {
+                None
+            },
             audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
             audio_norm_out: LayerNormNoParams::new(config.norm_eps),
             audio_proj_out: nn::linear(
@@ -2227,6 +2284,7 @@ impl Ltx2AvTransformer3DModel {
     ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+        let adaln_embedding_coefficient = if config.cross_attention_adaln { 9 } else { 6 };
         let cross_max = config
             .positional_embedding_max_pos
             .first()
@@ -2244,15 +2302,28 @@ impl Ltx2AvTransformer3DModel {
             patchify_proj: nn::linear(config.in_channels, video_dim, vb.pp("patchify_proj"))?,
             adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 video_dim,
-                6,
+                adaln_embedding_coefficient,
                 vb.pp("adaln_single"),
             )?,
-            caption_projection: PixArtAlphaTextProjection::new_with_out_features(
-                config.caption_channels,
-                video_dim,
-                video_dim,
-                vb.pp("caption_projection"),
-            )?,
+            prompt_adaln_single: if config.cross_attention_adaln {
+                Some(AdaLayerNormSingle::new_with_coefficient(
+                    video_dim,
+                    2,
+                    vb.pp("prompt_adaln_single"),
+                )?)
+            } else {
+                None
+            },
+            caption_projection: if config.caption_projection_in_transformer {
+                Some(PixArtAlphaTextProjection::new_with_out_features(
+                    config.caption_channels,
+                    video_dim,
+                    video_dim,
+                    vb.pp("caption_projection"),
+                )?)
+            } else {
+                None
+            },
             scale_shift_table: vb.get((2, video_dim), "scale_shift_table")?,
             norm_out: LayerNormNoParams::new(config.norm_eps),
             proj_out: nn::linear(video_dim, config.out_channels, vb.pp("proj_out"))?,
@@ -2263,15 +2334,28 @@ impl Ltx2AvTransformer3DModel {
             )?,
             audio_adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 audio_dim,
-                6,
+                adaln_embedding_coefficient,
                 vb.pp("audio_adaln_single"),
             )?,
-            audio_caption_projection: PixArtAlphaTextProjection::new_with_out_features(
-                config.caption_channels,
-                audio_dim,
-                audio_dim,
-                vb.pp("audio_caption_projection"),
-            )?,
+            audio_prompt_adaln_single: if config.cross_attention_adaln {
+                Some(AdaLayerNormSingle::new_with_coefficient(
+                    audio_dim,
+                    2,
+                    vb.pp("audio_prompt_adaln_single"),
+                )?)
+            } else {
+                None
+            },
+            audio_caption_projection: if config.caption_projection_in_transformer {
+                Some(PixArtAlphaTextProjection::new_with_out_features(
+                    config.caption_channels,
+                    audio_dim,
+                    audio_dim,
+                    vb.pp("audio_caption_projection"),
+                )?)
+            } else {
+                None
+            },
             audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
             audio_norm_out: LayerNormNoParams::new(config.norm_eps),
             audio_proj_out: nn::linear(
@@ -2369,7 +2453,8 @@ impl Ltx2AvTransformer3DModel {
         positions: &Tensor,
         patchify_proj: &nn::Linear,
         adaln_single: &AdaLayerNormSingle,
-        caption_projection: &PixArtAlphaTextProjection,
+        prompt_adaln_single: Option<&AdaLayerNormSingle>,
+        caption_projection: Option<&PixArtAlphaTextProjection>,
         rope: &Ltx2VideoRotaryPosEmbed,
     ) -> Result<LtxPreparedModality> {
         let x = patchify_proj.forward(latent)?;
@@ -2377,7 +2462,17 @@ impl Ltx2AvTransformer3DModel {
         let batch = x.dim(0)?;
         let timesteps = timesteps.reshape((batch, 1, timesteps.dim(1)?))?;
         let embedded_timestep = embedded_timestep.reshape((batch, 1, embedded_timestep.dim(1)?))?;
-        let context = caption_projection.forward(context)?;
+        let prompt_timestep = if let Some(prompt_adaln_single) = prompt_adaln_single {
+            let (prompt_timestep, _) = prompt_adaln_single.forward(&timestep.flatten_all()?)?;
+            Some(prompt_timestep.reshape((batch, 1, prompt_timestep.dim(1)?))?)
+        } else {
+            None
+        };
+        let context = if let Some(caption_projection) = caption_projection {
+            caption_projection.forward(context)?
+        } else {
+            context.clone()
+        };
         let rope = rope.forward(&x, positions)?;
         Ok(LtxPreparedModality {
             x,
@@ -2389,7 +2484,7 @@ impl Ltx2AvTransformer3DModel {
             cross_rope: None,
             cross_scale_shift_timestep: None,
             cross_gate_timestep: None,
-            prompt_timestep: None,
+            prompt_timestep,
         })
     }
 
@@ -2454,7 +2549,8 @@ impl Ltx2AvTransformer3DModel {
             video_positions,
             &self.patchify_proj,
             &self.adaln_single,
-            &self.caption_projection,
+            self.prompt_adaln_single.as_ref(),
+            self.caption_projection.as_ref(),
             &self.video_rope,
         )?;
         let mut audio = match (
@@ -2474,7 +2570,8 @@ impl Ltx2AvTransformer3DModel {
                 audio_positions,
                 &self.audio_patchify_proj,
                 &self.audio_adaln_single,
-                &self.audio_caption_projection,
+                self.audio_prompt_adaln_single.as_ref(),
+                self.audio_caption_projection.as_ref(),
                 &self.audio_rope,
             )?),
             (None, None, None) => None,
@@ -2629,6 +2726,14 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: these tests serialize access to the process-wide env var
+            // through `fp8_input_scale_env_lock`.
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -2649,6 +2754,10 @@ mod tests {
     }
 
     fn attention_var_builder(dim: usize) -> VarBuilder<'static> {
+        attention_var_builder_with_gate(dim, None)
+    }
+
+    fn attention_var_builder_with_gate(dim: usize, gate_bias: Option<f32>) -> VarBuilder<'static> {
         let device = Device::Cpu;
         let mut tensors = HashMap::new();
         let mut identity = vec![0.0f32; dim * dim];
@@ -2673,6 +2782,16 @@ mod tests {
             "norm_k.weight".to_string(),
             Tensor::ones(dim, DType::F32, &device).unwrap(),
         );
+        if let Some(gate_bias) = gate_bias {
+            tensors.insert(
+                "to_gate_logits.weight".to_string(),
+                Tensor::zeros((1, dim), DType::F32, &device).unwrap(),
+            );
+            tensors.insert(
+                "to_gate_logits.bias".to_string(),
+                Tensor::full(gate_bias, 1, &device).unwrap(),
+            );
+        }
         VarBuilder::from_tensors(tensors, DType::F32, &device)
     }
 
@@ -2704,7 +2823,12 @@ mod tests {
         tensors.insert(format!("{prefix}.weight"), weight);
         tensors.insert(
             format!("{prefix}.bias"),
-            Tensor::from_vec(patterned_values(out_dim, prefix.len() + 7), out_dim, &device).unwrap(),
+            Tensor::from_vec(
+                patterned_values(out_dim, prefix.len() + 7),
+                out_dim,
+                &device,
+            )
+            .unwrap(),
         );
         if fp8 {
             tensors.insert(
@@ -2734,8 +2858,12 @@ mod tests {
     ) {
         tensors.insert(
             name.to_string(),
-            Tensor::from_vec(patterned_values(rows * cols, offset), (rows, cols), &Device::Cpu)
-                .unwrap(),
+            Tensor::from_vec(
+                patterned_values(rows * cols, offset),
+                (rows, cols),
+                &Device::Cpu,
+            )
+            .unwrap(),
         );
     }
 
@@ -2775,8 +2903,20 @@ mod tests {
         hidden_dim: usize,
         out_dim: usize,
     ) {
-        insert_linear(tensors, &format!("{prefix}.linear_1"), hidden_dim, in_dim, false);
-        insert_linear(tensors, &format!("{prefix}.linear_2"), out_dim, hidden_dim, false);
+        insert_linear(
+            tensors,
+            &format!("{prefix}.linear_1"),
+            hidden_dim,
+            in_dim,
+            false,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.linear_2"),
+            out_dim,
+            hidden_dim,
+            false,
+        );
     }
 
     fn insert_attention(
@@ -2786,15 +2926,49 @@ mod tests {
         context_dim: usize,
         heads: usize,
         dim_head: usize,
+        apply_gated_attention: bool,
         fp8: bool,
     ) {
         let inner_dim = heads * dim_head;
         insert_rms_norm(tensors, &format!("{prefix}.norm_q"), inner_dim);
         insert_rms_norm(tensors, &format!("{prefix}.norm_k"), inner_dim);
-        insert_linear(tensors, &format!("{prefix}.to_q"), inner_dim, query_dim, fp8);
-        insert_linear(tensors, &format!("{prefix}.to_k"), inner_dim, context_dim, fp8);
-        insert_linear(tensors, &format!("{prefix}.to_v"), inner_dim, context_dim, fp8);
-        insert_linear(tensors, &format!("{prefix}.to_out.0"), query_dim, inner_dim, fp8);
+        insert_linear(
+            tensors,
+            &format!("{prefix}.to_q"),
+            inner_dim,
+            query_dim,
+            fp8,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.to_k"),
+            inner_dim,
+            context_dim,
+            fp8,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.to_v"),
+            inner_dim,
+            context_dim,
+            fp8,
+        );
+        insert_linear(
+            tensors,
+            &format!("{prefix}.to_out.0"),
+            query_dim,
+            inner_dim,
+            fp8,
+        );
+        if apply_gated_attention {
+            insert_linear(
+                tensors,
+                &format!("{prefix}.to_gate_logits"),
+                heads,
+                query_dim,
+                fp8,
+            );
+        }
     }
 
     fn insert_feed_forward(
@@ -2823,6 +2997,7 @@ mod tests {
             video_dim,
             config.num_attention_heads,
             config.attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_attention(
@@ -2832,6 +3007,7 @@ mod tests {
             config.cross_attention_dim,
             config.num_attention_heads,
             config.attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_feed_forward(tensors, &format!("{prefix}.ff"), video_dim, fp8);
@@ -2850,6 +3026,7 @@ mod tests {
             audio_dim,
             config.audio_num_attention_heads,
             config.audio_attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_attention(
@@ -2859,6 +3036,7 @@ mod tests {
             config.audio_cross_attention_dim,
             config.audio_num_attention_heads,
             config.audio_attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_feed_forward(tensors, &format!("{prefix}.audio_ff"), audio_dim, fp8);
@@ -2877,6 +3055,7 @@ mod tests {
             audio_dim,
             config.audio_num_attention_heads,
             config.audio_attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_attention(
@@ -2886,6 +3065,7 @@ mod tests {
             video_dim,
             config.audio_num_attention_heads,
             config.audio_attention_head_dim,
+            config.apply_gated_attention,
             fp8,
         );
         insert_matrix(
@@ -2918,6 +3098,7 @@ mod tests {
             norm_elementwise_affine: false,
             norm_eps: 1e-6,
             caption_channels: 4,
+            caption_projection_in_transformer: true,
             attention_bias: true,
             attention_out_bias: true,
             positional_embedding_theta: 10_000.0,
@@ -2931,6 +3112,7 @@ mod tests {
             audio_out_channels: 2,
             audio_cross_attention_dim: 8,
             audio_positional_embedding_max_pos: vec![4],
+            apply_gated_attention: false,
             av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
         }
@@ -2959,7 +3141,13 @@ mod tests {
             video_dim,
         );
         insert_matrix(&mut tensors, "scale_shift_table", 2, video_dim, 11);
-        insert_linear(&mut tensors, "proj_out", config.out_channels, video_dim, false);
+        insert_linear(
+            &mut tensors,
+            "proj_out",
+            config.out_channels,
+            video_dim,
+            false,
+        );
 
         insert_linear(
             &mut tensors,
@@ -3036,6 +3224,7 @@ mod tests {
             true,
             "rms_norm",
             LtxRopeType::Interleaved,
+            false,
             attention_var_builder(4),
         )
         .unwrap();
@@ -3090,6 +3279,53 @@ mod tests {
             baseline.to_vec3::<f32>().unwrap(),
             with_video_rope.to_vec3::<f32>().unwrap()
         );
+    }
+
+    #[test]
+    fn text_attention_zero_init_gates_preserve_output() {
+        let hidden_states = Tensor::new(
+            &[[[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let ungated = LtxAttention::new(
+            4,
+            1,
+            1,
+            4,
+            0.0,
+            true,
+            None,
+            true,
+            "rms_norm",
+            LtxRopeType::Interleaved,
+            false,
+            attention_var_builder(4),
+        )
+        .unwrap();
+        let gated = LtxAttention::new(
+            4,
+            1,
+            1,
+            4,
+            0.0,
+            true,
+            None,
+            true,
+            "rms_norm",
+            LtxRopeType::Interleaved,
+            true,
+            attention_var_builder_with_gate(4, Some(0.0)),
+        )
+        .unwrap();
+
+        let ungated_out = ungated
+            .forward(&hidden_states, None, None, None, None)
+            .unwrap();
+        let gated_out = gated
+            .forward(&hidden_states, None, None, None, None)
+            .unwrap();
+        assert_tensors_close(&ungated_out, &gated_out, 1e-5);
     }
 
     #[test]
@@ -3229,7 +3465,7 @@ mod tests {
     }
 
     #[test]
-    fn fp8_weight_scale_is_ignored_by_default_in_fp8_cast_mode() {
+    fn fp8_weight_scale_can_be_skipped_for_debugging() {
         let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
         let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "skip");
         let device = Device::Cpu;
@@ -3257,9 +3493,9 @@ mod tests {
     }
 
     #[test]
-    fn fp8_weight_scale_can_be_applied_when_requested() {
+    fn fp8_weight_scale_is_applied_by_default() {
         let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
-        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "apply");
+        let _guard = EnvVarGuard::unset("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE");
         let device = Device::Cpu;
         let weight = Tensor::from_vec(vec![2.0f32, -4.0], (1, 2), &device)
             .unwrap()
@@ -3289,7 +3525,7 @@ mod tests {
     }
 
     #[test]
-    fn fp8_linear_forward_ignores_weight_scale_by_default_in_fp8_cast_mode() {
+    fn fp8_linear_forward_can_skip_weight_scale_for_debugging() {
         let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
         let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "skip");
         let device = Device::Cpu;
@@ -3322,9 +3558,9 @@ mod tests {
     }
 
     #[test]
-    fn fp8_linear_forward_can_apply_weight_scale_when_requested() {
+    fn fp8_linear_forward_applies_weight_scale_by_default() {
         let _env_lock = fp8_weight_scale_env_lock().lock().unwrap();
-        let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE", "apply");
+        let _guard = EnvVarGuard::unset("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE");
         let device = Device::Cpu;
         let xs = Tensor::from_vec(vec![0.42f32, -0.91, 1.37, -0.18], (1, 2, 2), &device).unwrap();
         let weight = Tensor::from_vec(vec![1.5f32, -0.75, 0.25, 2.0], (2, 2), &device)
@@ -3491,8 +3727,8 @@ mod tests {
         let audio_attention_mask = Tensor::new(&[[1u8, 0, 1, 0]], &device).unwrap();
         let video_positions = Tensor::from_vec(
             vec![
-                0.0f32, 1.0, 1.0, 2.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
-                1.0, 2.0, 2.0, 3.0,
+                0.0f32, 1.0, 1.0, 2.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 2.0,
+                2.0, 3.0,
             ],
             (1, 3, 3, 2),
             &device,
@@ -3529,10 +3765,6 @@ mod tests {
             .unwrap();
 
         assert_tensors_close(&eager_video, &streaming_video, 1e-4);
-        assert_tensors_close(
-            &eager_audio.unwrap(),
-            &streaming_audio.unwrap(),
-            1e-4,
-        );
+        assert_tensors_close(&eager_audio.unwrap(), &streaming_audio.unwrap(), 1e-4);
     }
 }
