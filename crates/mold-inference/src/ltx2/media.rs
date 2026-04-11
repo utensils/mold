@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::{GenericImage, Rgb, RgbImage};

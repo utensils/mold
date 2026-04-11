@@ -8,19 +8,22 @@ pipelines.
 ::: warning Current implementation
 LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the supported
 backend for real local generation, CPU is a correctness-oriented fallback, and
-Metal is explicitly unsupported for this family.
+Metal is explicitly unsupported for this family. The verified coherent native
+smoke path on this branch is the LTX-2.3 22B CUDA text-to-video flow; the
+remaining CUDA acceptance matrix is still being re-verified before this issue
+closes.
 :::
 
 ## Supported Models
 
-| Model | Path | Notes |
-| ----- | ---- | ----- |
-| `ltx-2-19b-dev:fp8` | Two-stage | Highest-quality published 19B FP8 checkpoint |
-| `ltx-2-19b-distilled:fp8` | Distilled | Fastest 19B path, recommended default |
-| `ltx-2.3-22b-dev:fp8` | Two-stage | Highest-quality 22B FP8 checkpoint |
-| `ltx-2.3-22b-distilled:fp8` | Distilled | Fastest 22B path |
+| Model                       | Path      | Notes                                        |
+| --------------------------- | --------- | -------------------------------------------- |
+| `ltx-2-19b-dev:fp8`         | Two-stage | Highest-quality published 19B FP8 checkpoint |
+| `ltx-2-19b-distilled:fp8`   | Distilled | Fastest 19B path, recommended default        |
+| `ltx-2.3-22b-dev:fp8`       | Two-stage | Highest-quality 22B FP8 checkpoint           |
+| `ltx-2.3-22b-distilled:fp8` | Distilled | Fastest 22B path                             |
 
-## What Works
+## Implemented Request Surface
 
 - Text-to-audio+video with synchronized MP4 output
 - First-frame image-to-video via `--image`

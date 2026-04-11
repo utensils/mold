@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+
 // LTX-2 video transformer — adapted from candle-transformers-mold's LTX Video model.
 // This keeps the proven video-only denoiser structure but patches the positional
 // embedding path and config surface to match the native LTX-2 checkpoints.
@@ -641,7 +644,7 @@ fn apply_split_rotary_emb(
             inner_dim
         );
     }
-    if head_dim % 2 != 0 {
+    if !head_dim.is_multiple_of(2) {
         candle_core::bail!("split rotary requires an even head_dim, got {head_dim}");
     }
 
@@ -742,9 +745,7 @@ impl Ltx2VideoRotaryPosEmbed {
         for (dim, max_pos) in self.max_pos.iter().enumerate() {
             normalized.push(grid.i((.., dim, ..))?.affine(1.0 / *max_pos as f64, 0.0)?);
         }
-        Tensor::stack(&normalized, 2)?
-            .reshape((batch, seq, pos_dims))
-            .map_err(Into::into)
+        Tensor::stack(&normalized, 2)?.reshape((batch, seq, pos_dims))
     }
 
     fn base_indices(&self, device: &Device, position_dims: usize) -> Result<Tensor> {
@@ -2495,7 +2496,7 @@ impl Ltx2AvTransformer3DModel {
         batch: usize,
     ) -> Result<Tensor> {
         let (output, _) = adaln.forward(&timestep.flatten_all()?.affine(scale, 0.0)?)?;
-        Ok(output.reshape((batch, 1, output.dim(1)?))?)
+        output.reshape((batch, 1, output.dim(1)?))
     }
 
     fn process_output(

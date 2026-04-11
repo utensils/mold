@@ -164,14 +164,29 @@ For Qwen-Image and Qwen-Image-Edit:
 
 ### Debug and Family-Specific Knobs
 
-| Variable                           | Default | Description                                        |
-| ---------------------------------- | ------- | -------------------------------------------------- |
-| `MOLD_SD3_DEBUG`                   | —       | Enable verbose SD3.5 pipeline logging              |
-| `MOLD_QWEN_DEBUG`                  | —       | Enable verbose Qwen-Image pipeline logging         |
-| `MOLD_ZIMAGE_DEBUG`                | —       | Enable verbose Z-Image pipeline logging            |
-| `MOLD_LTX_DEBUG`                   | —       | Enable verbose LTX Video / LTX-2 pipeline logging  |
-| `MOLD_WUERSTCHEN_DEBUG`            | —       | Enable verbose Wuerstchen pipeline logging         |
-| `MOLD_WUERSTCHEN_DECODER_GUIDANCE` | `0.0`   | Override decoder-stage CFG guidance for Wuerstchen |
+| Variable                                              | Default                    | Description                                                                                                  |
+| ----------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `MOLD_SD3_DEBUG`                                      | —                          | Enable verbose SD3.5 pipeline logging                                                                        |
+| `MOLD_QWEN_DEBUG`                                     | —                          | Enable verbose Qwen-Image pipeline logging                                                                   |
+| `MOLD_ZIMAGE_DEBUG`                                   | —                          | Enable verbose Z-Image pipeline logging                                                                      |
+| `MOLD_LTX_DEBUG`                                      | —                          | Enable verbose LTX Video / LTX-2 pipeline logging                                                            |
+| `MOLD_LTX_DEBUG_FILE`                                 | `/tmp/mold-ltx2-debug.log` | Append LTX Video / LTX-2 debug output to a file                                                              |
+| `MOLD_LTX_DEBUG_COMPARE_UNCOND`                       | —                          | Log conditional vs unconditional LTX-2 prompt-context comparisons                                            |
+| `MOLD_LTX_DEBUG_ALT_PROMPT`                           | —                          | Use an alternate prompt string for LTX-2 prompt-sensitivity debugging                                        |
+| `MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH`                 | —                          | Debug-only LTX-2 switch to disable the audio branch during native runs                                       |
+| `MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN`        | —                          | Debug-only LTX-2 switch to bypass cross-attention AdaLN modulation                                           |
+| `MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION` | —                          | Debug-only LTX-2 switch to bypass transformer gated attention                                                |
+| `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`            | —                          | Force the native LTX-2 prompt encoder onto CPU while leaving the rest of the runtime on the selected backend |
+| `MOLD_LTX2_DEBUG_STAGE_PREFIX`                        | —                          | Write decoded native LTX-2 stage artifacts using this filename prefix                                        |
+| `MOLD_LTX2_DEBUG_BLOCKS`                              | —                          | Emit per-block native LTX-2 transformer debug logs                                                           |
+| `MOLD_LTX2_DEBUG_BLOCK_DETAIL`                        | —                          | Restrict detailed native LTX-2 block logging to a specific transformer block index                           |
+| `MOLD_LTX2_DEBUG_LOAD_BLOCKS`                         | —                          | Log native LTX-2 transformer block loading details                                                           |
+| `MOLD_LTX2_FORCE_EAGER`                               | —                          | Force eager native LTX-2 transformer loading instead of layer streaming                                      |
+| `MOLD_LTX2_FORCE_STREAMING`                           | —                          | Force native LTX-2 transformer layer streaming                                                               |
+| `MOLD_LTX2_FP8_INPUT_SCALE_MODE`                      | `skip`                     | Debug override for native LTX-2 FP8 input-scale handling (`skip`, `emulate`, `divide`, `multiply`)           |
+| `MOLD_LTX2_FP8_WEIGHT_SCALE_MODE`                     | `apply`                    | Debug override for native LTX-2 FP8 checkpoint weight-scale handling (`apply`, `skip`, `scaled-mm`)          |
+| `MOLD_WUERSTCHEN_DEBUG`                               | —                          | Enable verbose Wuerstchen pipeline logging                                                                   |
+| `MOLD_WUERSTCHEN_DECODER_GUIDANCE`                    | `0.0`                      | Override decoder-stage CFG guidance for Wuerstchen                                                           |
 
 These are intended for troubleshooting and development rather than normal use.
 

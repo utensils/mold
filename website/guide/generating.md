@@ -157,6 +157,8 @@ LTX-2 also adds:
 - `--retake <start:end>`
 - repeatable `--lora`
 - `--camera-control <preset-or-path>`
+- `--spatial-upscale <x1.5|x2>`
+- `--temporal-upscale x2`
 
 ::: warning Backend policy
 LTX-2 now runs natively in Rust inside `mold-inference`. CUDA is the supported

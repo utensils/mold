@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use anyhow::{bail, Context, Result};
 use candle_core::Device;
 use mold_core::{
@@ -31,6 +33,10 @@ pub struct Ltx2Engine {
 }
 
 impl Ltx2Engine {
+    fn debug_force_cpu_prompt_encoder() -> bool {
+        std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some()
+    }
+
     pub fn new(model_name: String, paths: ModelPaths, _load_strategy: LoadStrategy) -> Self {
         Self {
             model_name,
@@ -175,7 +181,7 @@ impl Ltx2Engine {
             num_frames: req.frames.unwrap_or(97),
             frame_rate: req.fps.unwrap_or(24),
             num_inference_steps: req.steps,
-            guidance: req.guidance as f64,
+            guidance: req.guidance,
             quantization: self.request_quantization(),
             streaming_prefetch_count: Some(preset.streaming_prefetch_count),
             conditioning,
@@ -218,13 +224,18 @@ impl Ltx2Engine {
         plan: &Ltx2GeneratePlan,
         device: Device,
     ) -> Result<Ltx2RuntimeSession> {
-        let dtype = gpu_dtype(&device);
+        let prompt_device = if Self::debug_force_cpu_prompt_encoder() && !device.is_cpu() {
+            Device::Cpu
+        } else {
+            device.clone()
+        };
+        let dtype = gpu_dtype(&prompt_device);
         self.emit("Loading native LTX-2 prompt encoder");
         let prompt_encoder = NativePromptEncoder::load(
             Path::new(&plan.gemma_root),
             Path::new(&plan.checkpoint_path),
             &plan.preset,
-            &device,
+            &prompt_device,
             dtype,
         )?;
         Ok(Ltx2RuntimeSession::new(prompt_encoder))
@@ -693,6 +704,12 @@ mod tests {
                     Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
                 );
             }
+            for norm_name in ["attn1.q_norm", "attn1.k_norm"] {
+                tensors.insert(
+                    format!("{prefix}.transformer_1d_blocks.0.{norm_name}.weight"),
+                    Tensor::ones(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
             tensors.insert(
                 format!("{prefix}.transformer_1d_blocks.0.ff.net.0.proj.weight"),
                 Tensor::zeros((dim * 4, dim), DType::F32, &Device::Cpu).unwrap(),
@@ -734,6 +751,7 @@ mod tests {
                     num_attention_heads: 2,
                     attention_head_dim: 4,
                     num_layers: 1,
+                    apply_gated_attention: false,
                     positional_embedding_theta: 10_000.0,
                     positional_embedding_max_pos: &[32],
                     rope_type: crate::ltx2::model::LtxRopeType::Split,
@@ -745,6 +763,7 @@ mod tests {
                     num_attention_heads: 1,
                     attention_head_dim: 4,
                     num_layers: 1,
+                    apply_gated_attention: false,
                     positional_embedding_theta: 10_000.0,
                     positional_embedding_max_pos: &[32],
                     rope_type: crate::ltx2::model::LtxRopeType::Split,

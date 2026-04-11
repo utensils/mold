@@ -178,7 +178,7 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`
 
-**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the verified path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`.
+**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the verified path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The verified coherent native smoke path on this branch is the LTX-2.3 22B CUDA text-to-video flow; the remaining CUDA acceptance matrix is still being re-verified.
 
 ### Model Selection Guide
 

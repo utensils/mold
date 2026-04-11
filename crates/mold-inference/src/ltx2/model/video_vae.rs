@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::large_enum_variant)]
 
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
@@ -183,8 +184,7 @@ impl Ltx2VideoCausalConv3d {
         match self.spatial_padding_mode {
             SpatialPaddingMode::Zeros => x
                 .pad_with_zeros(3, self.spatial_pad_w, self.spatial_pad_w)?
-                .pad_with_zeros(2, self.spatial_pad_h, self.spatial_pad_h)
-                .map_err(Into::into),
+                .pad_with_zeros(2, self.spatial_pad_h, self.spatial_pad_h),
             SpatialPaddingMode::Reflect => self.reflect_pad_4d(x),
         }
     }
@@ -557,11 +557,7 @@ impl Ltx2VideoResBlockStack {
         let mut res_blocks = Vec::with_capacity(num_layers);
         let mut current_in = in_channels;
         for index in 0..num_layers {
-            let current_out = if index == 0 {
-                out_channels
-            } else {
-                out_channels
-            };
+            let current_out = out_channels;
             res_blocks.push(Ltx2VideoResnetBlock3d::new(
                 current_in,
                 current_out,
@@ -729,6 +725,37 @@ impl Default for AutoencoderKLLtx2VideoConfig {
             decoder_causal: false,
             latents_mean: vec![0.0; 128],
             latents_std: vec![1.0; 128],
+        }
+    }
+}
+
+impl AutoencoderKLLtx2VideoConfig {
+    pub(crate) fn ltx2_22b() -> Self {
+        Self {
+            encoder_blocks: vec![
+                VaeBlockConfig::res_x(4),
+                VaeBlockConfig::compress("compress_space_res", 2, true),
+                VaeBlockConfig::res_x(6),
+                VaeBlockConfig::compress("compress_time_res", 2, true),
+                VaeBlockConfig::res_x(4),
+                VaeBlockConfig::compress("compress_all_res", 2, true),
+                VaeBlockConfig::res_x(2),
+                VaeBlockConfig::compress("compress_all_res", 1, true),
+                VaeBlockConfig::res_x(2),
+            ],
+            decoder_blocks: vec![
+                VaeBlockConfig::res_x_with_noise(4, false),
+                VaeBlockConfig::compress("compress_space", 2, false),
+                VaeBlockConfig::res_x_with_noise(6, false),
+                VaeBlockConfig::compress("compress_time", 2, false),
+                VaeBlockConfig::res_x_with_noise(4, false),
+                VaeBlockConfig::compress("compress_all", 1, false),
+                VaeBlockConfig::res_x_with_noise(2, false),
+                VaeBlockConfig::compress("compress_all", 2, false),
+                VaeBlockConfig::res_x_with_noise(2, false),
+            ],
+            decoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            ..Self::default()
         }
     }
 }
@@ -1282,8 +1309,8 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d,
-        SpatialPaddingMode, VaeBlockConfig,
+        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialPaddingMode,
+        VaeBlockConfig,
     };
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -1553,5 +1580,67 @@ mod tests {
         let latents = Tensor::zeros((1, 4, 2, 2, 2), DType::F32, &Device::Cpu).unwrap();
         let (_output, video) = vae.decode(&latents, None, false, false).unwrap();
         assert_eq!(video.dims5().unwrap(), (1, 3, 3, 8, 8));
+    }
+
+    #[test]
+    fn ltx2_22b_config_matches_embedded_checkpoint_layout() {
+        let config = AutoencoderKLLtx2VideoConfig::ltx2_22b();
+        assert_eq!(
+            config
+                .encoder_blocks
+                .iter()
+                .map(|block| (
+                    block.name.as_str(),
+                    block.num_layers,
+                    block.multiplier,
+                    block.residual
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("res_x", 4, 1, false),
+                ("compress_space_res", 0, 2, true),
+                ("res_x", 6, 1, false),
+                ("compress_time_res", 0, 2, true),
+                ("res_x", 4, 1, false),
+                ("compress_all_res", 0, 2, true),
+                ("res_x", 2, 1, false),
+                ("compress_all_res", 0, 1, true),
+                ("res_x", 2, 1, false),
+            ]
+        );
+        assert_eq!(
+            config
+                .decoder_blocks
+                .iter()
+                .map(|block| {
+                    (
+                        block.name.as_str(),
+                        block.num_layers,
+                        block.multiplier,
+                        block.residual,
+                        block.inject_noise,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("res_x", 4, 1, false, false),
+                ("compress_space", 0, 2, false, false),
+                ("res_x", 6, 1, false, false),
+                ("compress_time", 0, 2, false, false),
+                ("res_x", 4, 1, false, false),
+                ("compress_all", 0, 1, false, false),
+                ("res_x", 2, 1, false, false),
+                ("compress_all", 0, 2, false, false),
+                ("res_x", 2, 1, false, false),
+            ]
+        );
+        assert_eq!(
+            config.encoder_spatial_padding_mode,
+            SpatialPaddingMode::Zeros
+        );
+        assert_eq!(
+            config.decoder_spatial_padding_mode,
+            SpatialPaddingMode::Zeros
+        );
     }
 }

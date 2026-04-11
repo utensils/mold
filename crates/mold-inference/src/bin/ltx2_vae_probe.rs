@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +78,7 @@ fn roundtrip_vae(
     if output_path.extension().and_then(|ext| ext.to_str()) != Some("mp4") {
         bail!("output must be an .mp4 path: {}", output_path.display());
     }
-    if width % 32 != 0 || height % 32 != 0 {
+    if !width.is_multiple_of(32) || !height.is_multiple_of(32) {
         bail!("width and height must be divisible by 32, got {width}x{height}");
     }
     if frames == 0 {
@@ -100,13 +102,13 @@ fn roundtrip_vae(
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&checkpoint_path), dtype, &device)?
     };
-    let vae = AutoencoderKLLtx2Video::new(AutoencoderKLLtx2VideoConfig::default(), vb.pp("vae"))
-        .with_context(|| {
-            format!(
-                "failed to load native LTX-2 VAE from '{}'",
-                checkpoint_path.display()
-            )
-        })?;
+    let vae_config = infer_vae_config(checkpoint_path);
+    let vae = AutoencoderKLLtx2Video::new(vae_config, vb.pp("vae")).with_context(|| {
+        format!(
+            "failed to load native LTX-2 VAE from '{}'",
+            checkpoint_path.display()
+        )
+    })?;
 
     println!(
         "device={:?} dtype={:?} mean_of_means_rms={:.6} std_of_means_rms={:.6}",
@@ -183,6 +185,15 @@ fn roundtrip_vae(
     );
 
     Ok(())
+}
+
+fn infer_vae_config(checkpoint_path: &Path) -> AutoencoderKLLtx2VideoConfig {
+    let checkpoint_name = checkpoint_path.to_string_lossy().to_ascii_lowercase();
+    if checkpoint_name.contains("ltx-2.3-22b") {
+        AutoencoderKLLtx2VideoConfig::ltx2_22b()
+    } else {
+        AutoencoderKLLtx2VideoConfig::default()
+    }
 }
 
 #[cfg(feature = "mp4")]
@@ -289,4 +300,29 @@ fn tensor_rms(tensor: &Tensor) -> Result<f32> {
         .mean_all()?
         .to_scalar::<f32>()?
         .sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::infer_vae_config;
+
+    #[test]
+    fn infer_vae_config_selects_22b_layout_from_checkpoint_name() {
+        let config = infer_vae_config(Path::new("/tmp/ltx-2.3-22b-distilled-fp8.safetensors"));
+
+        assert_eq!(config.encoder_blocks[0].num_layers, 4);
+        assert_eq!(config.encoder_blocks[1].name, "compress_space_res");
+        assert_eq!(config.decoder_blocks[1].name, "compress_space");
+    }
+
+    #[test]
+    fn infer_vae_config_defaults_for_non_22b_checkpoint() {
+        let config = infer_vae_config(Path::new("/tmp/ltx-2-19b-distilled-fp8.safetensors"));
+
+        assert_eq!(config.encoder_blocks[1].name, "compress_space_res");
+        assert!(!config.encoder_blocks[1].residual);
+        assert_eq!(config.decoder_blocks[1].name, "compress_all");
+    }
 }

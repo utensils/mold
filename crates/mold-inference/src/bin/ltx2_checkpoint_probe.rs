@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use candle_core::{DType, Device};
 use safetensors::tensor::TensorInfo;
 use serde_json::Value;
 
@@ -19,6 +20,9 @@ fn main() -> Result<()> {
     }
 
     let (metadata, tensors) = read_safetensors_header(&checkpoint)?;
+    let tensor_values =
+        unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[checkpoint.as_path()]) }
+            .with_context(|| format!("failed to mmap {}", checkpoint.display()))?;
 
     let patterns = args.collect::<Vec<_>>();
     if patterns.is_empty() {
@@ -40,18 +44,49 @@ fn main() -> Result<()> {
         }
         for name in matches {
             let info = tensors.get(&name).expect("match came from keys()");
-            println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
+            if info.shape.is_empty() {
+                let scalar = tensor_values
+                    .load(&name, &Device::Cpu)
+                    .ok()
+                    .and_then(|tensor| scalar_value_string(&tensor).ok());
+                match scalar {
+                    Some(value) => {
+                        println!(
+                            "  {name}: dtype={:?} shape={:?} value={value}",
+                            info.dtype, info.shape
+                        );
+                    }
+                    None => {
+                        println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
+                    }
+                }
+            } else {
+                println!("  {name}: dtype={:?} shape={:?}", info.dtype, info.shape);
+            }
         }
     }
 
     Ok(())
 }
 
+fn scalar_value_string(tensor: &candle_core::Tensor) -> Result<String> {
+    let value = match tensor.dtype() {
+        DType::F32 | DType::F16 | DType::BF16 | DType::F64 => {
+            tensor.to_dtype(DType::F32)?.to_scalar::<f32>()?.to_string()
+        }
+        DType::I64 => tensor.to_scalar::<i64>()?.to_string(),
+        DType::U32 => tensor.to_scalar::<u32>()?.to_string(),
+        DType::U8 => tensor.to_scalar::<u8>()?.to_string(),
+        _ => bail!("unsupported scalar dtype {:?}", tensor.dtype()),
+    };
+    Ok(value)
+}
+
 fn read_safetensors_header(
     path: &PathBuf,
 ) -> Result<(BTreeMap<String, String>, BTreeMap<String, TensorInfo>)> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)
         .with_context(|| format!("failed to read header length from {}", path.display()))?;

@@ -97,7 +97,6 @@ impl Module for RmsNorm {
         normed
             .to_dtype(input_dtype)?
             .broadcast_mul(&(&self.weight + 1.0)?)
-            .map_err(Into::into)
     }
 }
 
@@ -205,7 +204,7 @@ impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
         let lhs = xs.apply(&self.gate_proj)?.apply(&self.act_fn)?;
         let rhs = xs.apply(&self.up_proj)?;
-        Ok((lhs * rhs)?.apply(&self.down_proj)?)
+        (lhs * rhs)?.apply(&self.down_proj)
     }
 }
 
@@ -552,7 +551,7 @@ impl GemmaHiddenStateEncoder {
         layers_vb: VarBuilder<'static>,
         index: usize,
     ) -> Result<DecoderLayer> {
-        let uses_sliding = (index + 1) % cfg.sliding_window_pattern > 0;
+        let uses_sliding = !(index + 1).is_multiple_of(cfg.sliding_window_pattern);
         DecoderLayer::new(
             cfg,
             layers_vb.pp(index),

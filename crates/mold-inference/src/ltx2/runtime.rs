@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 use anyhow::{Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
@@ -524,7 +525,7 @@ fn fill_background(
             r += 36.0;
             b += 22.0;
         }
-        if retake_strength > 0.0 && (fx < 0.03 || fx > 0.97 || fy < 0.03 || fy > 0.97) {
+        if retake_strength > 0.0 && (!(0.03..=0.97).contains(&fx) || !(0.03..=0.97).contains(&fy)) {
             r += highlight * 255.0;
             g += highlight * 96.0;
         }
@@ -1410,7 +1411,7 @@ fn load_ltx2_av_transformer(
             )?
         }
     };
-    let vb = vb.rename_f(|name| remap_ltx2_transformer_key(name));
+    let vb = vb.rename_f(remap_ltx2_transformer_key);
     if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
         Ok(Ltx2AvTransformer3DModel::new(&config, vb)?)
     } else {
@@ -1944,11 +1945,12 @@ mod tests {
     };
 
     use super::{
-        convert_velocity_to_x0, convert_x0_to_velocity, effective_native_guidance_scale,
-        guided_velocity_from_cfg, ltx2_video_transformer_config, Ltx2RuntimeSession,
-        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
+        effective_native_guidance_scale, guided_velocity_from_cfg, ltx2_video_transformer_config,
+        Ltx2RuntimeSession, LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
+    use crate::ltx2::model::VideoPixelShape;
     use crate::ltx2::plan::{Ltx2GeneratePlan, PipelineKind};
     use crate::ltx2::preset::preset_for_model;
     use crate::ltx2::text::connectors::PaddingSide;
@@ -2124,6 +2126,12 @@ mod tests {
                 tensors.insert(
                     format!("{prefix}.transformer_1d_blocks.0.{linear_name}.bias"),
                     Tensor::zeros(dim, DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+            for norm_name in ["attn1.q_norm", "attn1.k_norm"] {
+                tensors.insert(
+                    format!("{prefix}.transformer_1d_blocks.0.{norm_name}.weight"),
+                    Tensor::ones(dim, DType::F32, &Device::Cpu).unwrap(),
                 );
             }
             tensors.insert(
@@ -2409,6 +2417,24 @@ mod tests {
 
         assert_eq!(rendered.frames.len(), 97);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+    }
+
+    #[test]
+    fn decoded_video_to_frames_resizes_decoded_shape_to_requested_pixels() {
+        let video = Tensor::zeros((1, 3, 2, 320, 544), DType::F32, &Device::Cpu).unwrap();
+        let pixel_shape = VideoPixelShape {
+            batch: 1,
+            frames: 2,
+            height: 352,
+            width: 608,
+            fps: 12.0,
+        };
+
+        let frames = decoded_video_to_frames(&video, pixel_shape).unwrap();
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].dimensions(), (608, 352));
+        assert_eq!(frames[1].dimensions(), (608, 352));
     }
 
     #[test]

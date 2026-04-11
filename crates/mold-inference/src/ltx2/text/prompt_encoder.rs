@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device};
@@ -69,6 +70,7 @@ impl NativePromptEncoder {
                 num_attention_heads: preset.connectors.video_num_attention_heads,
                 attention_head_dim: preset.connectors.video_attention_head_dim,
                 num_layers: preset.connectors.video_num_layers,
+                apply_gated_attention: preset.connectors.apply_gated_attention,
                 positional_embedding_theta: preset.connectors.positional_embedding_theta,
                 positional_embedding_max_pos: preset.connectors.positional_embedding_max_pos,
                 rope_type: preset.connectors.rope_type,
@@ -82,7 +84,7 @@ impl NativePromptEncoder {
                         preset.connectors.video_num_attention_heads
                     }
                     GemmaFeatureExtractorKind::V2DualAv => {
-                        preset.transformer.audio_num_attention_heads
+                        preset.connectors.audio_num_attention_heads
                     }
                 },
                 attention_head_dim: match preset.feature_extractor {
@@ -90,10 +92,11 @@ impl NativePromptEncoder {
                         preset.connectors.video_attention_head_dim
                     }
                     GemmaFeatureExtractorKind::V2DualAv => {
-                        preset.transformer.audio_attention_head_dim
+                        preset.connectors.audio_attention_head_dim
                     }
                 },
                 num_layers: preset.connectors.audio_num_layers,
+                apply_gated_attention: preset.connectors.apply_gated_attention,
                 positional_embedding_theta: preset.connectors.positional_embedding_theta,
                 positional_embedding_max_pos: preset.connectors.positional_embedding_max_pos,
                 rope_type: preset.connectors.rope_type,
@@ -152,6 +155,7 @@ pub(crate) struct ConnectorSpec<'a> {
     pub(crate) num_attention_heads: usize,
     pub(crate) attention_head_dim: usize,
     pub(crate) num_layers: usize,
+    pub(crate) apply_gated_attention: bool,
     pub(crate) positional_embedding_theta: f64,
     pub(crate) positional_embedding_max_pos: &'a [usize],
     pub(crate) rope_type: LtxRopeType,
@@ -231,6 +235,7 @@ fn build_connector(vb: VarBuilder, spec: ConnectorSpec<'_>) -> Result<Embeddings
         spec.rope_type,
         spec.double_precision_rope,
         spec.num_learnable_registers,
+        spec.apply_gated_attention,
         vb,
     )
 }
@@ -423,6 +428,7 @@ mod tests {
                 num_attention_heads: 2,
                 attention_head_dim: 4,
                 num_layers: 1,
+                apply_gated_attention: false,
                 positional_embedding_theta: 10_000.0,
                 positional_embedding_max_pos: &[32],
                 rope_type: LtxRopeType::Split,
@@ -434,6 +440,7 @@ mod tests {
                 num_attention_heads: 1,
                 attention_head_dim: 4,
                 num_layers: 1,
+                apply_gated_attention: false,
                 positional_embedding_theta: 10_000.0,
                 positional_embedding_max_pos: &[32],
                 rope_type: LtxRopeType::Split,

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor, D};
@@ -367,6 +368,7 @@ struct ConnectorAttention {
     k_proj: Linear,
     v_proj: Linear,
     out_proj: Linear,
+    gate_proj: Option<Linear>,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
     heads: usize,
@@ -386,6 +388,7 @@ impl ConnectorAttention {
         positional_embedding_max_pos: Vec<usize>,
         rope_type: LtxRopeType,
         double_precision_rope: bool,
+        apply_gated_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = heads * dim_head;
@@ -394,6 +397,9 @@ impl ConnectorAttention {
             k_proj: linear_b(dim, inner_dim, true, vb.pp("to_k"))?,
             v_proj: linear_b(dim, inner_dim, true, vb.pp("to_v"))?,
             out_proj: linear_b(inner_dim, dim, true, vb.pp("to_out").pp("0"))?,
+            gate_proj: apply_gated_attention
+                .then(|| linear_b(dim, heads, true, vb.pp("to_gate_logits")))
+                .transpose()?,
             q_norm: RmsNorm::new(inner_dim, 1e-6, true, vb.pp("q_norm"))?,
             k_norm: RmsNorm::new(inner_dim, 1e-6, true, vb.pp("k_norm"))?,
             heads,
@@ -469,10 +475,18 @@ impl ConnectorAttention {
         };
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
         let context = probs.contiguous()?.matmul(&v)?;
-        let context = context
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, seq, inner_dim))?;
+        let mut context = context.transpose(1, 2)?.contiguous()?;
+        if let Some(gate_proj) = &self.gate_proj {
+            let gates = gate_proj.forward(xs)?;
+            let gates = candle_nn::ops::sigmoid(&gates)?.affine(2.0, 0.0)?;
+            let gates = if gates.dtype() == context.dtype() {
+                gates
+            } else {
+                gates.to_dtype(context.dtype())?
+            };
+            context = context.broadcast_mul(&gates.unsqueeze(D::Minus1)?)?;
+        }
+        let context = context.reshape((batch, seq, inner_dim))?;
         let output = self.out_proj.forward(&context)?;
         if output.dim(D::Minus1)? != dim {
             bail!("connector attention output dimension mismatch");
@@ -518,6 +532,7 @@ impl BasicTransformerBlock1D {
         positional_embedding_max_pos: Vec<usize>,
         rope_type: LtxRopeType,
         double_precision_rope: bool,
+        apply_gated_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
@@ -529,6 +544,7 @@ impl BasicTransformerBlock1D {
                 positional_embedding_max_pos,
                 rope_type,
                 double_precision_rope,
+                apply_gated_attention,
                 vb.pp("attn1"),
             )?,
             ff: ConnectorFeedForward::new(dim, vb.pp("ff"))?,
@@ -563,6 +579,7 @@ impl Embeddings1DConnector {
         rope_type: LtxRopeType,
         double_precision_rope: bool,
         num_learnable_registers: Option<usize>,
+        apply_gated_attention: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = num_attention_heads * attention_head_dim;
@@ -576,6 +593,7 @@ impl Embeddings1DConnector {
                     positional_embedding_max_pos.clone(),
                     rope_type,
                     double_precision_rope,
+                    apply_gated_attention,
                     vb.pp("transformer_1d_blocks").pp(index),
                 )
             })
@@ -799,8 +817,8 @@ mod tests {
 
     use super::{
         convert_to_additive_mask, replace_padded_with_registers, ConnectorAttention,
-        Embeddings1DConnector, EmbeddingsFeatureExtractor, EmbeddingsProcessor,
-        FeatureExtractorV1, FeatureExtractorV2, PaddingSide, Projection,
+        Embeddings1DConnector, EmbeddingsFeatureExtractor, EmbeddingsProcessor, FeatureExtractorV1,
+        FeatureExtractorV2, PaddingSide, Projection,
     };
     use crate::ltx2::model::LtxRopeType;
 
@@ -839,7 +857,11 @@ mod tests {
         );
     }
 
-    fn attention_var_builder(q_norm_scale: f32, k_norm_scale: f32) -> VarBuilder<'static> {
+    fn attention_var_builder(
+        q_norm_scale: f32,
+        k_norm_scale: f32,
+        gate_bias: Option<f32>,
+    ) -> VarBuilder<'static> {
         let mut tensors = HashMap::new();
         let eye = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (2, 2), &Device::Cpu).unwrap();
         let zeros = Tensor::zeros(2, DType::F32, &Device::Cpu).unwrap();
@@ -857,6 +879,16 @@ mod tests {
             "k_norm.weight".to_string(),
             Tensor::full(k_norm_scale, 2, &Device::Cpu).unwrap(),
         );
+        if let Some(gate_bias) = gate_bias {
+            tensors.insert(
+                "to_gate_logits.weight".to_string(),
+                Tensor::zeros((1, 2), DType::F32, &Device::Cpu).unwrap(),
+            );
+            tensors.insert(
+                "to_gate_logits.bias".to_string(),
+                Tensor::full(gate_bias, 1, &Device::Cpu).unwrap(),
+            );
+        }
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
@@ -871,7 +903,8 @@ mod tests {
             vec![32],
             LtxRopeType::Split,
             true,
-            attention_var_builder(0.0, 1.0),
+            false,
+            attention_var_builder(0.0, 1.0, None),
         )
         .unwrap();
         let unit_q = ConnectorAttention::new(
@@ -882,7 +915,8 @@ mod tests {
             vec![32],
             LtxRopeType::Split,
             true,
-            attention_var_builder(1.0, 1.0),
+            false,
+            attention_var_builder(1.0, 1.0, None),
         )
         .unwrap();
 
@@ -891,6 +925,69 @@ mod tests {
 
         assert_eq!(zero_out[0][0], zero_out[0][1]);
         assert_ne!(unit_out[0][0], unit_out[0][1]);
+    }
+
+    #[test]
+    fn connector_attention_zero_init_gates_preserve_attention_output() {
+        let xs = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let ungated = ConnectorAttention::new(
+            2,
+            1,
+            2,
+            10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
+            false,
+            attention_var_builder(1.0, 1.0, None),
+        )
+        .unwrap();
+        let gated = ConnectorAttention::new(
+            2,
+            1,
+            2,
+            10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
+            true,
+            attention_var_builder(1.0, 1.0, Some(0.0)),
+        )
+        .unwrap();
+
+        let ungated_out = ungated
+            .forward(&xs, None)
+            .unwrap()
+            .to_vec3::<f32>()
+            .unwrap();
+        let gated_out = gated.forward(&xs, None).unwrap().to_vec3::<f32>().unwrap();
+
+        assert_eq!(ungated_out, gated_out);
+    }
+
+    #[test]
+    fn connector_attention_gate_bias_can_suppress_heads() {
+        let xs = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let gated = ConnectorAttention::new(
+            2,
+            1,
+            2,
+            10_000.0,
+            vec![32],
+            LtxRopeType::Split,
+            true,
+            true,
+            attention_var_builder(1.0, 1.0, Some(-100.0)),
+        )
+        .unwrap();
+
+        let gated_out = gated.forward(&xs, None).unwrap().to_vec3::<f32>().unwrap();
+
+        assert!(gated_out
+            .iter()
+            .flatten()
+            .flatten()
+            .all(|value| value.abs() < 1e-4));
     }
 
     fn zero_connector_var_builder(
@@ -1116,6 +1213,7 @@ mod tests {
             LtxRopeType::Split,
             true,
             None,
+            false,
             zero_connector_var_builder(4, 1, None),
         )
         .unwrap();
@@ -1160,6 +1258,7 @@ mod tests {
             LtxRopeType::Split,
             true,
             None,
+            false,
             zero_connector_var_builder(4, 1, None),
         )
         .unwrap();
@@ -1172,6 +1271,7 @@ mod tests {
             LtxRopeType::Split,
             true,
             None,
+            false,
             zero_connector_var_builder(6, 1, None),
         )
         .unwrap();

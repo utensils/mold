@@ -88,7 +88,7 @@ impl MultiModalGuider {
     }
 
     pub fn should_skip_step(&self, step: usize) -> bool {
-        self.params.skip_step != 0 && step % (self.params.skip_step + 1) != 0
+        self.params.skip_step != 0 && !step.is_multiple_of(self.params.skip_step + 1)
     }
 }
 
@@ -124,8 +124,7 @@ impl MultiModalGuiderFactory {
     pub fn params(&self, sigma: f32) -> &MultiModalGuiderParams {
         self.params_by_sigma
             .iter()
-            .filter(|(upper_bound, _)| *upper_bound >= sigma)
-            .next_back()
+            .rfind(|(upper_bound, _)| *upper_bound >= sigma)
             .or_else(|| self.params_by_sigma.first())
             .map(|(_, params)| params)
             .expect("guider factory requires at least one sigma bin")

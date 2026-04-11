@@ -3,6 +3,7 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerturbationType {
     SkipA2VCrossAttention,

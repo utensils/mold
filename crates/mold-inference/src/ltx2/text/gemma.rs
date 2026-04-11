@@ -183,7 +183,7 @@ impl GemmaAssets {
         let eos_token_id = self
             .read_special_tokens()?
             .eos_token
-            .or_else(|| Some(pad_token))
+            .or(Some(pad_token))
             .and_then(|token| tokenizer.token_to_id(&token));
         Ok((pad_token_id, eos_token_id))
     }

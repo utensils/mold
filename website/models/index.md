@@ -148,7 +148,7 @@ for more options.
 | [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
 | [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
-| [LTX-2](/models/ltx2)                | 1216x704                      | Gemma 3, joint audio-video transformer         |
+| [LTX-2](/models/ltx2)                 | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
 
 Each family page lists recommended dimensions for non-square aspect ratios.

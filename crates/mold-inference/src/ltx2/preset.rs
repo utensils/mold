@@ -32,6 +32,7 @@ pub(crate) struct ConnectorProfile {
     pub(crate) audio_num_attention_heads: usize,
     pub(crate) audio_attention_head_dim: usize,
     pub(crate) audio_num_layers: usize,
+    pub(crate) apply_gated_attention: bool,
     pub(crate) positional_embedding_theta: f64,
     pub(crate) positional_embedding_max_pos: &'static [usize],
     pub(crate) rope_type: LtxRopeType,
@@ -52,6 +53,7 @@ pub(crate) struct TransformerProfile {
     pub(crate) audio_in_channels: usize,
     pub(crate) audio_out_channels: usize,
     pub(crate) audio_cross_attention_dim: usize,
+    pub(crate) apply_gated_attention: bool,
     pub(crate) cross_attention_adaln: bool,
 }
 
@@ -112,6 +114,7 @@ const CONNECTOR_PROFILE_19B: ConnectorProfile = ConnectorProfile {
     audio_num_attention_heads: 30,
     audio_attention_head_dim: 128,
     audio_num_layers: 2,
+    apply_gated_attention: false,
     positional_embedding_theta: 10_000.0,
     positional_embedding_max_pos: &[4096],
     rope_type: LtxRopeType::Split,
@@ -120,12 +123,13 @@ const CONNECTOR_PROFILE_19B: ConnectorProfile = ConnectorProfile {
 };
 
 const CONNECTOR_PROFILE_22B: ConnectorProfile = ConnectorProfile {
-    video_num_attention_heads: 30,
+    video_num_attention_heads: 32,
     video_attention_head_dim: 128,
-    video_num_layers: 2,
+    video_num_layers: 8,
     audio_num_attention_heads: 32,
     audio_attention_head_dim: 64,
-    audio_num_layers: 2,
+    audio_num_layers: 8,
+    apply_gated_attention: true,
     positional_embedding_theta: 10_000.0,
     positional_embedding_max_pos: &[4096],
     rope_type: LtxRopeType::Split,
@@ -133,7 +137,7 @@ const CONNECTOR_PROFILE_22B: ConnectorProfile = ConnectorProfile {
     num_learnable_registers: Some(128),
 };
 
-const TRANSFORMER_PROFILE: TransformerProfile = TransformerProfile {
+const TRANSFORMER_PROFILE_19B: TransformerProfile = TransformerProfile {
     num_attention_heads: 32,
     attention_head_dim: 128,
     num_layers: 48,
@@ -145,14 +149,21 @@ const TRANSFORMER_PROFILE: TransformerProfile = TransformerProfile {
     audio_in_channels: 128,
     audio_out_channels: 128,
     audio_cross_attention_dim: 2048,
+    apply_gated_attention: false,
     cross_attention_adaln: false,
+};
+
+const TRANSFORMER_PROFILE_22B: TransformerProfile = TransformerProfile {
+    apply_gated_attention: true,
+    cross_attention_adaln: true,
+    ..TRANSFORMER_PROFILE_19B
 };
 
 const PRESET_19B: Ltx2ModelPreset = Ltx2ModelPreset {
     name: "ltx-2-19b",
     caption_projection: CaptionProjectionPlacement::Transformer,
     feature_extractor: GemmaFeatureExtractorKind::V1SharedAv,
-    transformer: TRANSFORMER_PROFILE,
+    transformer: TRANSFORMER_PROFILE_19B,
     connectors: CONNECTOR_PROFILE_19B,
     gemma: GEMMA_PROFILE,
     supports_spatial_upscale_x1_5: false,
@@ -165,7 +176,7 @@ const PRESET_22B: Ltx2ModelPreset = Ltx2ModelPreset {
     name: "ltx-2.3-22b",
     caption_projection: CaptionProjectionPlacement::TextEncoderConnector,
     feature_extractor: GemmaFeatureExtractorKind::V2DualAv,
-    transformer: TRANSFORMER_PROFILE,
+    transformer: TRANSFORMER_PROFILE_22B,
     connectors: CONNECTOR_PROFILE_22B,
     gemma: GEMMA_PROFILE,
     supports_spatial_upscale_x1_5: true,
@@ -222,8 +233,13 @@ mod tests {
         );
         assert!(preset_22b.supports_spatial_upscale_x1_5);
         assert_eq!(preset_22b.streaming_prefetch_count, 2);
-        assert_eq!(preset_22b.video_connector_inner_dim(), 3840);
+        assert_eq!(preset_22b.video_connector_inner_dim(), 4096);
         assert_eq!(preset_22b.audio_connector_inner_dim(), 2048);
+        assert_eq!(preset_22b.connectors.video_num_layers, 8);
+        assert_eq!(preset_22b.connectors.audio_num_layers, 8);
+        assert!(preset_22b.connectors.apply_gated_attention);
+        assert!(preset_22b.transformer.apply_gated_attention);
+        assert!(preset_22b.transformer.cross_attention_adaln);
         assert_eq!(preset_22b.connectors.rope_type, LtxRopeType::Split);
         assert_eq!(preset_22b.connectors.positional_embedding_max_pos, &[4096]);
     }

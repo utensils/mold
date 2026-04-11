@@ -79,7 +79,8 @@ the full multiscale refinement path.
 ## Notes
 
 - ControlNet is currently available only for SD 1.5.
-- LoRA adapters are currently available only for FLUX models.
+- General LoRA adapters are currently available only for FLUX models; LTX-2 has
+  its own stacked video-adapter path plus camera-control presets.
 - LTX-2 adds stacked LoRAs plus camera-control presets for the published 19B adapters.
 - `--scheduler` applies only to SD 1.5 and SDXL.
 - Negative prompts are meaningful for CFG-based families and ignored by FLUX,

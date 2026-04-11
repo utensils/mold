@@ -179,7 +179,9 @@ is the supported backend for real local generation, CPU is a correctness-only
 fallback, and Metal is explicitly unsupported for this family. On 24 GB Ada
 GPUs such as the RTX 4090, mold uses native staged loading, layer streaming,
 and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
-`fp8-scaled-mm`.
+`fp8-scaled-mm`. The verified coherent native smoke path on this branch is the
+LTX-2.3 22B CUDA text-to-video flow; the rest of the full CUDA acceptance
+matrix is still being re-verified.
 
 ## Features
 
