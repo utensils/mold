@@ -238,7 +238,11 @@ impl Ltx2Engine {
             &prompt_device,
             dtype,
         )?;
-        Ok(Ltx2RuntimeSession::new(prompt_encoder))
+        if prompt_device.is_cuda() {
+            Ok(Ltx2RuntimeSession::new_deferred_cuda(prompt_encoder))
+        } else {
+            Ok(Ltx2RuntimeSession::new(device, prompt_encoder))
+        }
     }
 
     fn create_runtime_session(&self, plan: &Ltx2GeneratePlan) -> Result<Ltx2RuntimeSession> {
@@ -774,7 +778,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(prompt_encoder)
+        Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder)
     }
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {

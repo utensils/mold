@@ -27,6 +27,7 @@ use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::sampler::euler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
+use crate::device::{fmt_gb, free_vram_bytes};
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::ProgressReporter;
@@ -128,15 +129,21 @@ impl Ltx2VaeLatentStats {
 }
 
 pub struct Ltx2RuntimeSession {
-    device: candle_core::Device,
+    device: Option<candle_core::Device>,
     prompt_encoder: Option<NativePromptEncoder>,
 }
 
 impl Ltx2RuntimeSession {
-    pub fn new(prompt_encoder: NativePromptEncoder) -> Self {
-        let device = prompt_encoder.device().clone();
+    pub fn new(device: candle_core::Device, prompt_encoder: NativePromptEncoder) -> Self {
         Self {
-            device,
+            device: Some(device),
+            prompt_encoder: Some(prompt_encoder),
+        }
+    }
+
+    pub fn new_deferred_cuda(prompt_encoder: NativePromptEncoder) -> Self {
+        Self {
+            device: None,
             prompt_encoder: Some(prompt_encoder),
         }
     }
@@ -146,7 +153,7 @@ impl Ltx2RuntimeSession {
             .prompt_encoder
             .take()
             .context("native LTX-2 prompt encoder has already been consumed")?;
-        let prompt_device_is_cuda = self.device.is_cuda();
+        let prompt_device_is_cuda = prompt_encoder.device().is_cuda();
         let prepared_device = if prompt_device_is_cuda || prompt_encoder.device().is_metal() {
             candle_core::Device::Cpu
         } else {
@@ -209,7 +216,14 @@ impl Ltx2RuntimeSession {
         }
         drop(prompt_encoder);
         if prompt_device_is_cuda {
-            self.device.synchronize()?;
+            if self.device.is_none() {
+                crate::device::reclaim_gpu_memory();
+                self.device = Some(new_native_cuda_device()?);
+            } else if let Some(device) = self.device.as_ref() {
+                if device.is_cuda() {
+                    device.synchronize()?;
+                }
+            }
         }
         let pixel_shape = VideoPixelShape {
             batch: 1,
@@ -298,7 +312,11 @@ impl Ltx2RuntimeSession {
         plan: &Ltx2GeneratePlan,
         prepared: &NativePreparedRun,
     ) -> Result<NativeRenderedVideo> {
-        if let Some(rendered) = self.try_render_real_video(plan, prepared, &self.device)? {
+        let device = self
+            .device
+            .as_ref()
+            .context("native LTX-2 compute device was not initialized")?;
+        if let Some(rendered) = self.try_render_real_video(plan, prepared, device)? {
             return Ok(rendered);
         }
 
@@ -577,6 +595,23 @@ fn overlay_alpha(overlay: &ConditioningOverlay, frame_idx: u32, total_frames: u3
     (overlay.strength.max(0.1) * falloff).clamp(0.0, 0.85)
 }
 
+#[cfg(feature = "cuda")]
+fn new_native_cuda_device() -> Result<candle_core::Device> {
+    let device = candle_core::Device::new_cuda(0)?;
+    let cuda = device.as_cuda_device()?;
+    if cuda.is_event_tracking() {
+        unsafe {
+            cuda.disable_event_tracking();
+        }
+    }
+    Ok(device)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn new_native_cuda_device() -> Result<candle_core::Device> {
+    anyhow::bail!("CUDA backend is unavailable in this build")
+}
+
 const DISTILLED_STAGE1_SIGMAS_NO_TERMINAL: &[f32] = &[
     1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875,
 ];
@@ -743,7 +778,13 @@ fn render_real_distilled_av(
     let dtype = gpu_dtype(device);
     let guidance_scale = effective_native_guidance_scale(plan);
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading stage1 transformer");
+    }
     let stage1_transformer = load_ltx2_av_transformer(plan, device)?;
+    if debug_enabled {
+        log_debug_vram("after_stage1_transformer_load");
+    }
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -765,8 +806,14 @@ fn render_real_distilled_av(
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage1"),
     )?;
+    if debug_enabled {
+        log_debug_vram("after_stage1_denoise");
+    }
     drop(stage1_transformer);
     device.synchronize()?;
+    if debug_enabled {
+        log_debug_vram("after_stage1_transformer_drop");
+    }
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -791,6 +838,9 @@ fn render_real_distilled_av(
     )?;
     drop(upsampler);
     device.synchronize()?;
+    if debug_enabled {
+        log_debug_vram("after_stage1_upsample");
+    }
     let requested_pixel_shape = VideoPixelShape {
         batch: 1,
         frames: plan.num_frames as usize,
@@ -858,7 +908,13 @@ fn render_real_distilled_av(
         }
         _ => None,
     };
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading stage2 transformer");
+    }
     let stage2_transformer = load_ltx2_av_transformer(plan, device)?;
+    if debug_enabled {
+        log_debug_vram("after_stage2_transformer_load");
+    }
     let (latents, _audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -880,8 +936,14 @@ fn render_real_distilled_av(
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
         debug_enabled.then_some("stage2"),
     )?;
+    if debug_enabled {
+        log_debug_vram("after_stage2_denoise");
+    }
     drop(stage2_transformer);
     device.synchronize()?;
+    if debug_enabled {
+        log_debug_vram("after_stage2_transformer_drop");
+    }
     if debug_enabled {
         log_tensor_stats("final_video_latents", &latents)?;
     }
@@ -979,6 +1041,9 @@ fn run_real_distilled_stage(
         .take(run_sigmas.len().saturating_sub(1))
         .enumerate()
     {
+        if let Some(stage) = debug_stage {
+            eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6} entering");
+        }
         let timestep = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
         let (video_velocity, audio_velocity): (Tensor, Option<Tensor>) =
             if let Some(audio_latents_ref) = audio_latents.as_ref() {
@@ -1590,6 +1655,14 @@ fn velocity_from_denoised(sample: &Tensor, denoised: &Tensor, sigma: f32) -> Res
 
 fn ltx_debug_enabled() -> bool {
     env::var_os("MOLD_LTX_DEBUG").is_some()
+}
+
+fn log_debug_vram(label: &str) {
+    if let Some(free) = free_vram_bytes() {
+        eprintln!("[ltx2-debug] {label} free_vram={}", fmt_gb(free));
+    } else {
+        eprintln!("[ltx2-debug] {label} free_vram=unavailable");
+    }
 }
 
 fn ltx_debug_compare_uncond_enabled() -> bool {
@@ -2227,7 +2300,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(prompt_encoder)
+        Ltx2RuntimeSession::new(candle_core::Device::Cpu, prompt_encoder)
     }
 
     fn build_plan(

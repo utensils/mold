@@ -295,6 +295,98 @@ fn dequantize_fp8_weight_for_runtime(
     Ok(dequantized)
 }
 
+fn fp8_linear_output_chunk_size(weight: &Tensor) -> Result<usize> {
+    let out_dim = weight.dim(0)?;
+    if !weight.device().is_cuda() {
+        return Ok(out_dim);
+    }
+    Ok(if out_dim >= 16_384 {
+        1_024
+    } else if out_dim >= 8_192 {
+        1_536
+    } else if out_dim >= 4_096 {
+        2_048.min(out_dim)
+    } else {
+        out_dim
+    })
+}
+
+fn fp8_linear_forward_chunked(
+    xs: &Tensor,
+    weight: &Tensor,
+    weight_scale: Option<&Tensor>,
+    runtime_dtype: DType,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let out_dim = weight.dim(0)?;
+    if chunk_size >= out_dim {
+        let weight = dequantize_fp8_weight_for_runtime(weight, weight_scale, runtime_dtype)?;
+        let weight_t = weight.t()?;
+        return match *xs.dims() {
+            [batch0, batch1, tokens, hidden] => xs
+                .reshape((batch0 * batch1 * tokens, hidden))?
+                .matmul(&weight_t)?
+                .reshape((batch0, batch1, tokens, ())),
+            [batch, tokens, hidden] => xs
+                .reshape((batch * tokens, hidden))?
+                .matmul(&weight_t)?
+                .reshape((batch, tokens, ())),
+            _ => xs.matmul(&weight_t),
+        };
+    }
+
+    let mut outputs = Vec::with_capacity(out_dim.div_ceil(chunk_size));
+    match *xs.dims() {
+        [batch0, batch1, tokens, hidden] => {
+            let xs_flat = xs.reshape((batch0 * batch1 * tokens, hidden))?;
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
+                let weight_chunk =
+                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                let chunk = xs_flat
+                    .matmul(&weight_chunk.t()?)?
+                    .reshape((batch0, batch1, tokens, rows))?;
+                outputs.push(chunk);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+        [batch, tokens, hidden] => {
+            let xs_flat = xs.reshape((batch * tokens, hidden))?;
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
+                let weight_chunk =
+                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                let chunk = xs_flat
+                    .matmul(&weight_chunk.t()?)?
+                    .reshape((batch, tokens, rows))?;
+                outputs.push(chunk);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+        _ => {
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = weight.narrow(0, offset, rows)?.contiguous()?;
+                let weight_chunk =
+                    dequantize_fp8_weight_for_runtime(&weight_chunk, weight_scale, runtime_dtype)?;
+                outputs.push(xs.matmul(&weight_chunk.t()?)?);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+    }
+}
+
 impl Module for LtxLinear {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
@@ -323,31 +415,17 @@ impl Module for LtxLinear {
                     Some(scale) => emulate_static_fp8_input_quantization(&xs, scale, dtype)?,
                     None => xs,
                 };
-                // Public LTX-2 FP8 checkpoints store transformer weights in
-                // float8 together with per-tensor dequantization scales. Apply
-                // `weight_scale` by default; keep `input_scale` emulation behind
-                // the explicit debug env knob because the shipped checkpoints do
-                // not require activation re-quantization for coherent results.
-                let weight = dequantize_fp8_weight_for_runtime(
+                let chunk_size = fp8_linear_output_chunk_size(weight)?;
+                let out = fp8_linear_forward_chunked(
+                    &xs,
                     weight,
                     match fp8_weight_scale_mode() {
                         Fp8WeightScaleMode::Skip => None,
                         Fp8WeightScaleMode::Apply => weight_scale.as_ref(),
                     },
                     dtype,
+                    chunk_size,
                 )?;
-                let weight_t = weight.t()?;
-                let out = match *xs.dims() {
-                    [batch0, batch1, tokens, hidden] => xs
-                        .reshape((batch0 * batch1 * tokens, hidden))?
-                        .matmul(&weight_t)?
-                        .reshape((batch0, batch1, tokens, ()))?,
-                    [batch, tokens, hidden] => xs
-                        .reshape((batch * tokens, hidden))?
-                        .matmul(&weight_t)?
-                        .reshape((batch, tokens, ()))?,
-                    _ => xs.matmul(&weight_t)?,
-                };
                 match bias {
                     Some(bias) => out.broadcast_add(&bias.to_dtype(dtype)?),
                     None => Ok(out),
@@ -1027,26 +1105,29 @@ impl LtxAttention {
 
         let dtype = q.dtype();
         let scale = 1f32 / (self.head_dim as f32).sqrt();
-
-        // Manual attention path — F32 upcast for softmax stability
-        let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-
-        let att = q_f32.matmul(&k_f32.transpose(D::Minus1, D::Minus2)?)?;
-        let att = (att * (scale as f64))?;
-
-        let att = match &attn_mask {
-            Some(mask) => att.broadcast_add(&mask.to_dtype(DType::F32)?)?,
-            None => att,
+        let attn_mask_f32 = attn_mask
+            .as_ref()
+            .map(|mask| mask.to_dtype(DType::F32))
+            .transpose()?;
+        let out_f32 = if should_chunk_attention(q_len, k_len) {
+            let q_t = q.transpose(1, 2)?;
+            let k_t = k.transpose(1, 2)?;
+            let v_t = v.transpose(1, 2)?;
+            chunked_attention(
+                &q_t,
+                &k_t,
+                &v_t,
+                attn_mask_f32.as_ref(),
+                scale,
+                attention_query_chunk_size(q_len),
+                attention_key_chunk_size(k_len),
+            )?
+        } else {
+            let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+            let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+            let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+            full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
         };
-
-        let (b_sz, h_sz, q_l, k_l) = att.dims4()?;
-        let att = att.reshape((b_sz * h_sz * q_l, k_l))?;
-        let att = nn::ops::softmax(&att, D::Minus1)?;
-        let att = att.reshape((b_sz, h_sz, q_l, k_l))?;
-
-        let out_f32 = att.matmul(&v_f32)?;
         let out = out_f32.to_dtype(dtype)?;
 
         let mut out = out.transpose(1, 2)?.contiguous()?;
@@ -1065,6 +1146,128 @@ impl LtxAttention {
         let out = self.to_out.forward(&out)?;
         self.dropout.forward(&out, false)
     }
+}
+
+fn should_chunk_attention(q_len: usize, k_len: usize) -> bool {
+    q_len.saturating_mul(k_len) > 1_048_576
+}
+
+fn attention_query_chunk_size(q_len: usize) -> usize {
+    if q_len >= 8_192 {
+        32
+    } else if q_len >= 4_096 {
+        64
+    } else {
+        128
+    }
+}
+
+fn attention_key_chunk_size(k_len: usize) -> usize {
+    if k_len >= 8_192 {
+        1_024
+    } else if k_len >= 4_096 {
+        2_048
+    } else {
+        k_len
+    }
+}
+
+fn full_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    scale: f32,
+) -> Result<Tensor> {
+    let att = q.matmul(&k.transpose(D::Minus1, D::Minus2)?)?;
+    let att = (att * (scale as f64))?;
+
+    let att = match attn_mask {
+        Some(mask) => att.broadcast_add(mask)?,
+        None => att,
+    };
+
+    let (b_sz, h_sz, q_l, k_l) = att.dims4()?;
+    let att = att.reshape((b_sz * h_sz * q_l, k_l))?;
+    let att = nn::ops::softmax(&att, D::Minus1)?;
+    let att = att.reshape((b_sz, h_sz, q_l, k_l))?;
+
+    att.matmul(v)
+}
+
+fn chunked_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    attn_mask: Option<&Tensor>,
+    scale: f32,
+    query_chunk_size: usize,
+    key_chunk_size: usize,
+) -> Result<Tensor> {
+    let q_len = q.dim(2)?;
+    let k_len = k.dim(2)?;
+    let value_dim = v.dim(3)?;
+    let mut outputs = Vec::with_capacity(q_len.div_ceil(query_chunk_size));
+    let mut q_offset = 0;
+    while q_offset < q_len {
+        let q_chunk_len = query_chunk_size.min(q_len - q_offset);
+        let q_chunk = q
+            .narrow(2, q_offset, q_chunk_len)?
+            .contiguous()?
+            .to_dtype(DType::F32)?;
+        let (b_sz, h_sz, _, _) = q_chunk.dims4()?;
+        let mut running_max =
+            Tensor::full(f32::NEG_INFINITY, (b_sz, h_sz, q_chunk_len, 1), q.device())?;
+        let mut running_denom =
+            Tensor::zeros((b_sz, h_sz, q_chunk_len, 1), DType::F32, q.device())?;
+        let mut running_out =
+            Tensor::zeros((b_sz, h_sz, q_chunk_len, value_dim), DType::F32, q.device())?;
+
+        let mut k_offset = 0;
+        while k_offset < k_len {
+            let k_chunk_len = key_chunk_size.min(k_len - k_offset);
+            let k_chunk = k
+                .narrow(2, k_offset, k_chunk_len)?
+                .contiguous()?
+                .to_dtype(DType::F32)?;
+            let v_chunk = v
+                .narrow(2, k_offset, k_chunk_len)?
+                .contiguous()?
+                .to_dtype(DType::F32)?;
+
+            let mut att =
+                q_chunk.matmul(&k_chunk.transpose(D::Minus1, D::Minus2)?.contiguous()?)?;
+            att = (att * (scale as f64))?;
+            if let Some(mask) = attn_mask {
+                let mask = mask
+                    .narrow(2, q_offset, q_chunk_len)?
+                    .narrow(3, k_offset, k_chunk_len)?
+                    .contiguous()?;
+                att = att.broadcast_add(&mask)?;
+            }
+
+            let chunk_max = att.max_keepdim(D::Minus1)?;
+            let next_max = running_max.maximum(&chunk_max)?;
+            let prev_scale = running_max.broadcast_sub(&next_max)?.exp()?;
+            let att = att.broadcast_sub(&next_max)?.exp()?;
+            let chunk_denom = att.sum_keepdim(D::Minus1)?;
+            let chunk_out = att.matmul(&v_chunk)?;
+
+            running_denom = running_denom
+                .broadcast_mul(&prev_scale)?
+                .broadcast_add(&chunk_denom)?;
+            running_out = running_out
+                .broadcast_mul(&prev_scale)?
+                .broadcast_add(&chunk_out)?;
+            running_max = next_max;
+            k_offset += k_chunk_len;
+        }
+
+        outputs.push(running_out.broadcast_div(&running_denom)?);
+        q_offset += q_chunk_len;
+    }
+    let refs = outputs.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,6 +1725,9 @@ impl Ltx2VideoTransformer3DModel {
         match &self.transformer_blocks {
             TransformerBlockSource::Eager(blocks) => {
                 for (index, block) in blocks.iter().enumerate() {
+                    if ltx2_block_debug_enabled() {
+                        eprintln!("[ltx2-block-debug] enter block={index}");
+                    }
                     hidden_states = self.apply_block(
                         index,
                         block,
@@ -1536,6 +1742,9 @@ impl Ltx2VideoTransformer3DModel {
             }
             TransformerBlockSource::Streaming(blocks_vb) => {
                 for index in 0..self.config.num_layers {
+                    if ltx2_block_debug_enabled() {
+                        eprintln!("[ltx2-block-debug] enter block={index}");
+                    }
                     let block = self.streaming_block(blocks_vb.clone(), index)?;
                     hidden_states = self.apply_block(
                         index,
@@ -2617,6 +2826,9 @@ impl Ltx2AvTransformer3DModel {
         match &self.transformer_blocks {
             AvTransformerBlockSource::Eager(blocks) => {
                 for (index, block) in blocks.iter().enumerate() {
+                    if ltx2_block_debug_enabled() {
+                        eprintln!("[ltx2-block-debug] enter block={index}");
+                    }
                     let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
                     video.x = vx.ok_or_else(|| {
                         candle_core::Error::msg("video branch unexpectedly returned no output")
@@ -2641,6 +2853,9 @@ impl Ltx2AvTransformer3DModel {
             }
             AvTransformerBlockSource::Streaming(blocks_vb) => {
                 for index in 0..self.config.num_layers {
+                    if ltx2_block_debug_enabled() {
+                        eprintln!("[ltx2-block-debug] enter block={index}");
+                    }
                     let block = self.streaming_block(blocks_vb.clone(), index)?;
                     let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
                     video.x = vx.ok_or_else(|| {
@@ -3597,6 +3812,31 @@ mod tests {
     }
 
     #[test]
+    fn fp8_linear_forward_chunked_matches_full_dequantized_matmul() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(patterned_values(24, 29), (1, 2, 3, 4), &device).unwrap();
+        let weight = Tensor::from_vec(patterned_values(24, 31), (6, 4), &device)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let weight_scale = Tensor::new(0.25f32, &device).unwrap();
+
+        let full = super::fp8_linear_forward_chunked(
+            &xs,
+            &weight,
+            Some(&weight_scale),
+            DType::F32,
+            weight.dim(0).unwrap(),
+        )
+        .unwrap();
+        let chunked =
+            super::fp8_linear_forward_chunked(&xs, &weight, Some(&weight_scale), DType::F32, 2)
+                .unwrap();
+
+        assert_tensors_close(&full, &chunked, 1e-5);
+    }
+
+    #[test]
     fn fp8_linear_ignores_input_scale_by_default_in_fp8_cast_mode() {
         let _env_lock = fp8_input_scale_env_lock().lock().unwrap();
         let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_INPUT_SCALE_MODE", "skip");
@@ -3689,6 +3929,41 @@ mod tests {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn chunked_attention_matches_full_attention_without_mask() {
+        let device = Device::Cpu;
+        let q = Tensor::from_vec(patterned_values(40, 7), (1, 2, 5, 4), &device).unwrap();
+        let k = Tensor::from_vec(patterned_values(40, 11), (1, 2, 5, 4), &device).unwrap();
+        let v = Tensor::from_vec(patterned_values(40, 13), (1, 2, 5, 4), &device).unwrap();
+        let scale = 1f32 / 2f32.sqrt();
+
+        let full = super::full_attention(&q, &k, &v, None, scale).unwrap();
+        let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
+
+        assert_tensors_close(&full, &chunked, 1e-5);
+    }
+
+    #[test]
+    fn chunked_attention_matches_full_attention_with_mask() {
+        let device = Device::Cpu;
+        let q = Tensor::from_vec(patterned_values(40, 17), (1, 2, 5, 4), &device).unwrap();
+        let k = Tensor::from_vec(patterned_values(40, 19), (1, 2, 5, 4), &device).unwrap();
+        let v = Tensor::from_vec(patterned_values(40, 23), (1, 2, 5, 4), &device).unwrap();
+        let mut mask_values = vec![0.0f32; 1 * 2 * 5 * 5];
+        for head in 0..2 {
+            let base = head * 25;
+            mask_values[base + 3] = f32::NEG_INFINITY;
+            mask_values[base + 4] = f32::NEG_INFINITY;
+        }
+        let mask = Tensor::from_vec(mask_values, (1, 2, 5, 5), &device).unwrap();
+        let scale = 1f32 / 2f32.sqrt();
+
+        let full = super::full_attention(&q, &k, &v, Some(&mask), scale).unwrap();
+        let chunked = super::chunked_attention(&q, &k, &v, Some(&mask), scale, 2, 3).unwrap();
+
+        assert_tensors_close(&full, &chunked, 1e-5);
     }
 
     #[test]
