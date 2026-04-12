@@ -383,7 +383,12 @@ impl Ltx2RuntimeSession {
         if !Path::new(&plan.checkpoint_path).is_file() {
             return Ok(None);
         }
-        match render_real_distilled_av(plan, prepared, device) {
+        let render = match plan.pipeline {
+            PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device),
+            PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device),
+            _ => return Ok(None),
+        };
+        match render {
             Ok(rendered) => Ok(Some(rendered)),
             Err(err) if is_placeholder_checkpoint_error(&err) => Ok(None),
             Err(err) => Err(err),
@@ -639,8 +644,7 @@ fn effective_native_guidance_scale(plan: &Ltx2GeneratePlan) -> f64 {
 }
 
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
-    matches!(plan.pipeline, PipelineKind::Distilled)
-        && plan.conditioning.images.is_empty()
+    let plain_silent_request = plan.conditioning.images.is_empty()
         && plan.conditioning.audio_path.is_none()
         && plan.conditioning.video_path.is_none()
         && !plan.execution_graph.wants_audio_output
@@ -648,7 +652,16 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_reference_video_conditioning
         && !plan.execution_graph.uses_keyframe_conditioning
         && !plan.execution_graph.uses_retake_masking
-        && plan.loras.is_empty()
+        && plan.loras.is_empty();
+    match plan.pipeline {
+        PipelineKind::Distilled => plain_silent_request,
+        PipelineKind::OneStage => {
+            plain_silent_request
+                && plan.spatial_upscale.is_none()
+                && plan.temporal_upscale.is_none()
+        }
+        _ => false,
+    }
 }
 
 fn video_latent_shape_from_tensor(latents: &Tensor) -> Result<VideoLatentShape> {
@@ -983,6 +996,175 @@ fn render_real_distilled_av(
     drop(uncond_context);
     drop(cond_context);
     drop(latent_stats);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+
+    Ok(NativeRenderedVideo {
+        frames,
+        has_audio: false,
+        audio_sample_rate: None,
+        audio_channels: None,
+    })
+}
+
+fn render_real_one_stage_av(
+    plan: &Ltx2GeneratePlan,
+    prepared: &NativePreparedRun,
+    device: &candle_core::Device,
+) -> Result<NativeRenderedVideo> {
+    let debug_enabled = ltx_debug_enabled();
+    let cond_context = prepared
+        .prompt
+        .conditional
+        .video_encoding
+        .to_device(device)?;
+    let uncond_context = prepared
+        .prompt
+        .unconditional
+        .video_encoding
+        .to_device(device)?;
+    let audio_shape = prepared.audio_latent_shape;
+    let audio_context = prepared
+        .prompt
+        .conditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let uncond_audio_context = prepared
+        .prompt
+        .unconditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let alt_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .map(|prompt| prompt.video_encoding.to_device(device))
+        .transpose()?;
+    let alt_audio_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.audio_encoding.as_ref())
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let cond_mask = None;
+    let uncond_mask = None;
+    let alt_mask = None;
+    let video_positions = prepared.video_positions.to_device(device)?;
+    let audio_positions = prepared
+        .audio_positions
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let stage1_video_noise = seeded_randn(
+        plan.seed,
+        &[
+            prepared.video_latent_shape.batch,
+            prepared.video_latent_shape.channels,
+            prepared.video_latent_shape.frames,
+            prepared.video_latent_shape.height,
+            prepared.video_latent_shape.width,
+        ],
+        device,
+        DType::F32,
+    )?;
+    let stage1_audio_noise = match audio_shape {
+        Some(audio_shape) => Some(seeded_randn(
+            plan.seed ^ 0x4155_4449_4f4c_5458,
+            &[
+                audio_shape.batch,
+                audio_shape.channels,
+                audio_shape.frames,
+                audio_shape.mel_bins,
+            ],
+            device,
+            DType::F32,
+        )?),
+        None => None,
+    };
+
+    if debug_enabled {
+        log_tensor_stats("video_context", &cond_context)?;
+        if let Some(audio_context) = audio_context.as_ref() {
+            log_tensor_stats("audio_context", audio_context)?;
+        }
+        log_tensor_stats("initial_video_latents", &stage1_video_noise)?;
+        if let Some(stage1_audio_noise) = stage1_audio_noise.as_ref() {
+            log_tensor_stats("initial_audio_latents", stage1_audio_noise)?;
+        }
+    }
+
+    let dtype = gpu_dtype(device);
+    let guidance_scale = effective_native_guidance_scale(plan);
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading one-stage transformer");
+    }
+    let transformer = load_ltx2_av_transformer(plan, device)?;
+    if debug_enabled {
+        log_debug_vram("after_one_stage_transformer_load");
+    }
+    let (latents, stage1_audio_latents) = run_real_distilled_stage(
+        &transformer,
+        prepared.video_latent_shape,
+        audio_shape,
+        &stage1_video_noise,
+        stage1_audio_noise.as_ref(),
+        &video_positions,
+        audio_positions.as_ref(),
+        &cond_context,
+        Some(&uncond_context),
+        alt_context.as_ref(),
+        audio_context.as_ref(),
+        uncond_audio_context.as_ref(),
+        alt_audio_context.as_ref(),
+        cond_mask.as_ref(),
+        uncond_mask.as_ref(),
+        alt_mask.as_ref(),
+        guidance_scale,
+        DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+        debug_enabled.then_some("one-stage"),
+    )?;
+    if debug_enabled {
+        log_debug_vram("after_one_stage_denoise");
+        log_tensor_stats("final_video_latents", &latents)?;
+    }
+    drop(transformer);
+    device.synchronize()?;
+    if debug_enabled {
+        log_debug_vram("after_one_stage_transformer_drop");
+    }
+
+    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    vae.use_tiling = false;
+    vae.use_framewise_decoding = false;
+    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    if debug_enabled {
+        log_tensor_stats("decoded_video", &video)?;
+    }
+    let frames = decoded_video_to_frames(&video, prepared.video_pixel_shape)?;
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    drop(video);
+    drop(vae);
+    drop(latents);
+    drop(stage1_audio_latents);
+    drop(stage1_audio_noise);
+    drop(stage1_video_noise);
+    drop(audio_positions);
+    drop(video_positions);
+    drop(alt_mask);
+    drop(uncond_mask);
+    drop(cond_mask);
+    drop(alt_audio_context);
+    drop(uncond_audio_context);
+    drop(audio_context);
+    drop(alt_context);
+    drop(uncond_context);
+    drop(cond_context);
     if device.is_cuda() {
         device.synchronize()?;
     }
@@ -2647,5 +2829,48 @@ mod tests {
         plan.guidance = 4.5;
 
         assert_eq!(effective_native_guidance_scale(&plan), 4.5);
+    }
+
+    #[test]
+    fn one_stage_runtime_keeps_requested_full_resolution_shape() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::OneStage;
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 1216);
+        assert_eq!(prepared.video_pixel_shape.height, 704);
+        assert_eq!(prepared.video_latent_shape.width, 38);
+        assert_eq!(prepared.video_latent_shape.height, 22);
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_plain_silent_one_stage_runs() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::OneStage;
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_rejects_one_stage_audio_and_upscale_requests() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::OneStage;
+
+        assert!(!super::supports_real_video_path(&plan));
     }
 }
