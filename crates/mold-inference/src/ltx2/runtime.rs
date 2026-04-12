@@ -2864,6 +2864,11 @@ fn denoised_from_velocity_with_sigma(
     sigma: &Tensor,
 ) -> Result<Tensor> {
     let sigma = sigma_scale_for_sample(sample, sigma)?;
+    let velocity = if velocity.dtype() == sample.dtype() {
+        velocity.clone()
+    } else {
+        velocity.to_dtype(sample.dtype())?
+    };
     sample
         .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
         .map_err(Into::into)
@@ -3293,6 +3298,11 @@ fn remap_ltx2_transformer_key(name: &str) -> String {
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
+    let velocity = if velocity.dtype() == sample.dtype() {
+        velocity.clone()
+    } else {
+        velocity.to_dtype(sample.dtype())?
+    };
     sample
         .broadcast_sub(&velocity.affine(sigma as f64, 0.0)?)
         .map_err(Into::into)
@@ -3302,8 +3312,13 @@ fn velocity_from_denoised(sample: &Tensor, denoised: &Tensor, sigma: f32) -> Res
     if sigma == 0.0 {
         return Tensor::zeros_like(sample).map_err(Into::into);
     }
+    let denoised = if denoised.dtype() == sample.dtype() {
+        denoised.clone()
+    } else {
+        denoised.to_dtype(sample.dtype())?
+    };
     sample
-        .broadcast_sub(denoised)?
+        .broadcast_sub(&denoised)?
         .affine(1.0 / sigma as f64, 0.0)
         .map_err(Into::into)
 }
@@ -4293,6 +4308,28 @@ mod tests {
         let value = guided.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
 
         assert!((value + 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn denoiser_helpers_cast_velocity_and_denoised_to_sample_dtype() {
+        let sample = Tensor::new(&[[[10.0f32, 4.0]]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+        let velocity = Tensor::new(&[[[2.0f32, -1.0]]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let sigma = Tensor::new(&[[0.5f32]], &Device::Cpu).unwrap();
+
+        let denoised = super::denoised_from_velocity_with_sigma(&sample, &velocity, &sigma).unwrap();
+        let restored = super::velocity_from_denoised(&sample, &denoised, 0.5).unwrap();
+
+        assert_eq!(denoised.dtype(), DType::F32);
+        assert_eq!(restored.dtype(), DType::F32);
+        let values = restored.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!((values[0] - 2.0).abs() < 1e-3);
+        assert!((values[1] + 1.0).abs() < 1e-3);
     }
 
     #[test]
