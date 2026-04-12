@@ -166,15 +166,22 @@ impl CheckpointUpSample1d {
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (_, channels, _) = x.dims3()?;
-        let x = replicate_pad_1d(x, self.pad, self.pad)?;
-        let filter = self
-            .filter
-            .to_device(x.device())?
-            .to_dtype(x.dtype())?
-            .broadcast_as((channels, 1, self.filter.dims3()?.2))?
-            .contiguous()?;
-        let y = x.conv_transpose1d(&filter, 0, 0, self.ratio, 1, channels)?;
-        let y = y.affine(self.ratio as f64, 0.0)?;
+        let x = replicate_pad_1d(x, self.pad, self.pad).with_context(|| {
+            format!(
+                "checkpoint upsample pad failed: channels={channels} ratio={}",
+                self.ratio
+            )
+        })?;
+        let x = x
+            .contiguous()
+            .context("checkpoint upsample contiguous materialization failed")?;
+        let filter = materialize_group_filter(&self.filter, channels, x.device(), x.dtype())?;
+        let y = x
+            .conv_transpose1d(&filter, 0, 0, self.ratio, 1, channels)
+            .with_context(|| format!("checkpoint upsample conv_transpose1d failed: input={:?} filter={:?} channels={channels} ratio={}", x.dims(), filter.dims(), self.ratio))?;
+        let y = y
+            .affine(self.ratio as f64, 0.0)
+            .context("checkpoint upsample affine failed")?;
         let out_len = y.dims3()?.2;
         y.narrow(
             2,
@@ -209,14 +216,25 @@ impl CheckpointDownSample1d {
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (_, channels, _) = x.dims3()?;
-        let x = replicate_pad_1d(x, self.pad_left, self.pad_right)?;
-        let filter = self
-            .filter
-            .to_device(x.device())?
-            .to_dtype(x.dtype())?
-            .broadcast_as((channels, 1, self.filter.dims3()?.2))?
-            .contiguous()?;
+        let x = replicate_pad_1d(x, self.pad_left, self.pad_right).with_context(|| {
+            format!(
+                "checkpoint downsample pad failed: channels={channels} ratio={}",
+                self.ratio
+            )
+        })?;
+        let x = x
+            .contiguous()
+            .context("checkpoint downsample contiguous materialization failed")?;
+        let filter = materialize_group_filter(&self.filter, channels, x.device(), x.dtype())?;
         x.conv1d(&filter, 0, self.ratio, 1, channels)
+            .with_context(|| {
+                format!(
+                    "checkpoint downsample conv1d failed: input={:?} filter={:?} channels={channels} ratio={}",
+                    x.dims(),
+                    filter.dims(),
+                    self.ratio
+                )
+            })
             .map_err(Into::into)
     }
 }
@@ -243,9 +261,17 @@ impl Activation1d {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.upsample.forward(x)?;
-        let x = self.act.forward(&x)?;
-        self.downsample.forward(&x)
+        let x = self
+            .upsample
+            .forward(x)
+            .context("anti-aliased activation upsample failed")?;
+        let x = self
+            .act
+            .forward(&x)
+            .context("anti-aliased activation snakebeta failed")?;
+        self.downsample
+            .forward(&x)
+            .context("anti-aliased activation downsample failed")
     }
 }
 
@@ -588,7 +614,16 @@ impl StftFn {
             .forward_basis
             .to_device(y.device())?
             .to_dtype(y.dtype())?;
-        let spec = y.conv1d(&basis, 0, self.hop_length, 1, 1)?;
+        let spec = y
+            .conv1d(&basis, 0, self.hop_length, 1, 1)
+            .with_context(|| {
+                format!(
+                    "stft conv1d failed: waveform={:?} basis={:?} hop_length={}",
+                    y.dims(),
+                    basis.dims(),
+                    self.hop_length
+                )
+            })?;
         let n_freqs = spec.dims3()?.1 / 2;
         let real = spec.narrow(1, 0, n_freqs)?;
         let imag = spec.narrow(1, n_freqs, n_freqs)?;
@@ -626,7 +661,13 @@ impl MelStft {
             .to_device(magnitude.device())?
             .to_dtype(magnitude.dtype())?
             .reshape((1, self.mel_basis.dims2()?.0, n_freqs))?;
-        let mel = mel_basis.broadcast_matmul(&magnitude)?;
+        let mel = mel_basis.broadcast_matmul(&magnitude).with_context(|| {
+            format!(
+                "mel projection failed: mel_basis={:?} magnitude={:?}",
+                mel_basis.dims(),
+                magnitude.dims()
+            )
+        })?;
         let log_mel = mel.clamp(1e-5f32, f32::MAX)?.log()?;
         log_mel
             .reshape((batch, channels, self.mel_basis.dims2()?.0, frames))
@@ -672,15 +713,29 @@ impl HannResampler {
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (_, channels, _) = x.dims3()?;
-        let x = replicate_pad_1d(x, self.pad, self.pad)?;
-        let filter = self
-            .filter
-            .to_device(x.device())?
-            .to_dtype(x.dtype())?
-            .broadcast_as((channels, 1, self.filter.dims3()?.2))?
-            .contiguous()?;
-        let y = x.conv_transpose1d(&filter, 0, 0, self.ratio, 1, channels)?;
-        let y = y.affine(self.ratio as f64, 0.0)?;
+        let x = replicate_pad_1d(x, self.pad, self.pad).with_context(|| {
+            format!(
+                "hann resampler pad failed: channels={channels} ratio={}",
+                self.ratio
+            )
+        })?;
+        let x = x
+            .contiguous()
+            .context("hann resampler contiguous materialization failed")?;
+        let filter = materialize_group_filter(&self.filter, channels, x.device(), x.dtype())?;
+        let y = x
+            .conv_transpose1d(&filter, 0, 0, self.ratio, 1, channels)
+            .with_context(|| {
+                format!(
+                    "hann resampler conv_transpose1d failed: input={:?} filter={:?} channels={channels} ratio={}",
+                    x.dims(),
+                    filter.dims(),
+                    self.ratio
+                )
+            })?;
+        let y = y
+            .affine(self.ratio as f64, 0.0)
+            .context("hann resampler affine failed")?;
         let out_len = y.dims3()?.2;
         y.narrow(
             2,
@@ -762,7 +817,10 @@ impl Ltx2VocoderWithBwe {
     }
 
     pub fn forward(&self, mel_spec: &Tensor) -> Result<Tensor> {
-        let mut x = self.vocoder.forward(mel_spec)?;
+        let mut x = self
+            .vocoder
+            .forward(mel_spec)
+            .context("base vocoder forward failed")?;
         let Some(bwe) = self.config.bwe.as_ref() else {
             return Ok(x);
         };
@@ -776,18 +834,21 @@ impl Ltx2VocoderWithBwe {
             .mel_stft
             .as_ref()
             .context("native LTX-2 BWE checkpoint is missing mel STFT state")?
-            .compute_log_mel(&x)?;
+            .compute_log_mel(&x)
+            .context("bwe mel-stft forward failed")?;
         let mel_for_bwe = mel.transpose(2, 3)?;
         let residual = self
             .bwe_generator
             .as_ref()
             .context("native LTX-2 BWE checkpoint is missing BWE generator weights")?
-            .forward(&mel_for_bwe)?;
+            .forward(&mel_for_bwe)
+            .context("bwe generator forward failed")?;
         let skip = self
             .resampler
             .as_ref()
             .context("native LTX-2 BWE checkpoint is missing the BWE resampler")?
-            .forward(&x)?;
+            .forward(&x)
+            .context("bwe skip resampler forward failed")?;
         let residual_len = residual.dims3()?.2;
         let skip_len = skip.dims3()?.2;
         if residual_len != skip_len {
@@ -897,6 +958,17 @@ fn load_conv_transpose1d(
     ))
 }
 
+fn materialize_group_filter(
+    filter: &Tensor,
+    channels: usize,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let base = filter.to_device(device)?.to_dtype(dtype)?.contiguous()?;
+    let copies = (0..channels).map(|_| &base).collect::<Vec<_>>();
+    Tensor::cat(&copies, 0).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -905,8 +977,8 @@ mod tests {
     use candle_nn::VarBuilder;
 
     use super::{
-        default_apply_final_activation, BigVganGenerator, HannResampler, Ltx2BweConfig,
-        Ltx2GeneratorConfig, Ltx2VocoderConfig, Ltx2VocoderWithBwe, MelStft,
+        default_apply_final_activation, BigVganGenerator, CheckpointUpSample1d, HannResampler,
+        Ltx2BweConfig, Ltx2GeneratorConfig, Ltx2VocoderConfig, Ltx2VocoderWithBwe, MelStft,
     };
 
     fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
@@ -1168,6 +1240,17 @@ mod tests {
         let x = Tensor::zeros((1, 2, 8), DType::F32, &device).unwrap();
         let y = resampler.forward(&x).unwrap();
         assert_eq!(y.dims3().unwrap(), (1, 2, 24));
+    }
+
+    #[test]
+    fn checkpoint_upsample_accepts_non_contiguous_input() {
+        let device = Device::Cpu;
+        let upsample = CheckpointUpSample1d::load(unit_filter(&device, 12), 2).unwrap();
+        let base = Tensor::zeros((1, 5, 4), DType::F32, &device).unwrap();
+        let non_contiguous = base.transpose(1, 2).unwrap();
+        assert!(!non_contiguous.layout().is_contiguous());
+        let y = upsample.forward(&non_contiguous).unwrap();
+        assert_eq!(y.dims3().unwrap(), (1, 4, 10));
     }
 
     #[test]
