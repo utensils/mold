@@ -647,6 +647,37 @@ fn effective_native_guidance_scale(plan: &Ltx2GeneratePlan) -> f64 {
     }
 }
 
+fn stage_guidance_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<f64> {
+    Ok(match (plan.pipeline, stage_index) {
+        (PipelineKind::Distilled, _) => 1.0,
+        (PipelineKind::TwoStage, 1)
+        | (PipelineKind::TwoStageHq, 1)
+        | (PipelineKind::A2Vid, 1)
+        | (PipelineKind::Keyframe, 1) => 1.0,
+        _ => {
+            let _ = denoise_pass_plan(plan, stage_index)?;
+            effective_native_guidance_scale(plan)
+        }
+    })
+}
+
+fn stage_sampler_mode(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<SamplerMode> {
+    Ok(match (plan.pipeline, stage_index) {
+        (PipelineKind::TwoStageHq, 0 | 1) => SamplerMode::Res2S,
+        _ => denoise_pass_plan(plan, stage_index)?.sampler,
+    })
+}
+
+fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Option<f64>> {
+    let pass = denoise_pass_plan(plan, stage_index)?;
+    Ok(match (plan.pipeline, stage_index) {
+        (PipelineKind::TwoStageHq, 0) => Some(0.25),
+        (PipelineKind::TwoStageHq, 1) => Some(0.5),
+        _ if pass.apply_distilled_lora => Some(1.0),
+        _ => None,
+    })
+}
+
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
     let plain_silent_request = plan.conditioning.images.is_empty()
         && plan.conditioning.audio_path.is_none()
@@ -691,13 +722,12 @@ fn denoise_pass_plan(
 
 fn stage_lora_stack(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Vec<LoraWeight>> {
     let mut loras = plan.loras.clone();
-    let pass = denoise_pass_plan(plan, stage_index)?;
-    if pass.apply_distilled_lora {
+    if let Some(scale) = stage_distilled_lora_scale(plan, stage_index)? {
         let path = plan
             .distilled_lora_path
             .clone()
             .context("native LTX-2 two-stage runtime requires a distilled LoRA asset")?;
-        loras.push(LoraWeight { path, scale: 1.0 });
+        loras.push(LoraWeight { path, scale });
     }
     Ok(loras)
 }
@@ -708,6 +738,14 @@ fn stage_sigmas_no_terminal(
     device: &candle_core::Device,
 ) -> Result<Vec<f32>> {
     let pass = denoise_pass_plan(plan, stage_index)?;
+    if stage_index == 1
+        && matches!(
+            plan.pipeline,
+            PipelineKind::TwoStage | PipelineKind::TwoStageHq
+        )
+    {
+        return Ok(DISTILLED_STAGE2_SIGMAS_NO_TERMINAL.to_vec());
+    }
     if pass.uses_distilled_checkpoint {
         return Ok(match stage_index {
             0 => DISTILLED_STAGE1_SIGMAS_NO_TERMINAL.to_vec(),
@@ -806,9 +844,9 @@ fn render_real_distilled_av(
     // and zeroed masked positions, so feeding the binary mask back into text
     // cross-attention here over-constrains the prompt path and does not match
     // the published inference stack.
-    let cond_mask = None;
-    let uncond_mask = None;
-    let alt_mask = None;
+    let cond_mask: Option<&Tensor> = None;
+    let uncond_mask: Option<&Tensor> = None;
+    let alt_mask: Option<&Tensor> = None;
     let video_positions = prepared.video_positions.to_device(device)?;
     let audio_positions = prepared
         .audio_positions
@@ -854,7 +892,7 @@ fn render_real_distilled_av(
     }
 
     let dtype = gpu_dtype(device);
-    let guidance_scale = effective_native_guidance_scale(plan);
+    let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
@@ -872,17 +910,17 @@ fn render_real_distilled_av(
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        Some(&uncond_context),
+        None,
         alt_context.as_ref(),
         audio_context.as_ref(),
-        uncond_audio_context.as_ref(),
+        None,
         alt_audio_context.as_ref(),
-        cond_mask.as_ref(),
-        uncond_mask.as_ref(),
-        alt_mask.as_ref(),
-        guidance_scale,
+        cond_mask,
+        None,
+        alt_mask,
+        stage1_guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
-        SamplerMode::Euler,
+        stage_sampler_mode(plan, 0)?,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
         debug_enabled.then_some("stage1"),
@@ -1005,17 +1043,17 @@ fn render_real_distilled_av(
         &stage2_video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        Some(&uncond_context),
+        None,
         alt_context.as_ref(),
         audio_context.as_ref(),
-        uncond_audio_context.as_ref(),
+        None,
         alt_audio_context.as_ref(),
-        cond_mask.as_ref(),
-        uncond_mask.as_ref(),
-        alt_mask.as_ref(),
-        guidance_scale,
+        cond_mask,
+        None,
+        alt_mask,
+        stage_guidance_scale(plan, 1)?,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
-        SamplerMode::Euler,
+        stage_sampler_mode(plan, 1)?,
         Some(&stage2_video_noise),
         stage2_audio_noise.as_ref(),
         debug_enabled.then_some("stage2"),
@@ -1057,9 +1095,9 @@ fn render_real_distilled_av(
     drop(stage1_video_noise);
     drop(audio_positions);
     drop(video_positions);
-    drop(alt_mask);
-    drop(uncond_mask);
-    drop(cond_mask);
+    let _ = alt_mask;
+    let _ = uncond_mask;
+    let _ = cond_mask;
     drop(alt_audio_context);
     drop(uncond_audio_context);
     drop(audio_context);
@@ -1121,9 +1159,9 @@ fn render_real_two_stage_av(
         .and_then(|prompt| prompt.audio_encoding.as_ref())
         .map(|tensor| tensor.to_device(device))
         .transpose()?;
-    let cond_mask = None;
-    let uncond_mask = None;
-    let alt_mask = None;
+    let cond_mask: Option<&Tensor> = None;
+    let uncond_mask: Option<&Tensor> = None;
+    let alt_mask: Option<&Tensor> = None;
     let video_positions = prepared.video_positions.to_device(device)?;
     let audio_positions = prepared
         .audio_positions
@@ -1158,10 +1196,10 @@ fn render_real_two_stage_av(
     };
 
     let dtype = gpu_dtype(device);
-    let guidance_scale = effective_native_guidance_scale(plan);
+    let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
     let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
-    let stage1_sampler = denoise_pass_plan(plan, 0)?.sampler;
+    let stage1_sampler = stage_sampler_mode(plan, 0)?;
     let stage1_loras = stage_lora_stack(plan, 0)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
@@ -1176,15 +1214,21 @@ fn render_real_two_stage_av(
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        Some(&uncond_context),
+        (stage1_guidance_scale > 1.0).then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        uncond_audio_context.as_ref(),
+        (stage1_guidance_scale > 1.0)
+            .then_some(uncond_audio_context.as_ref())
+            .flatten(),
         alt_audio_context.as_ref(),
-        cond_mask.as_ref(),
-        uncond_mask.as_ref(),
-        alt_mask.as_ref(),
-        guidance_scale,
+        cond_mask,
+        if stage1_guidance_scale > 1.0 {
+            uncond_mask
+        } else {
+            None
+        },
+        alt_mask,
+        stage1_guidance_scale,
         &stage1_sigmas,
         stage1_sampler,
         Some(&stage1_video_noise),
@@ -1261,8 +1305,9 @@ fn render_real_two_stage_av(
         }
         _ => None,
     };
-    let stage2_sampler = denoise_pass_plan(plan, 1)?.sampler;
+    let stage2_sampler = stage_sampler_mode(plan, 1)?;
     let stage2_loras = stage_lora_stack(plan, 1)?;
+    let stage2_guidance_scale = stage_guidance_scale(plan, 1)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
@@ -1276,15 +1321,21 @@ fn render_real_two_stage_av(
         &stage2_video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        Some(&uncond_context),
+        (stage2_guidance_scale > 1.0).then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        uncond_audio_context.as_ref(),
+        (stage2_guidance_scale > 1.0)
+            .then_some(uncond_audio_context.as_ref())
+            .flatten(),
         alt_audio_context.as_ref(),
-        cond_mask.as_ref(),
-        uncond_mask.as_ref(),
-        alt_mask.as_ref(),
-        guidance_scale,
+        cond_mask,
+        if stage2_guidance_scale > 1.0 {
+            uncond_mask
+        } else {
+            None
+        },
+        alt_mask,
+        stage2_guidance_scale,
         &stage2_sigmas,
         stage2_sampler,
         Some(&stage2_video_noise),
@@ -1317,9 +1368,9 @@ fn render_real_two_stage_av(
     drop(stage1_video_noise);
     drop(audio_positions);
     drop(video_positions);
-    drop(alt_mask);
-    drop(uncond_mask);
-    drop(cond_mask);
+    let _ = alt_mask;
+    let _ = uncond_mask;
+    let _ = cond_mask;
     drop(alt_audio_context);
     drop(uncond_audio_context);
     drop(audio_context);
@@ -1381,9 +1432,9 @@ fn render_real_one_stage_av(
         .and_then(|prompt| prompt.audio_encoding.as_ref())
         .map(|tensor| tensor.to_device(device))
         .transpose()?;
-    let cond_mask = None;
-    let uncond_mask = None;
-    let alt_mask = None;
+    let cond_mask: Option<&Tensor> = None;
+    let uncond_mask: Option<&Tensor> = None;
+    let alt_mask: Option<&Tensor> = None;
     let video_positions = prepared.video_positions.to_device(device)?;
     let audio_positions = prepared
         .audio_positions
@@ -1429,7 +1480,7 @@ fn render_real_one_stage_av(
     }
 
     let dtype = gpu_dtype(device);
-    let guidance_scale = effective_native_guidance_scale(plan);
+    let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
@@ -1446,17 +1497,23 @@ fn render_real_one_stage_av(
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        Some(&uncond_context),
+        (stage1_guidance_scale > 1.0).then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        uncond_audio_context.as_ref(),
+        (stage1_guidance_scale > 1.0)
+            .then_some(uncond_audio_context.as_ref())
+            .flatten(),
         alt_audio_context.as_ref(),
-        cond_mask.as_ref(),
-        uncond_mask.as_ref(),
-        alt_mask.as_ref(),
-        guidance_scale,
+        cond_mask,
+        if stage1_guidance_scale > 1.0 {
+            uncond_mask
+        } else {
+            None
+        },
+        alt_mask,
+        stage1_guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
-        SamplerMode::Euler,
+        stage_sampler_mode(plan, 0)?,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
         debug_enabled.then_some("one-stage"),
@@ -1490,9 +1547,9 @@ fn render_real_one_stage_av(
     drop(stage1_video_noise);
     drop(audio_positions);
     drop(video_positions);
-    drop(alt_mask);
-    drop(uncond_mask);
-    drop(cond_mask);
+    let _ = alt_mask;
+    let _ = uncond_mask;
+    let _ = cond_mask;
     drop(alt_audio_context);
     drop(uncond_audio_context);
     drop(audio_context);
@@ -3290,7 +3347,24 @@ mod tests {
     }
 
     #[test]
-    fn two_stage_hq_stage_sigmas_use_requested_step_count_and_hq_sampler() {
+    fn two_stage_stage2_sigmas_use_fixed_distilled_subset() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.num_inference_steps = 30;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let sigmas = super::stage_sigmas_no_terminal(&plan, 1, &Device::Cpu).unwrap();
+
+        assert_eq!(sigmas, vec![0.909375, 0.725, 0.421875]);
+    }
+
+    #[test]
+    fn two_stage_hq_stage_defaults_match_upstream_runtime() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -3301,15 +3375,28 @@ mod tests {
         plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
         rebuild_execution_graph(&mut plan, &req);
 
-        let sigmas = super::stage_sigmas_no_terminal(&plan, 1, &Device::Cpu).unwrap();
+        let stage1_sigmas = super::stage_sigmas_no_terminal(&plan, 0, &Device::Cpu).unwrap();
+        let stage2_sigmas = super::stage_sigmas_no_terminal(&plan, 1, &Device::Cpu).unwrap();
+        let stage1_loras = super::stage_lora_stack(&plan, 0).unwrap();
+        let stage2_loras = super::stage_lora_stack(&plan, 1).unwrap();
 
         assert_eq!(
-            super::denoise_pass_plan(&plan, 1).unwrap().sampler,
+            super::stage_sampler_mode(&plan, 0).unwrap(),
             crate::ltx2::execution::SamplerMode::Res2S
         );
-        assert_eq!(sigmas.len(), 6);
-        assert!(sigmas.windows(2).all(|pair| pair[0] >= pair[1]));
-        assert!(sigmas.last().copied().unwrap() > 0.0);
+        assert_eq!(
+            super::stage_sampler_mode(&plan, 1).unwrap(),
+            crate::ltx2::execution::SamplerMode::Res2S
+        );
+        assert_eq!(stage1_sigmas.len(), 6);
+        assert!(stage1_sigmas.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(stage1_sigmas.last().copied().unwrap() > 0.0);
+        assert_eq!(stage2_sigmas, vec![0.909375, 0.725, 0.421875]);
+        assert_eq!(stage1_loras.len(), 1);
+        assert_eq!(stage1_loras[0].scale, 0.25);
+        assert_eq!(stage2_loras.len(), 1);
+        assert_eq!(stage2_loras[0].scale, 0.5);
+        assert_eq!(super::stage_guidance_scale(&plan, 1).unwrap(), 1.0);
     }
 
     #[test]
