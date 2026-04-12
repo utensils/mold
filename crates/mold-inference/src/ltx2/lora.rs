@@ -1,11 +1,140 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use candle_core::{Device, Tensor};
 use mold_core::{GenerateRequest, LoraWeight};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CameraControlPreset {
     pub(crate) repo: &'static str,
     pub(crate) filename: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LinearLoraAdapter {
+    pub(crate) a: Tensor,
+    pub(crate) b: Tensor,
+    pub(crate) scale: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Ltx2LoraRegistry {
+    layers: HashMap<String, Vec<LinearLoraAdapter>>,
+}
+
+impl Ltx2LoraRegistry {
+    pub(crate) fn adapters_for(&self, key: &str) -> Vec<LinearLoraAdapter> {
+        self.layers.get(key).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    #[cfg(test)]
+    fn contains_layer(&self, key: &str) -> bool {
+        self.layers.contains_key(key)
+    }
+}
+
+fn strip_optional_model_prefix(key: &str) -> &str {
+    key.strip_prefix("model.").unwrap_or(key)
+}
+
+fn canonical_lora_layer_key(name: &str) -> Option<String> {
+    let base = name
+        .strip_suffix(".lora_A.weight")
+        .or_else(|| name.strip_suffix(".lora_B.weight"))
+        .or_else(|| name.strip_suffix(".alpha"))?;
+    let base = strip_optional_model_prefix(base);
+    if base.starts_with("diffusion_model.") {
+        Some(base.to_string())
+    } else if base.starts_with("transformer_blocks.")
+        || base.starts_with("patchify_proj")
+        || base.starts_with("adaln_single")
+        || base.starts_with("prompt_adaln_single")
+        || base.starts_with("caption_projection")
+        || base.starts_with("proj_out")
+        || base.starts_with("audio_")
+        || base.starts_with("av_ca_")
+        || base.starts_with("scale_shift_table")
+    {
+        Some(format!("diffusion_model.{base}"))
+    } else {
+        None
+    }
+}
+
+fn effective_lora_scale(user_scale: f64, rank: usize, alpha: Option<f64>) -> f64 {
+    match alpha {
+        Some(alpha) if rank > 0 => user_scale * alpha / rank as f64,
+        _ => user_scale,
+    }
+}
+
+pub(crate) fn load_lora_registry(loras: &[LoraWeight]) -> Result<Option<Arc<Ltx2LoraRegistry>>> {
+    if loras.is_empty() {
+        return Ok(None);
+    }
+
+    let mut registry = Ltx2LoraRegistry::default();
+    for lora in loras {
+        let tensors = candle_core::safetensors::load(&lora.path, &Device::Cpu)
+            .with_context(|| format!("failed to load LTX-2 LoRA {}", lora.path))?;
+        let mut a_tensors: HashMap<String, Tensor> = HashMap::new();
+        let mut b_tensors: HashMap<String, Tensor> = HashMap::new();
+        let mut alpha_values: HashMap<String, f64> = HashMap::new();
+
+        for (name, tensor) in tensors {
+            if let Some(key) = name
+                .strip_suffix(".lora_A.weight")
+                .and_then(|_| canonical_lora_layer_key(&name))
+            {
+                a_tensors.insert(key, tensor);
+            } else if let Some(key) = name
+                .strip_suffix(".lora_B.weight")
+                .and_then(|_| canonical_lora_layer_key(&name))
+            {
+                b_tensors.insert(key, tensor);
+            } else if let Some(key) = name
+                .strip_suffix(".alpha")
+                .and_then(|_| canonical_lora_layer_key(&name))
+            {
+                if let Ok(value) = tensor.to_dtype(candle_core::DType::F32)?.to_scalar::<f32>() {
+                    alpha_values.insert(key, value as f64);
+                }
+            }
+        }
+
+        let mut found_pairs = 0usize;
+        for (key, a) in a_tensors {
+            let Some(b) = b_tensors.remove(&key) else {
+                continue;
+            };
+            let rank = a.dim(0)?;
+            let scale = effective_lora_scale(lora.scale, rank, alpha_values.get(&key).copied());
+            registry
+                .layers
+                .entry(key)
+                .or_default()
+                .push(LinearLoraAdapter { a, b, scale });
+            found_pairs += 1;
+        }
+
+        if found_pairs == 0 {
+            bail!(
+                "no LTX-2 LoRA A/B pairs found in {}",
+                PathBuf::from(&lora.path).display()
+            );
+        }
+    }
+
+    if registry.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Arc::new(registry)))
+    }
 }
 
 pub(crate) fn normalize_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
@@ -86,6 +215,8 @@ pub(crate) fn resolve_loras(model_name: &str, req: &GenerateRequest) -> Result<V
 mod tests {
     use super::*;
     use mold_core::{GenerateRequest, OutputFormat};
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
 
     fn dummy_request() -> GenerateRequest {
         GenerateRequest {
@@ -165,5 +296,77 @@ mod tests {
             "ltx-2-19b-lora-camera-control-dolly-in.safetensors"
         );
         assert!(camera_control_preset("unknown").is_none());
+    }
+
+    fn temp_file(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "mold-ltx2-lora-{}-{}-{}.safetensors",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
+    }
+
+    #[test]
+    fn canonical_lora_layer_key_normalizes_expected_prefixes() {
+        assert_eq!(
+            canonical_lora_layer_key(
+                "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight"
+            )
+            .as_deref(),
+            Some("diffusion_model.transformer_blocks.0.attn1.to_q")
+        );
+        assert_eq!(
+            canonical_lora_layer_key(
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.lora_B.weight"
+            )
+            .as_deref(),
+            Some("diffusion_model.transformer_blocks.0.attn1.to_q")
+        );
+        assert_eq!(
+            canonical_lora_layer_key("transformer_blocks.0.attn1.to_q.alpha").as_deref(),
+            Some("diffusion_model.transformer_blocks.0.attn1.to_q")
+        );
+        assert!(canonical_lora_layer_key("tokenizer.foo").is_none());
+    }
+
+    #[test]
+    fn load_lora_registry_parses_camera_control_style_pairs() {
+        let path = temp_file("registry");
+        let a_data = vec![0u8; 2 * 4 * std::mem::size_of::<f32>()];
+        let b_data = vec![0u8; 8 * 2 * std::mem::size_of::<f32>()];
+        let alpha_data = 4.0f32.to_le_bytes().to_vec();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 4], &a_data).unwrap(),
+        );
+        tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_B.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![8, 2], &b_data).unwrap(),
+        );
+        tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.alpha".to_string(),
+            TensorView::new(SafeDtype::F32, vec![], &alpha_data).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let registry = load_lora_registry(&[LoraWeight {
+            path: path.to_string_lossy().to_string(),
+            scale: 0.5,
+        }])
+        .unwrap()
+        .unwrap();
+        assert!(registry.contains_layer("diffusion_model.transformer_blocks.0.attn1.to_q"));
+        let adapters = registry.adapters_for("diffusion_model.transformer_blocks.0.attn1.to_q");
+        assert_eq!(adapters.len(), 1);
+        assert!((adapters[0].scale - 1.0).abs() < 1e-6);
+
+        let _ = std::fs::remove_file(path);
     }
 }

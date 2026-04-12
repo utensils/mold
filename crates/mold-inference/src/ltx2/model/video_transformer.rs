@@ -8,6 +8,9 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
 use nn::{Module, VarBuilder};
+use std::sync::Arc;
+
+use crate::ltx2::lora::{LinearLoraAdapter, Ltx2LoraRegistry};
 
 use super::rope::LtxRopeType;
 
@@ -218,12 +221,16 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
 
 #[derive(Clone, Debug)]
 enum LtxLinear {
-    Standard(nn::Linear),
+    Standard {
+        linear: nn::Linear,
+        adapters: Vec<LinearLoraAdapter>,
+    },
     Fp8 {
         weight: Tensor,
         weight_scale: Option<Tensor>,
         input_scale: Option<Tensor>,
         bias: Option<Tensor>,
+        adapters: Vec<LinearLoraAdapter>,
     },
 }
 
@@ -241,7 +248,13 @@ enum Fp8WeightScaleMode {
 }
 
 impl LtxLinear {
-    fn load(in_dim: usize, out_dim: usize, has_bias: bool, vb: VarBuilder) -> Result<Self> {
+    fn load(
+        in_dim: usize,
+        out_dim: usize,
+        has_bias: bool,
+        vb: VarBuilder,
+        adapters: Vec<LinearLoraAdapter>,
+    ) -> Result<Self> {
         let weight = vb.get((out_dim, in_dim), "weight")?;
         let weight_scale = if vb.contains_tensor("weight_scale") {
             Some(vb.get((), "weight_scale")?)
@@ -264,18 +277,87 @@ impl LtxLinear {
                 weight_scale,
                 input_scale,
                 bias,
+                adapters,
             })
         } else {
-            Ok(Self::Standard(nn::Linear::new(weight, bias)))
+            Ok(Self::Standard {
+                linear: nn::Linear::new(weight, bias),
+                adapters,
+            })
         }
     }
 
     fn weight_dtype(&self) -> DType {
         match self {
-            Self::Standard(linear) => linear.weight().dtype(),
+            Self::Standard { linear, .. } => linear.weight().dtype(),
             Self::Fp8 { weight, .. } => weight.dtype(),
         }
     }
+}
+
+fn adapter_to_runtime_dtype(tensor: &Tensor, xs: &Tensor, runtime_dtype: DType) -> Result<Tensor> {
+    if tensor.device().same_device(xs.device()) {
+        tensor.to_dtype(runtime_dtype)
+    } else {
+        tensor.to_device(xs.device())?.to_dtype(runtime_dtype)
+    }
+}
+
+fn lora_linear_forward(
+    xs: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    runtime_dtype: DType,
+) -> Result<Tensor> {
+    let a = adapter_to_runtime_dtype(a, xs, runtime_dtype)?;
+    let b = adapter_to_runtime_dtype(b, xs, runtime_dtype)?;
+    let a_t = a.t()?;
+    let b_t = b.t()?;
+    match *xs.dims() {
+        [batch0, batch1, tokens, hidden] => xs
+            .reshape((batch0 * batch1 * tokens, hidden))?
+            .matmul(&a_t)?
+            .matmul(&b_t)?
+            .reshape((batch0, batch1, tokens, ())),
+        [batch, tokens, hidden] => xs
+            .reshape((batch * tokens, hidden))?
+            .matmul(&a_t)?
+            .matmul(&b_t)?
+            .reshape((batch, tokens, ())),
+        _ => xs.matmul(&a_t)?.matmul(&b_t),
+    }
+}
+
+fn apply_linear_loras(
+    base: Tensor,
+    xs: &Tensor,
+    adapters: &[LinearLoraAdapter],
+    runtime_dtype: DType,
+) -> Result<Tensor> {
+    if adapters.is_empty() {
+        return Ok(base);
+    }
+    let mut out = if base.dtype() == runtime_dtype {
+        base
+    } else {
+        base.to_dtype(runtime_dtype)?
+    };
+    let xs = if xs.dtype() == runtime_dtype {
+        xs.clone()
+    } else {
+        xs.to_dtype(runtime_dtype)?
+    };
+    for adapter in adapters {
+        let delta = lora_linear_forward(&xs, &adapter.a, &adapter.b, runtime_dtype)?;
+        out = out.broadcast_add(&delta.affine(adapter.scale, 0.0)?)?;
+    }
+    Ok(out)
+}
+
+fn lora_adapters_for(registry: Option<&Ltx2LoraRegistry>, key: &str) -> Vec<LinearLoraAdapter> {
+    registry
+        .map(|registry| registry.adapters_for(key))
+        .unwrap_or_default()
 }
 
 fn dequantize_fp8_weight_for_runtime(
@@ -390,12 +472,17 @@ fn fp8_linear_forward_chunked(
 impl Module for LtxLinear {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
-            Self::Standard(linear) => linear.forward(xs),
+            Self::Standard { linear, adapters } => {
+                let base = linear.forward(xs)?;
+                let dtype = base.dtype();
+                apply_linear_loras(base, xs, adapters, dtype)
+            }
             Self::Fp8 {
                 weight,
                 weight_scale,
                 input_scale,
                 bias,
+                adapters,
             } => {
                 let dtype = match xs.dtype() {
                     DType::F8E4M3 => DType::BF16,
@@ -426,10 +513,11 @@ impl Module for LtxLinear {
                     dtype,
                     chunk_size,
                 )?;
-                match bias {
+                let out = match bias {
                     Some(bias) => out.broadcast_add(&bias.to_dtype(dtype)?),
                     None => Ok(out),
-                }
+                }?;
+                apply_linear_loras(out, &xs, adapters, dtype)
             }
         }
     }
@@ -482,8 +570,20 @@ struct GeluProjection {
 }
 
 impl GeluProjection {
-    fn new(dim_in: usize, dim_out: usize, vb: VarBuilder) -> Result<Self> {
-        let proj = LtxLinear::load(dim_in, dim_out, true, vb.pp("proj"))?;
+    fn new(
+        dim_in: usize,
+        dim_out: usize,
+        vb: VarBuilder,
+        lora_registry: Option<&Ltx2LoraRegistry>,
+        lora_key: &str,
+    ) -> Result<Self> {
+        let proj = LtxLinear::load(
+            dim_in,
+            dim_out,
+            true,
+            vb.pp("proj"),
+            lora_adapters_for(lora_registry, lora_key),
+        )?;
         Ok(Self { proj })
     }
 
@@ -510,10 +610,27 @@ pub struct FeedForward {
 }
 
 impl FeedForward {
-    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        dim: usize,
+        vb: VarBuilder,
+        lora_registry: Option<&Ltx2LoraRegistry>,
+        lora_key_prefix: &str,
+    ) -> Result<Self> {
         let hidden = dim * 4;
-        let net_0 = GeluProjection::new(dim, hidden, vb.pp("net.0"))?;
-        let net_2 = LtxLinear::load(hidden, dim, true, vb.pp("net.2"))?;
+        let net_0 = GeluProjection::new(
+            dim,
+            hidden,
+            vb.pp("net.0"),
+            lora_registry,
+            &format!("{lora_key_prefix}.net.0.proj"),
+        )?;
+        let net_2 = LtxLinear::load(
+            hidden,
+            dim,
+            true,
+            vb.pp("net.2"),
+            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.net.2")),
+        )?;
         Ok(Self { net_0, net_2 })
     }
 
@@ -976,6 +1093,8 @@ impl LtxAttention {
         rope_type: LtxRopeType,
         apply_gated_attention: bool,
         vb: VarBuilder,
+        lora_registry: Option<&Ltx2LoraRegistry>,
+        lora_key_prefix: &str,
     ) -> Result<Self> {
         if qk_norm != "rms_norm_across_heads" && qk_norm != "rms_norm" {
             candle_core::bail!(
@@ -991,13 +1110,45 @@ impl LtxAttention {
         let norm_q = RmsNorm::new(inner_dim, norm_eps, true, vb.pp("norm_q"))?;
         let norm_k = RmsNorm::new(inner_kv_dim, norm_eps, true, vb.pp("norm_k"))?;
 
-        let to_q = LtxLinear::load(query_dim, inner_dim, bias, vb.pp("to_q"))?;
-        let to_k = LtxLinear::load(cross_attention_dim, inner_kv_dim, bias, vb.pp("to_k"))?;
-        let to_v = LtxLinear::load(cross_attention_dim, inner_kv_dim, bias, vb.pp("to_v"))?;
+        let to_q = LtxLinear::load(
+            query_dim,
+            inner_dim,
+            bias,
+            vb.pp("to_q"),
+            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_q")),
+        )?;
+        let to_k = LtxLinear::load(
+            cross_attention_dim,
+            inner_kv_dim,
+            bias,
+            vb.pp("to_k"),
+            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_k")),
+        )?;
+        let to_v = LtxLinear::load(
+            cross_attention_dim,
+            inner_kv_dim,
+            bias,
+            vb.pp("to_v"),
+            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_v")),
+        )?;
 
-        let to_out = LtxLinear::load(inner_dim, query_dim, out_bias, vb.pp("to_out").pp("0"))?;
+        let to_out = LtxLinear::load(
+            inner_dim,
+            query_dim,
+            out_bias,
+            vb.pp("to_out").pp("0"),
+            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_out.0")),
+        )?;
         let to_gate_logits = apply_gated_attention
-            .then(|| LtxLinear::load(query_dim, heads, true, vb.pp("to_gate_logits")))
+            .then(|| {
+                LtxLinear::load(
+                    query_dim,
+                    heads,
+                    true,
+                    vb.pp("to_gate_logits"),
+                    lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_gate_logits")),
+                )
+            })
             .transpose()?;
         let dropout = nn::Dropout::new(dropout as f32);
 
@@ -1300,6 +1451,8 @@ impl LtxVideoTransformerBlock {
         elementwise_affine: bool,
         apply_gated_attention: bool,
         vb: VarBuilder,
+        lora_registry: Option<&Ltx2LoraRegistry>,
+        block_key: &str,
     ) -> Result<Self> {
         let norm1 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm1"))?;
         let attn1 = LtxAttention::new(
@@ -1315,6 +1468,8 @@ impl LtxVideoTransformerBlock {
             rope_type,
             apply_gated_attention,
             vb.pp("attn1"),
+            lora_registry,
+            &format!("{block_key}.attn1"),
         )?;
         let norm2 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm2"))?;
         let attn2 = LtxAttention::new(
@@ -1330,10 +1485,12 @@ impl LtxVideoTransformerBlock {
             rope_type,
             apply_gated_attention,
             vb.pp("attn2"),
+            lora_registry,
+            &format!("{block_key}.attn2"),
         )?;
         let norm3 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm3"))?;
 
-        let ff = FeedForward::new(dim, vb.pp("ff"))?;
+        let ff = FeedForward::new(dim, vb.pp("ff"), lora_registry, &format!("{block_key}.ff"))?;
         let scale_shift_table = vb.get((6, dim), "scale_shift_table")?;
 
         Ok(Self {
@@ -1523,6 +1680,8 @@ impl Ltx2VideoTransformer3DModel {
                 config.norm_elementwise_affine,
                 config.apply_gated_attention,
                 vb.pp("transformer_blocks").pp(layer_idx.to_string()),
+                None,
+                &format!("diffusion_model.transformer_blocks.{layer_idx}"),
             )?);
         }
 
@@ -1620,6 +1779,8 @@ impl Ltx2VideoTransformer3DModel {
             self.config.norm_elementwise_affine,
             self.config.apply_gated_attention,
             blocks_vb.pp(index.to_string()),
+            None,
+            &format!("diffusion_model.transformer_blocks.{index}"),
         )
     }
 
@@ -1858,7 +2019,12 @@ struct LtxAvTransformerBlock {
 }
 
 impl LtxAvTransformerBlock {
-    fn new(config: &Ltx2VideoTransformer3DModelConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        config: &Ltx2VideoTransformer3DModelConfig,
+        vb: VarBuilder,
+        lora_registry: Option<&Ltx2LoraRegistry>,
+        block_key: &str,
+    ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
 
@@ -1875,6 +2041,8 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("attn1"),
+            lora_registry,
+            &format!("{block_key}.attn1"),
         )?;
         let video_attn2 = LtxAttention::new(
             video_dim,
@@ -1889,8 +2057,15 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("attn2"),
+            lora_registry,
+            &format!("{block_key}.attn2"),
         )?;
-        let video_ff = FeedForward::new(video_dim, vb.pp("ff"))?;
+        let video_ff = FeedForward::new(
+            video_dim,
+            vb.pp("ff"),
+            lora_registry,
+            &format!("{block_key}.ff"),
+        )?;
         let video_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, video_dim),
             "scale_shift_table",
@@ -1909,6 +2084,8 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("audio_attn1"),
+            lora_registry,
+            &format!("{block_key}.audio_attn1"),
         )?;
         let audio_attn2 = LtxAttention::new(
             audio_dim,
@@ -1923,8 +2100,15 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("audio_attn2"),
+            lora_registry,
+            &format!("{block_key}.audio_attn2"),
         )?;
-        let audio_ff = FeedForward::new(audio_dim, vb.pp("audio_ff"))?;
+        let audio_ff = FeedForward::new(
+            audio_dim,
+            vb.pp("audio_ff"),
+            lora_registry,
+            &format!("{block_key}.audio_ff"),
+        )?;
         let audio_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, audio_dim),
             "audio_scale_shift_table",
@@ -1943,6 +2127,8 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("audio_to_video_attn"),
+            lora_registry,
+            &format!("{block_key}.audio_to_video_attn"),
         )?;
         let video_to_audio_attn = LtxAttention::new(
             audio_dim,
@@ -1957,6 +2143,8 @@ impl LtxAvTransformerBlock {
             config.rope_type,
             config.apply_gated_attention,
             vb.pp("video_to_audio_attn"),
+            lora_registry,
+            &format!("{block_key}.video_to_audio_attn"),
         )?;
         let scale_shift_table_a2v_ca_audio =
             vb.get((5, audio_dim), "scale_shift_table_a2v_ca_audio")?;
@@ -2336,11 +2524,16 @@ pub struct Ltx2AvTransformer3DModel {
     audio_rope: Ltx2VideoRotaryPosEmbed,
     cross_rope: Ltx2VideoRotaryPosEmbed,
     transformer_blocks: AvTransformerBlockSource,
+    lora_registry: Option<Arc<Ltx2LoraRegistry>>,
     config: Ltx2VideoTransformer3DModelConfig,
 }
 
 impl Ltx2AvTransformer3DModel {
-    pub fn new(config: &Ltx2VideoTransformer3DModelConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        config: &Ltx2VideoTransformer3DModelConfig,
+        vb: VarBuilder,
+        lora_registry: Option<Arc<Ltx2LoraRegistry>>,
+    ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
         let adaln_embedding_coefficient = if config.cross_attention_adaln { 9 } else { 6 };
@@ -2361,6 +2554,8 @@ impl Ltx2AvTransformer3DModel {
             transformer_blocks.push(LtxAvTransformerBlock::new(
                 config,
                 vb.pp("transformer_blocks").pp(layer_idx.to_string()),
+                lora_registry.as_deref(),
+                &format!("diffusion_model.transformer_blocks.{layer_idx}"),
             )?);
             if ltx2_load_debug_enabled() {
                 eprintln!(
@@ -2484,6 +2679,7 @@ impl Ltx2AvTransformer3DModel {
                 config.double_precision_rope,
             ),
             transformer_blocks: AvTransformerBlockSource::Eager(transformer_blocks),
+            lora_registry,
             config: config.clone(),
         })
     }
@@ -2491,6 +2687,7 @@ impl Ltx2AvTransformer3DModel {
     pub fn new_streaming(
         config: &Ltx2VideoTransformer3DModelConfig,
         vb: VarBuilder<'static>,
+        lora_registry: Option<Arc<Ltx2LoraRegistry>>,
     ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
@@ -2621,6 +2818,7 @@ impl Ltx2AvTransformer3DModel {
                 config.double_precision_rope,
             ),
             transformer_blocks: AvTransformerBlockSource::Streaming(vb.pp("transformer_blocks")),
+            lora_registry,
             config: config.clone(),
         })
     }
@@ -2630,7 +2828,12 @@ impl Ltx2AvTransformer3DModel {
         blocks_vb: VarBuilder<'static>,
         index: usize,
     ) -> Result<LtxAvTransformerBlock> {
-        LtxAvTransformerBlock::new(&self.config, blocks_vb.pp(index.to_string()))
+        LtxAvTransformerBlock::new(
+            &self.config,
+            blocks_vb.pp(index.to_string()),
+            self.lora_registry.as_deref(),
+            &format!("diffusion_model.transformer_blocks.{index}"),
+        )
     }
 
     fn prepare_context_mask(mask: Option<&Tensor>, dtype: DType) -> Result<Option<Tensor>> {
@@ -2912,11 +3115,12 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use candle_core::{DType, Device, Tensor};
-    use candle_nn::{Module, VarBuilder};
+    use candle_nn::{Linear, Module, VarBuilder};
 
     use super::{
-        emulate_static_fp8_input_quantization, LayerNormNoParams, Ltx2AvTransformer3DModel,
-        Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear, LtxRopeType,
+        emulate_static_fp8_input_quantization, LayerNormNoParams, LinearLoraAdapter,
+        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear,
+        LtxRopeType,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -3442,6 +3646,8 @@ mod tests {
             LtxRopeType::Interleaved,
             false,
             attention_var_builder(4),
+            None,
+            "diffusion_model.transformer_blocks.0.attn2",
         )
         .unwrap();
         let hidden_states = Tensor::new(
@@ -3517,6 +3723,8 @@ mod tests {
             LtxRopeType::Interleaved,
             false,
             attention_var_builder(4),
+            None,
+            "diffusion_model.transformer_blocks.0.attn1",
         )
         .unwrap();
         let gated = LtxAttention::new(
@@ -3532,6 +3740,8 @@ mod tests {
             LtxRopeType::Interleaved,
             true,
             attention_var_builder_with_gate(4, Some(0.0)),
+            None,
+            "diffusion_model.transformer_blocks.0.attn1",
         )
         .unwrap();
 
@@ -3613,6 +3823,7 @@ mod tests {
             weight_scale: None,
             input_scale: None,
             bias: Some(bias.clone()),
+            adapters: vec![],
         };
 
         let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
@@ -3662,7 +3873,7 @@ mod tests {
         );
         let vb = VarBuilder::from_tensors(tensors, DType::F8E4M3, &device);
 
-        let linear = LtxLinear::load(2, 2, true, vb).unwrap();
+        let linear = LtxLinear::load(2, 2, true, vb, vec![]).unwrap();
 
         match linear {
             LtxLinear::Fp8 {
@@ -3670,13 +3881,15 @@ mod tests {
                 weight_scale,
                 input_scale,
                 bias,
+                adapters,
             } => {
                 assert_eq!(weight.dtype(), DType::F8E4M3);
                 assert!(weight_scale.is_some());
                 assert!(input_scale.is_some());
                 assert!(bias.is_some());
+                assert!(adapters.is_empty());
             }
-            LtxLinear::Standard(_) => panic!("expected fp8 linear"),
+            LtxLinear::Standard { .. } => panic!("expected fp8 linear"),
         }
     }
 
@@ -3756,6 +3969,7 @@ mod tests {
             weight_scale: Some(weight_scale),
             input_scale: None,
             bias: None,
+            adapters: vec![],
         };
 
         let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
@@ -3789,6 +4003,7 @@ mod tests {
             weight_scale: Some(weight_scale.clone()),
             input_scale: None,
             bias: None,
+            adapters: vec![],
         };
 
         let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
@@ -3837,6 +4052,24 @@ mod tests {
     }
 
     #[test]
+    fn standard_linear_applies_lora_adapters_without_merging_base_weight() {
+        let device = Device::Cpu;
+        let xs = Tensor::from_vec(vec![4.0f32, 5.0], (1, 1, 2), &device).unwrap();
+        let weight = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (2, 2), &device).unwrap();
+        let linear = LtxLinear::Standard {
+            linear: Linear::new(weight, None),
+            adapters: vec![LinearLoraAdapter {
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device).unwrap(),
+                b: Tensor::from_vec(vec![2.0f32, 3.0], (2, 1), &device).unwrap(),
+                scale: 0.5,
+            }],
+        };
+
+        let out = linear.forward(&xs).unwrap().flatten_all().unwrap();
+        assert_eq!(out.to_vec1::<f32>().unwrap(), vec![8.0, 11.0]);
+    }
+
+    #[test]
     fn fp8_linear_ignores_input_scale_by_default_in_fp8_cast_mode() {
         let _env_lock = fp8_input_scale_env_lock().lock().unwrap();
         let _guard = EnvVarGuard::set("MOLD_LTX2_FP8_INPUT_SCALE_MODE", "skip");
@@ -3852,6 +4085,7 @@ mod tests {
             weight_scale: None,
             input_scale: Some(input_scale.clone()),
             bias: None,
+            adapters: vec![],
         };
 
         let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
@@ -3885,6 +4119,7 @@ mod tests {
             weight_scale: None,
             input_scale: Some(input_scale.clone()),
             bias: None,
+            adapters: vec![],
         };
 
         let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
@@ -3971,8 +4206,8 @@ mod tests {
         let device = Device::Cpu;
         let config = tiny_av_config();
         let vb = av_transformer_var_builder();
-        let eager = Ltx2AvTransformer3DModel::new(&config, vb.clone()).unwrap();
-        let streaming = Ltx2AvTransformer3DModel::new_streaming(&config, vb).unwrap();
+        let eager = Ltx2AvTransformer3DModel::new(&config, vb.clone(), None).unwrap();
+        let streaming = Ltx2AvTransformer3DModel::new_streaming(&config, vb, None).unwrap();
 
         let video_hidden_states = Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],

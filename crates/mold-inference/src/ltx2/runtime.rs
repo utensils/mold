@@ -32,7 +32,7 @@ use crate::engine::{gpu_dtype, seeded_randn};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::ProgressReporter;
 use crate::weight_loader::load_fp8_safetensors;
-use mold_core::Ltx2SpatialUpscale;
+use mold_core::{LoraWeight, Ltx2SpatialUpscale};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
 pub const LTX2_AUDIO_LATENT_CHANNELS: usize = 8;
@@ -1667,9 +1667,18 @@ fn load_ltx2_av_transformer(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
 ) -> Result<Ltx2AvTransformer3DModel> {
+    load_ltx2_av_transformer_with_loras(plan, device, &[])
+}
+
+fn load_ltx2_av_transformer_with_loras(
+    plan: &Ltx2GeneratePlan,
+    device: &candle_core::Device,
+    loras: &[LoraWeight],
+) -> Result<Ltx2AvTransformer3DModel> {
     let force_streaming = std::env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some();
     let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
+    let lora_registry = super::lora::load_lora_registry(loras)?;
     let vb = if ltx2_checkpoint_is_fp8(plan) {
         load_fp8_safetensors(
             std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
@@ -1689,9 +1698,13 @@ fn load_ltx2_av_transformer(
     };
     let vb = vb.rename_f(remap_ltx2_transformer_key);
     if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
-        Ok(Ltx2AvTransformer3DModel::new(&config, vb)?)
+        Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else {
-        Ok(Ltx2AvTransformer3DModel::new_streaming(&config, vb)?)
+        Ok(Ltx2AvTransformer3DModel::new_streaming(
+            &config,
+            vb,
+            lora_registry,
+        )?)
     }
 }
 
