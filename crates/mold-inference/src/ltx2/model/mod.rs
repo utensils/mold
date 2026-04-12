@@ -1,3 +1,4 @@
+pub mod audio_vae;
 pub mod patchifiers;
 pub mod rope;
 pub mod shapes;
@@ -6,6 +7,8 @@ pub mod upsampler;
 pub mod video_transformer;
 pub mod video_vae;
 
+#[allow(unused_imports)]
+pub use audio_vae::{AudioCausalityAxis, AudioNormType, Ltx2AudioDecoder, Ltx2AudioDecoderConfig};
 #[allow(unused_imports)]
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};
 #[allow(unused_imports)]
