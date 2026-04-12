@@ -10,6 +10,7 @@ use candle_nn as nn;
 use nn::{Module, VarBuilder};
 use std::sync::Arc;
 
+use crate::ltx2::guidance::{BatchedPerturbationConfig, PerturbationType};
 use crate::ltx2::lora::{LinearLoraAdapter, Ltx2LoraRegistry};
 
 use super::rope::LtxRopeType;
@@ -1221,6 +1222,8 @@ impl LtxAttention {
         attention_mask: Option<&Tensor>,
         image_rotary_emb: Option<(&Tensor, &Tensor)>,
         key_rotary_emb: Option<(&Tensor, &Tensor)>,
+        perturbation_mask: Option<&Tensor>,
+        all_perturbed: bool,
     ) -> Result<Tensor> {
         let (b, q_len, _) = hidden_states.dims3()?;
         let is_self_attention = encoder_hidden_states.is_none();
@@ -1233,53 +1236,88 @@ impl LtxAttention {
             None
         };
 
-        let mut q = self.to_q.forward(hidden_states)?;
-        let mut k = self.to_k.forward(enc)?;
         let v = self.to_v.forward(enc)?;
-
-        q = self.norm_q.forward(&q)?;
-        k = self.norm_k.forward(&k)?;
-
-        if let Some((cos, sin)) = image_rotary_emb {
-            if is_self_attention {
-                q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
-                k = apply_rotary_emb(&k, cos, sin, self.rope_type, self.heads, self.head_dim)?;
-            } else if let Some((k_cos, k_sin)) = key_rotary_emb {
-                q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
-                k = apply_rotary_emb(&k, k_cos, k_sin, self.rope_type, self.heads, self.head_dim)?;
-            }
-        }
-
-        let q = q.reshape((b, q_len, self.heads, self.head_dim))?;
-        let k = k.reshape((b, k_len, self.heads, self.head_dim))?;
         let v = v.reshape((b, k_len, self.heads, self.head_dim))?;
+        let value_passthrough = v.transpose(1, 2)?.contiguous()?;
 
-        let dtype = q.dtype();
-        let scale = 1f32 / (self.head_dim as f32).sqrt();
-        let attn_mask_f32 = attn_mask
-            .as_ref()
-            .map(|mask| mask.to_dtype(DType::F32))
-            .transpose()?;
-        let out_f32 = if should_chunk_attention(q_len, k_len) {
-            let q_t = q.transpose(1, 2)?;
-            let k_t = k.transpose(1, 2)?;
-            let v_t = v.transpose(1, 2)?;
-            chunked_attention(
-                &q_t,
-                &k_t,
-                &v_t,
-                attn_mask_f32.as_ref(),
-                scale,
-                attention_query_chunk_size(q_len),
-                attention_key_chunk_size(k_len),
-            )?
+        let dtype = hidden_states.dtype();
+        let out = if all_perturbed {
+            value_passthrough.clone()
         } else {
-            let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-            let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-            let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-            full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
+            let mut q = self.to_q.forward(hidden_states)?;
+            let mut k = self.to_k.forward(enc)?;
+
+            q = self.norm_q.forward(&q)?;
+            k = self.norm_k.forward(&k)?;
+
+            if let Some((cos, sin)) = image_rotary_emb {
+                if is_self_attention {
+                    q =
+                        apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                    k =
+                        apply_rotary_emb(&k, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                } else if let Some((k_cos, k_sin)) = key_rotary_emb {
+                    q =
+                        apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                    k = apply_rotary_emb(
+                        &k,
+                        k_cos,
+                        k_sin,
+                        self.rope_type,
+                        self.heads,
+                        self.head_dim,
+                    )?;
+                }
+            }
+
+            let q = q.reshape((b, q_len, self.heads, self.head_dim))?;
+            let k = k.reshape((b, k_len, self.heads, self.head_dim))?;
+
+            let scale = 1f32 / (self.head_dim as f32).sqrt();
+            let attn_mask_f32 = attn_mask
+                .as_ref()
+                .map(|mask| mask.to_dtype(DType::F32))
+                .transpose()?;
+            let out_f32 = if should_chunk_attention(q_len, k_len) {
+                let q_t = q.transpose(1, 2)?;
+                let k_t = k.transpose(1, 2)?;
+                let v_t = v.transpose(1, 2)?;
+                chunked_attention(
+                    &q_t,
+                    &k_t,
+                    &v_t,
+                    attn_mask_f32.as_ref(),
+                    scale,
+                    attention_query_chunk_size(q_len),
+                    attention_key_chunk_size(k_len),
+                )?
+            } else {
+                let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
+            };
+            let mut out = out_f32.to_dtype(dtype)?;
+            if let Some(mask) = perturbation_mask {
+                let mask = if mask.rank() == out.rank() {
+                    mask.clone()
+                } else {
+                    let mut shape = vec![mask.dim(0)?];
+                    shape.extend(std::iter::repeat_n(1usize, out.rank().saturating_sub(1)));
+                    mask.reshape(shape)?
+                };
+                let mask = if mask.dtype() == out.dtype() {
+                    mask
+                } else {
+                    mask.to_dtype(out.dtype())?
+                };
+                let one_minus_mask = Tensor::ones_like(&mask)?.broadcast_sub(&mask)?;
+                out = out
+                    .broadcast_mul(&mask)?
+                    .broadcast_add(&value_passthrough.broadcast_mul(&one_minus_mask)?)?;
+            }
+            out
         };
-        let out = out_f32.to_dtype(dtype)?;
 
         let mut out = out.transpose(1, 2)?.contiguous()?;
         if let Some(to_gate_logits) = &self.to_gate_logits {
@@ -1563,7 +1601,7 @@ impl LtxVideoTransformerBlock {
 
         let attn1 = self
             .attn1
-            .forward(&norm_hidden, None, None, image_rotary_emb, None)?;
+            .forward(&norm_hidden, None, None, image_rotary_emb, None, None, false)?;
         let gate_msa = if gate_msa.dim(1)? == 1 {
             gate_msa.broadcast_as((b, hidden_states.dim(1)?, gate_msa.dim(2)?))?
         } else {
@@ -1579,6 +1617,8 @@ impl LtxVideoTransformerBlock {
             encoder_attention_mask,
             None,
             None,
+            None,
+            false,
         )?;
         hs = hs.broadcast_add(&attn2)?;
 
@@ -1974,14 +2014,30 @@ fn broadcast_to_tokens(values: &Tensor, tokens: usize) -> Result<Tensor> {
 
 fn modulate_tokens(x: &Tensor, scale: &Tensor, shift: &Tensor) -> Result<Tensor> {
     let scale = broadcast_to_tokens(scale, x.dim(1)?)?;
+    let scale = if scale.dtype() == x.dtype() {
+        scale
+    } else {
+        scale.to_dtype(x.dtype())?
+    };
     let shift = broadcast_to_tokens(shift, x.dim(1)?)?;
+    let shift = if shift.dtype() == x.dtype() {
+        shift
+    } else {
+        shift.to_dtype(x.dtype())?
+    };
     let one = Tensor::ones_like(&scale)?;
     x.broadcast_mul(&one.broadcast_add(&scale)?)?
         .broadcast_add(&shift)
 }
 
 fn gate_tokens(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
-    x.broadcast_mul(&broadcast_to_tokens(gate, x.dim(1)?)?)
+    let gate = broadcast_to_tokens(gate, x.dim(1)?)?;
+    let gate = if gate.dtype() == x.dtype() {
+        gate
+    } else {
+        gate.to_dtype(x.dtype())?
+    };
+    x.broadcast_mul(&gate)
 }
 
 #[derive(Clone, Debug)]
@@ -1989,6 +2045,7 @@ struct LtxPreparedModality {
     x: Tensor,
     context: Tensor,
     context_mask: Option<Tensor>,
+    self_attention_mask: Option<Tensor>,
     timesteps: Tensor,
     embedded_timestep: Tensor,
     rope: (Tensor, Tensor),
@@ -2255,7 +2312,15 @@ impl LtxAvTransformerBlock {
             let scale_kv = prompt.i((.., .., 1, ..))?;
             let context = modulate_tokens(context, &scale_kv, &shift_kv)?;
             return gate_tokens(
-                &attn.forward(&attn_input, Some(&context), context_mask, None, None)?,
+                &attn.forward(
+                    &attn_input,
+                    Some(&context),
+                    context_mask,
+                    None,
+                    None,
+                    None,
+                    false,
+                )?,
                 &gate,
             );
         }
@@ -2265,6 +2330,8 @@ impl LtxAvTransformerBlock {
             context_mask,
             None,
             None,
+            None,
+            false,
         )
     }
 
@@ -2273,6 +2340,7 @@ impl LtxAvTransformerBlock {
         index: usize,
         video: Option<&LtxPreparedModality>,
         audio: Option<&LtxPreparedModality>,
+        perturbations: &BatchedPerturbationConfig,
     ) -> Result<(Option<Tensor>, Option<Tensor>)> {
         if video.is_none() && audio.is_none() {
             candle_core::bail!("AV transformer block requires at least one modality");
@@ -2287,13 +2355,28 @@ impl LtxAvTransformerBlock {
                 &v_scale_msa,
                 &v_shift_msa,
             )?;
+            let all_video_self_perturbed =
+                perturbations.all_in_batch(PerturbationType::SkipVideoSelfAttention, index);
+            let video_self_mask = if all_video_self_perturbed
+                || !perturbations.any_in_batch(PerturbationType::SkipVideoSelfAttention, index)
+            {
+                None
+            } else {
+                Some(perturbations.mask_like(
+                    PerturbationType::SkipVideoSelfAttention,
+                    index,
+                    &v_self_input,
+                )?)
+            };
             let v_self = gate_tokens(
                 &self.video_attn1.forward(
                     &v_self_input,
                     None,
-                    None,
+                    video.self_attention_mask.as_ref(),
                     Some((&video.rope.0, &video.rope.1)),
                     None,
+                    video_self_mask.as_ref(),
+                    all_video_self_perturbed,
                 )?,
                 &v_gate_msa,
             )?;
@@ -2330,13 +2413,28 @@ impl LtxAvTransformerBlock {
                 &a_scale_msa,
                 &a_shift_msa,
             )?;
+            let all_audio_self_perturbed =
+                perturbations.all_in_batch(PerturbationType::SkipAudioSelfAttention, index);
+            let audio_self_mask = if all_audio_self_perturbed
+                || !perturbations.any_in_batch(PerturbationType::SkipAudioSelfAttention, index)
+            {
+                None
+            } else {
+                Some(perturbations.mask_like(
+                    PerturbationType::SkipAudioSelfAttention,
+                    index,
+                    &a_self_input,
+                )?)
+            };
             let a_self = gate_tokens(
                 &self.audio_attn1.forward(
                     &a_self_input,
                     None,
-                    None,
+                    audio.self_attention_mask.as_ref(),
                     Some((&audio.rope.0, &audio.rope.1)),
                     None,
+                    audio_self_mask.as_ref(),
+                    all_audio_self_perturbed,
                 )?,
                 &a_gate_msa,
             )?;
@@ -2415,20 +2513,35 @@ impl LtxAvTransformerBlock {
             )?;
             let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
             let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
-            let a2v = gate_tokens(
-                &self.audio_to_video_attn.forward(
-                    &vx_scaled,
-                    Some(&ax_scaled),
-                    None,
-                    Some((&video_cross_rope.0, &video_cross_rope.1)),
-                    Some((&audio_cross_rope.0, &audio_cross_rope.1)),
-                )?,
-                &v_gate,
-            )?;
-            log_detail_tensor(index, "video_av_cross_out", &a2v)?;
-            let current_vx = vx_before_cross.broadcast_add(&a2v)?;
-            log_detail_tensor(index, "video_after_av_cross", &current_vx)?;
-            vx = Some(current_vx);
+            if !perturbations.all_in_batch(PerturbationType::SkipA2VCrossAttention, index) {
+                let a2v_mask = perturbations.mask_like(
+                    PerturbationType::SkipA2VCrossAttention,
+                    index,
+                    vx_before_cross,
+                )?;
+                let a2v = gate_tokens(
+                    &self.audio_to_video_attn.forward(
+                        &vx_scaled,
+                        Some(&ax_scaled),
+                        None,
+                        Some((&video_cross_rope.0, &video_cross_rope.1)),
+                        Some((&audio_cross_rope.0, &audio_cross_rope.1)),
+                        None,
+                        false,
+                    )?,
+                    &v_gate,
+                )?;
+                let a2v_mask = if a2v_mask.dtype() == a2v.dtype() {
+                    a2v_mask
+                } else {
+                    a2v_mask.to_dtype(a2v.dtype())?
+                };
+                let a2v = a2v.broadcast_mul(&a2v_mask)?;
+                log_detail_tensor(index, "video_av_cross_out", &a2v)?;
+                let current_vx = vx_before_cross.broadcast_add(&a2v)?;
+                log_detail_tensor(index, "video_after_av_cross", &current_vx)?;
+                vx = Some(current_vx);
+            }
 
             let (a_ca_scale, a_ca_shift, a_gate) = self.get_cross_ada_values(
                 &self.scale_shift_table_a2v_ca_audio,
@@ -2444,20 +2557,35 @@ impl LtxAvTransformerBlock {
             )?;
             let ax_scaled = modulate_tokens(&ax_norm3, &a_ca_scale, &a_ca_shift)?;
             let vx_scaled = modulate_tokens(&vx_norm3, &v_ca_scale, &v_ca_shift)?;
-            let v2a = gate_tokens(
-                &self.video_to_audio_attn.forward(
-                    &ax_scaled,
-                    Some(&vx_scaled),
-                    None,
-                    Some((&audio_cross_rope.0, &audio_cross_rope.1)),
-                    Some((&video_cross_rope.0, &video_cross_rope.1)),
-                )?,
-                &a_gate,
-            )?;
-            log_detail_tensor(index, "audio_av_cross_out", &v2a)?;
-            let current_ax = ax_before_cross.broadcast_add(&v2a)?;
-            log_detail_tensor(index, "audio_after_av_cross", &current_ax)?;
-            ax = Some(current_ax);
+            if !perturbations.all_in_batch(PerturbationType::SkipV2ACrossAttention, index) {
+                let v2a_mask = perturbations.mask_like(
+                    PerturbationType::SkipV2ACrossAttention,
+                    index,
+                    ax_before_cross,
+                )?;
+                let v2a = gate_tokens(
+                    &self.video_to_audio_attn.forward(
+                        &ax_scaled,
+                        Some(&vx_scaled),
+                        None,
+                        Some((&audio_cross_rope.0, &audio_cross_rope.1)),
+                        Some((&video_cross_rope.0, &video_cross_rope.1)),
+                        None,
+                        false,
+                    )?,
+                    &a_gate,
+                )?;
+                let v2a_mask = if v2a_mask.dtype() == v2a.dtype() {
+                    v2a_mask
+                } else {
+                    v2a_mask.to_dtype(v2a.dtype())?
+                };
+                let v2a = v2a.broadcast_mul(&v2a_mask)?;
+                log_detail_tensor(index, "audio_av_cross_out", &v2a)?;
+                let current_ax = ax_before_cross.broadcast_add(&v2a)?;
+                log_detail_tensor(index, "audio_after_av_cross", &current_ax)?;
+                ax = Some(current_ax);
+            }
         }
 
         if let (Some(video), Some(vx_before_ff)) = (video, vx.as_ref()) {
@@ -2846,6 +2974,18 @@ impl Ltx2AvTransformer3DModel {
         }
     }
 
+    fn prepare_self_attention_mask(mask: Option<&Tensor>, dtype: DType) -> Result<Option<Tensor>> {
+        match mask {
+            Some(mask) => Ok(Some(
+                mask.to_dtype(dtype)?
+                    .affine(1.0, -1.0)?
+                    .affine(10000.0, 0.0)?
+                    .unsqueeze(1)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
     fn temporal_cross_positions(&self, positions: &Tensor, expected_dims: usize) -> Result<Tensor> {
         let dims = positions.dim(1)?;
         if dims == expected_dims {
@@ -2857,12 +2997,24 @@ impl Ltx2AvTransformer3DModel {
         positions.i((.., 0..1, .., ..))
     }
 
+    fn reshape_adaln_output(output: &Tensor, batch: usize) -> Result<Tensor> {
+        let (rows, dim) = output.dims2()?;
+        if rows % batch != 0 {
+            candle_core::bail!(
+                "AdaLN output row count {rows} is not divisible by batch size {batch}"
+            );
+        }
+        output.reshape((batch, rows / batch, dim))
+    }
+
     fn prepare_modality(
         &self,
         latent: &Tensor,
         context: &Tensor,
         context_mask: Option<&Tensor>,
-        timestep: &Tensor,
+        self_attention_mask: Option<&Tensor>,
+        timesteps: &Tensor,
+        sigma: &Tensor,
         positions: &Tensor,
         patchify_proj: &nn::Linear,
         adaln_single: &AdaLayerNormSingle,
@@ -2871,13 +3023,13 @@ impl Ltx2AvTransformer3DModel {
         rope: &Ltx2VideoRotaryPosEmbed,
     ) -> Result<LtxPreparedModality> {
         let x = patchify_proj.forward(latent)?;
-        let (timesteps, embedded_timestep) = adaln_single.forward(&timestep.flatten_all()?)?;
+        let (timesteps, embedded_timestep) = adaln_single.forward(&timesteps.flatten_all()?)?;
         let batch = x.dim(0)?;
-        let timesteps = timesteps.reshape((batch, 1, timesteps.dim(1)?))?;
-        let embedded_timestep = embedded_timestep.reshape((batch, 1, embedded_timestep.dim(1)?))?;
+        let timesteps = Self::reshape_adaln_output(&timesteps, batch)?;
+        let embedded_timestep = Self::reshape_adaln_output(&embedded_timestep, batch)?;
         let prompt_timestep = if let Some(prompt_adaln_single) = prompt_adaln_single {
-            let (prompt_timestep, _) = prompt_adaln_single.forward(&timestep.flatten_all()?)?;
-            Some(prompt_timestep.reshape((batch, 1, prompt_timestep.dim(1)?))?)
+            let (prompt_timestep, _) = prompt_adaln_single.forward(&sigma.flatten_all()?)?;
+            Some(Self::reshape_adaln_output(&prompt_timestep, batch)?)
         } else {
             None
         };
@@ -2891,6 +3043,10 @@ impl Ltx2AvTransformer3DModel {
             x,
             context,
             context_mask: Self::prepare_context_mask(context_mask, latent.dtype())?,
+            self_attention_mask: Self::prepare_self_attention_mask(
+                self_attention_mask,
+                latent.dtype(),
+            )?,
             timesteps,
             embedded_timestep,
             rope,
@@ -2908,7 +3064,7 @@ impl Ltx2AvTransformer3DModel {
         batch: usize,
     ) -> Result<Tensor> {
         let (output, _) = adaln.forward(&timestep.flatten_all()?.affine(scale, 0.0)?)?;
-        output.reshape((batch, 1, output.dim(1)?))
+        Self::reshape_adaln_output(&output, batch)
     }
 
     fn process_output(
@@ -2928,7 +3084,17 @@ impl Ltx2AvTransformer3DModel {
         let scale = scale_shift.i((.., .., 1, ..))?;
         let x = norm_out.forward(x)?;
         let scale = broadcast_to_tokens(&scale, tokens)?;
+        let scale = if scale.dtype() == x.dtype() {
+            scale
+        } else {
+            scale.to_dtype(x.dtype())?
+        };
         let shift = broadcast_to_tokens(&shift, tokens)?;
+        let shift = if shift.dtype() == x.dtype() {
+            shift
+        } else {
+            shift.to_dtype(x.dtype())?
+        };
         let one = Tensor::ones_like(&scale)?;
         proj_out.forward(
             &x.broadcast_mul(&one.broadcast_add(&scale)?)?
@@ -2943,22 +3109,39 @@ impl Ltx2AvTransformer3DModel {
         audio_hidden_states: Option<&Tensor>,
         video_encoder_hidden_states: &Tensor,
         audio_encoder_hidden_states: Option<&Tensor>,
-        timestep: &Tensor,
+        video_sigma: &Tensor,
+        video_timestep: &Tensor,
+        audio_sigma: Option<&Tensor>,
+        audio_timestep: Option<&Tensor>,
         video_encoder_attention_mask: Option<&Tensor>,
         audio_encoder_attention_mask: Option<&Tensor>,
+        video_self_attention_mask: Option<&Tensor>,
+        audio_self_attention_mask: Option<&Tensor>,
         video_positions: &Tensor,
         audio_positions: Option<&Tensor>,
+        perturbations: Option<&BatchedPerturbationConfig>,
     ) -> Result<(Tensor, Option<Tensor>)> {
         let compute_dtype = match self.patchify_proj.weight().dtype() {
             DType::F8E4M3 => DType::BF16,
             other => other,
         };
-        let timestep = timestep.to_dtype(compute_dtype)?.affine(1000.0, 0.0)?;
+        let video_sigma = video_sigma.to_dtype(compute_dtype)?.affine(1000.0, 0.0)?;
+        let video_timestep = video_timestep
+            .to_dtype(compute_dtype)?
+            .affine(1000.0, 0.0)?;
+        let audio_sigma = audio_sigma
+            .map(|sigma| sigma.to_dtype(compute_dtype)?.affine(1000.0, 0.0))
+            .transpose()?;
+        let audio_timestep = audio_timestep
+            .map(|timestep| timestep.to_dtype(compute_dtype)?.affine(1000.0, 0.0))
+            .transpose()?;
         let mut video = self.prepare_modality(
             &video_hidden_states.to_dtype(compute_dtype)?,
             &video_encoder_hidden_states.to_dtype(compute_dtype)?,
             video_encoder_attention_mask,
-            &timestep,
+            video_self_attention_mask,
+            &video_timestep,
+            &video_sigma,
             video_positions,
             &self.patchify_proj,
             &self.adaln_single,
@@ -2966,20 +3149,28 @@ impl Ltx2AvTransformer3DModel {
             self.caption_projection.as_ref(),
             &self.video_rope,
         )?;
+        let audio_sigma_ref = audio_sigma.as_ref();
+        let audio_timestep_ref = audio_timestep.as_ref();
         let mut audio = match (
             audio_hidden_states,
             audio_encoder_hidden_states,
+            audio_sigma_ref,
+            audio_timestep_ref,
             audio_positions,
         ) {
             (
                 Some(audio_hidden_states),
                 Some(audio_encoder_hidden_states),
+                Some(audio_sigma),
+                Some(audio_timestep),
                 Some(audio_positions),
             ) => Some(self.prepare_modality(
                 &audio_hidden_states.to_dtype(compute_dtype)?,
                 &audio_encoder_hidden_states.to_dtype(compute_dtype)?,
                 audio_encoder_attention_mask,
-                &timestep,
+                audio_self_attention_mask,
+                audio_timestep,
+                audio_sigma,
                 audio_positions,
                 &self.audio_patchify_proj,
                 &self.audio_adaln_single,
@@ -2987,12 +3178,15 @@ impl Ltx2AvTransformer3DModel {
                 self.audio_caption_projection.as_ref(),
                 &self.audio_rope,
             )?),
-            (None, None, None) => None,
+            (None, None, None, None, None) => None,
             _ => candle_core::bail!(
-                "audio hidden states, contexts, and positions must be provided together"
+                "audio hidden states, contexts, sigma, timesteps, and positions must be provided together"
             ),
         };
         let batch = video.x.dim(0)?;
+        let perturbations = perturbations
+            .cloned()
+            .unwrap_or_else(|| BatchedPerturbationConfig::empty(batch));
         let av_scale = self.config.av_ca_timestep_scale_multiplier / 1000.0;
         if let Some(audio) = audio.as_mut() {
             let video_cross_positions = self.temporal_cross_positions(video_positions, 1)?;
@@ -3002,25 +3196,29 @@ impl Ltx2AvTransformer3DModel {
             audio.cross_rope = Some(self.cross_rope.forward(&audio.x, &audio_cross_positions)?);
             video.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_video_scale_shift_adaln_single,
-                &timestep,
+                audio_sigma
+                    .as_ref()
+                    .expect("audio sigma already validated"),
                 1.0,
                 batch,
             )?);
             audio.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_audio_scale_shift_adaln_single,
-                &timestep,
+                &video_sigma,
                 1.0,
                 batch,
             )?);
             video.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_a2v_gate_adaln_single,
-                &timestep,
+                audio_sigma
+                    .as_ref()
+                    .expect("audio sigma already validated"),
                 av_scale,
                 batch,
             )?);
             audio.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_v2a_gate_adaln_single,
-                &timestep,
+                &video_sigma,
                 av_scale,
                 batch,
             )?);
@@ -3032,7 +3230,8 @@ impl Ltx2AvTransformer3DModel {
                     if ltx2_block_debug_enabled() {
                         eprintln!("[ltx2-block-debug] enter block={index}");
                     }
-                    let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
+                    let (vx, ax) =
+                        block.forward(index, Some(&video), audio.as_ref(), &perturbations)?;
                     video.x = vx.ok_or_else(|| {
                         candle_core::Error::msg("video branch unexpectedly returned no output")
                     })?;
@@ -3060,7 +3259,8 @@ impl Ltx2AvTransformer3DModel {
                         eprintln!("[ltx2-block-debug] enter block={index}");
                     }
                     let block = self.streaming_block(blocks_vb.clone(), index)?;
-                    let (vx, ax) = block.forward(index, Some(&video), audio.as_ref())?;
+                    let (vx, ax) =
+                        block.forward(index, Some(&video), audio.as_ref(), &perturbations)?;
                     video.x = vx.ok_or_else(|| {
                         candle_core::Error::msg("video branch unexpectedly returned no output")
                     })?;
@@ -3118,9 +3318,9 @@ mod tests {
     use candle_nn::{Linear, Module, VarBuilder};
 
     use super::{
-        emulate_static_fp8_input_quantization, LayerNormNoParams, LinearLoraAdapter,
-        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear,
-        LtxRopeType,
+        emulate_static_fp8_input_quantization, gate_tokens, modulate_tokens, LayerNormNoParams,
+        LinearLoraAdapter, Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig,
+        LtxAttention, LtxLinear, LtxRopeType,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -3685,6 +3885,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                false,
             )
             .unwrap();
         let with_video_rope = attention
@@ -3694,6 +3896,8 @@ mod tests {
                 None,
                 Some((&cos, &sin)),
                 None,
+                None,
+                false,
             )
             .unwrap();
 
@@ -3746,12 +3950,88 @@ mod tests {
         .unwrap();
 
         let ungated_out = ungated
-            .forward(&hidden_states, None, None, None, None)
+            .forward(&hidden_states, None, None, None, None, None, false)
             .unwrap();
         let gated_out = gated
-            .forward(&hidden_states, None, None, None, None)
+            .forward(&hidden_states, None, None, None, None, None, false)
             .unwrap();
         assert_tensors_close(&ungated_out, &gated_out, 1e-5);
+    }
+
+    #[test]
+    fn self_attention_partial_perturbation_mask_broadcasts_across_heads() {
+        let hidden_states = Tensor::new(
+            &[
+                [[1.0f32, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]],
+                [[0.5f32, 1.0, 1.5, 2.0], [2.0, 1.5, 1.0, 0.5]],
+            ],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let attention = LtxAttention::new(
+            4,
+            1,
+            1,
+            4,
+            0.0,
+            true,
+            None,
+            true,
+            "rms_norm",
+            LtxRopeType::Interleaved,
+            false,
+            attention_var_builder(4),
+            None,
+            "diffusion_model.transformer_blocks.0.attn1",
+        )
+        .unwrap();
+        let perturbation_mask = Tensor::new(&[[[1.0f32]], [[0.0f32]]], &Device::Cpu).unwrap();
+
+        let baseline = attention
+            .forward(&hidden_states, None, None, None, None, None, false)
+            .unwrap();
+        let passthrough = attention
+            .forward(&hidden_states, None, None, None, None, None, true)
+            .unwrap();
+        let blended = attention
+            .forward(
+                &hidden_states,
+                None,
+                None,
+                None,
+                None,
+                Some(&perturbation_mask),
+                false,
+            )
+            .unwrap();
+
+        assert_tensors_close(
+            &blended.narrow(0, 0, 1).unwrap(),
+            &baseline.narrow(0, 0, 1).unwrap(),
+            1e-5,
+        );
+        assert_tensors_close(
+            &blended.narrow(0, 1, 1).unwrap(),
+            &passthrough.narrow(0, 1, 1).unwrap(),
+            1e-5,
+        );
+    }
+
+    #[test]
+    fn modulate_and_gate_tokens_cast_to_input_dtype() {
+        let x = Tensor::new(&[[[1.0f32, 2.0], [3.0, 4.0]]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let scale = Tensor::new(&[[[0.5f32, -0.25]]], &Device::Cpu).unwrap();
+        let shift = Tensor::new(&[[[1.0f32, -1.0]]], &Device::Cpu).unwrap();
+        let gate = Tensor::new(&[[[0.25f32, 0.5]]], &Device::Cpu).unwrap();
+
+        let modulated = modulate_tokens(&x, &scale, &shift).unwrap();
+        let gated = gate_tokens(&modulated, &gate).unwrap();
+
+        assert_eq!(modulated.dtype(), DType::BF16);
+        assert_eq!(gated.dtype(), DType::BF16);
     }
 
     #[test]
@@ -4255,10 +4535,16 @@ mod tests {
                 &video_encoder_hidden_states,
                 Some(&audio_encoder_hidden_states),
                 &timestep,
+                &timestep,
+                Some(&timestep),
+                Some(&timestep),
                 Some(&video_attention_mask),
                 Some(&audio_attention_mask),
+                None,
+                None,
                 &video_positions,
                 Some(&audio_positions),
+                None,
             )
             .unwrap();
         let (streaming_video, streaming_audio) = streaming
@@ -4268,14 +4554,111 @@ mod tests {
                 &video_encoder_hidden_states,
                 Some(&audio_encoder_hidden_states),
                 &timestep,
+                &timestep,
+                Some(&timestep),
+                Some(&timestep),
                 Some(&video_attention_mask),
                 Some(&audio_attention_mask),
+                None,
+                None,
                 &video_positions,
                 Some(&audio_positions),
+                None,
             )
             .unwrap();
 
         assert_tensors_close(&eager_video, &streaming_video, 1e-4);
         assert_tensors_close(&eager_audio.unwrap(), &streaming_audio.unwrap(), 1e-4);
+    }
+
+    #[test]
+    fn av_transformer_uniform_tokenwise_timesteps_match_scalar_sigma_path() {
+        let device = Device::Cpu;
+        let config = tiny_av_config();
+        let model = Ltx2AvTransformer3DModel::new(&config, av_transformer_var_builder(), None).unwrap();
+
+        let video_hidden_states = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],
+            (1, 3, config.in_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_hidden_states = Tensor::from_vec(
+            vec![0.2f32, -0.1, 0.5, -0.4],
+            (1, 2, config.audio_in_channels),
+            &device,
+        )
+        .unwrap();
+        let video_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 3),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 9),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let sigma = Tensor::new(&[0.75f32], &device).unwrap();
+        let video_timesteps =
+            Tensor::new(&[[0.75f32, 0.75, 0.75]], &device).unwrap();
+        let audio_timesteps = Tensor::new(&[[0.75f32, 0.75]], &device).unwrap();
+        let video_attention_mask = Tensor::new(&[[1u8, 1, 0, 0]], &device).unwrap();
+        let audio_attention_mask = Tensor::new(&[[1u8, 0, 1, 0]], &device).unwrap();
+        let video_positions = Tensor::from_vec(
+            vec![
+                0.0f32, 1.0, 1.0, 2.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 2.0,
+                2.0, 3.0,
+            ],
+            (1, 3, 3, 2),
+            &device,
+        )
+        .unwrap();
+        let audio_positions =
+            Tensor::from_vec(vec![0.0f32, 1.0, 1.0, 2.0], (1, 1, 2, 2), &device).unwrap();
+
+        let (scalar_video, scalar_audio) = model
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &sigma,
+                &sigma,
+                Some(&sigma),
+                Some(&sigma),
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                None,
+                None,
+                &video_positions,
+                Some(&audio_positions),
+                None,
+            )
+            .unwrap();
+        let (token_video, token_audio) = model
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &sigma,
+                &video_timesteps,
+                Some(&sigma),
+                Some(&audio_timesteps),
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                None,
+                None,
+                &video_positions,
+                Some(&audio_positions),
+                None,
+            )
+            .unwrap();
+
+        assert_tensors_close(&scalar_video, &token_video, 1e-4);
+        assert_tensors_close(&scalar_audio.unwrap(), &token_audio.unwrap(), 1e-4);
     }
 }

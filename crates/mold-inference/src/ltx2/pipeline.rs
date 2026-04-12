@@ -158,6 +158,7 @@ impl Ltx2Engine {
         Ok(Ltx2GeneratePlan {
             pipeline,
             preset,
+            checkpoint_is_distilled: self.model_name.contains("distilled"),
             execution_graph,
             checkpoint_path: self.paths.transformer.to_string_lossy().to_string(),
             distilled_checkpoint_path: pipeline

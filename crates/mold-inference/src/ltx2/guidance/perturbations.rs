@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Result, Tensor};
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +93,20 @@ impl BatchedPerturbationConfig {
     ) -> Result<Tensor> {
         let values = self.mask_values(kind, block);
         Ok(Tensor::from_vec(values, self.perturbations.len(), device)?)
+    }
+
+    pub fn mask_like(
+        &self,
+        kind: PerturbationType,
+        block: usize,
+        values: &Tensor,
+    ) -> Result<Tensor> {
+        let mask = self
+            .mask_tensor(kind, block, values.device())?
+            .to_dtype(values.dtype())?;
+        let mut shape = vec![mask.dim(0)?];
+        shape.extend(std::iter::repeat_n(1usize, values.rank().saturating_sub(1)));
+        Ok(mask.reshape(shape)?)
     }
 
     pub fn any_in_batch(&self, kind: PerturbationType, block: usize) -> bool {

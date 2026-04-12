@@ -29,6 +29,7 @@ impl PipelineKind {
 pub(crate) struct Ltx2GeneratePlan {
     pub(crate) pipeline: PipelineKind,
     pub(crate) preset: Ltx2ModelPreset,
+    pub(crate) checkpoint_is_distilled: bool,
     pub(crate) execution_graph: Ltx2ExecutionGraph,
     pub(crate) checkpoint_path: String,
     pub(crate) distilled_checkpoint_path: Option<String>,

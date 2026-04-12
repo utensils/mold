@@ -15,6 +15,10 @@ use std::sync::{Mutex, OnceLock};
 
 use super::conditioning::retake_temporal_mask;
 use super::execution::SamplerMode;
+use super::guidance::{
+    BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderParams, Perturbation,
+    PerturbationConfig, PerturbationType,
+};
 use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
     get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
@@ -77,6 +81,25 @@ struct VideoTokenReplacement {
     start_token: usize,
     tokens: Tensor,
     strength: f64,
+}
+
+#[derive(Debug, Clone)]
+struct VideoTokenAppendCondition {
+    tokens: Tensor,
+    positions: Tensor,
+    strength: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StageVideoConditioning {
+    replacements: Vec<VideoTokenReplacement>,
+    appended: Vec<VideoTokenAppendCondition>,
+}
+
+impl StageVideoConditioning {
+    fn is_empty(&self) -> bool {
+        self.replacements.is_empty() && self.appended.is_empty()
+    }
 }
 
 struct Ltx2VaeLatentStats {
@@ -334,7 +357,19 @@ impl Ltx2RuntimeSession {
             .as_ref()
             .context("native LTX-2 compute device was not initialized")?;
         if let Some(rendered) = self.try_render_real_video(plan, prepared, device)? {
+            if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+                eprintln!(
+                    "[ltx2-debug] render_native_video using real path pipeline={:?}",
+                    plan.pipeline
+                );
+            }
             return Ok(rendered);
+        }
+        if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+            eprintln!(
+                "[ltx2-debug] render_native_video falling back to placeholder path pipeline={:?}",
+                plan.pipeline
+            );
         }
 
         let summary = RenderSummary::from_prepared(prepared)?;
@@ -396,22 +431,41 @@ impl Ltx2RuntimeSession {
         device: &candle_core::Device,
     ) -> Result<Option<NativeRenderedVideo>> {
         if !supports_real_video_path(plan) {
+            if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+                eprintln!(
+                    "[ltx2-debug] real path rejected by supports_real_video_path pipeline={:?}",
+                    plan.pipeline
+                );
+            }
             return Ok(None);
         }
         if !Path::new(&plan.checkpoint_path).is_file() {
+            if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+                eprintln!(
+                    "[ltx2-debug] real path rejected because checkpoint is missing: {}",
+                    plan.checkpoint_path
+                );
+            }
             return Ok(None);
         }
         let render = match plan.pipeline {
             PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device),
             PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device),
-            PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
+            PipelineKind::TwoStage | PipelineKind::TwoStageHq | PipelineKind::Keyframe => {
                 render_real_two_stage_av(plan, prepared, device)
             }
             _ => return Ok(None),
         };
         match render {
             Ok(rendered) => Ok(Some(rendered)),
-            Err(err) if is_placeholder_checkpoint_error(&err) => Ok(None),
+            Err(err) if is_placeholder_checkpoint_error(&err) => {
+                if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+                    eprintln!(
+                        "[ltx2-debug] real path fell back due to placeholder checkpoint error: {err:#}"
+                    );
+                }
+                Ok(None)
+            }
             Err(err) => Err(err),
         }
     }
@@ -685,38 +739,86 @@ fn stage_sampler_mode(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Sam
     })
 }
 
+fn stage_multimodal_guider_params(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+) -> Option<(MultiModalGuiderParams, MultiModalGuiderParams)> {
+    match (plan.pipeline, stage_index) {
+        (PipelineKind::TwoStage | PipelineKind::Keyframe | PipelineKind::A2Vid, 0) => {
+            let stg_block = if plan.preset.name == "ltx-2.3-22b" {
+                28
+            } else {
+                29
+            };
+            Some((
+                MultiModalGuiderParams {
+                    cfg_scale: 3.0,
+                    stg_scale: 1.0,
+                    stg_blocks: vec![stg_block],
+                    rescale_scale: 0.7,
+                    modality_scale: 3.0,
+                    skip_step: 0,
+                },
+                MultiModalGuiderParams {
+                    cfg_scale: 7.0,
+                    stg_scale: 1.0,
+                    stg_blocks: vec![stg_block],
+                    rescale_scale: 0.7,
+                    modality_scale: 3.0,
+                    skip_step: 0,
+                },
+            ))
+        }
+        (PipelineKind::TwoStageHq, 0) => Some((
+            MultiModalGuiderParams {
+                cfg_scale: 3.0,
+                stg_scale: 0.0,
+                stg_blocks: Vec::new(),
+                rescale_scale: 0.45,
+                modality_scale: 3.0,
+                skip_step: 0,
+            },
+            MultiModalGuiderParams {
+                cfg_scale: 7.0,
+                stg_scale: 0.0,
+                stg_blocks: Vec::new(),
+                rescale_scale: 1.0,
+                modality_scale: 3.0,
+                skip_step: 0,
+            },
+        )),
+        _ => None,
+    }
+}
+
 fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Option<f64>> {
     let pass = denoise_pass_plan(plan, stage_index)?;
     Ok(match (plan.pipeline, stage_index) {
         (PipelineKind::TwoStageHq, 0) => Some(0.25),
         (PipelineKind::TwoStageHq, 1) => Some(0.5),
-        _ if pass.apply_distilled_lora => Some(1.0),
+        _ if pass.apply_distilled_lora && !plan.checkpoint_is_distilled => Some(1.0),
         _ => None,
     })
 }
 
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
-    let plain_or_source_image_request = (plan.conditioning.images.is_empty()
-        || source_image_only_conditioning(plan))
-        && plan.conditioning.audio_path.is_none()
+    let native_plain_or_image_conditioning = plan.conditioning.audio_path.is_none()
         && plan.conditioning.video_path.is_none()
         && !plan.execution_graph.uses_audio_conditioning
         && !plan.execution_graph.uses_reference_video_conditioning
-        && !plan.execution_graph.uses_keyframe_conditioning
         && !plan.execution_graph.uses_retake_masking
         && plan.loras.is_empty();
     match plan.pipeline {
-        PipelineKind::Distilled => plain_or_source_image_request,
+        PipelineKind::Distilled => native_plain_or_image_conditioning,
         PipelineKind::OneStage => {
-            plain_or_source_image_request
+            native_plain_or_image_conditioning
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
-        PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
-            plain_or_source_image_request
+        PipelineKind::TwoStage | PipelineKind::TwoStageHq | PipelineKind::Keyframe => {
+            native_plain_or_image_conditioning
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
-                && plan.distilled_lora_path.is_some()
         }
         _ => false,
     }
@@ -811,14 +913,28 @@ fn source_image_only_conditioning(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_keyframe_conditioning
 }
 
-fn maybe_load_stage_video_replacements(
+fn keyframe_only_conditioning(plan: &Ltx2GeneratePlan) -> bool {
+    !plan.conditioning.images.is_empty()
+        && plan.conditioning.images.iter().all(|image| image.frame > 0)
+        && plan.execution_graph.uses_keyframe_conditioning
+}
+
+fn offset_video_time_positions(pixel_coords: &Tensor, frame_offset: u32) -> Result<Tensor> {
+    let temporal = pixel_coords
+        .i((.., 0..1, .., ..))?
+        .affine(1.0, frame_offset as f64)?;
+    let height_width = pixel_coords.i((.., 1.., .., ..))?;
+    Tensor::cat(&[temporal, height_width], 1).map_err(Into::into)
+}
+
+fn maybe_load_stage_video_conditioning(
     plan: &Ltx2GeneratePlan,
     pixel_shape: VideoPixelShape,
     device: &candle_core::Device,
     dtype: DType,
-) -> Result<Vec<VideoTokenReplacement>> {
-    if !source_image_only_conditioning(plan) {
-        return Ok(Vec::new());
+) -> Result<StageVideoConditioning> {
+    if plan.conditioning.images.is_empty() {
+        return Ok(StageVideoConditioning::default());
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
@@ -826,7 +942,7 @@ fn maybe_load_stage_video_replacements(
     vae.use_framewise_decoding = false;
 
     let patchifier = VideoLatentPatchifier::new(1);
-    let mut replacements = Vec::with_capacity(plan.conditioning.images.len());
+    let mut conditioning = StageVideoConditioning::default();
     for image in &plan.conditioning.images {
         let bytes = std::fs::read(&image.path).with_context(|| {
             format!(
@@ -850,17 +966,38 @@ fn maybe_load_stage_video_replacements(
             )
         })?;
         let tokens = patchifier.patchify(&latents.to_dtype(DType::F32)?)?;
-        replacements.push(VideoTokenReplacement {
-            start_token: 0,
-            tokens,
-            strength: image.strength as f64,
-        });
+        let use_guiding_latent = matches!(plan.pipeline, PipelineKind::Keyframe);
+        if image.frame == 0 && !use_guiding_latent {
+            conditioning.replacements.push(VideoTokenReplacement {
+                start_token: 0,
+                tokens,
+                strength: image.strength as f64,
+            });
+        } else {
+            let latent_shape = video_latent_shape_from_tensor(&latents)?;
+            let latent_coords = patchifier.get_patch_grid_bounds(latent_shape, device)?;
+            let pixel_coords = get_pixel_coords(
+                &latent_coords,
+                SpatioTemporalScaleFactors::default(),
+                image.frame == 0,
+            )?;
+            let positions = scale_video_time_to_seconds(
+                &offset_video_time_positions(&pixel_coords, image.frame)?,
+                pixel_shape.fps,
+            )?
+            .to_dtype(DType::F32)?;
+            conditioning.appended.push(VideoTokenAppendCondition {
+                tokens,
+                positions,
+                strength: image.strength as f64,
+            });
+        }
     }
     drop(vae);
     if device.is_cuda() {
         device.synchronize()?;
     }
-    Ok(replacements)
+    Ok(conditioning)
 }
 
 fn apply_video_token_replacements(
@@ -905,6 +1042,229 @@ fn apply_video_token_replacements(
         patched = Tensor::cat(&refs, 1)?;
     }
     Ok(patched)
+}
+
+fn apply_appended_video_conditioning(
+    video_latents: &Tensor,
+    video_positions: &Tensor,
+    appended: &[VideoTokenAppendCondition],
+) -> Result<(Tensor, Tensor)> {
+    if appended.is_empty() {
+        return Ok((video_latents.clone(), video_positions.clone()));
+    }
+
+    let mut token_parts = vec![video_latents.clone()];
+    let mut position_parts = vec![video_positions.clone()];
+    for condition in appended {
+        let tokens = if condition.strength <= 0.0 {
+            condition
+                .tokens
+                .zeros_like()?
+                .to_device(video_latents.device())?
+                .to_dtype(video_latents.dtype())?
+        } else {
+            condition
+                .tokens
+                .to_device(video_latents.device())?
+                .to_dtype(video_latents.dtype())?
+        };
+        token_parts.push(tokens);
+        position_parts.push(
+            condition
+                .positions
+                .to_device(video_positions.device())?
+                .to_dtype(video_positions.dtype())?,
+        );
+    }
+    let token_refs = token_parts.iter().collect::<Vec<_>>();
+    let position_refs = position_parts.iter().collect::<Vec<_>>();
+    Ok((
+        Tensor::cat(&token_refs, 1)?,
+        Tensor::cat(&position_refs, 2)?,
+    ))
+}
+
+fn apply_stage_video_conditioning(
+    video_latents: &Tensor,
+    video_positions: &Tensor,
+    conditioning: &StageVideoConditioning,
+) -> Result<(Tensor, Tensor)> {
+    let replaced = apply_video_token_replacements(video_latents, &conditioning.replacements)?;
+    apply_appended_video_conditioning(&replaced, video_positions, &conditioning.appended)
+}
+
+fn reapply_stage_video_conditioning(
+    video_latents: &Tensor,
+    base_token_count: usize,
+    conditioning: &StageVideoConditioning,
+) -> Result<Tensor> {
+    let total_tokens = video_latents.dim(1)?;
+    if total_tokens < base_token_count {
+        anyhow::bail!(
+            "video token count ({total_tokens}) is smaller than base token count ({base_token_count})"
+        );
+    }
+
+    let base = video_latents.narrow(1, 0, base_token_count)?;
+    let hard_replacements = conditioning
+        .replacements
+        .iter()
+        .filter(|replacement| replacement.strength >= 1.0)
+        .cloned()
+        .collect::<Vec<_>>();
+    let base = apply_video_token_replacements(&base, &hard_replacements)?;
+    if conditioning.appended.is_empty() {
+        return Ok(base);
+    }
+
+    let mut parts = vec![base];
+    for condition in &conditioning.appended {
+        if condition.strength < 1.0 {
+            continue;
+        }
+        parts.push(
+            condition
+                .tokens
+                .to_device(video_latents.device())?
+                .to_dtype(video_latents.dtype())?,
+        );
+    }
+    let refs = parts.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, 1).map_err(Into::into)
+}
+
+fn strip_appended_video_conditioning(
+    video_latents: &Tensor,
+    base_token_count: usize,
+) -> Result<Tensor> {
+    let total_tokens = video_latents.dim(1)?;
+    if total_tokens < base_token_count {
+        anyhow::bail!(
+            "video token count ({total_tokens}) is smaller than base token count ({base_token_count})"
+        );
+    }
+    if total_tokens == base_token_count {
+        return Ok(video_latents.clone());
+    }
+    video_latents
+        .narrow(1, 0, base_token_count)
+        .map_err(Into::into)
+}
+
+fn build_video_conditioning_denoise_mask(
+    base_token_count: usize,
+    conditioning: &StageVideoConditioning,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let mut values = vec![1.0f32; base_token_count];
+    for replacement in &conditioning.replacements {
+        let count = replacement.tokens.dim(1)?;
+        let end = replacement.start_token + count;
+        if end > base_token_count {
+            anyhow::bail!(
+                "conditioning replacement exceeds base token count: start={} count={} total={base_token_count}",
+                replacement.start_token,
+                count
+            );
+        }
+        values[replacement.start_token..end].fill((1.0 - replacement.strength) as f32);
+    }
+    for condition in &conditioning.appended {
+        values.extend(std::iter::repeat_n(
+            (1.0 - condition.strength) as f32,
+            condition.tokens.dim(1)?,
+        ));
+    }
+    Tensor::from_vec(values.clone(), (1, values.len()), device).map_err(Into::into)
+}
+
+fn append_conditioning_attention_mask(
+    existing_mask: Option<&Tensor>,
+    num_noisy_tokens: usize,
+    num_existing_tokens: usize,
+    num_new_tokens: usize,
+    batch_size: usize,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let top_left = match existing_mask {
+        Some(mask) => mask.to_device(device)?.to_dtype(DType::F32)?,
+        None => Tensor::ones(
+            (batch_size, num_existing_tokens, num_existing_tokens),
+            DType::F32,
+            device,
+        )?,
+    };
+    let previous_ref_tokens = num_existing_tokens.saturating_sub(num_noisy_tokens);
+    let noisy_to_new = Tensor::ones((batch_size, num_noisy_tokens, num_new_tokens), DType::F32, device)?;
+    let prev_ref_to_new = Tensor::zeros(
+        (batch_size, previous_ref_tokens, num_new_tokens),
+        DType::F32,
+        device,
+    )?;
+    let top_right = Tensor::cat(&[&noisy_to_new, &prev_ref_to_new], 1)?;
+
+    let new_to_noisy =
+        Tensor::ones((batch_size, num_new_tokens, num_noisy_tokens), DType::F32, device)?;
+    let new_to_prev_ref = Tensor::zeros(
+        (batch_size, num_new_tokens, previous_ref_tokens),
+        DType::F32,
+        device,
+    )?;
+    let bottom_left = Tensor::cat(&[&new_to_noisy, &new_to_prev_ref], 2)?;
+    let bottom_right = Tensor::ones((batch_size, num_new_tokens, num_new_tokens), DType::F32, device)?;
+
+    let top = Tensor::cat(&[&top_left, &top_right], 2)?;
+    let bottom = Tensor::cat(&[&bottom_left, &bottom_right], 2)?;
+    Tensor::cat(&[&top, &bottom], 1).map_err(Into::into)
+}
+
+fn build_video_conditioning_self_attention_mask(
+    base_token_count: usize,
+    conditioning: &StageVideoConditioning,
+    device: &candle_core::Device,
+) -> Result<Option<Tensor>> {
+    if conditioning.appended.is_empty() {
+        return Ok(None);
+    }
+    let batch_size = conditioning
+        .appended
+        .first()
+        .context("appended conditioning unexpectedly empty")?
+        .tokens
+        .dim(0)?;
+    let mut existing_mask = None;
+    let mut existing_tokens = base_token_count;
+    for condition in &conditioning.appended {
+        existing_mask = Some(append_conditioning_attention_mask(
+            existing_mask.as_ref(),
+            base_token_count,
+            existing_tokens,
+            condition.tokens.dim(1)?,
+            batch_size,
+            device,
+        )?);
+        existing_tokens += condition.tokens.dim(1)?;
+    }
+    Ok(existing_mask)
+}
+
+fn blend_conditioned_denoised(
+    denoised: &Tensor,
+    clean_latents: &Tensor,
+    denoise_mask: &Tensor,
+) -> Result<Tensor> {
+    let mask = denoise_mask
+        .to_device(denoised.device())?
+        .to_dtype(denoised.dtype())?;
+    let mask = mask.unsqueeze(2)?;
+    let clean = clean_latents
+        .to_device(denoised.device())?
+        .to_dtype(denoised.dtype())?;
+    let inverse = Tensor::ones_like(&mask)?.broadcast_sub(&mask)?;
+    denoised
+        .broadcast_mul(&mask)?
+        .broadcast_add(&clean.broadcast_mul(&inverse)?)
+        .map_err(Into::into)
 }
 
 fn is_placeholder_checkpoint_error(err: &anyhow::Error) -> bool {
@@ -1012,8 +1372,8 @@ fn render_real_distilled_av(
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
-    let stage1_video_replacements =
-        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -1026,7 +1386,7 @@ fn render_real_distilled_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
-        &stage1_video_replacements,
+        &stage1_video_conditioning,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -1039,6 +1399,7 @@ fn render_real_distilled_av(
         cond_mask,
         None,
         alt_mask,
+        None,
         stage1_guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         stage_sampler_mode(plan, 0)?,
@@ -1091,8 +1452,8 @@ fn render_real_distilled_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_replacements =
-        maybe_load_stage_video_replacements(plan, stage2_pixel_shape, device, dtype)?;
+    let stage2_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype)?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -1162,7 +1523,7 @@ fn render_real_distilled_av(
         stage2_video_latent_shape,
         audio_shape,
         &stage2_video_start,
-        &stage2_video_replacements,
+        &stage2_video_conditioning,
         stage2_audio_start.as_ref(),
         &stage2_video_positions,
         audio_positions.as_ref(),
@@ -1175,6 +1536,7 @@ fn render_real_distilled_av(
         cond_mask,
         None,
         alt_mask,
+        None,
         stage_guidance_scale(plan, 1)?,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
         stage_sampler_mode(plan, 1)?,
@@ -1332,8 +1694,8 @@ fn render_real_two_stage_av(
     let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
     let stage1_sampler = stage_sampler_mode(plan, 0)?;
     let stage1_loras = stage_lora_stack(plan, 0)?;
-    let stage1_video_replacements =
-        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -1343,7 +1705,7 @@ fn render_real_two_stage_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
-        &stage1_video_replacements,
+        &stage1_video_conditioning,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -1362,6 +1724,7 @@ fn render_real_two_stage_av(
             None
         },
         alt_mask,
+        stage_multimodal_guider_params(plan, 0),
         stage1_guidance_scale,
         &stage1_sigmas,
         stage1_sampler,
@@ -1371,6 +1734,20 @@ fn render_real_two_stage_av(
     )?;
     drop(stage1_transformer);
     device.synchronize()?;
+    if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        debug_vae.use_tiling = false;
+        debug_vae.use_framewise_decoding = false;
+        maybe_write_debug_stage_video(
+            "stage1",
+            &debug_vae,
+            &stage1_video_latents,
+            prepared.video_pixel_shape,
+            dtype,
+        )?;
+        drop(debug_vae);
+        device.synchronize()?;
+    }
 
     let spatial_upsampler_path = plan
         .spatial_upsampler_path
@@ -1393,8 +1770,22 @@ fn render_real_two_stage_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_replacements =
-        maybe_load_stage_video_replacements(plan, stage2_pixel_shape, device, dtype)?;
+    let stage2_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype)?;
+    if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        debug_vae.use_tiling = false;
+        debug_vae.use_framewise_decoding = false;
+        maybe_write_debug_stage_video(
+            "stage1-upscaled",
+            &debug_vae,
+            &stage2_clean_video_latents,
+            stage2_pixel_shape,
+            dtype,
+        )?;
+        drop(debug_vae);
+        device.synchronize()?;
+    }
     let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
     let stage2_video_noise = seeded_randn(
         plan.seed ^ 0x5354_4147_4532_4c54,
@@ -1453,7 +1844,7 @@ fn render_real_two_stage_av(
         stage2_video_latent_shape,
         audio_shape,
         &stage2_video_start,
-        &stage2_video_replacements,
+        &stage2_video_conditioning,
         stage2_audio_start.as_ref(),
         &stage2_video_positions,
         audio_positions.as_ref(),
@@ -1472,6 +1863,7 @@ fn render_real_two_stage_av(
             None
         },
         alt_mask,
+        stage_multimodal_guider_params(plan, 1),
         stage2_guidance_scale,
         &stage2_sigmas,
         stage2_sampler,
@@ -1625,8 +2017,8 @@ fn render_real_one_stage_av(
 
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
-    let stage1_video_replacements =
-        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
@@ -1639,7 +2031,7 @@ fn render_real_one_stage_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
-        &stage1_video_replacements,
+        &stage1_video_conditioning,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -1658,6 +2050,7 @@ fn render_real_one_stage_av(
             None
         },
         alt_mask,
+        None,
         stage1_guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
         stage_sampler_mode(plan, 0)?,
@@ -1728,7 +2121,7 @@ fn run_real_distilled_stage(
     video_shape: VideoLatentShape,
     audio_shape: Option<AudioLatentShape>,
     video_start_latents: &Tensor,
-    video_replacements: &[VideoTokenReplacement],
+    video_conditioning: &StageVideoConditioning,
     audio_start_latents: Option<&Tensor>,
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
@@ -1741,6 +2134,7 @@ fn run_real_distilled_stage(
     cond_mask: Option<&Tensor>,
     uncond_mask: Option<&Tensor>,
     alt_mask: Option<&Tensor>,
+    multimodal_guidance: Option<(MultiModalGuiderParams, MultiModalGuiderParams)>,
     guidance_scale: f64,
     sigmas_no_terminal: &[f32],
     sampler_mode: SamplerMode,
@@ -1759,10 +2153,18 @@ fn run_real_distilled_stage(
     );
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
-    let mut video_latents = apply_video_token_replacements(
+    let base_video_token_count = video_patchifier.get_token_count(video_shape);
+    let (mut video_latents, conditioned_video_positions) = apply_stage_video_conditioning(
         &video_patchifier.patchify(video_start_latents)?,
-        video_replacements,
+        video_positions,
+        video_conditioning,
     )?;
+    let clean_video_latents = video_latents.clone();
+    let video_denoise_mask =
+        build_video_conditioning_denoise_mask(base_video_token_count, video_conditioning, &device)?;
+    let video_self_attention_mask =
+        build_video_conditioning_self_attention_mask(base_video_token_count, video_conditioning, &device)?;
+    let video_positions = &conditioned_video_positions;
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
         .transpose()?;
@@ -1775,6 +2177,12 @@ fn run_real_distilled_stage(
         _ => None,
     };
     let use_cfg = guidance_scale > 1.0;
+    let multimodal_guiders = multimodal_guidance.map(|(video_params, audio_params)| {
+        (
+            MultiModalGuider::new(video_params, uncond_context.cloned()),
+            MultiModalGuider::new(audio_params, uncond_audio_context.cloned()),
+        )
+    });
 
     for (step_idx, sigma) in run_sigmas
         .iter()
@@ -1785,9 +2193,45 @@ fn run_real_distilled_stage(
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6} entering");
         }
-        let timestep = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
-        let (video_velocity, audio_velocity): (Tensor, Option<Tensor>) =
-            if let Some(audio_latents_ref) = audio_latents.as_ref() {
+        let video_sigma = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
+        let video_timestep = if video_conditioning.is_empty() {
+            video_sigma.clone()
+        } else {
+            video_denoise_mask.affine(sigma as f64, 0.0)?
+        };
+        let audio_sigma = if let Some(audio_latents_ref) = audio_latents.as_ref() {
+            Some(Tensor::full(sigma, (audio_latents_ref.dim(0)?,), &device)?)
+        } else {
+            None
+        };
+        let audio_timestep = if let Some(audio_sigma) = audio_sigma.as_ref() {
+            Some(audio_sigma.clone())
+        } else {
+            None
+        };
+        let (mut video_denoised, audio_denoised, video_velocity): (Tensor, Option<Tensor>, Option<Tensor>) =
+            if let Some((video_guider, audio_guider)) = multimodal_guiders.as_ref() {
+                let (video_denoised, audio_denoised) = multimodal_guided_denoise_step(
+                    transformer,
+                    &video_latents,
+                    audio_latents.as_ref(),
+                    cond_context,
+                    audio_context,
+                    cond_mask,
+                    uncond_mask,
+                    &video_sigma,
+                    &video_timestep,
+                    audio_sigma.as_ref(),
+                    audio_timestep.as_ref(),
+                    video_self_attention_mask.as_ref(),
+                    video_positions,
+                    audio_positions,
+                    video_guider,
+                    audio_guider,
+                    step_idx,
+                )?;
+                (video_denoised, audio_denoised, None)
+            } else if let Some(audio_latents_ref) = audio_latents.as_ref() {
                 let audio_positions_ref = audio_positions
                     .as_ref()
                     .context("audio positions missing for multimodal distilled stage")?;
@@ -1805,42 +2249,63 @@ fn run_real_distilled_stage(
                         Some(audio_latents_ref),
                         uncond_video_context,
                         Some(uncond_audio_context),
-                        &timestep,
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
                         uncond_mask,
                         uncond_mask,
+                        video_self_attention_mask.as_ref(),
+                        None,
                         video_positions,
                         Some(audio_positions_ref),
+                        None,
                     )?;
                     let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
                         &video_latents,
                         Some(audio_latents_ref),
                         cond_context,
                         Some(audio_context_ref),
-                        &timestep,
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
                         cond_mask,
                         cond_mask,
+                        video_self_attention_mask.as_ref(),
+                        None,
                         video_positions,
                         Some(audio_positions_ref),
+                        None,
                     )?;
                     let uncond_audio_velocity = uncond_audio_velocity
                         .context("audio branch unexpectedly returned no unconditional output")?;
                     let cond_audio_velocity = cond_audio_velocity
                         .context("audio branch unexpectedly returned no conditional output")?;
                     (
-                        guided_velocity_from_cfg(
+                        denoised_from_velocity(
                             &video_latents,
-                            &cond_video_velocity,
-                            &uncond_video_velocity,
+                            &guided_velocity_from_cfg(
+                                &video_latents,
+                                &cond_video_velocity,
+                                &uncond_video_velocity,
+                                sigma,
+                                guidance_scale,
+                            )?,
                             sigma,
-                            guidance_scale,
                         )?,
-                        Some(guided_velocity_from_cfg(
+                        Some(denoised_from_velocity(
                             audio_latents_ref,
-                            &cond_audio_velocity,
-                            &uncond_audio_velocity,
+                            &guided_velocity_from_cfg(
+                                audio_latents_ref,
+                                &cond_audio_velocity,
+                                &uncond_audio_velocity,
+                                sigma,
+                                guidance_scale,
+                            )?,
                             sigma,
-                            guidance_scale,
                         )?),
+                        Some(cond_video_velocity),
                     )
                 } else {
                     let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
@@ -1848,11 +2313,17 @@ fn run_real_distilled_stage(
                         Some(audio_latents_ref),
                         cond_context,
                         Some(audio_context_ref),
-                        &timestep,
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
                         cond_mask,
                         cond_mask,
+                        video_self_attention_mask.as_ref(),
+                        None,
                         video_positions,
                         Some(audio_positions_ref),
+                        None,
                     )?;
                     if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
                         if let (Some(uncond_video_context), Some(uncond_audio_context)) =
@@ -1864,11 +2335,17 @@ fn run_real_distilled_stage(
                                     Some(audio_latents_ref),
                                     uncond_video_context,
                                     Some(uncond_audio_context),
-                                    &timestep,
+                                    &video_sigma,
+                                    &video_timestep,
+                                    audio_sigma.as_ref(),
+                                    audio_timestep.as_ref(),
                                     uncond_mask,
                                     uncond_mask,
+                                    video_self_attention_mask.as_ref(),
+                                    None,
                                     video_positions,
                                     Some(audio_positions_ref),
+                                    None,
                                 )?;
                             log_distilled_prompt_sensitivity(
                                 debug_stage,
@@ -1892,11 +2369,17 @@ fn run_real_distilled_stage(
                                 Some(audio_latents_ref),
                                 alt_video_context,
                                 Some(alt_audio_context),
-                                &timestep,
+                                &video_sigma,
+                                &video_timestep,
+                                audio_sigma.as_ref(),
+                                audio_timestep.as_ref(),
                                 alt_mask,
                                 alt_mask,
+                                video_self_attention_mask.as_ref(),
+                                None,
                                 video_positions,
                                 Some(audio_positions_ref),
+                                None,
                             )?;
                             log_distilled_alternate_prompt_sensitivity(
                                 debug_stage,
@@ -1911,7 +2394,14 @@ fn run_real_distilled_stage(
                             )?;
                         }
                     }
-                    (cond_video_velocity, cond_audio_velocity)
+                    (
+                        denoised_from_velocity(&video_latents, &cond_video_velocity, sigma)?,
+                        cond_audio_velocity
+                            .as_ref()
+                            .map(|velocity| denoised_from_velocity(audio_latents_ref, velocity, sigma))
+                            .transpose()?,
+                        Some(cond_video_velocity),
+                    )
                 }
             } else if use_cfg {
                 let uncond_video_context =
@@ -1921,10 +2411,16 @@ fn run_real_distilled_stage(
                     None,
                     uncond_video_context,
                     None,
-                    &timestep,
+                    &video_sigma,
+                    &video_timestep,
+                    None,
+                    None,
                     uncond_mask,
                     None,
+                    video_self_attention_mask.as_ref(),
+                    None,
                     video_positions,
+                    None,
                     None,
                 )?;
                 let (cond_video_velocity, _) = transformer.forward(
@@ -1932,32 +2428,49 @@ fn run_real_distilled_stage(
                     None,
                     cond_context,
                     None,
-                    &timestep,
+                    &video_sigma,
+                    &video_timestep,
+                    None,
+                    None,
                     cond_mask,
+                    None,
+                    video_self_attention_mask.as_ref(),
                     None,
                     video_positions,
                     None,
+                    None,
                 )?;
                 (
-                    guided_velocity_from_cfg(
+                    denoised_from_velocity(
                         &video_latents,
-                        &cond_video_velocity,
-                        &uncond_video_velocity,
+                        &guided_velocity_from_cfg(
+                            &video_latents,
+                            &cond_video_velocity,
+                            &uncond_video_velocity,
+                            sigma,
+                            guidance_scale,
+                        )?,
                         sigma,
-                        guidance_scale,
                     )?,
                     None,
+                    Some(cond_video_velocity),
                 )
             } else {
-                let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
+                let (cond_video_velocity, _cond_audio_velocity) = transformer.forward(
                     &video_latents,
                     None,
                     cond_context,
                     None,
-                    &timestep,
+                    &video_sigma,
+                    &video_timestep,
+                    None,
+                    None,
                     cond_mask,
                     None,
+                    video_self_attention_mask.as_ref(),
+                    None,
                     video_positions,
+                    None,
                     None,
                 )?;
                 if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
@@ -1967,10 +2480,16 @@ fn run_real_distilled_stage(
                             None,
                             uncond_video_context,
                             None,
-                            &timestep,
+                            &video_sigma,
+                            &video_timestep,
+                            None,
+                            None,
                             uncond_mask,
                             None,
+                            video_self_attention_mask.as_ref(),
+                            None,
                             video_positions,
+                            None,
                             None,
                         )?;
                         log_distilled_prompt_sensitivity(
@@ -1993,10 +2512,16 @@ fn run_real_distilled_stage(
                             None,
                             alt_video_context,
                             None,
-                            &timestep,
+                            &video_sigma,
+                            &video_timestep,
+                            None,
+                            None,
                             alt_mask,
                             None,
+                            video_self_attention_mask.as_ref(),
+                            None,
                             video_positions,
+                            None,
                             None,
                         )?;
                         log_distilled_alternate_prompt_sensitivity(
@@ -2012,13 +2537,29 @@ fn run_real_distilled_stage(
                         )?;
                     }
                 }
-                (cond_video_velocity, cond_audio_velocity)
+                (
+                    denoised_from_velocity(&video_latents, &cond_video_velocity, sigma)?,
+                    None,
+                    Some(cond_video_velocity),
+                )
             };
         if device.is_cuda() {
             device.synchronize()?;
         }
-        let video_velocity = video_velocity.to_dtype(DType::F32)?;
-        let video_denoised = denoised_from_velocity(&video_latents, &video_velocity, sigma)?;
+        if let Some(video_velocity) = video_velocity.as_ref() {
+            let video_velocity = video_velocity.to_dtype(DType::F32)?;
+            if let Some(stage) = debug_stage {
+                log_tensor_stats("video_velocity", &video_velocity)?;
+                eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
+            }
+        }
+        if !video_conditioning.is_empty() {
+            video_denoised = blend_conditioned_denoised(
+                &video_denoised,
+                &clean_video_latents,
+                &video_denoise_mask,
+            )?;
+        }
         video_latents = match sampler_mode {
             SamplerMode::Euler => {
                 euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?
@@ -2034,22 +2575,24 @@ fn run_real_distilled_stage(
                 0.5,
             )?,
         };
-        if !video_replacements.is_empty() {
-            video_latents = apply_video_token_replacements(&video_latents, video_replacements)?;
+        if !video_conditioning.is_empty() {
+            video_latents = reapply_stage_video_conditioning(
+                &video_latents,
+                base_video_token_count,
+                video_conditioning,
+            )?;
         }
 
         if let (Some(audio_latents), Some(audio_velocity)) =
-            (audio_latents.as_mut(), audio_velocity.as_ref())
+            (audio_latents.as_mut(), audio_denoised.as_ref())
         {
-            let audio_velocity = audio_velocity.to_dtype(DType::F32)?;
-            let audio_denoised = denoised_from_velocity(audio_latents, &audio_velocity, sigma)?;
             *audio_latents = match sampler_mode {
                 SamplerMode::Euler => {
-                    euler_step(audio_latents, &audio_denoised, &run_sigmas, step_idx)?
+                    euler_step(audio_latents, audio_velocity, &run_sigmas, step_idx)?
                 }
                 SamplerMode::Res2S => res2s_step(
                     audio_latents,
-                    &audio_denoised,
+                    audio_velocity,
                     sigma as f64,
                     run_sigmas[step_idx + 1] as f64,
                     audio_sampler_noise
@@ -2067,18 +2610,17 @@ fn run_real_distilled_stage(
                 log_tensor_stats("step_audio_latents", audio_latents)?;
             }
             log_tensor_stats("video_x0", &video_denoised)?;
-            log_tensor_stats("video_velocity", &video_velocity)?;
-            if let (Some(audio_latents), Some(audio_velocity)) =
-                (audio_latents.as_ref(), audio_velocity.as_ref())
+            if let (Some(audio_latents), Some(audio_denoised)) =
+                (audio_latents.as_ref(), audio_denoised.as_ref())
             {
-                let audio_velocity = audio_velocity.to_dtype(DType::F32)?;
-                let audio_denoised = denoised_from_velocity(audio_latents, &audio_velocity, sigma)?;
                 log_tensor_stats("audio_x0", &audio_denoised)?;
+                let audio_velocity = velocity_from_denoised(audio_latents, audio_denoised, sigma)?;
                 log_tensor_stats("audio_velocity", &audio_velocity)?;
             }
         }
     }
 
+    let video_latents = strip_appended_video_conditioning(&video_latents, base_video_token_count)?;
     let video_latents = video_patchifier.unpatchify(&video_latents, video_shape)?;
     let audio_latents = match (audio_latents, audio_shape) {
         (Some(latents), Some(shape)) => Some(audio_patchifier.unpatchify(&latents, shape)?),
@@ -2271,6 +2813,277 @@ fn write_contact_sheet_from_frames(
 
     sheet.save(output_png)?;
     Ok(())
+}
+
+fn repeat_batch(tensor: &Tensor, repeats: usize) -> Result<Tensor> {
+    if repeats <= 1 {
+        return Ok(tensor.clone());
+    }
+    let parts = (0..repeats).map(|_| tensor.clone()).collect::<Vec<_>>();
+    let refs = parts.iter().collect::<Vec<_>>();
+    Tensor::cat(&refs, 0).map_err(Into::into)
+}
+
+fn cat_optional_batches(parts: &[Option<Tensor>]) -> Result<Option<Tensor>> {
+    if parts.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if !parts.iter().all(Option::is_some) {
+        anyhow::bail!("batched optional tensors must be either all present or all absent");
+    }
+    let tensors = parts
+        .iter()
+        .map(|part| part.as_ref().expect("validated above"))
+        .collect::<Vec<_>>();
+    Tensor::cat(&tensors, 0).map(Some).map_err(Into::into)
+}
+
+fn split_batch_chunk(tensor: &Tensor, index: usize, chunk: usize) -> Result<Tensor> {
+    tensor.narrow(0, index * chunk, chunk).map_err(Into::into)
+}
+
+fn sigma_scale_for_sample(sample: &Tensor, sigma: &Tensor) -> Result<Tensor> {
+    match sigma.rank() {
+        1 => sigma
+            .reshape((sample.dim(0)?, 1, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        2 => sigma
+            .reshape((sample.dim(0)?, sample.dim(1)?, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        other => anyhow::bail!("expected sigma rank 1 or 2, got rank {other}"),
+    }
+}
+
+fn denoised_from_velocity_with_sigma(
+    sample: &Tensor,
+    velocity: &Tensor,
+    sigma: &Tensor,
+) -> Result<Tensor> {
+    let sigma = sigma_scale_for_sample(sample, sigma)?;
+    sample
+        .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
+        .map_err(Into::into)
+}
+
+fn multimodal_guided_denoise_step(
+    transformer: &Ltx2AvTransformer3DModel,
+    video_latents: &Tensor,
+    audio_latents: Option<&Tensor>,
+    cond_context: &Tensor,
+    audio_context: Option<&Tensor>,
+    cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    video_sigma: &Tensor,
+    video_timestep: &Tensor,
+    audio_sigma: Option<&Tensor>,
+    audio_timestep: Option<&Tensor>,
+    video_self_attention_mask: Option<&Tensor>,
+    video_positions: &Tensor,
+    audio_positions: Option<&Tensor>,
+    video_guider: &MultiModalGuider,
+    audio_guider: &MultiModalGuider,
+    step_idx: usize,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let video_skip = video_guider.should_skip_step(step_idx);
+    let audio_skip = audio_guider.should_skip_step(step_idx);
+
+    let mut video_contexts = vec![cond_context.clone()];
+    let mut audio_contexts = vec![audio_context.cloned()];
+    let mut video_masks = vec![cond_mask.cloned()];
+    let mut audio_masks = vec![cond_mask.cloned()];
+    let mut perturbations = vec![PerturbationConfig::empty()];
+    let cond_index = 0usize;
+    let mut uncond_index = None;
+    let mut perturbed_index = None;
+    let mut modality_index = None;
+
+    if video_guider.do_unconditional_generation() || audio_guider.do_unconditional_generation() {
+        let negative_video_context = video_guider
+            .negative_context
+            .as_ref()
+            .context("missing unconditional video context for multimodal guidance")?;
+        video_contexts.push(negative_video_context.clone());
+        audio_contexts.push(audio_guider.negative_context.clone().or_else(|| audio_context.cloned()));
+        video_masks.push(uncond_mask.cloned());
+        audio_masks.push(uncond_mask.cloned());
+        perturbations.push(PerturbationConfig::empty());
+        uncond_index = Some(perturbations.len() - 1);
+    }
+
+    if video_guider.do_perturbed_generation() || audio_guider.do_perturbed_generation() {
+        let mut stg_perturbations = Vec::new();
+        if video_guider.do_perturbed_generation() {
+            stg_perturbations.push(Perturbation::new(
+                PerturbationType::SkipVideoSelfAttention,
+                Some(video_guider.params.stg_blocks.clone()),
+            ));
+        }
+        if audio_guider.do_perturbed_generation() {
+            stg_perturbations.push(Perturbation::new(
+                PerturbationType::SkipAudioSelfAttention,
+                Some(audio_guider.params.stg_blocks.clone()),
+            ));
+        }
+        video_contexts.push(cond_context.clone());
+        audio_contexts.push(audio_context.cloned());
+        video_masks.push(cond_mask.cloned());
+        audio_masks.push(cond_mask.cloned());
+        perturbations.push(PerturbationConfig::new(stg_perturbations));
+        perturbed_index = Some(perturbations.len() - 1);
+    }
+    if video_guider.do_isolated_modality_generation() || audio_guider.do_isolated_modality_generation()
+    {
+        video_contexts.push(cond_context.clone());
+        audio_contexts.push(audio_context.cloned());
+        video_masks.push(cond_mask.cloned());
+        audio_masks.push(cond_mask.cloned());
+        perturbations.push(PerturbationConfig::new(vec![
+            Perturbation::new(PerturbationType::SkipA2VCrossAttention, None),
+            Perturbation::new(PerturbationType::SkipV2ACrossAttention, None),
+        ]));
+        modality_index = Some(perturbations.len() - 1);
+    }
+
+    let repeat_count = perturbations.len();
+    let batch = video_latents.dim(0)?;
+    let batched_video_context = Tensor::cat(&video_contexts.iter().collect::<Vec<_>>(), 0)?;
+    let batched_audio_context = cat_optional_batches(&audio_contexts)?;
+    let batched_video_mask = cat_optional_batches(&video_masks)?;
+    let batched_audio_mask = cat_optional_batches(&audio_masks)?;
+    let batched_video_latents = repeat_batch(video_latents, repeat_count)?;
+    let batched_video_sigma = repeat_batch(video_sigma, repeat_count)?;
+    let batched_video_timestep = repeat_batch(video_timestep, repeat_count)?;
+    let batched_video_positions = repeat_batch(video_positions, repeat_count)?;
+    let batched_video_self_attention_mask = video_self_attention_mask
+        .map(|mask| repeat_batch(mask, repeat_count))
+        .transpose()?;
+    let batched_audio_latents = audio_latents
+        .map(|latents| repeat_batch(latents, repeat_count))
+        .transpose()?;
+    let batched_audio_sigma = audio_sigma
+        .map(|sigma| repeat_batch(sigma, repeat_count))
+        .transpose()?;
+    let batched_audio_timestep = audio_timestep
+        .map(|timestep| repeat_batch(timestep, repeat_count))
+        .transpose()?;
+    let batched_audio_positions = audio_positions
+        .map(|positions| repeat_batch(positions, repeat_count))
+        .transpose()?;
+
+    let (all_video_velocity, all_audio_velocity) = transformer.forward(
+        &batched_video_latents,
+        batched_audio_latents.as_ref(),
+        &batched_video_context,
+        batched_audio_context.as_ref(),
+        &batched_video_sigma,
+        &batched_video_timestep,
+        batched_audio_sigma.as_ref(),
+        batched_audio_timestep.as_ref(),
+        batched_video_mask.as_ref(),
+        batched_audio_mask.as_ref(),
+        batched_video_self_attention_mask.as_ref(),
+        None,
+        &batched_video_positions,
+        batched_audio_positions.as_ref(),
+        Some(&BatchedPerturbationConfig::new(perturbations)),
+    )?;
+
+    let cond_video = denoised_from_velocity_with_sigma(
+        video_latents,
+        &split_batch_chunk(&all_video_velocity, cond_index, batch)?,
+        video_timestep,
+    )?;
+    let uncond_video = if let Some(index) = uncond_index {
+        denoised_from_velocity_with_sigma(
+            video_latents,
+            &split_batch_chunk(&all_video_velocity, index, batch)?,
+            video_timestep,
+        )?
+    } else {
+        cond_video.clone()
+    };
+    let perturbed_video = if let Some(index) = perturbed_index {
+        denoised_from_velocity_with_sigma(
+            video_latents,
+            &split_batch_chunk(&all_video_velocity, index, batch)?,
+            video_timestep,
+        )?
+    } else {
+        cond_video.clone()
+    };
+    let modality_video = if let Some(index) = modality_index {
+        denoised_from_velocity_with_sigma(
+            video_latents,
+            &split_batch_chunk(&all_video_velocity, index, batch)?,
+            video_timestep,
+        )?
+    } else {
+        cond_video.clone()
+    };
+    let video_denoised = if video_skip {
+        cond_video.clone()
+    } else {
+        video_guider.calculate(&cond_video, &uncond_video, &perturbed_video, &modality_video)?
+    };
+
+    let audio_denoised = match (
+        audio_latents,
+        all_audio_velocity.as_ref(),
+        audio_timestep,
+        batched_audio_positions.as_ref(),
+    ) {
+        (Some(audio_latents), Some(all_audio_velocity), Some(audio_timestep), Some(_)) => {
+            let cond_audio = denoised_from_velocity_with_sigma(
+                audio_latents,
+                &split_batch_chunk(all_audio_velocity, cond_index, batch)?,
+                audio_timestep,
+            )?;
+            let uncond_audio = if let Some(index) = uncond_index {
+                denoised_from_velocity_with_sigma(
+                    audio_latents,
+                    &split_batch_chunk(all_audio_velocity, index, batch)?,
+                    audio_timestep,
+                )?
+            } else {
+                cond_audio.clone()
+            };
+            let perturbed_audio = if let Some(index) = perturbed_index {
+                denoised_from_velocity_with_sigma(
+                    audio_latents,
+                    &split_batch_chunk(all_audio_velocity, index, batch)?,
+                    audio_timestep,
+                )?
+            } else {
+                cond_audio.clone()
+            };
+            let modality_audio = if let Some(index) = modality_index {
+                denoised_from_velocity_with_sigma(
+                    audio_latents,
+                    &split_batch_chunk(all_audio_velocity, index, batch)?,
+                    audio_timestep,
+                )?
+            } else {
+                cond_audio.clone()
+            };
+            Some(if audio_skip {
+                cond_audio
+            } else {
+                audio_guider.calculate(
+                    &cond_audio,
+                    &uncond_audio,
+                    &perturbed_audio,
+                    &modality_audio,
+                )?
+            })
+        }
+        _ => None,
+    };
+
+    Ok((video_denoised, audio_denoised))
 }
 
 fn convert_velocity_to_x0(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -2889,10 +3702,14 @@ mod tests {
     };
 
     use super::{
-        apply_video_token_replacements, convert_velocity_to_x0, convert_x0_to_velocity,
+        apply_stage_video_conditioning, apply_video_token_replacements, convert_velocity_to_x0,
+        build_video_conditioning_self_attention_mask, convert_x0_to_velocity,
         decoded_video_to_frames, effective_native_guidance_scale, guided_velocity_from_cfg,
-        ltx2_video_transformer_config, source_image_only_conditioning, Ltx2RuntimeSession,
-        VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        keyframe_only_conditioning, ltx2_video_transformer_config,
+        reapply_stage_video_conditioning, source_image_only_conditioning,
+        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
+        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
+        LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -3161,6 +3978,7 @@ mod tests {
         Ltx2GeneratePlan {
             pipeline: PipelineKind::Distilled,
             preset,
+            checkpoint_is_distilled: req.model.contains("distilled"),
             execution_graph: graph,
             checkpoint_path: "/tmp/ltx2.safetensors".to_string(),
             distilled_checkpoint_path: None,
@@ -3560,6 +4378,30 @@ mod tests {
     }
 
     #[test]
+    fn supports_real_video_path_accepts_keyframe_two_stage_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.keyframes = Some(vec![
+            mold_core::KeyframeCondition {
+                frame: 8,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+            mold_core::KeyframeCondition {
+                frame: 48,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+        ]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Keyframe;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(keyframe_only_conditioning(&plan));
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
     fn apply_video_token_replacements_blends_source_tokens_into_sequence() {
         let latents = Tensor::from_vec(
             vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0],
@@ -3582,6 +4424,107 @@ mod tests {
     }
 
     #[test]
+    fn stage_video_conditioning_appends_keyframe_tokens_and_restores_them() {
+        let latents =
+            Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let positions = Tensor::from_vec(
+            vec![
+                0.0f32, 1.0, 1.0, 2.0, 10.0, 11.0, 11.0, 12.0, 20.0, 21.0, 21.0, 22.0,
+            ],
+            (1, 3, 2, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![VideoTokenReplacement {
+                start_token: 0,
+                tokens: Tensor::from_vec(vec![7.0f32, 8.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                strength: 1.0,
+            }],
+            appended: vec![VideoTokenAppendCondition {
+                tokens: Tensor::from_vec(vec![9.0f32, 10.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                positions: Tensor::from_vec(
+                    vec![30.0f32, 31.0, 40.0, 41.0, 50.0, 51.0],
+                    (1, 3, 1, 2),
+                    &Device::Cpu,
+                )
+                .unwrap(),
+                strength: 1.0,
+            }],
+        };
+
+        let (conditioned_latents, conditioned_positions) =
+            apply_stage_video_conditioning(&latents, &positions, &conditioning).unwrap();
+        assert_eq!(conditioned_latents.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(conditioned_positions.dims4().unwrap(), (1, 3, 3, 2));
+        assert_eq!(
+            conditioned_latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            vec![7.0, 8.0, 2.0, 3.0, 9.0, 10.0]
+        );
+
+        let mutated = Tensor::from_vec(
+            vec![0.0f32, 0.0, 1.0, 1.0, 2.0, 2.0],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let reapplied = reapply_stage_video_conditioning(&mutated, 2, &conditioning).unwrap();
+        assert_eq!(
+            reapplied.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![7.0, 8.0, 1.0, 1.0, 9.0, 10.0]
+        );
+
+        let stripped = strip_appended_video_conditioning(&reapplied, 2).unwrap();
+        assert_eq!(stripped.dims3().unwrap(), (1, 2, 2));
+        assert_eq!(
+            stripped.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![7.0, 8.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn video_conditioning_self_attention_mask_blocks_cross_keyframe_attention() {
+        let conditioning = StageVideoConditioning {
+            replacements: vec![],
+            appended: vec![
+                VideoTokenAppendCondition {
+                    tokens: Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                    positions: Tensor::zeros((1, 3, 1, 2), DType::F32, &Device::Cpu).unwrap(),
+                    strength: 1.0,
+                },
+                VideoTokenAppendCondition {
+                    tokens: Tensor::from_vec(vec![3.0f32, 4.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                    positions: Tensor::zeros((1, 3, 1, 2), DType::F32, &Device::Cpu).unwrap(),
+                    strength: 1.0,
+                },
+            ],
+        };
+
+        let mask =
+            build_video_conditioning_self_attention_mask(2, &conditioning, &Device::Cpu).unwrap();
+        let values = mask
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        assert_eq!(
+            values,
+            vec![
+                1.0, 1.0, 1.0, 1.0, //
+                1.0, 1.0, 1.0, 1.0, //
+                1.0, 1.0, 1.0, 0.0, //
+                1.0, 1.0, 0.0, 1.0, //
+            ]
+        );
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_plain_silent_two_stage_runs() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3589,7 +4532,6 @@ mod tests {
         let preset = preset_for_model(&req.model).unwrap();
         let mut plan = build_plan(&req, preset, conditioning);
         plan.pipeline = PipelineKind::TwoStage;
-        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
@@ -3597,7 +4539,7 @@ mod tests {
 
     #[test]
     fn stage_lora_stack_adds_internal_distilled_lora_for_two_stage_second_pass() {
-        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let req = req("ltx-2.3-22b-dev:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
         let preset = preset_for_model(&req.model).unwrap();
@@ -3611,6 +4553,21 @@ mod tests {
         assert_eq!(loras.len(), 1);
         assert_eq!(loras[0].path, "/tmp/distilled-lora.safetensors");
         assert_eq!(loras[0].scale, 1.0);
+    }
+
+    #[test]
+    fn stage_lora_stack_skips_internal_distilled_lora_for_distilled_checkpoint() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        let loras = super::stage_lora_stack(&plan, 1).unwrap();
+
+        assert!(loras.is_empty());
     }
 
     #[test]
