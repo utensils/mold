@@ -6,6 +6,7 @@ pub mod transformer;
 pub mod upsampler;
 pub mod video_transformer;
 pub mod video_vae;
+pub mod vocoder;
 
 #[allow(unused_imports)]
 pub use audio_vae::{AudioCausalityAxis, AudioNormType, Ltx2AudioDecoder, Ltx2AudioDecoderConfig};
@@ -23,3 +24,5 @@ pub(crate) use upsampler::{
     derive_stage1_render_shape, spatially_upsample_frames, temporally_upsample_frames_x2,
     Stage1RenderShape,
 };
+#[allow(unused_imports)]
+pub use vocoder::{Ltx2BweConfig, Ltx2GeneratorConfig, Ltx2VocoderConfig, Ltx2VocoderWithBwe};

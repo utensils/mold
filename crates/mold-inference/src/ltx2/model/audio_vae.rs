@@ -143,7 +143,7 @@ struct CheckpointMelConfig {
     n_mel_channels: usize,
 }
 
-fn read_checkpoint_config_json(checkpoint_path: &Path) -> Result<String> {
+pub(crate) fn read_checkpoint_config_json(checkpoint_path: &Path) -> Result<String> {
     let mut file = File::open(checkpoint_path)
         .with_context(|| format!("failed to open {}", checkpoint_path.display()))?;
     let mut len_buf = [0u8; 8];

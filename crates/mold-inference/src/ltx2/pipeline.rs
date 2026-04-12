@@ -269,6 +269,18 @@ impl Ltx2Engine {
         rendered: &NativeRenderedVideo,
         work_dir: &Path,
     ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Option<ProbeMetadata>)> {
+        if let Some(audio_track) = rendered.audio_track.as_ref() {
+            let wav_path = work_dir.join("native-audio.wav");
+            fs::write(
+                &wav_path,
+                media::encode_wav_f32_interleaved(
+                    &audio_track.interleaved_samples,
+                    audio_track.sample_rate,
+                    audio_track.channels,
+                )?,
+            )?;
+        }
+
         let output_bytes = match req.output_format {
             OutputFormat::Apng => {
                 let metadata = video_enc::VideoMetadata {
@@ -295,9 +307,15 @@ impl Ltx2Engine {
                     let video_only = video_enc::encode_mp4(&rendered.frames, plan.frame_rate)?;
                     let mp4_path = work_dir.join("native-video.mp4");
                     fs::write(&mp4_path, &video_only)?;
-                    if rendered.has_audio {
+                    if let Some(audio_track) = rendered.audio_track.as_ref() {
                         let muxed_path = work_dir.join("native-video-audio.mp4");
-                        media::attach_placeholder_aac_track(&mp4_path, &muxed_path)?;
+                        media::attach_aac_track_from_f32_interleaved(
+                            &mp4_path,
+                            &muxed_path,
+                            &audio_track.interleaved_samples,
+                            audio_track.sample_rate,
+                            audio_track.channels,
+                        )?;
                         fs::read(muxed_path)?
                     } else {
                         video_only

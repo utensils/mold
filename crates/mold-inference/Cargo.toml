@@ -18,7 +18,7 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 expand = []
 webp = ["webp-animation"]
-mp4 = []
+mp4 = ["dep:fdk-aac"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.6.0" }
@@ -42,3 +42,4 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+fdk-aac = { version = "0.8", optional = true }

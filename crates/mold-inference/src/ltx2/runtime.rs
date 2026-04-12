@@ -21,8 +21,8 @@ use super::model::{
     temporally_upsample_frames_x2, video_token_positions,
     video_transformer::{Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig},
     video_vae::{AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig},
-    AudioLatentShape, AudioPatchifier, SpatioTemporalScaleFactors, VideoLatentPatchifier,
-    VideoLatentShape, VideoPixelShape,
+    AudioLatentShape, AudioPatchifier, Ltx2AudioDecoder, Ltx2VocoderWithBwe,
+    SpatioTemporalScaleFactors, VideoLatentPatchifier, VideoLatentShape, VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::sampler::{euler_step, res2s_step};
@@ -58,9 +58,17 @@ pub struct NativePreparedRun {
 #[derive(Debug)]
 pub struct NativeRenderedVideo {
     pub frames: Vec<RgbImage>,
+    pub audio_track: Option<NativeAudioTrack>,
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeAudioTrack {
+    pub interleaved_samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 struct Ltx2VaeLatentStats {
@@ -366,6 +374,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativeRenderedVideo {
             frames,
+            audio_track: None,
             has_audio: plan.execution_graph.wants_audio_output,
             audio_sample_rate: plan.execution_graph.wants_audio_output.then_some(48_000),
             audio_channels: plan.execution_graph.wants_audio_output.then_some(2),
@@ -679,24 +688,23 @@ fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Re
 }
 
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
-    let plain_silent_request = plan.conditioning.images.is_empty()
+    let plain_unconditioned_request = plan.conditioning.images.is_empty()
         && plan.conditioning.audio_path.is_none()
         && plan.conditioning.video_path.is_none()
-        && !plan.execution_graph.wants_audio_output
         && !plan.execution_graph.uses_audio_conditioning
         && !plan.execution_graph.uses_reference_video_conditioning
         && !plan.execution_graph.uses_keyframe_conditioning
         && !plan.execution_graph.uses_retake_masking
         && plan.loras.is_empty();
     match plan.pipeline {
-        PipelineKind::Distilled => plain_silent_request,
+        PipelineKind::Distilled => plain_unconditioned_request,
         PipelineKind::OneStage => {
-            plain_silent_request
+            plain_unconditioned_request
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
-            plain_silent_request
+            plain_unconditioned_request
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
                 && plan.distilled_lora_path.is_some()
@@ -1034,7 +1042,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_load");
     }
-    let (latents, _audio_latents) = run_real_distilled_stage(
+    let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
         audio_shape,
@@ -1082,7 +1090,9 @@ fn render_real_distilled_av(
     }
     drop(video);
     drop(vae);
+    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
+    drop(audio_latents);
     drop(stage2_audio_start);
     drop(stage2_video_start);
     drop(stage2_audio_noise);
@@ -1109,11 +1119,16 @@ fn render_real_distilled_av(
         device.synchronize()?;
     }
 
+    let has_audio = audio_track.is_some();
+    let audio_sample_rate = audio_track.as_ref().map(|track| track.sample_rate);
+    let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
+
     Ok(NativeRenderedVideo {
         frames,
-        has_audio: false,
-        audio_sample_rate: None,
-        audio_channels: None,
+        audio_track,
+        has_audio,
+        audio_sample_rate,
+        audio_channels,
     })
 }
 
@@ -1312,7 +1327,7 @@ fn render_real_two_stage_av(
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage2_loras)?;
-    let (latents, _audio_latents) = run_real_distilled_stage(
+    let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
         audio_shape,
@@ -1355,7 +1370,9 @@ fn render_real_two_stage_av(
     }
     drop(video);
     drop(vae);
+    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
     drop(latents);
+    drop(audio_latents);
     drop(stage2_audio_start);
     drop(stage2_video_start);
     drop(stage2_audio_noise);
@@ -1382,11 +1399,16 @@ fn render_real_two_stage_av(
         device.synchronize()?;
     }
 
+    let has_audio = audio_track.is_some();
+    let audio_sample_rate = audio_track.as_ref().map(|track| track.sample_rate);
+    let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
+
     Ok(NativeRenderedVideo {
         frames,
-        has_audio: false,
-        audio_sample_rate: None,
-        audio_channels: None,
+        audio_track,
+        has_audio,
+        audio_sample_rate,
+        audio_channels,
     })
 }
 
@@ -1541,6 +1563,8 @@ fn render_real_one_stage_av(
     }
     drop(video);
     drop(vae);
+    let audio_track =
+        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
     drop(latents);
     drop(stage1_audio_latents);
     drop(stage1_audio_noise);
@@ -1560,11 +1584,16 @@ fn render_real_one_stage_av(
         device.synchronize()?;
     }
 
+    let has_audio = audio_track.is_some();
+    let audio_sample_rate = audio_track.as_ref().map(|track| track.sample_rate);
+    let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
+
     Ok(NativeRenderedVideo {
         frames,
-        has_audio: false,
-        audio_sample_rate: None,
-        audio_channels: None,
+        audio_track,
+        has_audio,
+        audio_sample_rate,
+        audio_channels,
     })
 }
 
@@ -1996,6 +2025,63 @@ fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Resu
         frames.push(rgb);
     }
     Ok(frames)
+}
+
+fn maybe_render_native_audio_track(
+    plan: &Ltx2GeneratePlan,
+    audio_latents: Option<&Tensor>,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Option<NativeAudioTrack>> {
+    if !plan.execution_graph.wants_audio_output {
+        return Ok(None);
+    }
+    let audio_latents = audio_latents.context(
+        "native LTX-2 audio output requested but the denoiser produced no audio latents",
+    )?;
+    let decoder =
+        Ltx2AudioDecoder::load_from_checkpoint(Path::new(&plan.checkpoint_path), dtype, device)?;
+    let mel_spec = decoder.decode(&audio_latents.to_dtype(dtype)?)?;
+    drop(decoder);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+
+    let vocoder =
+        Ltx2VocoderWithBwe::load_from_checkpoint(Path::new(&plan.checkpoint_path), device)?;
+    let output_sample_rate = vocoder.config.output_sample_rate as u32;
+    let waveform = vocoder.forward(&mel_spec.to_dtype(DType::F32)?)?;
+    drop(vocoder);
+    drop(mel_spec);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    waveform_to_audio_track(&waveform, output_sample_rate)
+}
+
+fn waveform_to_audio_track(
+    waveform: &Tensor,
+    sample_rate: u32,
+) -> Result<Option<NativeAudioTrack>> {
+    let waveform = waveform
+        .to_device(&candle_core::Device::Cpu)?
+        .to_dtype(DType::F32)?;
+    let (batch, channels, samples_per_channel) = waveform.dims3()?;
+    if batch == 0 || channels == 0 || samples_per_channel == 0 {
+        return Ok(None);
+    }
+    let channel_vectors = waveform.i(0)?.to_vec2::<f32>()?;
+    let mut interleaved_samples = Vec::with_capacity(channels * samples_per_channel);
+    for sample_idx in 0..samples_per_channel {
+        for channel in &channel_vectors {
+            interleaved_samples.push(channel[sample_idx]);
+        }
+    }
+    Ok(Some(NativeAudioTrack {
+        interleaved_samples,
+        sample_rate,
+        channels: channels as u16,
+    }))
 }
 
 fn maybe_write_debug_stage_video(
@@ -3315,6 +3401,19 @@ mod tests {
     }
 
     #[test]
+    fn supports_real_video_path_accepts_plain_audio_one_stage_runs() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::OneStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_plain_silent_two_stage_runs() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3411,5 +3510,26 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(!super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn waveform_to_audio_track_interleaves_stereo_samples() {
+        let waveform = Tensor::from_vec(
+            vec![0.1f32, 0.2, 0.3, -0.1, -0.2, -0.3],
+            (1, 2, 3),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let track = super::waveform_to_audio_track(&waveform, 48_000)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(track.channels, 2);
+        assert_eq!(track.sample_rate, 48_000);
+        assert_eq!(
+            track.interleaved_samples,
+            vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3]
+        );
     }
 }
