@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::sampling::{
-    FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+    FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
 };
 use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::conditioning::retake_temporal_mask;
+use super::execution::SamplerMode;
 use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
     get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
@@ -24,7 +25,7 @@ use super::model::{
     VideoLatentShape, VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
-use super::sampler::euler_step;
+use super::sampler::{euler_step, res2s_step};
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
 use crate::device::{fmt_gb, free_vram_bytes};
@@ -386,6 +387,9 @@ impl Ltx2RuntimeSession {
         let render = match plan.pipeline {
             PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device),
             PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device),
+            PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
+                render_real_two_stage_av(plan, prepared, device)
+            }
             _ => return Ok(None),
         };
         match render {
@@ -660,8 +664,69 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
+        PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
+            plain_silent_request
+                && plan.spatial_upscale.is_none()
+                && plan.temporal_upscale.is_none()
+                && plan.distilled_lora_path.is_some()
+        }
         _ => false,
     }
+}
+
+fn denoise_pass_plan(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+) -> Result<&crate::ltx2::execution::DenoisePassPlan> {
+    plan.execution_graph
+        .denoise_passes
+        .get(stage_index)
+        .with_context(|| {
+            format!(
+                "missing LTX-2 denoise pass plan for stage {}",
+                stage_index + 1
+            )
+        })
+}
+
+fn stage_lora_stack(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Vec<LoraWeight>> {
+    let mut loras = plan.loras.clone();
+    let pass = denoise_pass_plan(plan, stage_index)?;
+    if pass.apply_distilled_lora {
+        let path = plan
+            .distilled_lora_path
+            .clone()
+            .context("native LTX-2 two-stage runtime requires a distilled LoRA asset")?;
+        loras.push(LoraWeight { path, scale: 1.0 });
+    }
+    Ok(loras)
+}
+
+fn stage_sigmas_no_terminal(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+    device: &candle_core::Device,
+) -> Result<Vec<f32>> {
+    let pass = denoise_pass_plan(plan, stage_index)?;
+    if pass.uses_distilled_checkpoint {
+        return Ok(match stage_index {
+            0 => DISTILLED_STAGE1_SIGMAS_NO_TERMINAL.to_vec(),
+            1 => DISTILLED_STAGE2_SIGMAS_NO_TERMINAL.to_vec(),
+            _ => anyhow::bail!("unsupported distilled denoise stage {}", stage_index + 1),
+        });
+    }
+
+    let mut scheduler = FlowMatchEulerDiscreteScheduler::new(ltx2_scheduler_config())?;
+    scheduler.set_timesteps(
+        Some(plan.num_inference_steps as usize),
+        device,
+        None,
+        None,
+        None,
+    )?;
+    let sigmas = scheduler.sigmas().to_device(&candle_core::Device::Cpu)?;
+    let sigmas = sigmas.to_vec1::<f32>()?;
+    Ok(sigmas[..sigmas.len().saturating_sub(1)].to_vec())
 }
 
 fn video_latent_shape_from_tensor(latents: &Tensor) -> Result<VideoLatentShape> {
@@ -817,6 +882,9 @@ fn render_real_distilled_av(
         alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+        SamplerMode::Euler,
+        Some(&stage1_video_noise),
+        stage1_audio_noise.as_ref(),
         debug_enabled.then_some("stage1"),
     )?;
     if debug_enabled {
@@ -947,6 +1015,9 @@ fn render_real_distilled_av(
         alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
+        SamplerMode::Euler,
+        Some(&stage2_video_noise),
+        stage2_audio_noise.as_ref(),
         debug_enabled.then_some("stage2"),
     )?;
     if debug_enabled {
@@ -967,6 +1038,266 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
+    let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    drop(video);
+    drop(vae);
+    drop(latents);
+    drop(stage2_audio_start);
+    drop(stage2_video_start);
+    drop(stage2_audio_noise);
+    drop(stage2_video_noise);
+    drop(stage2_video_positions);
+    drop(stage2_clean_video_latents);
+    drop(stage1_audio_latents);
+    drop(stage1_video_latents);
+    drop(stage1_audio_noise);
+    drop(stage1_video_noise);
+    drop(audio_positions);
+    drop(video_positions);
+    drop(alt_mask);
+    drop(uncond_mask);
+    drop(cond_mask);
+    drop(alt_audio_context);
+    drop(uncond_audio_context);
+    drop(audio_context);
+    drop(alt_context);
+    drop(uncond_context);
+    drop(cond_context);
+    drop(latent_stats);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+
+    Ok(NativeRenderedVideo {
+        frames,
+        has_audio: false,
+        audio_sample_rate: None,
+        audio_channels: None,
+    })
+}
+
+fn render_real_two_stage_av(
+    plan: &Ltx2GeneratePlan,
+    prepared: &NativePreparedRun,
+    device: &candle_core::Device,
+) -> Result<NativeRenderedVideo> {
+    let debug_enabled = ltx_debug_enabled();
+    let cond_context = prepared
+        .prompt
+        .conditional
+        .video_encoding
+        .to_device(device)?;
+    let uncond_context = prepared
+        .prompt
+        .unconditional
+        .video_encoding
+        .to_device(device)?;
+    let audio_shape = prepared.audio_latent_shape;
+    let audio_context = prepared
+        .prompt
+        .conditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let uncond_audio_context = prepared
+        .prompt
+        .unconditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let alt_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .map(|prompt| prompt.video_encoding.to_device(device))
+        .transpose()?;
+    let alt_audio_context = prepared
+        .debug_alt_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.audio_encoding.as_ref())
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let cond_mask = None;
+    let uncond_mask = None;
+    let alt_mask = None;
+    let video_positions = prepared.video_positions.to_device(device)?;
+    let audio_positions = prepared
+        .audio_positions
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let stage1_video_noise = seeded_randn(
+        plan.seed,
+        &[
+            prepared.video_latent_shape.batch,
+            prepared.video_latent_shape.channels,
+            prepared.video_latent_shape.frames,
+            prepared.video_latent_shape.height,
+            prepared.video_latent_shape.width,
+        ],
+        device,
+        DType::F32,
+    )?;
+    let stage1_audio_noise = match audio_shape {
+        Some(audio_shape) => Some(seeded_randn(
+            plan.seed ^ 0x4155_4449_4f4c_5458,
+            &[
+                audio_shape.batch,
+                audio_shape.channels,
+                audio_shape.frames,
+                audio_shape.mel_bins,
+            ],
+            device,
+            DType::F32,
+        )?),
+        None => None,
+    };
+
+    let dtype = gpu_dtype(device);
+    let guidance_scale = effective_native_guidance_scale(plan);
+    let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
+    let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
+    let stage1_sampler = denoise_pass_plan(plan, 0)?.sampler;
+    let stage1_loras = stage_lora_stack(plan, 0)?;
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading stage1 transformer");
+    }
+    let stage1_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage1_loras)?;
+    let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
+        &stage1_transformer,
+        prepared.video_latent_shape,
+        audio_shape,
+        &stage1_video_noise,
+        stage1_audio_noise.as_ref(),
+        &video_positions,
+        audio_positions.as_ref(),
+        &cond_context,
+        Some(&uncond_context),
+        alt_context.as_ref(),
+        audio_context.as_ref(),
+        uncond_audio_context.as_ref(),
+        alt_audio_context.as_ref(),
+        cond_mask.as_ref(),
+        uncond_mask.as_ref(),
+        alt_mask.as_ref(),
+        guidance_scale,
+        &stage1_sigmas,
+        stage1_sampler,
+        Some(&stage1_video_noise),
+        stage1_audio_noise.as_ref(),
+        debug_enabled.then_some("stage1"),
+    )?;
+    drop(stage1_transformer);
+    device.synchronize()?;
+
+    let spatial_upsampler_path = plan
+        .spatial_upsampler_path
+        .as_ref()
+        .context("native LTX-2 two-stage inference requires a spatial upsampler asset")?;
+    let upsampler = LatentUpsampler::load(Path::new(spatial_upsampler_path), dtype, device)?;
+    let stage2_clean_video_latents = latent_stats.normalize(
+        &upsampler.forward(&latent_stats.denormalize(&stage1_video_latents.to_dtype(dtype)?)?)?,
+    )?;
+    drop(upsampler);
+    device.synchronize()?;
+
+    let requested_pixel_shape = VideoPixelShape {
+        batch: 1,
+        frames: plan.num_frames as usize,
+        height: plan.height as usize,
+        width: plan.width as usize,
+        fps: plan.frame_rate as f32,
+    };
+    let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
+    let stage2_pixel_shape =
+        pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
+    let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
+    let stage2_video_noise = seeded_randn(
+        plan.seed ^ 0x5354_4147_4532_4c54,
+        &[
+            stage2_video_latent_shape.batch,
+            stage2_video_latent_shape.channels,
+            stage2_video_latent_shape.frames,
+            stage2_video_latent_shape.height,
+            stage2_video_latent_shape.width,
+        ],
+        device,
+        DType::F32,
+    )?;
+    let stage2_audio_noise = match audio_shape {
+        Some(audio_shape) => Some(seeded_randn(
+            plan.seed ^ 0x4155_4449_3254_4c58,
+            &[
+                audio_shape.batch,
+                audio_shape.channels,
+                audio_shape.frames,
+                audio_shape.mel_bins,
+            ],
+            device,
+            DType::F32,
+        )?),
+        None => None,
+    };
+    let stage2_sigmas = stage_sigmas_no_terminal(plan, 1, device)?;
+    let stage2_sigma = *stage2_sigmas
+        .first()
+        .context("stage2 sigma schedule must contain at least one step")?;
+    let stage2_video_start = mix_clean_latents_with_noise(
+        &stage2_clean_video_latents.to_dtype(DType::F32)?,
+        &stage2_video_noise,
+        stage2_sigma,
+    )?;
+    let stage2_audio_start = match (stage1_audio_latents.as_ref(), stage2_audio_noise.as_ref()) {
+        (Some(stage1_audio_latents), Some(stage2_audio_noise)) => {
+            Some(mix_clean_latents_with_noise(
+                &stage1_audio_latents.to_dtype(DType::F32)?,
+                stage2_audio_noise,
+                stage2_sigma,
+            )?)
+        }
+        _ => None,
+    };
+    let stage2_sampler = denoise_pass_plan(plan, 1)?.sampler;
+    let stage2_loras = stage_lora_stack(plan, 1)?;
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading stage2 transformer");
+    }
+    let stage2_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage2_loras)?;
+    let (latents, _audio_latents) = run_real_distilled_stage(
+        &stage2_transformer,
+        stage2_video_latent_shape,
+        audio_shape,
+        &stage2_video_start,
+        stage2_audio_start.as_ref(),
+        &stage2_video_positions,
+        audio_positions.as_ref(),
+        &cond_context,
+        Some(&uncond_context),
+        alt_context.as_ref(),
+        audio_context.as_ref(),
+        uncond_audio_context.as_ref(),
+        alt_audio_context.as_ref(),
+        cond_mask.as_ref(),
+        uncond_mask.as_ref(),
+        alt_mask.as_ref(),
+        guidance_scale,
+        &stage2_sigmas,
+        stage2_sampler,
+        Some(&stage2_video_noise),
+        stage2_audio_noise.as_ref(),
+        debug_enabled.then_some("stage2"),
+    )?;
+    drop(stage2_transformer);
+    device.synchronize()?;
+
+    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    vae.use_tiling = false;
+    vae.use_framewise_decoding = false;
+    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
     let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
     if device.is_cuda() {
         device.synchronize()?;
@@ -1125,6 +1456,9 @@ fn render_real_one_stage_av(
         alt_mask.as_ref(),
         guidance_scale,
         DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+        SamplerMode::Euler,
+        Some(&stage1_video_noise),
+        stage1_audio_noise.as_ref(),
         debug_enabled.then_some("one-stage"),
     )?;
     if debug_enabled {
@@ -1197,6 +1531,9 @@ fn run_real_distilled_stage(
     alt_mask: Option<&Tensor>,
     guidance_scale: f64,
     sigmas_no_terminal: &[f32],
+    sampler_mode: SamplerMode,
+    video_sampler_noise: Option<&Tensor>,
+    audio_sampler_noise: Option<&Tensor>,
     debug_stage: Option<&str>,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let device = video_start_latents.device().clone();
@@ -1211,8 +1548,15 @@ fn run_real_distilled_stage(
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
     let mut video_latents = video_patchifier.patchify(video_start_latents)?;
+    let video_sampler_noise = video_sampler_noise
+        .map(|noise| video_patchifier.patchify(noise))
+        .transpose()?;
     let mut audio_latents = match (audio_shape, audio_start_latents) {
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
+        _ => None,
+    };
+    let audio_sampler_noise = match (audio_shape, audio_sampler_noise) {
+        (Some(_), Some(noise)) => Some(audio_patchifier.patchify(noise)?),
         _ => None,
     };
     let use_cfg = guidance_scale > 1.0;
@@ -1460,14 +1804,42 @@ fn run_real_distilled_stage(
         }
         let video_velocity = video_velocity.to_dtype(DType::F32)?;
         let video_denoised = denoised_from_velocity(&video_latents, &video_velocity, sigma)?;
-        video_latents = euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?;
+        video_latents = match sampler_mode {
+            SamplerMode::Euler => {
+                euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?
+            }
+            SamplerMode::Res2S => res2s_step(
+                &video_latents,
+                &video_denoised,
+                sigma as f64,
+                run_sigmas[step_idx + 1] as f64,
+                video_sampler_noise
+                    .as_ref()
+                    .context("video sampler noise missing for Res2S stage")?,
+                0.5,
+            )?,
+        };
 
         if let (Some(audio_latents), Some(audio_velocity)) =
             (audio_latents.as_mut(), audio_velocity.as_ref())
         {
             let audio_velocity = audio_velocity.to_dtype(DType::F32)?;
             let audio_denoised = denoised_from_velocity(audio_latents, &audio_velocity, sigma)?;
-            *audio_latents = euler_step(audio_latents, &audio_denoised, &run_sigmas, step_idx)?;
+            *audio_latents = match sampler_mode {
+                SamplerMode::Euler => {
+                    euler_step(audio_latents, &audio_denoised, &run_sigmas, step_idx)?
+                }
+                SamplerMode::Res2S => res2s_step(
+                    audio_latents,
+                    &audio_denoised,
+                    sigma as f64,
+                    run_sigmas[step_idx + 1] as f64,
+                    audio_sampler_noise
+                        .as_ref()
+                        .context("audio sampler noise missing for Res2S stage")?,
+                    0.5,
+                )?,
+            };
         }
 
         if let Some(stage) = debug_stage {
@@ -2541,6 +2913,16 @@ mod tests {
         }
     }
 
+    fn rebuild_execution_graph(plan: &mut Ltx2GeneratePlan, req: &GenerateRequest) {
+        plan.execution_graph = crate::ltx2::execution::build_execution_graph(
+            req,
+            plan.pipeline,
+            &plan.conditioning,
+            &plan.preset,
+            plan.loras.len(),
+        );
+    }
+
     #[test]
     fn runtime_prepare_tracks_audio_and_video_latent_shapes() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
@@ -2870,8 +3252,64 @@ mod tests {
         let preset = preset_for_model(&req.model).unwrap();
         let mut plan = build_plan(&req, preset, conditioning);
         plan.pipeline = PipelineKind::OneStage;
+        rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_plain_silent_two_stage_runs() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn stage_lora_stack_adds_internal_distilled_lora_for_two_stage_second_pass() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let loras = super::stage_lora_stack(&plan, 1).unwrap();
+
+        assert_eq!(loras.len(), 1);
+        assert_eq!(loras[0].path, "/tmp/distilled-lora.safetensors");
+        assert_eq!(loras[0].scale, 1.0);
+    }
+
+    #[test]
+    fn two_stage_hq_stage_sigmas_use_requested_step_count_and_hq_sampler() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStageHq;
+        plan.num_inference_steps = 6;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let sigmas = super::stage_sigmas_no_terminal(&plan, 1, &Device::Cpu).unwrap();
+
+        assert_eq!(
+            super::denoise_pass_plan(&plan, 1).unwrap().sampler,
+            crate::ltx2::execution::SamplerMode::Res2S
+        );
+        assert_eq!(sigmas.len(), 6);
+        assert!(sigmas.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(sigmas.last().copied().unwrap() > 0.0);
     }
 
     #[test]
@@ -2883,6 +3321,7 @@ mod tests {
         let preset = preset_for_model(&req.model).unwrap();
         let mut plan = build_plan(&req, preset, conditioning);
         plan.pipeline = PipelineKind::OneStage;
+        rebuild_execution_graph(&mut plan, &req);
 
         assert!(!super::supports_real_video_path(&plan));
     }
