@@ -30,6 +30,7 @@ use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
 use crate::device::{fmt_gb, free_vram_bytes};
 use crate::engine::{gpu_dtype, seeded_randn};
+use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::ProgressReporter;
 use crate::weight_loader::load_fp8_safetensors;
@@ -69,6 +70,13 @@ pub struct NativeAudioTrack {
     pub interleaved_samples: Vec<f32>,
     pub sample_rate: u32,
     pub channels: u16,
+}
+
+#[derive(Debug, Clone)]
+struct VideoTokenReplacement {
+    start_token: usize,
+    tokens: Tensor,
+    strength: f64,
 }
 
 struct Ltx2VaeLatentStats {
@@ -688,7 +696,8 @@ fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Re
 }
 
 fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
-    let plain_unconditioned_request = plan.conditioning.images.is_empty()
+    let plain_or_source_image_request = (plan.conditioning.images.is_empty()
+        || source_image_only_conditioning(plan))
         && plan.conditioning.audio_path.is_none()
         && plan.conditioning.video_path.is_none()
         && !plan.execution_graph.uses_audio_conditioning
@@ -697,14 +706,14 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_retake_masking
         && plan.loras.is_empty();
     match plan.pipeline {
-        PipelineKind::Distilled => plain_unconditioned_request,
+        PipelineKind::Distilled => plain_or_source_image_request,
         PipelineKind::OneStage => {
-            plain_unconditioned_request
+            plain_or_source_image_request
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::TwoStage | PipelineKind::TwoStageHq => {
-            plain_unconditioned_request
+            plain_or_source_image_request
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
                 && plan.distilled_lora_path.is_some()
@@ -795,6 +804,107 @@ fn pixel_shape_for_video_latents(latent_shape: VideoLatentShape, fps: u32) -> Vi
         width: pixel_shape.width,
         fps: fps as f32,
     }
+}
+
+fn source_image_only_conditioning(plan: &Ltx2GeneratePlan) -> bool {
+    matches!(plan.conditioning.images.as_slice(), [image] if image.frame == 0)
+        && !plan.execution_graph.uses_keyframe_conditioning
+}
+
+fn maybe_load_stage_video_replacements(
+    plan: &Ltx2GeneratePlan,
+    pixel_shape: VideoPixelShape,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Vec<VideoTokenReplacement>> {
+    if !source_image_only_conditioning(plan) {
+        return Ok(Vec::new());
+    }
+
+    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    vae.use_tiling = false;
+    vae.use_framewise_decoding = false;
+
+    let patchifier = VideoLatentPatchifier::new(1);
+    let mut replacements = Vec::with_capacity(plan.conditioning.images.len());
+    for image in &plan.conditioning.images {
+        let bytes = std::fs::read(&image.path).with_context(|| {
+            format!(
+                "failed to read staged LTX-2 conditioning image '{}'",
+                image.path
+            )
+        })?;
+        let decoded = decode_source_image(
+            &bytes,
+            pixel_shape.width as u32,
+            pixel_shape.height as u32,
+            NormalizeRange::MinusOneToOne,
+            device,
+            dtype,
+        )?;
+        let video = decoded.unsqueeze(2)?;
+        let latents = vae.encode(&video).with_context(|| {
+            format!(
+                "failed to encode native LTX-2 conditioning image '{}'",
+                image.path
+            )
+        })?;
+        let tokens = patchifier.patchify(&latents.to_dtype(DType::F32)?)?;
+        replacements.push(VideoTokenReplacement {
+            start_token: 0,
+            tokens,
+            strength: image.strength as f64,
+        });
+    }
+    drop(vae);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    Ok(replacements)
+}
+
+fn apply_video_token_replacements(
+    video_latents: &Tensor,
+    replacements: &[VideoTokenReplacement],
+) -> Result<Tensor> {
+    let mut patched = video_latents.clone();
+    for replacement in replacements {
+        let total_tokens = patched.dim(1)?;
+        let replacement_tokens = replacement
+            .tokens
+            .to_device(patched.device())?
+            .to_dtype(patched.dtype())?;
+        let count = replacement_tokens.dim(1)?;
+        if replacement.start_token + count > total_tokens {
+            anyhow::bail!(
+                "conditioning replacement exceeds video token count: start={} count={} total={total_tokens}",
+                replacement.start_token,
+                count
+            );
+        }
+        let current = patched.narrow(1, replacement.start_token, count)?;
+        let blended = if replacement.strength <= 0.0 {
+            current
+        } else if replacement.strength >= 1.0 {
+            replacement_tokens
+        } else {
+            current
+                .affine(1.0 - replacement.strength, 0.0)?
+                .broadcast_add(&replacement_tokens.affine(replacement.strength, 0.0)?)?
+        };
+        let mut parts = Vec::with_capacity(3);
+        if replacement.start_token != 0 {
+            parts.push(patched.narrow(1, 0, replacement.start_token)?);
+        }
+        parts.push(blended);
+        let end = replacement.start_token + count;
+        if end < total_tokens {
+            parts.push(patched.narrow(1, end, total_tokens - end)?);
+        }
+        let refs = parts.iter().collect::<Vec<_>>();
+        patched = Tensor::cat(&refs, 1)?;
+    }
+    Ok(patched)
 }
 
 fn is_placeholder_checkpoint_error(err: &anyhow::Error) -> bool {
@@ -902,6 +1012,8 @@ fn render_real_distilled_av(
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
+    let stage1_video_replacements =
+        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -914,6 +1026,7 @@ fn render_real_distilled_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
+        &stage1_video_replacements,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -978,6 +1091,8 @@ fn render_real_distilled_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
+    let stage2_video_replacements =
+        maybe_load_stage_video_replacements(plan, stage2_pixel_shape, device, dtype)?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -1047,6 +1162,7 @@ fn render_real_distilled_av(
         stage2_video_latent_shape,
         audio_shape,
         &stage2_video_start,
+        &stage2_video_replacements,
         stage2_audio_start.as_ref(),
         &stage2_video_positions,
         audio_positions.as_ref(),
@@ -1216,6 +1332,8 @@ fn render_real_two_stage_av(
     let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
     let stage1_sampler = stage_sampler_mode(plan, 0)?;
     let stage1_loras = stage_lora_stack(plan, 0)?;
+    let stage1_video_replacements =
+        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -1225,6 +1343,7 @@ fn render_real_two_stage_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
+        &stage1_video_replacements,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -1274,6 +1393,8 @@ fn render_real_two_stage_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
+    let stage2_video_replacements =
+        maybe_load_stage_video_replacements(plan, stage2_pixel_shape, device, dtype)?;
     let stage2_video_positions = build_video_positions(stage2_pixel_shape, device)?;
     let stage2_video_noise = seeded_randn(
         plan.seed ^ 0x5354_4147_4532_4c54,
@@ -1332,6 +1453,7 @@ fn render_real_two_stage_av(
         stage2_video_latent_shape,
         audio_shape,
         &stage2_video_start,
+        &stage2_video_replacements,
         stage2_audio_start.as_ref(),
         &stage2_video_positions,
         audio_positions.as_ref(),
@@ -1503,6 +1625,8 @@ fn render_real_one_stage_av(
 
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
+    let stage1_video_replacements =
+        maybe_load_stage_video_replacements(plan, prepared.video_pixel_shape, device, dtype)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
@@ -1515,6 +1639,7 @@ fn render_real_one_stage_av(
         prepared.video_latent_shape,
         audio_shape,
         &stage1_video_noise,
+        &stage1_video_replacements,
         stage1_audio_noise.as_ref(),
         &video_positions,
         audio_positions.as_ref(),
@@ -1603,6 +1728,7 @@ fn run_real_distilled_stage(
     video_shape: VideoLatentShape,
     audio_shape: Option<AudioLatentShape>,
     video_start_latents: &Tensor,
+    video_replacements: &[VideoTokenReplacement],
     audio_start_latents: Option<&Tensor>,
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
@@ -1633,7 +1759,10 @@ fn run_real_distilled_stage(
     );
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
-    let mut video_latents = video_patchifier.patchify(video_start_latents)?;
+    let mut video_latents = apply_video_token_replacements(
+        &video_patchifier.patchify(video_start_latents)?,
+        video_replacements,
+    )?;
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
         .transpose()?;
@@ -1905,6 +2034,9 @@ fn run_real_distilled_stage(
                 0.5,
             )?,
         };
+        if !video_replacements.is_empty() {
+            video_latents = apply_video_token_replacements(&video_latents, video_replacements)?;
+        }
 
         if let (Some(audio_latents), Some(audio_velocity)) =
             (audio_latents.as_mut(), audio_velocity.as_ref())
@@ -2757,9 +2889,10 @@ mod tests {
     };
 
     use super::{
-        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
-        effective_native_guidance_scale, guided_velocity_from_cfg, ltx2_video_transformer_config,
-        Ltx2RuntimeSession, LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        apply_video_token_replacements, convert_velocity_to_x0, convert_x0_to_velocity,
+        decoded_video_to_frames, effective_native_guidance_scale, guided_velocity_from_cfg,
+        ltx2_video_transformer_config, source_image_only_conditioning, Ltx2RuntimeSession,
+        VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -3411,6 +3544,41 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_source_image_distilled_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        assert!(source_image_only_conditioning(&plan));
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn apply_video_token_replacements_blends_source_tokens_into_sequence() {
+        let latents = Tensor::from_vec(
+            vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let replacement_tokens =
+            Tensor::from_vec(vec![10.0f32, 20.0], (1, 1, 2), &Device::Cpu).unwrap();
+        let replacement = VideoTokenReplacement {
+            start_token: 1,
+            tokens: replacement_tokens,
+            strength: 0.25,
+        };
+
+        let replaced = apply_video_token_replacements(&latents, &[replacement]).unwrap();
+        let values = replaced.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        assert_eq!(values, vec![0.0, 1.0, 4.0, 7.25, 4.0, 5.0]);
     }
 
     #[test]
