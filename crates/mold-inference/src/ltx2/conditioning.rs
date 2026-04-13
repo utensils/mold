@@ -18,19 +18,37 @@ pub(crate) struct StagedConditioning {
     pub(crate) video_path: Option<String>,
 }
 
+fn infer_staged_extension<'a>(data: &[u8], default_ext: &'a str) -> &'a str {
+    if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "jpg"
+    } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WAVE") {
+        "wav"
+    } else if data.get(4..8) == Some(b"ftyp") {
+        "mp4"
+    } else if data.starts_with(b"OggS") {
+        "ogg"
+    } else if data.starts_with(b"fLaC") {
+        "flac"
+    } else if data.starts_with(b"ID3")
+        || data
+            .get(..2)
+            .is_some_and(|header| header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)
+    {
+        "mp3"
+    } else {
+        default_ext
+    }
+}
+
 pub(crate) fn stage_input_file(
     dir: &Path,
     stem: &str,
     data: &[u8],
     default_ext: &str,
 ) -> Result<PathBuf> {
-    let ext = if data.starts_with(&[0x89, b'P', b'N', b'G']) {
-        "png"
-    } else if data.starts_with(&[0xFF, 0xD8]) {
-        "jpg"
-    } else {
-        default_ext
-    };
+    let ext = infer_staged_extension(data, default_ext);
     let path = dir.join(format!("{stem}.{ext}"));
     fs::write(&path, data)?;
     Ok(path)
@@ -257,6 +275,19 @@ mod tests {
             .video_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source-video.mp4")));
+    }
+
+    #[test]
+    fn stage_conditioning_inferrs_mp4_audio_extension_from_container_bytes() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let mut req = req();
+        req.audio_file = Some(fake_mp4_bytes());
+
+        let staged = stage_conditioning(&req, work_dir.path()).unwrap();
+        assert!(staged
+            .audio_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("conditioning-audio.mp4")));
     }
 
     fn fake_png_bytes() -> Vec<u8> {

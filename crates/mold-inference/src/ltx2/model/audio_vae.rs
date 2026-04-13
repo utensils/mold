@@ -2,22 +2,27 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, Module, VarBuilder};
+use mp4_rs::{MediaType, Mp4Reader, TrackType};
 use rustfft::{num_complex::Complex32, FftPlanner};
 use serde::Deserialize;
 use serde_json::Value;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{
+    CodecParameters, Decoder as SymphoniaDecoder, DecoderOptions, CODEC_TYPE_AAC,
+};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::Packet;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::TimeBase;
 use symphonia::default::{get_codecs, get_probe};
 
 use super::video_vae::PerChannelRmsNorm;
@@ -256,12 +261,37 @@ pub struct DecodedAudio {
 
 impl DecodedAudio {
     pub fn from_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
+        let decoded = if is_mp4_audio_container(path) {
+            match Self::decode_with_probe(path) {
+                Ok(Some(decoded)) => Some(decoded),
+                Ok(None) => Self::decode_aac_from_mp4(path)?,
+                Err(probe_err) => match Self::decode_aac_from_mp4(path) {
+                    Ok(decoded) => decoded,
+                    Err(fallback_err) => {
+                        return Err(anyhow!(
+                            "failed to decode source audio '{}' via probe ({probe_err:#}) or native MP4 fallback ({fallback_err:#})",
+                            path.display()
+                        ));
+                    }
+                },
+            }
+        } else {
+            Self::decode_with_probe(path)?
+        };
+        Ok(decoded.map(|decoded| decoded.trimmed(max_duration_seconds)))
+    }
+
+    fn decode_with_probe(path: &Path) -> Result<Option<Self>> {
         let file = File::open(path)
             .with_context(|| format!("failed to open source audio '{}'", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            hint.with_extension(extension);
+        }
         let probed = get_probe()
             .format(
-                &Hint::new(),
+                &hint,
                 mss,
                 &FormatOptions::default(),
                 &MetadataOptions::default(),
@@ -286,13 +316,14 @@ impl DecodedAudio {
                 )
             })?;
 
-        let mut sample_rate = track.codec_params.sample_rate.unwrap_or(16_000) as usize;
-        let mut channels = track
-            .codec_params
-            .channels
-            .map(|channels| channels.count())
-            .unwrap_or(2);
-        let mut planar = vec![Vec::new(); channels];
+        let mut accumulator = DecodedAudioAccumulator::new(
+            track.codec_params.sample_rate.unwrap_or(16_000) as usize,
+            track
+                .codec_params
+                .channels
+                .map(|channels| channels.count())
+                .unwrap_or(2),
+        );
 
         loop {
             let packet = match format.next_packet() {
@@ -303,55 +334,83 @@ impl DecodedAudio {
             if packet.track_id() != track_id {
                 continue;
             }
-            let decoded = match decoder.decode(&packet) {
-                Ok(decoded) => decoded,
-                Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(SymphoniaError::IoError(_)) => break,
-                Err(SymphoniaError::ResetRequired) => {
-                    bail!(
-                        "source audio decoder requested a reset while decoding '{}'",
-                        path.display()
-                    );
-                }
-                Err(err) => return Err(err.into()),
-            };
-            sample_rate = decoded.spec().rate as usize;
-            channels = decoded.spec().channels.count();
-            if planar.len() != channels {
-                if planar.iter().all(Vec::is_empty) {
-                    planar = vec![Vec::new(); channels];
-                } else {
-                    bail!(
-                        "source audio '{}' changed channel count mid-stream from {} to {}",
-                        path.display(),
-                        planar.len(),
-                        channels
-                    );
-                }
-            }
-
-            let mut sample_buf =
-                SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-            sample_buf.copy_interleaved_ref(decoded);
-            let frames = sample_buf.samples().len() / channels;
-            let interleaved = sample_buf.samples();
-            for frame_idx in 0..frames {
-                let offset = frame_idx * channels;
-                for channel_idx in 0..channels {
-                    planar[channel_idx].push(interleaved[offset + channel_idx]);
-                }
-            }
+            accumulator.push_packet(path, decoder.as_mut(), &packet)?;
         }
 
-        if planar.first().is_none_or(Vec::is_empty) {
-            return Ok(None);
-        }
+        Ok(accumulator.finish())
+    }
 
-        let decoded = Self {
-            sample_rate,
-            channels: planar,
+    fn decode_aac_from_mp4(path: &Path) -> Result<Option<Self>> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read source MP4 audio '{}'", path.display()))?;
+        let mut reader = Mp4Reader::read_header(Cursor::new(bytes.clone()), bytes.len() as u64)
+            .with_context(|| format!("failed to parse MP4 container from '{}'", path.display()))?;
+        let (track_id, track) = match reader
+            .tracks()
+            .iter()
+            .find(|(_, track)| matches!(track.track_type(), Ok(TrackType::Audio)))
+        {
+            Some((track_id, track)) => (*track_id, track),
+            None => return Ok(None),
         };
-        Ok(Some(decoded.trimmed(max_duration_seconds)))
+        if track.media_type()? != MediaType::AAC {
+            bail!(
+                "unsupported source audio codec in '{}': expected AAC in MP4 container, found {}",
+                path.display(),
+                track.media_type()?
+            );
+        }
+        let mp4a = track
+            .trak
+            .mdia
+            .minf
+            .stbl
+            .stsd
+            .mp4a
+            .as_ref()
+            .context("MP4 audio track did not contain an mp4a sample entry")?;
+        let esds = mp4a
+            .esds
+            .as_ref()
+            .context("MP4 audio track did not contain an esds descriptor")?;
+        let dec_specific = &esds.es_desc.dec_config.dec_specific;
+        let mut codec_params = CodecParameters::new();
+        codec_params
+            .for_codec(CODEC_TYPE_AAC)
+            .with_time_base(TimeBase::new(1, track.timescale()))
+            .with_sample_rate(track.sample_freq_index()?.freq())
+            .with_extra_data(build_aac_audio_specific_config(
+                dec_specific.profile,
+                dec_specific.freq_index,
+                dec_specific.chan_conf,
+            )?);
+        let mut decoder = get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .with_context(|| {
+                format!(
+                    "failed to create AAC decoder for source audio '{}'",
+                    path.display()
+                )
+            })?;
+        let mut accumulator = DecodedAudioAccumulator::new(
+            track.sample_freq_index()?.freq() as usize,
+            mp4a.channelcount as usize,
+        );
+
+        for sample_id in 1..=track.sample_count() {
+            let Some(sample) = reader.read_sample(track_id, sample_id)? else {
+                continue;
+            };
+            let packet = Packet::new_from_boxed_slice(
+                track_id,
+                sample.start_time,
+                u64::from(sample.duration),
+                sample.bytes.to_vec().into_boxed_slice(),
+            );
+            accumulator.push_packet(path, decoder.as_mut(), &packet)?;
+        }
+
+        Ok(accumulator.finish())
     }
 
     pub fn channel_count(&self) -> usize {
@@ -398,6 +457,106 @@ impl DecodedAudio {
         }
         Tensor::from_vec(flat, (1, target_channels, sample_count), device).map_err(Into::into)
     }
+}
+
+#[derive(Debug, Clone)]
+struct DecodedAudioAccumulator {
+    sample_rate: usize,
+    planar: Vec<Vec<f32>>,
+}
+
+impl DecodedAudioAccumulator {
+    fn new(sample_rate: usize, channels: usize) -> Self {
+        Self {
+            sample_rate,
+            planar: vec![Vec::new(); channels.max(1)],
+        }
+    }
+
+    fn push_packet(
+        &mut self,
+        path: &Path,
+        decoder: &mut dyn SymphoniaDecoder,
+        packet: &Packet,
+    ) -> Result<()> {
+        let decoded = match decoder.decode(packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => return Ok(()),
+            Err(SymphoniaError::IoError(_)) => return Ok(()),
+            Err(SymphoniaError::ResetRequired) => {
+                bail!(
+                    "source audio decoder requested a reset while decoding '{}'",
+                    path.display()
+                );
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        self.sample_rate = decoded.spec().rate as usize;
+        let channels = decoded.spec().channels.count();
+        if self.planar.len() != channels {
+            if self.planar.iter().all(Vec::is_empty) {
+                self.planar = vec![Vec::new(); channels];
+            } else {
+                bail!(
+                    "source audio '{}' changed channel count mid-stream from {} to {}",
+                    path.display(),
+                    self.planar.len(),
+                    channels
+                );
+            }
+        }
+
+        let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        sample_buf.copy_interleaved_ref(decoded);
+        let frames = sample_buf.samples().len() / channels;
+        let interleaved = sample_buf.samples();
+        for frame_idx in 0..frames {
+            let offset = frame_idx * channels;
+            for channel_idx in 0..channels {
+                self.planar[channel_idx].push(interleaved[offset + channel_idx]);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Option<DecodedAudio> {
+        if self.planar.first().is_none_or(Vec::is_empty) {
+            None
+        } else {
+            Some(DecodedAudio {
+                sample_rate: self.sample_rate,
+                channels: self.planar,
+            })
+        }
+    }
+}
+
+fn is_mp4_audio_container(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .is_some_and(|ext| matches!(ext.as_str(), "mp4" | "m4a" | "mov"))
+}
+
+fn build_aac_audio_specific_config(
+    profile: u8,
+    freq_index: u8,
+    chan_conf: u8,
+) -> Result<Box<[u8]>> {
+    if profile > 31 {
+        bail!("unsupported AAC object type profile {profile} in MP4 fallback");
+    }
+    if freq_index > 15 {
+        bail!("unsupported AAC sample frequency index {freq_index} in MP4 fallback");
+    }
+    if chan_conf > 15 {
+        bail!("unsupported AAC channel config {chan_conf} in MP4 fallback");
+    }
+    Ok(Box::from([
+        (profile << 3) | (freq_index >> 1),
+        (freq_index << 7) | (chan_conf << 3),
+    ]))
 }
 
 fn conform_audio_channels(channels: &[Vec<f32>], target_channels: usize) -> Vec<Vec<f32>> {
@@ -1376,6 +1535,10 @@ mod tests {
 
     use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::VarBuilder;
+    #[cfg(feature = "mp4")]
+    use image::{ImageBuffer, Rgb, RgbImage};
+    #[cfg(feature = "mp4")]
+    use std::path::PathBuf;
 
     use super::{
         adjust_decoded_output_shape, decoder_target_shape, waveform_to_log_mel, AudioCausalConv2d,
@@ -1383,8 +1546,12 @@ mod tests {
         DecodedAudio, Ltx2AudioDecoder, Ltx2AudioDecoderConfig, Ltx2AudioEncoder,
         Ltx2AudioEncoderConfig,
     };
+    #[cfg(feature = "mp4")]
+    use crate::ltx2::media::attach_aac_track_from_f32_interleaved;
     use crate::ltx2::media::encode_wav_f32_interleaved;
     use crate::ltx2::model::AudioLatentShape;
+    #[cfg(feature = "mp4")]
+    use crate::ltx_video::video_enc;
 
     fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
         let map = tensors
@@ -1392,6 +1559,46 @@ mod tests {
             .map(|(name, tensor)| (name.to_string(), tensor))
             .collect::<HashMap<_, _>>();
         VarBuilder::from_tensors(map, candle_core::DType::F32, &Device::Cpu)
+    }
+
+    #[cfg(feature = "mp4")]
+    fn sample_frames() -> Vec<RgbImage> {
+        [[255, 64, 32], [32, 192, 255], [16, 224, 96], [240, 224, 64]]
+            .into_iter()
+            .map(|rgb| ImageBuffer::from_pixel(64, 64, Rgb(rgb)))
+            .collect()
+    }
+
+    #[cfg(feature = "mp4")]
+    fn sample_audio_track(samples_per_channel: usize) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(samples_per_channel * 2);
+        for idx in 0..samples_per_channel {
+            let t = idx as f32 / 48_000.0;
+            samples.push((t * std::f32::consts::TAU * 440.0).sin() * 0.25);
+            samples.push((t * std::f32::consts::TAU * 660.0).sin() * 0.25);
+        }
+        samples
+    }
+
+    #[cfg(feature = "mp4")]
+    fn write_mp4_with_native_aac() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let video_path = dir.path().join("video.mp4");
+        fs::write(
+            &video_path,
+            video_enc::encode_mp4(&sample_frames(), 12).unwrap(),
+        )
+        .unwrap();
+        let audio_path = dir.path().join("video-audio.mp4");
+        attach_aac_track_from_f32_interleaved(
+            &video_path,
+            &audio_path,
+            &sample_audio_track(4_096),
+            48_000,
+            2,
+        )
+        .unwrap();
+        (dir, audio_path)
     }
 
     #[test]
@@ -1714,5 +1921,25 @@ mod tests {
         let mel = waveform_to_log_mel(&waveform, 16_000, 4, 160, 1024, &Device::Cpu).unwrap();
 
         assert_eq!(mel.dims4().unwrap(), (1, 2, 5, 4));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn decoded_audio_from_mp4_falls_back_when_probe_rejects_sl_descriptor() {
+        let (_dir, bad_sl_path) = write_mp4_with_native_aac();
+
+        let probe_err = DecodedAudio::decode_with_probe(&bad_sl_path).unwrap_err();
+        assert!(
+            format!("{probe_err:#}").contains("sl descriptor predefined not mp4"),
+            "unexpected probe error: {probe_err:#}"
+        );
+
+        let decoded = DecodedAudio::from_file(&bad_sl_path, Some(0.05))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channel_count(), 2);
+        assert_eq!(decoded.sample_count(), 2_400);
     }
 }
