@@ -12,6 +12,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::env;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use super::conditioning::retake_temporal_mask;
 use super::execution::SamplerMode;
@@ -1563,10 +1564,16 @@ fn render_real_distilled_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
+    let stage1_transformer_load_start = Instant::now();
     let stage1_transformer = load_ltx2_av_transformer(plan, device)?;
+    log_timing(
+        "distilled.stage1.transformer_load",
+        stage1_transformer_load_start,
+    );
     if debug_enabled {
         log_debug_vram("after_stage1_transformer_load");
     }
+    let stage1_denoise_start = Instant::now();
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -1597,6 +1604,7 @@ fn render_real_distilled_av(
         None,
         debug_enabled.then_some("stage1"),
     )?;
+    log_timing("distilled.stage1.denoise", stage1_denoise_start);
     if debug_enabled {
         log_debug_vram("after_stage1_denoise");
     }
@@ -1623,12 +1631,14 @@ fn render_real_distilled_av(
         .spatial_upsampler_path
         .as_ref()
         .context("native distilled LTX-2 inference requires a spatial upsampler asset")?;
+    let stage1_upsample_start = Instant::now();
     let upsampler = LatentUpsampler::load(Path::new(spatial_upsampler_path), dtype, device)?;
     let stage2_clean_video_latents = latent_stats.normalize(
         &upsampler.forward(&latent_stats.denormalize(&stage1_video_latents.to_dtype(dtype)?)?)?,
     )?;
     drop(upsampler);
     device.synchronize()?;
+    log_timing("distilled.stage1.spatial_upsample", stage1_upsample_start);
     if debug_enabled {
         log_debug_vram("after_stage1_upsample");
     }
@@ -1704,10 +1714,16 @@ fn render_real_distilled_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
+    let stage2_transformer_load_start = Instant::now();
     let stage2_transformer = load_ltx2_av_transformer(plan, device)?;
+    log_timing(
+        "distilled.stage2.transformer_load",
+        stage2_transformer_load_start,
+    );
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_load");
     }
+    let stage2_denoise_start = Instant::now();
     let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -1738,6 +1754,7 @@ fn render_real_distilled_av(
         None,
         debug_enabled.then_some("stage2"),
     )?;
+    log_timing("distilled.stage2.denoise", stage2_denoise_start);
     if debug_enabled {
         log_debug_vram("after_stage2_denoise");
     }
@@ -1756,6 +1773,7 @@ fn render_real_distilled_av(
     let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
+    let decode_start = Instant::now();
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
@@ -1766,7 +1784,10 @@ fn render_real_distilled_av(
     }
     drop(video);
     drop(vae);
+    log_timing("distilled.decode_video", decode_start);
+    let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    log_timing("distilled.render_audio", audio_render_start);
     drop(latents);
     drop(audio_latents);
     drop(stage2_audio_start);
@@ -1915,11 +1936,17 @@ fn render_real_two_stage_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
+    let stage1_transformer_load_start = Instant::now();
     let stage1_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage1_loras)?;
+    log_timing(
+        "two_stage.stage1.transformer_load",
+        stage1_transformer_load_start,
+    );
     let stage1_audio_start = conditioned_audio
         .as_ref()
         .map(|audio| &audio.latents)
         .or(stage1_audio_noise.as_ref());
+    let stage1_denoise_start = Instant::now();
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -1956,6 +1983,7 @@ fn render_real_two_stage_av(
         frozen_audio_denoise_mask.as_ref(),
         debug_enabled.then_some("stage1"),
     )?;
+    log_timing("two_stage.stage1.denoise", stage1_denoise_start);
     drop(stage1_transformer);
     device.synchronize()?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
@@ -1977,12 +2005,14 @@ fn render_real_two_stage_av(
         .spatial_upsampler_path
         .as_ref()
         .context("native LTX-2 two-stage inference requires a spatial upsampler asset")?;
+    let stage1_upsample_start = Instant::now();
     let upsampler = LatentUpsampler::load(Path::new(spatial_upsampler_path), dtype, device)?;
     let stage2_clean_video_latents = latent_stats.normalize(
         &upsampler.forward(&latent_stats.denormalize(&stage1_video_latents.to_dtype(dtype)?)?)?,
     )?;
     drop(upsampler);
     device.synchronize()?;
+    log_timing("two_stage.stage1.spatial_upsample", stage1_upsample_start);
 
     let requested_pixel_shape = VideoPixelShape {
         batch: 1,
@@ -2062,7 +2092,13 @@ fn render_real_two_stage_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
+    let stage2_transformer_load_start = Instant::now();
     let stage2_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage2_loras)?;
+    log_timing(
+        "two_stage.stage2.transformer_load",
+        stage2_transformer_load_start,
+    );
+    let stage2_denoise_start = Instant::now();
     let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -2099,6 +2135,7 @@ fn render_real_two_stage_av(
         frozen_audio_denoise_mask.as_ref(),
         debug_enabled.then_some("stage2"),
     )?;
+    log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
     device.synchronize()?;
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
@@ -2106,6 +2143,7 @@ fn render_real_two_stage_av(
     let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
+    let decode_start = Instant::now();
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
     let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
     if device.is_cuda() {
@@ -2113,11 +2151,14 @@ fn render_real_two_stage_av(
     }
     drop(video);
     drop(vae);
+    log_timing("two_stage.decode_video", decode_start);
+    let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
         conditioned_audio.original_track.clone()
     } else {
         maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?
     };
+    log_timing("two_stage.render_audio", audio_render_start);
     drop(latents);
     drop(audio_latents);
     drop(stage2_audio_start);
@@ -4071,6 +4112,10 @@ fn ltx_debug_enabled() -> bool {
     env::var_os("MOLD_LTX_DEBUG").is_some()
 }
 
+fn ltx_debug_timings_enabled() -> bool {
+    env::var_os("MOLD_LTX2_DEBUG_TIMINGS").is_some()
+}
+
 fn log_debug_vram(label: &str) {
     if let Some(free) = free_vram_bytes() {
         eprintln!("[ltx2-debug] {label} free_vram={}", fmt_gb(free));
@@ -4145,6 +4190,16 @@ fn log_tensor_stats(name: &str, tensor: &Tensor) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn log_timing(label: &str, start: Instant) {
+    if !ltx_debug_timings_enabled() {
+        return;
+    }
+    eprintln!(
+        "[ltx2-timing] {label} {:.3}s",
+        start.elapsed().as_secs_f64()
+    );
 }
 
 fn log_prompt_debug_stats(plan: &Ltx2GeneratePlan, prompt: &NativePromptEncoding) -> Result<()> {
