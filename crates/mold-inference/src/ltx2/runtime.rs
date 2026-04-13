@@ -3002,15 +3002,17 @@ fn run_real_distilled_stage(
                 Some(cond_video_velocity),
             )
         };
-        if device.is_cuda() {
-            device.synchronize()?;
-        }
-        if let Some(video_velocity) = video_velocity.as_ref() {
+        // Keep the hot denoise loop fully device-side unless step-level debug
+        // inspection is explicitly enabled.
+        if should_inspect_step_velocity(debug_stage) {
+            let stage =
+                debug_stage.expect("debug stage should be present when inspection is enabled");
+            let video_velocity = video_velocity
+                .as_ref()
+                .context("video velocity missing for debug inspection")?;
             let video_velocity = video_velocity.to_dtype(DType::F32)?;
-            if let Some(stage) = debug_stage {
-                log_tensor_stats("video_velocity", &video_velocity)?;
-                eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
-            }
+            log_tensor_stats("video_velocity", &video_velocity)?;
+            eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
         }
         if uses_video_freeze_mask {
             video_denoised = blend_conditioned_denoised(
@@ -3130,6 +3132,10 @@ fn mix_clean_latents_with_noise(
         .affine(clean_scale, 0.0)?
         .broadcast_add(&noise.affine(noise_scale, 0.0)?)
         .map_err(Into::into)
+}
+
+fn should_inspect_step_velocity(debug_stage: Option<&str>) -> bool {
+    debug_stage.is_some()
 }
 
 fn decoded_video_to_frames(video: &Tensor, pixel_shape: VideoPixelShape) -> Result<Vec<RgbImage>> {
@@ -4460,10 +4466,10 @@ mod tests {
         build_video_conditioning_self_attention_mask, convert_velocity_to_x0,
         convert_x0_to_velocity, decoded_video_to_frames, effective_native_guidance_scale,
         guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
-        reapply_stage_video_conditioning, source_image_only_conditioning,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        reapply_stage_video_conditioning, should_inspect_step_velocity,
+        source_image_only_conditioning, strip_appended_video_conditioning, Ltx2RuntimeSession,
+        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -5072,6 +5078,12 @@ mod tests {
         let values = restored.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert!((values[0] - 2.0).abs() < 1e-3);
         assert!((values[1] + 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn step_velocity_inspection_is_debug_only() {
+        assert!(!should_inspect_step_velocity(None));
+        assert!(should_inspect_step_velocity(Some("stage1")));
     }
 
     #[test]

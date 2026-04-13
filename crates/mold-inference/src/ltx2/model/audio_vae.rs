@@ -1977,4 +1977,16 @@ mod tests {
         assert_eq!(decoded.channel_count(), 2);
         assert_eq!(decoded.sample_count(), 800);
     }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn decoded_audio_from_mov_extension_uses_mp4_ingest_path() {
+        let (_dir, path) = write_mp4_with_native_aac_params(32_000, 1, "mov");
+
+        let decoded = DecodedAudio::from_file(&path, Some(0.05)).unwrap().unwrap();
+
+        assert_eq!(decoded.sample_rate, 32_000);
+        assert_eq!(decoded.channel_count(), 1);
+        assert_eq!(decoded.sample_count(), 1_600);
+    }
 }
