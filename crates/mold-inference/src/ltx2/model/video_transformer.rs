@@ -52,6 +52,16 @@ fn log_detail_tensor(index: usize, label: &str, xs: &Tensor) -> Result<()> {
     Ok(())
 }
 
+fn should_synchronize_streaming_layer(
+    index: usize,
+    total_layers: usize,
+    prefetch_count: usize,
+) -> bool {
+    let interval = prefetch_count.max(1);
+    let layer_num = index + 1;
+    layer_num % interval == 0 || layer_num == total_layers
+}
+
 // ---------------------------------------------------------------------------
 // Output wrapper
 // ---------------------------------------------------------------------------
@@ -87,6 +97,7 @@ pub struct Ltx2VideoTransformer3DModelConfig {
     pub apply_gated_attention: bool,
     pub av_ca_timestep_scale_multiplier: f64,
     pub cross_attention_adaln: bool,
+    pub streaming_prefetch_count: usize,
 }
 
 impl Default for Ltx2VideoTransformer3DModelConfig {
@@ -121,6 +132,7 @@ impl Default for Ltx2VideoTransformer3DModelConfig {
             apply_gated_attention: false,
             av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
+            streaming_prefetch_count: 1,
         }
     }
 }
@@ -1960,7 +1972,13 @@ impl Ltx2VideoTransformer3DModel {
                         encoder_attention_mask,
                         skip_layer_mask,
                     )?;
-                    if hidden_states.device().is_cuda() {
+                    if hidden_states.device().is_cuda()
+                        && should_synchronize_streaming_layer(
+                            index,
+                            self.config.num_layers,
+                            self.config.streaming_prefetch_count,
+                        )
+                    {
                         hidden_states.device().synchronize()?;
                     }
                     drop(block);
@@ -3285,7 +3303,13 @@ impl Ltx2AvTransformer3DModel {
                             );
                         }
                     }
-                    if video.x.device().is_cuda() {
+                    if video.x.device().is_cuda()
+                        && should_synchronize_streaming_layer(
+                            index,
+                            self.config.num_layers,
+                            self.config.streaming_prefetch_count,
+                        )
+                    {
                         video.x.device().synchronize()?;
                     }
                 }
@@ -3740,6 +3764,7 @@ mod tests {
             apply_gated_attention: false,
             av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
+            streaming_prefetch_count: 2,
         }
     }
 
@@ -4475,6 +4500,23 @@ mod tests {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn streaming_layer_sync_uses_prefetch_interval_and_final_layer() {
+        assert!(!super::should_synchronize_streaming_layer(0, 6, 2));
+        assert!(super::should_synchronize_streaming_layer(1, 6, 2));
+        assert!(!super::should_synchronize_streaming_layer(2, 6, 2));
+        assert!(super::should_synchronize_streaming_layer(3, 6, 2));
+        assert!(!super::should_synchronize_streaming_layer(4, 6, 2));
+        assert!(super::should_synchronize_streaming_layer(5, 6, 2));
+    }
+
+    #[test]
+    fn streaming_layer_sync_treats_zero_prefetch_as_every_layer() {
+        assert!(super::should_synchronize_streaming_layer(0, 3, 0));
+        assert!(super::should_synchronize_streaming_layer(1, 3, 0));
+        assert!(super::should_synchronize_streaming_layer(2, 3, 0));
     }
 
     #[test]

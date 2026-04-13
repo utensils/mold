@@ -3968,6 +3968,7 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         // branch on the same sigma*1000 scale as the main timestep embedding.
         av_ca_timestep_scale_multiplier: 1000.0,
         cross_attention_adaln,
+        streaming_prefetch_count: plan.streaming_prefetch_count.unwrap_or(1) as usize,
     }
 }
 
@@ -5014,6 +5015,7 @@ mod tests {
         let config = ltx2_video_transformer_config(&plan);
 
         assert_eq!(config.av_ca_timestep_scale_multiplier, 1000.0);
+        assert_eq!(config.streaming_prefetch_count, 2);
     }
 
     #[test]
