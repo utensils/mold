@@ -204,6 +204,7 @@ impl Ltx2RuntimeSession {
     }
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
+        let prepare_total_start = Instant::now();
         let mut prompt_encoder = self
             .prompt_encoder
             .take()
@@ -238,10 +239,17 @@ impl Ltx2RuntimeSession {
             stage1_shape.width = implicit_x2_shape.width;
             stage1_shape.height = implicit_x2_shape.height;
         }
+        let prompt_encode_start = Instant::now();
+        let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
         let prompt = move_prompt_encoding_to_device(
-            prompt_encoder.encode_prompt_pair(&plan.prompt_tokens)?,
+            prompt_encoder.encode_prompt_pair_with_unconditional(
+                &plan.prompt_tokens,
+                encode_unconditional_prompt,
+            )?,
             &prepared_device,
         )?;
+        log_timing("prepare.prompt_pair", prompt_encode_start);
+        let alt_prompt_start = Instant::now();
         let debug_alt_prompt = match ltx_debug_alt_prompt() {
             Some(alt_prompt) => {
                 let assets = super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
@@ -263,13 +271,17 @@ impl Ltx2RuntimeSession {
             }
             None => None,
         };
+        log_timing("prepare.alt_prompt", alt_prompt_start);
+        let prompt_debug_start = Instant::now();
         if ltx_debug_enabled() {
             log_prompt_debug_stats(plan, &prompt)?;
             if let Some(alt_prompt) = debug_alt_prompt.as_ref() {
                 log_alt_prompt_debug_stats(plan, &prompt.conditional, alt_prompt)?;
             }
         }
+        log_timing("prepare.prompt_debug", prompt_debug_start);
         drop(prompt_encoder);
+        let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
                 crate::device::reclaim_gpu_memory();
@@ -280,6 +292,8 @@ impl Ltx2RuntimeSession {
                 }
             }
         }
+        log_timing("prepare.device_handoff", device_handoff_start);
+        let positions_start = Instant::now();
         let pixel_shape = VideoPixelShape {
             batch: 1,
             frames: stage1_shape.frames as usize,
@@ -342,12 +356,16 @@ impl Ltx2RuntimeSession {
             } else {
                 (None, None, None)
             };
+        log_timing("prepare.positions", positions_start);
 
+        let retake_mask_start = Instant::now();
         let retake_mask = plan
             .retake_range
             .as_ref()
             .map(|range| retake_temporal_mask(range, stage1_shape.fps, stage1_shape.frames))
             .transpose()?;
+        log_timing("prepare.retake_mask", retake_mask_start);
+        log_timing("prepare.total", prepare_total_start);
 
         Ok(NativePreparedRun {
             prompt,
@@ -823,6 +841,24 @@ fn stage_multimodal_guider_params(
         )),
         _ => None,
     }
+}
+
+fn prompt_requires_unconditional_context(plan: &Ltx2GeneratePlan) -> Result<bool> {
+    if ltx_debug_enabled() || ltx_debug_compare_uncond_enabled() {
+        return Ok(true);
+    }
+    prompt_requires_unconditional_context_for_plan(plan)
+}
+
+fn prompt_requires_unconditional_context_for_plan(plan: &Ltx2GeneratePlan) -> Result<bool> {
+    for stage_index in 0..plan.execution_graph.denoise_passes.len() {
+        if stage_guidance_scale(plan, stage_index)? > 1.0
+            || stage_multimodal_guider_params(plan, stage_index).is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Option<f64>> {
@@ -5182,6 +5218,64 @@ mod tests {
         plan.guidance = 4.5;
 
         assert_eq!(effective_native_guidance_scale(&plan), 4.5);
+    }
+
+    #[test]
+    fn distilled_runtime_skips_unconditional_prompt_encoding() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Distilled;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(!super::prompt_requires_unconditional_context_for_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn ic_lora_runtime_skips_unconditional_prompt_encoding() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::IcLora;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(!super::prompt_requires_unconditional_context_for_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn two_stage_runtime_keeps_unconditional_prompt_encoding_for_multimodal_guidance() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::prompt_requires_unconditional_context_for_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn a2vid_runtime_keeps_unconditional_prompt_encoding_for_multimodal_guidance() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.audio_file = Some(b"RIFFtestWAVEfmt ".to_vec());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::A2Vid;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::prompt_requires_unconditional_context_for_plan(&plan).unwrap());
     }
 
     #[test]

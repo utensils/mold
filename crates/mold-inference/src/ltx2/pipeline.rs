@@ -238,6 +238,7 @@ impl Ltx2Engine {
         plan: &Ltx2GeneratePlan,
         device: Device,
     ) -> Result<Ltx2RuntimeSession> {
+        let load_start = Instant::now();
         let prompt_device = if Self::debug_force_cpu_prompt_encoder() && !device.is_cpu() {
             Device::Cpu
         } else {
@@ -252,6 +253,7 @@ impl Ltx2Engine {
             &prompt_device,
             dtype,
         )?;
+        Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
         if prompt_device.is_cuda() {
             Ok(Ltx2RuntimeSession::new_deferred_cuda(prompt_encoder))
         } else {

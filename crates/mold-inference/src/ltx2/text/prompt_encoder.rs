@@ -115,37 +115,49 @@ impl NativePromptEncoder {
     }
 
     pub fn encode_prompt_pair(&mut self, pair: &EncodedPromptPair) -> Result<NativePromptEncoding> {
+        self.encode_prompt_pair_with_unconditional(pair, true)
+    }
+
+    pub fn encode_prompt_pair_with_unconditional(
+        &mut self,
+        pair: &EncodedPromptPair,
+        encode_unconditional: bool,
+    ) -> Result<NativePromptEncoding> {
         let conditional = self
-            .gemma
             .encode_prompt_tokens(&pair.conditional)
-            .context("failed to encode conditional Gemma prompt tokens")?;
-        let unconditional = self
-            .gemma
-            .encode_prompt_tokens(&pair.unconditional)
-            .context("failed to encode unconditional Gemma prompt tokens")?;
+            .context("failed to build conditional native LTX-2 embeddings")?;
+        let unconditional = if encode_unconditional {
+            self.encode_prompt_tokens(&pair.unconditional)
+                .context("failed to build unconditional native LTX-2 embeddings")?
+        } else {
+            conditional.clone()
+        };
 
         Ok(NativePromptEncoding {
-            conditional: self
-                .embeddings_processor
-                .process_hidden_states(
-                    &conditional.hidden_states,
-                    &conditional.attention_mask,
-                    self.padding_side,
-                )
-                .context("failed to build conditional native LTX-2 embeddings")?,
-            unconditional: self
-                .embeddings_processor
-                .process_hidden_states(
-                    &unconditional.hidden_states,
-                    &unconditional.attention_mask,
-                    self.padding_side,
-                )
-                .context("failed to build unconditional native LTX-2 embeddings")?,
+            conditional,
+            unconditional,
         })
     }
 
     pub fn device(&self) -> &Device {
         self.gemma.device()
+    }
+
+    fn encode_prompt_tokens(
+        &mut self,
+        tokens: &super::gemma::PromptTokens,
+    ) -> Result<EmbeddingsProcessorOutput> {
+        let encoded = self
+            .gemma
+            .encode_prompt_tokens(tokens)
+            .context("failed to encode Gemma prompt tokens")?;
+        self.embeddings_processor
+            .process_hidden_states(
+                &encoded.hidden_states,
+                &encoded.attention_mask,
+                self.padding_side,
+            )
+            .context("failed to project native LTX-2 prompt embeddings")
     }
 }
 
@@ -468,6 +480,63 @@ mod tests {
         assert_eq!(
             output.unconditional.attention_mask.to_vec2::<u8>().unwrap(),
             vec![vec![1, 1, 1]]
+        );
+    }
+
+    #[test]
+    fn native_prompt_encoder_can_skip_unconditional_pass_for_guidance_free_paths() {
+        let cfg = tiny_gemma_config();
+        let gemma = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
+        let processor = build_embeddings_processor(
+            zero_connector_source_var_builder(),
+            GemmaFeatureExtractorKind::V2DualAv,
+            cfg.hidden_size,
+            cfg.num_hidden_layers,
+            8,
+            Some(4),
+            ConnectorSpec {
+                prefix: "model.diffusion_model.video_embeddings_connector.",
+                num_attention_heads: 2,
+                attention_head_dim: 4,
+                num_layers: 1,
+                apply_gated_attention: false,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
+            },
+            Some(ConnectorSpec {
+                prefix: "model.diffusion_model.audio_embeddings_connector.",
+                num_attention_heads: 1,
+                attention_head_dim: 4,
+                num_layers: 1,
+                apply_gated_attention: false,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
+            }),
+        )
+        .unwrap();
+        let mut prompt_encoder = NativePromptEncoder::new(gemma, processor, PaddingSide::Left);
+
+        let output = prompt_encoder
+            .encode_prompt_pair_with_unconditional(&prompt_pair(), false)
+            .unwrap();
+
+        assert_eq!(
+            output.conditional.video_encoding.to_vec3::<f32>().unwrap(),
+            output
+                .unconditional
+                .video_encoding
+                .to_vec3::<f32>()
+                .unwrap()
+        );
+        assert_eq!(
+            output.conditional.attention_mask.to_vec2::<u8>().unwrap(),
+            output.unconditional.attention_mask.to_vec2::<u8>().unwrap()
         );
     }
 }
