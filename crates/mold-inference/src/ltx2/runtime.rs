@@ -1602,6 +1602,7 @@ fn render_real_distilled_av(
         stage1_audio_noise.as_ref(),
         None,
         None,
+        Some("distilled.stage1"),
         debug_enabled.then_some("stage1"),
     )?;
     log_timing("distilled.stage1.denoise", stage1_denoise_start);
@@ -1752,6 +1753,7 @@ fn render_real_distilled_av(
         stage2_audio_noise.as_ref(),
         None,
         None,
+        Some("distilled.stage2"),
         debug_enabled.then_some("stage2"),
     )?;
     log_timing("distilled.stage2.denoise", stage2_denoise_start);
@@ -1981,6 +1983,7 @@ fn render_real_two_stage_av(
         stage1_audio_noise.as_ref(),
         None,
         frozen_audio_denoise_mask.as_ref(),
+        Some("two_stage.stage1"),
         debug_enabled.then_some("stage1"),
     )?;
     log_timing("two_stage.stage1.denoise", stage1_denoise_start);
@@ -2133,6 +2136,7 @@ fn render_real_two_stage_av(
         stage2_audio_noise.as_ref(),
         None,
         frozen_audio_denoise_mask.as_ref(),
+        Some("two_stage.stage2"),
         debug_enabled.then_some("stage2"),
     )?;
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
@@ -2341,6 +2345,7 @@ fn render_real_one_stage_av(
         stage1_audio_noise.as_ref(),
         None,
         None,
+        Some("one_stage"),
         debug_enabled.then_some("one-stage"),
     )?;
     if debug_enabled {
@@ -2520,6 +2525,7 @@ fn render_real_retake_av(
         stage1_audio_noise.as_ref(),
         Some(&video_retake_mask),
         audio_retake_mask.as_ref(),
+        Some("retake.stage1"),
         debug_enabled.then_some("retake"),
     )?;
     drop(transformer);
@@ -2596,6 +2602,7 @@ fn run_real_distilled_stage(
     audio_sampler_noise: Option<&Tensor>,
     video_denoise_mask: Option<&Tensor>,
     audio_denoise_mask: Option<&Tensor>,
+    timing_label: Option<&str>,
     debug_stage: Option<&str>,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let device = video_start_latents.device().clone();
@@ -2725,6 +2732,9 @@ fn run_real_distilled_stage(
     } else {
         None
     };
+    let mut step_setup_secs = 0.0;
+    let mut transformer_secs = 0.0;
+    let mut update_secs = 0.0;
 
     for (step_idx, sigma) in run_sigmas
         .iter()
@@ -2735,6 +2745,7 @@ fn run_real_distilled_stage(
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6} entering");
         }
+        let step_setup_start = Instant::now();
         let video_sigma = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
         let video_timestep = timestep_from_sigma_and_mask(
             sigma,
@@ -2757,6 +2768,8 @@ fn run_real_distilled_stage(
         } else {
             None
         };
+        step_setup_secs += step_setup_start.elapsed().as_secs_f64();
+        let transformer_start = Instant::now();
         let (mut video_denoised, audio_denoised, video_velocity): (
             Tensor,
             Option<Tensor>,
@@ -3030,6 +3043,8 @@ fn run_real_distilled_stage(
                 Some(cond_video_velocity),
             )
         };
+        transformer_secs += transformer_start.elapsed().as_secs_f64();
+        let update_start = Instant::now();
         // Keep the hot denoise loop fully device-side unless step-level debug
         // inspection is explicitly enabled.
         if should_inspect_step_velocity(debug_stage) {
@@ -3098,6 +3113,7 @@ fn run_real_distilled_stage(
                 )?,
             };
         }
+        update_secs += update_start.elapsed().as_secs_f64();
 
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
@@ -3127,6 +3143,14 @@ fn run_real_distilled_stage(
     }
     if device.is_cuda() {
         device.synchronize()?;
+    }
+    if let Some(timing_label) = timing_label {
+        log_elapsed_secs(&format!("{timing_label}.step_setup_total"), step_setup_secs);
+        log_elapsed_secs(
+            &format!("{timing_label}.transformer_total"),
+            transformer_secs,
+        );
+        log_elapsed_secs(&format!("{timing_label}.update_total"), update_secs);
     }
     Ok((video_latents, audio_latents))
 }
@@ -4187,6 +4211,13 @@ fn log_timing(label: &str, start: Instant) {
         "[ltx2-timing] {label} {:.3}s",
         start.elapsed().as_secs_f64()
     );
+}
+
+fn log_elapsed_secs(label: &str, elapsed_secs: f64) {
+    if !ltx_debug_timings_enabled() {
+        return;
+    }
+    eprintln!("[ltx2-timing] {label} {elapsed_secs:.3}s");
 }
 
 fn log_prompt_debug_stats(plan: &Ltx2GeneratePlan, prompt: &NativePromptEncoding) -> Result<()> {
