@@ -994,7 +994,15 @@ impl Ltx2VideoRotaryPosEmbed {
     }
 
     pub fn forward(&self, hidden_states: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
-        let device = hidden_states.device();
+        self.forward_for_dtype(hidden_states.device(), hidden_states.dtype(), positions)
+    }
+
+    pub fn forward_for_dtype(
+        &self,
+        device: &Device,
+        dtype: DType,
+        positions: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
         let position_dims = positions.dim(1)?;
         let indices = self.base_indices(device, position_dims)?;
         let fractional = self.fractional_positions(positions)?;
@@ -1018,10 +1026,7 @@ impl Ltx2VideoRotaryPosEmbed {
                     cos = Tensor::cat(&[cos_pad, cos], D::Minus1)?;
                     sin = Tensor::cat(&[sin_pad, sin], D::Minus1)?;
                 }
-                Ok((
-                    cos.to_dtype(hidden_states.dtype())?,
-                    sin.to_dtype(hidden_states.dtype())?,
-                ))
+                Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
             }
             LtxRopeType::Split => {
                 let expected = self.dim / 2;
@@ -1055,10 +1060,7 @@ impl Ltx2VideoRotaryPosEmbed {
                     ))?
                     .transpose(1, 2)?
                     .contiguous()?;
-                Ok((
-                    cos.to_dtype(hidden_states.dtype())?,
-                    sin.to_dtype(hidden_states.dtype())?,
-                ))
+                Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
             }
         }
     }
@@ -2077,6 +2079,21 @@ struct LtxPreparedModality {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct LtxPreparedModalityStatic {
+    context: Tensor,
+    context_mask: Option<Tensor>,
+    self_attention_mask: Option<Tensor>,
+    rope: (Tensor, Tensor),
+    cross_rope: Option<(Tensor, Tensor)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LtxPreparedStaticInputs {
+    video: LtxPreparedModalityStatic,
+    audio: Option<LtxPreparedModalityStatic>,
+}
+
+#[derive(Clone, Debug)]
 struct LtxAvTransformerBlock {
     video_attn1: LtxAttention,
     video_attn2: LtxAttention,
@@ -3037,17 +3054,12 @@ impl Ltx2AvTransformer3DModel {
     fn prepare_modality(
         &self,
         latent: &Tensor,
-        context: &Tensor,
-        context_mask: Option<&Tensor>,
-        self_attention_mask: Option<&Tensor>,
         timesteps: &Tensor,
         sigma: &Tensor,
-        positions: &Tensor,
         patchify_proj: &nn::Linear,
         adaln_single: &AdaLayerNormSingle,
         prompt_adaln_single: Option<&AdaLayerNormSingle>,
-        caption_projection: Option<&PixArtAlphaTextProjection>,
-        rope: &Ltx2VideoRotaryPosEmbed,
+        static_inputs: &LtxPreparedModalityStatic,
     ) -> Result<LtxPreparedModality> {
         let x = patchify_proj.forward(latent)?;
         let (timesteps, embedded_timestep) = adaln_single.forward(&timesteps.flatten_all()?)?;
@@ -3060,28 +3072,107 @@ impl Ltx2AvTransformer3DModel {
         } else {
             None
         };
-        let context = if let Some(caption_projection) = caption_projection {
-            caption_projection.forward(context)?
-        } else {
-            context.clone()
-        };
-        let rope = rope.forward(&x, positions)?;
         Ok(LtxPreparedModality {
             x,
-            context,
-            context_mask: Self::prepare_context_mask(context_mask, latent.dtype())?,
-            self_attention_mask: Self::prepare_self_attention_mask(
-                self_attention_mask,
-                latent.dtype(),
-            )?,
+            context: static_inputs.context.clone(),
+            context_mask: static_inputs.context_mask.clone(),
+            self_attention_mask: static_inputs.self_attention_mask.clone(),
             timesteps,
             embedded_timestep,
-            rope,
-            cross_rope: None,
+            rope: static_inputs.rope.clone(),
+            cross_rope: static_inputs.cross_rope.clone(),
             cross_scale_shift_timestep: None,
             cross_gate_timestep: None,
             prompt_timestep,
         })
+    }
+
+    fn prepare_modality_static(
+        &self,
+        context: &Tensor,
+        context_mask: Option<&Tensor>,
+        self_attention_mask: Option<&Tensor>,
+        positions: &Tensor,
+        caption_projection: Option<&PixArtAlphaTextProjection>,
+        rope: &Ltx2VideoRotaryPosEmbed,
+        cross_positions: Option<&Tensor>,
+        compute_dtype: DType,
+    ) -> Result<LtxPreparedModalityStatic> {
+        let context = context.to_dtype(compute_dtype)?;
+        let context = if let Some(caption_projection) = caption_projection {
+            caption_projection.forward(&context)?
+        } else {
+            context
+        };
+        let rope = rope.forward_for_dtype(context.device(), compute_dtype, positions)?;
+        let cross_rope = cross_positions
+            .map(|cross_positions| {
+                self.cross_rope
+                    .forward_for_dtype(context.device(), compute_dtype, cross_positions)
+            })
+            .transpose()?;
+        Ok(LtxPreparedModalityStatic {
+            context,
+            context_mask: Self::prepare_context_mask(context_mask, compute_dtype)?,
+            self_attention_mask: Self::prepare_self_attention_mask(
+                self_attention_mask,
+                compute_dtype,
+            )?,
+            rope,
+            cross_rope,
+        })
+    }
+
+    pub(crate) fn prepare_static_inputs(
+        &self,
+        video_encoder_hidden_states: &Tensor,
+        audio_encoder_hidden_states: Option<&Tensor>,
+        video_encoder_attention_mask: Option<&Tensor>,
+        audio_encoder_attention_mask: Option<&Tensor>,
+        video_self_attention_mask: Option<&Tensor>,
+        audio_self_attention_mask: Option<&Tensor>,
+        video_positions: &Tensor,
+        audio_positions: Option<&Tensor>,
+    ) -> Result<LtxPreparedStaticInputs> {
+        let compute_dtype = match self.patchify_proj.weight().dtype() {
+            DType::F8E4M3 => DType::BF16,
+            other => other,
+        };
+        let video_cross_positions = audio_positions
+            .map(|_| self.temporal_cross_positions(video_positions, 1))
+            .transpose()?;
+        let audio_cross_positions = audio_positions
+            .map(|positions| self.temporal_cross_positions(positions, 1))
+            .transpose()?;
+        let video = self.prepare_modality_static(
+            video_encoder_hidden_states,
+            video_encoder_attention_mask,
+            video_self_attention_mask,
+            video_positions,
+            self.caption_projection.as_ref(),
+            &self.video_rope,
+            video_cross_positions.as_ref(),
+            compute_dtype,
+        )?;
+        let audio = match (audio_encoder_hidden_states, audio_positions) {
+            (Some(audio_encoder_hidden_states), Some(audio_positions)) => Some(
+                self.prepare_modality_static(
+                    audio_encoder_hidden_states,
+                    audio_encoder_attention_mask,
+                    audio_self_attention_mask,
+                    audio_positions,
+                    self.audio_caption_projection.as_ref(),
+                    &self.audio_rope,
+                    audio_cross_positions.as_ref(),
+                    compute_dtype,
+                )?,
+            ),
+            (None, None) => None,
+            _ => candle_core::bail!(
+                "audio hidden states and positions must be provided together when preparing static inputs"
+            ),
+        };
+        Ok(LtxPreparedStaticInputs { video, audio })
     }
 
     fn prepare_cross_attention_timestep(
@@ -3130,22 +3221,15 @@ impl Ltx2AvTransformer3DModel {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn forward(
+    pub fn forward_with_static_inputs(
         &self,
         video_hidden_states: &Tensor,
         audio_hidden_states: Option<&Tensor>,
-        video_encoder_hidden_states: &Tensor,
-        audio_encoder_hidden_states: Option<&Tensor>,
         video_sigma: &Tensor,
         video_timestep: &Tensor,
         audio_sigma: Option<&Tensor>,
         audio_timestep: Option<&Tensor>,
-        video_encoder_attention_mask: Option<&Tensor>,
-        audio_encoder_attention_mask: Option<&Tensor>,
-        video_self_attention_mask: Option<&Tensor>,
-        audio_self_attention_mask: Option<&Tensor>,
-        video_positions: &Tensor,
-        audio_positions: Option<&Tensor>,
+        static_inputs: &LtxPreparedStaticInputs,
         perturbations: Option<&BatchedPerturbationConfig>,
     ) -> Result<(Tensor, Option<Tensor>)> {
         let compute_dtype = match self.patchify_proj.weight().dtype() {
@@ -3164,50 +3248,38 @@ impl Ltx2AvTransformer3DModel {
             .transpose()?;
         let mut video = self.prepare_modality(
             &video_hidden_states.to_dtype(compute_dtype)?,
-            &video_encoder_hidden_states.to_dtype(compute_dtype)?,
-            video_encoder_attention_mask,
-            video_self_attention_mask,
             &video_timestep,
             &video_sigma,
-            video_positions,
             &self.patchify_proj,
             &self.adaln_single,
             self.prompt_adaln_single.as_ref(),
-            self.caption_projection.as_ref(),
-            &self.video_rope,
+            &static_inputs.video,
         )?;
         let audio_sigma_ref = audio_sigma.as_ref();
         let audio_timestep_ref = audio_timestep.as_ref();
         let mut audio = match (
             audio_hidden_states,
-            audio_encoder_hidden_states,
+            static_inputs.audio.as_ref(),
             audio_sigma_ref,
             audio_timestep_ref,
-            audio_positions,
         ) {
             (
                 Some(audio_hidden_states),
-                Some(audio_encoder_hidden_states),
+                Some(audio_static_inputs),
                 Some(audio_sigma),
                 Some(audio_timestep),
-                Some(audio_positions),
             ) => Some(self.prepare_modality(
                 &audio_hidden_states.to_dtype(compute_dtype)?,
-                &audio_encoder_hidden_states.to_dtype(compute_dtype)?,
-                audio_encoder_attention_mask,
-                audio_self_attention_mask,
                 audio_timestep,
                 audio_sigma,
-                audio_positions,
                 &self.audio_patchify_proj,
                 &self.audio_adaln_single,
                 self.audio_prompt_adaln_single.as_ref(),
-                self.audio_caption_projection.as_ref(),
-                &self.audio_rope,
+                audio_static_inputs,
             )?),
-            (None, None, None, None, None) => None,
+            (None, None, None, None) => None,
             _ => candle_core::bail!(
-                "audio hidden states, contexts, sigma, timesteps, and positions must be provided together"
+                "audio hidden states, static inputs, sigma, and timesteps must be provided together"
             ),
         };
         let batch = video.x.dim(0)?;
@@ -3216,11 +3288,6 @@ impl Ltx2AvTransformer3DModel {
             .unwrap_or_else(|| BatchedPerturbationConfig::empty(batch));
         let av_scale = self.config.av_ca_timestep_scale_multiplier / 1000.0;
         if let Some(audio) = audio.as_mut() {
-            let video_cross_positions = self.temporal_cross_positions(video_positions, 1)?;
-            let audio_positions = audio_positions.expect("audio positions already validated");
-            let audio_cross_positions = self.temporal_cross_positions(audio_positions, 1)?;
-            video.cross_rope = Some(self.cross_rope.forward(&video.x, &video_cross_positions)?);
-            audio.cross_rope = Some(self.cross_rope.forward(&audio.x, &audio_cross_positions)?);
             video.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_video_scale_shift_adaln_single,
                 audio_sigma.as_ref().expect("audio sigma already validated"),
@@ -3335,6 +3402,47 @@ impl Ltx2AvTransformer3DModel {
         };
 
         Ok((video, audio))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        video_hidden_states: &Tensor,
+        audio_hidden_states: Option<&Tensor>,
+        video_encoder_hidden_states: &Tensor,
+        audio_encoder_hidden_states: Option<&Tensor>,
+        video_sigma: &Tensor,
+        video_timestep: &Tensor,
+        audio_sigma: Option<&Tensor>,
+        audio_timestep: Option<&Tensor>,
+        video_encoder_attention_mask: Option<&Tensor>,
+        audio_encoder_attention_mask: Option<&Tensor>,
+        video_self_attention_mask: Option<&Tensor>,
+        audio_self_attention_mask: Option<&Tensor>,
+        video_positions: &Tensor,
+        audio_positions: Option<&Tensor>,
+        perturbations: Option<&BatchedPerturbationConfig>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
+        let static_inputs = self.prepare_static_inputs(
+            video_encoder_hidden_states,
+            audio_encoder_hidden_states,
+            video_encoder_attention_mask,
+            audio_encoder_attention_mask,
+            video_self_attention_mask,
+            audio_self_attention_mask,
+            video_positions,
+            audio_positions,
+        )?;
+        self.forward_with_static_inputs(
+            video_hidden_states,
+            audio_hidden_states,
+            video_sigma,
+            video_timestep,
+            audio_sigma,
+            audio_timestep,
+            &static_inputs,
+            perturbations,
+        )
     }
 }
 
@@ -4642,6 +4750,100 @@ mod tests {
 
         assert_tensors_close(&eager_video, &streaming_video, 1e-4);
         assert_tensors_close(&eager_audio.unwrap(), &streaming_audio.unwrap(), 1e-4);
+    }
+
+    #[test]
+    fn av_transformer_forward_with_static_inputs_matches_full_forward() {
+        let device = Device::Cpu;
+        let config = tiny_av_config();
+        let model =
+            Ltx2AvTransformer3DModel::new(&config, av_transformer_var_builder(), None).unwrap();
+
+        let video_hidden_states = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],
+            (1, 3, config.in_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_hidden_states = Tensor::from_vec(
+            vec![0.2f32, -0.1, 0.5, -0.4],
+            (1, 2, config.audio_in_channels),
+            &device,
+        )
+        .unwrap();
+        let video_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 3),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let audio_encoder_hidden_states = Tensor::from_vec(
+            patterned_values(16, 9),
+            (1, 4, config.caption_channels),
+            &device,
+        )
+        .unwrap();
+        let timestep = Tensor::new(&[0.75f32], &device).unwrap();
+        let video_attention_mask = Tensor::new(&[[1u8, 1, 0, 0]], &device).unwrap();
+        let audio_attention_mask = Tensor::new(&[[1u8, 0, 1, 0]], &device).unwrap();
+        let video_positions = Tensor::from_vec(
+            vec![
+                0.0f32, 1.0, 1.0, 2.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 2.0,
+                2.0, 3.0,
+            ],
+            (1, 3, 3, 2),
+            &device,
+        )
+        .unwrap();
+        let audio_positions =
+            Tensor::from_vec(vec![0.0f32, 1.0, 1.0, 2.0], (1, 1, 2, 2), &device).unwrap();
+
+        let static_inputs = model
+            .prepare_static_inputs(
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                None,
+                None,
+                &video_positions,
+                Some(&audio_positions),
+            )
+            .unwrap();
+        let (full_video, full_audio) = model
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &timestep,
+                &timestep,
+                Some(&timestep),
+                Some(&timestep),
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                None,
+                None,
+                &video_positions,
+                Some(&audio_positions),
+                None,
+            )
+            .unwrap();
+        let (static_video, static_audio) = model
+            .forward_with_static_inputs(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &timestep,
+                &timestep,
+                Some(&timestep),
+                Some(&timestep),
+                &static_inputs,
+                None,
+            )
+            .unwrap();
+
+        assert_tensors_close(&full_video, &static_video, 1e-4);
+        assert_tensors_close(&full_audio.unwrap(), &static_audio.unwrap(), 1e-4);
     }
 
     #[test]

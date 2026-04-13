@@ -2675,6 +2675,56 @@ fn run_real_distilled_stage(
             MultiModalGuider::new(audio_params, uncond_audio_context.cloned()),
         )
     });
+    let cond_static_inputs = if multimodal_guiders.is_none() {
+        Some(transformer.prepare_static_inputs(
+            cond_context,
+            audio_context,
+            cond_mask,
+            cond_mask,
+            video_self_attention_mask.as_ref(),
+            None,
+            video_positions,
+            audio_positions,
+        )?)
+    } else {
+        None
+    };
+    let uncond_static_inputs = if multimodal_guiders.is_none() {
+        match (uncond_context, uncond_audio_context) {
+            (Some(uncond_context), uncond_audio_context) => {
+                Some(transformer.prepare_static_inputs(
+                    uncond_context,
+                    uncond_audio_context,
+                    uncond_mask,
+                    uncond_mask,
+                    video_self_attention_mask.as_ref(),
+                    None,
+                    video_positions,
+                    audio_positions,
+                )?)
+            }
+            (None, _) => None,
+        }
+    } else {
+        None
+    };
+    let alt_static_inputs = if multimodal_guiders.is_none() {
+        match (alt_context, alt_audio_context) {
+            (Some(alt_context), alt_audio_context) => Some(transformer.prepare_static_inputs(
+                alt_context,
+                alt_audio_context,
+                alt_mask,
+                alt_mask,
+                video_self_attention_mask.as_ref(),
+                None,
+                video_positions,
+                audio_positions,
+            )?),
+            (None, _) => None,
+        }
+    } else {
+        None
+    };
 
     for (step_idx, sigma) in run_sigmas
         .iter()
@@ -2733,52 +2783,35 @@ fn run_real_distilled_stage(
             )?;
             (video_denoised, audio_denoised, None)
         } else if let Some(audio_latents_ref) = audio_latents.as_ref() {
-            let audio_positions_ref = audio_positions
-                .as_ref()
-                .context("audio positions missing for multimodal distilled stage")?;
-            let audio_context_ref = audio_context
-                .as_ref()
-                .context("audio prompt conditioning missing for multimodal distilled stage")?;
             if use_cfg {
-                let uncond_video_context =
-                    uncond_context.context("missing unconditional video conditioning for CFG")?;
-                let uncond_audio_context = uncond_audio_context
+                let uncond_static_inputs = uncond_static_inputs
                     .as_ref()
-                    .context("missing unconditional audio conditioning for CFG")?;
-                let (uncond_video_velocity, uncond_audio_velocity) = transformer.forward(
-                    &video_latents,
-                    Some(audio_latents_ref),
-                    uncond_video_context,
-                    Some(uncond_audio_context),
-                    &video_sigma,
-                    &video_timestep,
-                    audio_sigma.as_ref(),
-                    audio_timestep.as_ref(),
-                    uncond_mask,
-                    uncond_mask,
-                    video_self_attention_mask.as_ref(),
-                    None,
-                    video_positions,
-                    Some(audio_positions_ref),
-                    None,
-                )?;
-                let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
-                    &video_latents,
-                    Some(audio_latents_ref),
-                    cond_context,
-                    Some(audio_context_ref),
-                    &video_sigma,
-                    &video_timestep,
-                    audio_sigma.as_ref(),
-                    audio_timestep.as_ref(),
-                    cond_mask,
-                    cond_mask,
-                    video_self_attention_mask.as_ref(),
-                    None,
-                    video_positions,
-                    Some(audio_positions_ref),
-                    None,
-                )?;
+                    .context("missing unconditional static inputs for CFG")?;
+                let cond_static_inputs = cond_static_inputs
+                    .as_ref()
+                    .context("missing conditional static inputs for multimodal stage")?;
+                let (uncond_video_velocity, uncond_audio_velocity) = transformer
+                    .forward_with_static_inputs(
+                        &video_latents,
+                        Some(audio_latents_ref),
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
+                        uncond_static_inputs,
+                        None,
+                    )?;
+                let (cond_video_velocity, cond_audio_velocity) = transformer
+                    .forward_with_static_inputs(
+                        &video_latents,
+                        Some(audio_latents_ref),
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
+                        cond_static_inputs,
+                        None,
+                    )?;
                 let uncond_audio_velocity = uncond_audio_velocity
                     .context("audio branch unexpectedly returned no unconditional output")?;
                 let cond_audio_velocity = cond_audio_velocity
@@ -2809,44 +2842,33 @@ fn run_real_distilled_stage(
                     Some(cond_video_velocity),
                 )
             } else {
-                let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
-                    &video_latents,
-                    Some(audio_latents_ref),
-                    cond_context,
-                    Some(audio_context_ref),
-                    &video_sigma,
-                    &video_timestep,
-                    audio_sigma.as_ref(),
-                    audio_timestep.as_ref(),
-                    cond_mask,
-                    cond_mask,
-                    video_self_attention_mask.as_ref(),
-                    None,
-                    video_positions,
-                    Some(audio_positions_ref),
-                    None,
-                )?;
+                let cond_static_inputs = cond_static_inputs
+                    .as_ref()
+                    .context("missing conditional static inputs for multimodal stage")?;
+                let (cond_video_velocity, cond_audio_velocity) = transformer
+                    .forward_with_static_inputs(
+                        &video_latents,
+                        Some(audio_latents_ref),
+                        &video_sigma,
+                        &video_timestep,
+                        audio_sigma.as_ref(),
+                        audio_timestep.as_ref(),
+                        cond_static_inputs,
+                        None,
+                    )?;
                 if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
-                    if let (Some(uncond_video_context), Some(uncond_audio_context)) =
-                        (uncond_context, uncond_audio_context.as_ref())
-                    {
-                        let (uncond_video_velocity, uncond_audio_velocity) = transformer.forward(
-                            &video_latents,
-                            Some(audio_latents_ref),
-                            uncond_video_context,
-                            Some(uncond_audio_context),
-                            &video_sigma,
-                            &video_timestep,
-                            audio_sigma.as_ref(),
-                            audio_timestep.as_ref(),
-                            uncond_mask,
-                            uncond_mask,
-                            video_self_attention_mask.as_ref(),
-                            None,
-                            video_positions,
-                            Some(audio_positions_ref),
-                            None,
-                        )?;
+                    if let Some(uncond_static_inputs) = uncond_static_inputs.as_ref() {
+                        let (uncond_video_velocity, uncond_audio_velocity) = transformer
+                            .forward_with_static_inputs(
+                                &video_latents,
+                                Some(audio_latents_ref),
+                                &video_sigma,
+                                &video_timestep,
+                                audio_sigma.as_ref(),
+                                audio_timestep.as_ref(),
+                                uncond_static_inputs,
+                                None,
+                            )?;
                         log_distilled_prompt_sensitivity(
                             debug_stage,
                             step_idx,
@@ -2861,26 +2883,18 @@ fn run_real_distilled_stage(
                     }
                 }
                 if step_idx == 0 {
-                    if let (Some(alt_video_context), Some(alt_audio_context)) =
-                        (alt_context, alt_audio_context.as_ref())
-                    {
-                        let (alt_video_velocity, alt_audio_velocity) = transformer.forward(
-                            &video_latents,
-                            Some(audio_latents_ref),
-                            alt_video_context,
-                            Some(alt_audio_context),
-                            &video_sigma,
-                            &video_timestep,
-                            audio_sigma.as_ref(),
-                            audio_timestep.as_ref(),
-                            alt_mask,
-                            alt_mask,
-                            video_self_attention_mask.as_ref(),
-                            None,
-                            video_positions,
-                            Some(audio_positions_ref),
-                            None,
-                        )?;
+                    if let Some(alt_static_inputs) = alt_static_inputs.as_ref() {
+                        let (alt_video_velocity, alt_audio_velocity) = transformer
+                            .forward_with_static_inputs(
+                                &video_latents,
+                                Some(audio_latents_ref),
+                                &video_sigma,
+                                &video_timestep,
+                                audio_sigma.as_ref(),
+                                audio_timestep.as_ref(),
+                                alt_static_inputs,
+                                None,
+                            )?;
                         log_distilled_alternate_prompt_sensitivity(
                             debug_stage,
                             step_idx,
@@ -2904,40 +2918,30 @@ fn run_real_distilled_stage(
                 )
             }
         } else if use_cfg {
-            let uncond_video_context =
-                uncond_context.context("missing unconditional video conditioning for CFG")?;
-            let (uncond_video_velocity, _) = transformer.forward(
+            let uncond_static_inputs = uncond_static_inputs
+                .as_ref()
+                .context("missing unconditional static inputs for CFG")?;
+            let cond_static_inputs = cond_static_inputs
+                .as_ref()
+                .context("missing conditional static inputs for video stage")?;
+            let (uncond_video_velocity, _) = transformer.forward_with_static_inputs(
                 &video_latents,
-                None,
-                uncond_video_context,
                 None,
                 &video_sigma,
                 &video_timestep,
                 None,
                 None,
-                uncond_mask,
-                None,
-                video_self_attention_mask.as_ref(),
-                None,
-                video_positions,
-                None,
+                uncond_static_inputs,
                 None,
             )?;
-            let (cond_video_velocity, _) = transformer.forward(
+            let (cond_video_velocity, _) = transformer.forward_with_static_inputs(
                 &video_latents,
-                None,
-                cond_context,
                 None,
                 &video_sigma,
                 &video_timestep,
                 None,
                 None,
-                cond_mask,
-                None,
-                video_self_attention_mask.as_ref(),
-                None,
-                video_positions,
-                None,
+                cond_static_inputs,
                 None,
             )?;
             (
@@ -2956,40 +2960,30 @@ fn run_real_distilled_stage(
                 Some(cond_video_velocity),
             )
         } else {
-            let (cond_video_velocity, _cond_audio_velocity) = transformer.forward(
-                &video_latents,
-                None,
-                cond_context,
-                None,
-                &video_sigma,
-                &video_timestep,
-                None,
-                None,
-                cond_mask,
-                None,
-                video_self_attention_mask.as_ref(),
-                None,
-                video_positions,
-                None,
-                None,
-            )?;
+            let cond_static_inputs = cond_static_inputs
+                .as_ref()
+                .context("missing conditional static inputs for video stage")?;
+            let (cond_video_velocity, _cond_audio_velocity) = transformer
+                .forward_with_static_inputs(
+                    &video_latents,
+                    None,
+                    &video_sigma,
+                    &video_timestep,
+                    None,
+                    None,
+                    cond_static_inputs,
+                    None,
+                )?;
             if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
-                if let Some(uncond_video_context) = uncond_context {
-                    let (uncond_video_velocity, _) = transformer.forward(
+                if let Some(uncond_static_inputs) = uncond_static_inputs.as_ref() {
+                    let (uncond_video_velocity, _) = transformer.forward_with_static_inputs(
                         &video_latents,
-                        None,
-                        uncond_video_context,
                         None,
                         &video_sigma,
                         &video_timestep,
                         None,
                         None,
-                        uncond_mask,
-                        None,
-                        video_self_attention_mask.as_ref(),
-                        None,
-                        video_positions,
-                        None,
+                        uncond_static_inputs,
                         None,
                     )?;
                     log_distilled_prompt_sensitivity(
@@ -3006,22 +3000,15 @@ fn run_real_distilled_stage(
                 }
             }
             if step_idx == 0 {
-                if let Some(alt_video_context) = alt_context {
-                    let (alt_video_velocity, _) = transformer.forward(
+                if let Some(alt_static_inputs) = alt_static_inputs.as_ref() {
+                    let (alt_video_velocity, _) = transformer.forward_with_static_inputs(
                         &video_latents,
-                        None,
-                        alt_video_context,
                         None,
                         &video_sigma,
                         &video_timestep,
                         None,
                         None,
-                        alt_mask,
-                        None,
-                        video_self_attention_mask.as_ref(),
-                        None,
-                        video_positions,
-                        None,
+                        alt_static_inputs,
                         None,
                     )?;
                     log_distilled_alternate_prompt_sensitivity(
