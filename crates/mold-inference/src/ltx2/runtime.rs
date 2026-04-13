@@ -2645,22 +2645,24 @@ fn run_real_distilled_stage(
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6} entering");
         }
         let video_sigma = Tensor::full(sigma, (video_latents.dim(0)?,), &device)?;
-        let video_timestep = if video_conditioning.is_empty() {
-            video_sigma.clone()
-        } else {
-            video_denoise_mask.affine(sigma as f64, 0.0)?
-        };
+        let video_timestep = timestep_from_sigma_and_mask(
+            sigma,
+            video_latents.dim(0)?,
+            uses_video_freeze_mask.then_some(&video_denoise_mask),
+            &device,
+        )?;
         let audio_sigma = if let Some(audio_latents_ref) = audio_latents.as_ref() {
             Some(Tensor::full(sigma, (audio_latents_ref.dim(0)?,), &device)?)
         } else {
             None
         };
-        let audio_timestep = if let Some(audio_sigma) = audio_sigma.as_ref() {
-            if let Some(audio_denoise_mask) = audio_denoise_mask.as_ref() {
-                Some(audio_denoise_mask.affine(sigma as f64, 0.0)?)
-            } else {
-                Some(audio_sigma.clone())
-            }
+        let audio_timestep = if let Some(audio_latents_ref) = audio_latents.as_ref() {
+            Some(timestep_from_sigma_and_mask(
+                sigma,
+                audio_latents_ref.dim(0)?,
+                audio_denoise_mask.as_ref(),
+                &device,
+            )?)
         } else {
             None
         };
@@ -3421,6 +3423,19 @@ fn build_frozen_audio_denoise_mask(
     device: &candle_core::Device,
 ) -> Result<Tensor> {
     Tensor::zeros((audio_shape.batch, audio_shape.frames), DType::F32, device).map_err(Into::into)
+}
+
+fn timestep_from_sigma_and_mask(
+    sigma: f32,
+    batch_size: usize,
+    denoise_mask: Option<&Tensor>,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let sigma_tensor = Tensor::full(sigma, (batch_size,), device)?;
+    match denoise_mask {
+        Some(mask) => mask.affine(sigma as f64, 0.0).map_err(Into::into),
+        None => Ok(sigma_tensor),
+    }
 }
 
 fn native_audio_track_from_decoded_audio(
@@ -5248,6 +5263,26 @@ mod tests {
         assert_eq!(
             mask.to_vec2::<f32>().unwrap(),
             vec![vec![0.0, 1.0, 1.0, 1.0]]
+        );
+    }
+
+    #[test]
+    fn timestep_from_sigma_and_mask_defaults_to_full_sigma_without_mask() {
+        let timestep = super::timestep_from_sigma_and_mask(0.75, 2, None, &Device::Cpu).unwrap();
+
+        assert_eq!(timestep.to_vec1::<f32>().unwrap(), vec![0.75, 0.75]);
+    }
+
+    #[test]
+    fn timestep_from_sigma_and_mask_scales_per_token_when_masked() {
+        let mask = Tensor::from_vec(vec![0.0f32, 0.25, 1.0], (1, 3), &Device::Cpu).unwrap();
+
+        let timestep =
+            super::timestep_from_sigma_and_mask(0.8, 1, Some(&mask), &Device::Cpu).unwrap();
+
+        assert_eq!(
+            timestep.to_vec2::<f32>().unwrap(),
+            vec![vec![0.0, 0.2, 0.8]]
         );
     }
 
