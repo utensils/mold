@@ -91,7 +91,7 @@ pub(crate) fn build_execution_graph(
     let stage1 = DenoisePassPlan {
         block: ExecutionBlock::Stage1Denoise,
         sampler: SamplerMode::Euler,
-        guidance: if matches!(pipeline, PipelineKind::OneStage) {
+        guidance: if matches!(pipeline, PipelineKind::OneStage | PipelineKind::Retake) {
             GuidanceMode::Simple
         } else {
             GuidanceMode::Multimodal
@@ -105,7 +105,7 @@ pub(crate) fn build_execution_graph(
     blocks.push(stage1.block);
 
     let mut denoise_passes = vec![stage1];
-    if !matches!(pipeline, PipelineKind::OneStage) {
+    if !matches!(pipeline, PipelineKind::OneStage | PipelineKind::Retake) {
         blocks.push(ExecutionBlock::SpatialUpsampler);
         let stage2 = DenoisePassPlan {
             block: ExecutionBlock::Stage2Denoise,
@@ -350,7 +350,7 @@ mod tests {
         assert!(graph.uses_reference_video_conditioning);
         assert!(graph.uses_audio_conditioning);
         assert!(graph.uses_retake_masking);
-        assert_eq!(graph.denoise_passes.len(), 2);
+        assert_eq!(graph.denoise_passes.len(), 1);
         assert!(graph
             .denoise_passes
             .iter()

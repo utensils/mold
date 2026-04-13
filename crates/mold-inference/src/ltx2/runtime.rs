@@ -19,6 +19,7 @@ use super::guidance::{
     BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderParams, Perturbation,
     PerturbationConfig, PerturbationType,
 };
+use super::media;
 use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
     get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
@@ -39,7 +40,7 @@ use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::ProgressReporter;
 use crate::weight_loader::load_fp8_safetensors;
-use mold_core::{LoraWeight, Ltx2SpatialUpscale};
+use mold_core::{LoraWeight, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
 pub const LTX2_AUDIO_LATENT_CHANNELS: usize = 8;
@@ -81,6 +82,11 @@ pub struct NativeAudioTrack {
 struct NativeConditioningAudio {
     latents: Tensor,
     original_track: Option<NativeAudioTrack>,
+}
+
+#[derive(Debug)]
+struct NativeConditioningVideo {
+    latents: Tensor,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +468,7 @@ impl Ltx2RuntimeSession {
             | PipelineKind::TwoStageHq
             | PipelineKind::Keyframe
             | PipelineKind::A2Vid => render_real_two_stage_av(plan, prepared, device),
+            PipelineKind::Retake => render_real_retake_av(plan, prepared, device),
             _ => return Ok(None),
         };
         match render {
@@ -715,20 +722,19 @@ fn pipeline_uses_two_stage_spatial_refinement(pipeline: PipelineKind) -> bool {
             | PipelineKind::IcLora
             | PipelineKind::Keyframe
             | PipelineKind::A2Vid
-            | PipelineKind::Retake
     )
 }
 
 fn effective_native_guidance_scale(plan: &Ltx2GeneratePlan) -> f64 {
     match plan.pipeline {
-        PipelineKind::Distilled => 1.0,
+        PipelineKind::Distilled | PipelineKind::Retake => 1.0,
         _ => plan.guidance,
     }
 }
 
 fn stage_guidance_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<f64> {
     Ok(match (plan.pipeline, stage_index) {
-        (PipelineKind::Distilled, _) => 1.0,
+        (PipelineKind::Distilled | PipelineKind::Retake, _) => 1.0,
         (PipelineKind::TwoStage, 1)
         | (PipelineKind::TwoStageHq, 1)
         | (PipelineKind::A2Vid, 1)
@@ -842,6 +848,11 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.loras.is_empty()
         && plan.spatial_upscale.is_none()
         && plan.temporal_upscale.is_none();
+    let native_retake = plan.conditioning.video_path.is_some()
+        && plan.execution_graph.uses_retake_masking
+        && plan.loras.is_empty()
+        && plan.spatial_upscale.is_none()
+        && plan.temporal_upscale.is_none();
     match plan.pipeline {
         PipelineKind::Distilled => native_plain_or_image_conditioning,
         PipelineKind::OneStage => {
@@ -855,6 +866,7 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::A2Vid => native_audio_conditioning,
+        PipelineKind::Retake => native_retake,
         _ => false,
     }
 }
@@ -1433,7 +1445,9 @@ fn render_real_distilled_av(
         audio_shape,
         &stage1_video_noise,
         &stage1_video_conditioning,
+        None,
         stage1_audio_noise.as_ref(),
+        None,
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
@@ -1451,6 +1465,7 @@ fn render_real_distilled_av(
         stage_sampler_mode(plan, 0)?,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
+        None,
         None,
         debug_enabled.then_some("stage1"),
     )?;
@@ -1571,7 +1586,9 @@ fn render_real_distilled_av(
         audio_shape,
         &stage2_video_start,
         &stage2_video_conditioning,
+        None,
         stage2_audio_start.as_ref(),
+        None,
         &stage2_video_positions,
         audio_positions.as_ref(),
         &cond_context,
@@ -1589,6 +1606,7 @@ fn render_real_distilled_av(
         stage_sampler_mode(plan, 1)?,
         Some(&stage2_video_noise),
         stage2_audio_noise.as_ref(),
+        None,
         None,
         debug_enabled.then_some("stage2"),
     )?;
@@ -1771,7 +1789,9 @@ fn render_real_two_stage_av(
         audio_shape,
         &stage1_video_noise,
         &stage1_video_conditioning,
+        None,
         stage1_audio_start,
+        None,
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
@@ -1795,6 +1815,7 @@ fn render_real_two_stage_av(
         stage1_sampler,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
+        None,
         frozen_audio_denoise_mask.as_ref(),
         debug_enabled.then_some("stage1"),
     )?;
@@ -1911,7 +1932,9 @@ fn render_real_two_stage_av(
         audio_shape,
         &stage2_video_start,
         &stage2_video_conditioning,
+        None,
         stage2_audio_start.as_ref(),
+        None,
         &stage2_video_positions,
         audio_positions.as_ref(),
         &cond_context,
@@ -1935,6 +1958,7 @@ fn render_real_two_stage_av(
         stage2_sampler,
         Some(&stage2_video_noise),
         stage2_audio_noise.as_ref(),
+        None,
         frozen_audio_denoise_mask.as_ref(),
         debug_enabled.then_some("stage2"),
     )?;
@@ -2105,7 +2129,9 @@ fn render_real_one_stage_av(
         audio_shape,
         &stage1_video_noise,
         &stage1_video_conditioning,
+        None,
         stage1_audio_noise.as_ref(),
+        None,
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
@@ -2129,6 +2155,7 @@ fn render_real_one_stage_av(
         stage_sampler_mode(plan, 0)?,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
+        None,
         None,
         debug_enabled.then_some("one-stage"),
     )?;
@@ -2189,6 +2216,168 @@ fn render_real_one_stage_av(
     })
 }
 
+fn render_real_retake_av(
+    plan: &Ltx2GeneratePlan,
+    prepared: &NativePreparedRun,
+    device: &candle_core::Device,
+) -> Result<NativeRenderedVideo> {
+    let debug_enabled = ltx_debug_enabled();
+    let cond_context = prepared
+        .prompt
+        .conditional
+        .video_encoding
+        .to_device(device)?;
+    let audio_shape = prepared.audio_latent_shape;
+    let audio_context = prepared
+        .prompt
+        .conditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let cond_mask: Option<&Tensor> = None;
+    let video_positions = prepared.video_positions.to_device(device)?;
+    let audio_positions = prepared
+        .audio_positions
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let dtype = gpu_dtype(device);
+    let retake_range = plan
+        .retake_range
+        .as_ref()
+        .context("native LTX-2 retake requires a retake_range")?;
+    let source_video = maybe_load_native_conditioning_video(
+        plan,
+        prepared.video_pixel_shape,
+        prepared.video_latent_shape,
+        device,
+        dtype,
+    )?
+    .context("native LTX-2 retake requires a source_video")?;
+    let stage_video_conditioning =
+        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
+    let video_retake_mask =
+        build_temporal_token_denoise_mask(retake_range, &video_positions, device)?;
+    let stage1_video_noise = seeded_randn(
+        plan.seed,
+        &[
+            prepared.video_latent_shape.batch,
+            prepared.video_latent_shape.channels,
+            prepared.video_latent_shape.frames,
+            prepared.video_latent_shape.height,
+            prepared.video_latent_shape.width,
+        ],
+        device,
+        DType::F32,
+    )?;
+    let conditioned_audio = maybe_load_native_conditioning_audio(plan, audio_shape, device, dtype)?;
+    let audio_retake_mask = match (
+        retake_range,
+        audio_positions.as_ref(),
+        conditioned_audio.as_ref(),
+    ) {
+        (range, Some(audio_positions), Some(_)) => Some(build_temporal_token_denoise_mask(
+            range,
+            audio_positions,
+            device,
+        )?),
+        _ => None,
+    };
+    let stage1_audio_noise = match audio_shape {
+        Some(audio_shape) => Some(seeded_randn(
+            plan.seed ^ 0x4155_4449_4f4c_5458,
+            &[
+                audio_shape.batch,
+                audio_shape.channels,
+                audio_shape.frames,
+                audio_shape.mel_bins,
+            ],
+            device,
+            DType::F32,
+        )?),
+        None => None,
+    };
+
+    if debug_enabled {
+        eprintln!("[ltx2-debug] loading retake transformer");
+    }
+    let transformer = load_ltx2_av_transformer(plan, device)?;
+    let (latents, audio_latents) = run_real_distilled_stage(
+        &transformer,
+        prepared.video_latent_shape,
+        audio_shape,
+        &stage1_video_noise,
+        &stage_video_conditioning,
+        Some(&source_video.latents),
+        stage1_audio_noise.as_ref(),
+        conditioned_audio.as_ref().map(|audio| &audio.latents),
+        &video_positions,
+        audio_positions.as_ref(),
+        &cond_context,
+        None,
+        None,
+        audio_context.as_ref(),
+        None,
+        None,
+        cond_mask,
+        None,
+        None,
+        None,
+        stage_guidance_scale(plan, 0)?,
+        DISTILLED_STAGE1_SIGMAS_NO_TERMINAL,
+        stage_sampler_mode(plan, 0)?,
+        Some(&stage1_video_noise),
+        stage1_audio_noise.as_ref(),
+        Some(&video_retake_mask),
+        audio_retake_mask.as_ref(),
+        debug_enabled.then_some("retake"),
+    )?;
+    drop(transformer);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+
+    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    vae.use_tiling = false;
+    vae.use_framewise_decoding = false;
+    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let frames = decoded_video_to_frames(&video, prepared.video_pixel_shape)?;
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    drop(video);
+    drop(vae);
+    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    drop(latents);
+    drop(audio_latents);
+    drop(stage1_audio_noise);
+    drop(stage1_video_noise);
+    drop(audio_retake_mask);
+    drop(video_retake_mask);
+    drop(conditioned_audio);
+    drop(source_video);
+    drop(audio_positions);
+    drop(video_positions);
+    drop(audio_context);
+    drop(cond_context);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+
+    let has_audio = audio_track.is_some();
+    let audio_sample_rate = audio_track.as_ref().map(|track| track.sample_rate);
+    let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
+
+    Ok(NativeRenderedVideo {
+        frames,
+        audio_track,
+        has_audio,
+        audio_sample_rate,
+        audio_channels,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_real_distilled_stage(
     transformer: &Ltx2AvTransformer3DModel,
@@ -2196,7 +2385,9 @@ fn run_real_distilled_stage(
     audio_shape: Option<AudioLatentShape>,
     video_start_latents: &Tensor,
     video_conditioning: &StageVideoConditioning,
+    video_clean_latents: Option<&Tensor>,
     audio_start_latents: Option<&Tensor>,
+    audio_clean_latents: Option<&Tensor>,
     video_positions: &Tensor,
     audio_positions: Option<&Tensor>,
     cond_context: &Tensor,
@@ -2214,6 +2405,7 @@ fn run_real_distilled_stage(
     sampler_mode: SamplerMode,
     video_sampler_noise: Option<&Tensor>,
     audio_sampler_noise: Option<&Tensor>,
+    video_denoise_mask: Option<&Tensor>,
     audio_denoise_mask: Option<&Tensor>,
     debug_stage: Option<&str>,
 ) -> Result<(Tensor, Option<Tensor>)> {
@@ -2234,15 +2426,25 @@ fn run_real_distilled_stage(
         video_positions,
         video_conditioning,
     )?;
-    let clean_video_latents = video_latents.clone();
-    let video_denoise_mask =
-        build_video_conditioning_denoise_mask(base_video_token_count, video_conditioning, &device)?;
+    let clean_video_latents = match video_clean_latents {
+        Some(latents) => video_patchifier.patchify(latents)?,
+        None => video_latents.clone(),
+    };
+    let video_denoise_mask = match video_denoise_mask {
+        Some(mask) => mask.to_device(&device)?.to_dtype(DType::F32)?,
+        None => build_video_conditioning_denoise_mask(
+            base_video_token_count,
+            video_conditioning,
+            &device,
+        )?,
+    };
     let video_self_attention_mask = build_video_conditioning_self_attention_mask(
         base_video_token_count,
         video_conditioning,
         &device,
     )?;
     let video_positions = &conditioned_video_positions;
+    let uses_video_freeze_mask = video_clean_latents.is_some() || !video_conditioning.is_empty();
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
         .transpose()?;
@@ -2250,7 +2452,10 @@ fn run_real_distilled_stage(
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
         _ => None,
     };
-    let clean_audio_latents = audio_latents.clone();
+    let clean_audio_latents = match (audio_shape, audio_clean_latents) {
+        (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
+        _ => audio_latents.clone(),
+    };
     let audio_sampler_noise = match (audio_shape, audio_sampler_noise) {
         (Some(_), Some(noise)) => Some(audio_patchifier.patchify(noise)?),
         _ => None,
@@ -2258,6 +2463,22 @@ fn run_real_distilled_stage(
     let audio_denoise_mask = audio_denoise_mask
         .map(|mask| mask.to_device(&device)?.to_dtype(DType::F32))
         .transpose()?;
+    if uses_video_freeze_mask {
+        video_latents =
+            blend_conditioned_denoised(&video_latents, &clean_video_latents, &video_denoise_mask)?;
+    }
+    if let Some(blended_audio_latents) = match (
+        audio_latents.as_ref(),
+        clean_audio_latents.as_ref(),
+        audio_denoise_mask.as_ref(),
+    ) {
+        (Some(audio_latents), Some(clean_audio_latents), Some(audio_denoise_mask)) => Some(
+            blend_conditioned_denoised(audio_latents, clean_audio_latents, audio_denoise_mask)?,
+        ),
+        _ => None,
+    } {
+        audio_latents = Some(blended_audio_latents);
+    }
     let use_cfg = guidance_scale > 1.0;
     let multimodal_guiders = multimodal_guidance.map(|(video_params, audio_params)| {
         (
@@ -2641,7 +2862,7 @@ fn run_real_distilled_stage(
                 eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
             }
         }
-        if !video_conditioning.is_empty() {
+        if uses_video_freeze_mask {
             video_denoised = blend_conditioned_denoised(
                 &video_denoised,
                 &clean_video_latents,
@@ -2828,26 +3049,151 @@ fn maybe_render_native_audio_track(
     waveform_to_audio_track(&waveform, output_sample_rate)
 }
 
+fn video_tensor_from_frames(
+    frames: &[RgbImage],
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    let first = frames
+        .first()
+        .context("native LTX-2 source video conditioning requires at least one frame")?;
+    let width = first.width() as usize;
+    let height = first.height() as usize;
+    let frame_count = frames.len();
+    let mut data = Vec::with_capacity(frame_count * width * height * 3);
+
+    for channel in 0..3usize {
+        for frame in frames {
+            if frame.width() as usize != width || frame.height() as usize != height {
+                anyhow::bail!("native LTX-2 source video frames do not share a common size");
+            }
+            for pixel in frame.pixels() {
+                data.push((pixel[channel] as f32 / 127.5) - 1.0);
+            }
+        }
+    }
+
+    Tensor::from_vec(data, (1, 3, frame_count, height, width), device)?
+        .to_dtype(dtype)
+        .map_err(Into::into)
+}
+
+fn conform_video_latent_length(
+    latents: &Tensor,
+    expected_shape: VideoLatentShape,
+) -> Result<Tensor> {
+    let (batch, channels, frames, height, width) = latents.dims5()?;
+    if batch != expected_shape.batch
+        || channels != expected_shape.channels
+        || height != expected_shape.height
+        || width != expected_shape.width
+    {
+        anyhow::bail!(
+            "native LTX-2 source video latent shape mismatch: got [{batch}, {channels}, {frames}, {height}, {width}], expected [{}, {}, {}, {}, {}]",
+            expected_shape.batch,
+            expected_shape.channels,
+            expected_shape.frames,
+            expected_shape.height,
+            expected_shape.width
+        );
+    }
+    if frames == expected_shape.frames {
+        return Ok(latents.clone());
+    }
+    if frames > expected_shape.frames {
+        return latents
+            .narrow(2, 0, expected_shape.frames)
+            .map_err(Into::into);
+    }
+    let pad_frames = expected_shape.frames - frames;
+    let pad = Tensor::zeros(
+        (batch, channels, pad_frames, height, width),
+        latents.dtype(),
+        latents.device(),
+    )?;
+    Tensor::cat(&[latents, &pad], 2).map_err(Into::into)
+}
+
+fn maybe_load_native_conditioning_video(
+    plan: &Ltx2GeneratePlan,
+    pixel_shape: VideoPixelShape,
+    latent_shape: VideoLatentShape,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Option<NativeConditioningVideo>> {
+    let Some(video_path) = plan.conditioning.video_path.as_ref() else {
+        return Ok(None);
+    };
+    let (metadata, frames) = media::decode_video_frames(Path::new(video_path))?;
+    if metadata.fps != pixel_shape.fps.round() as u32 {
+        anyhow::bail!(
+            "native LTX-2 source video FPS mismatch: source={} expected={}",
+            metadata.fps,
+            pixel_shape.fps.round() as u32
+        );
+    }
+    let resized = frames
+        .into_iter()
+        .map(|frame| {
+            if frame.width() == pixel_shape.width as u32
+                && frame.height() == pixel_shape.height as u32
+            {
+                frame
+            } else {
+                imageops::resize(
+                    &frame,
+                    pixel_shape.width as u32,
+                    pixel_shape.height as u32,
+                    imageops::FilterType::Lanczos3,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let video = video_tensor_from_frames(&resized, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    vae.use_tiling = false;
+    vae.use_framewise_decoding = false;
+    let latents = conform_video_latent_length(&vae.encode(&video)?, latent_shape)?;
+    drop(vae);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    Ok(Some(NativeConditioningVideo { latents }))
+}
+
 fn maybe_load_native_conditioning_audio(
     plan: &Ltx2GeneratePlan,
     audio_shape: Option<AudioLatentShape>,
     device: &candle_core::Device,
     dtype: DType,
 ) -> Result<Option<NativeConditioningAudio>> {
-    let Some(audio_path) = plan.conditioning.audio_path.as_ref() else {
+    let explicit_audio_path = plan.conditioning.audio_path.as_ref();
+    let audio_path = explicit_audio_path.or_else(|| {
+        if plan.execution_graph.uses_retake_masking {
+            plan.conditioning.video_path.as_ref()
+        } else {
+            None
+        }
+    });
+    let Some(audio_path) = audio_path else {
         return Ok(None);
     };
     let audio_shape = audio_shape.context(
         "native LTX-2 audio conditioning requested but the prepared run has no audio latent shape",
     )?;
     let max_duration = plan.num_frames as f32 / plan.frame_rate.max(1) as f32;
-    let decoded_audio = DecodedAudio::from_file(Path::new(audio_path), Some(max_duration))?
-        .with_context(|| {
-            format!(
+    let decoded_audio = match DecodedAudio::from_file(Path::new(audio_path), Some(max_duration))? {
+        Some(decoded_audio) => decoded_audio,
+        None if explicit_audio_path.is_none() && plan.execution_graph.uses_retake_masking => {
+            return Ok(None);
+        }
+        None => {
+            return Err(anyhow::anyhow!(
                 "source audio '{}' did not contain a decodable audio stream",
                 audio_path
-            )
-        })?;
+            ));
+        }
+    };
     let encoder =
         Ltx2AudioEncoder::load_from_checkpoint(Path::new(&plan.checkpoint_path), dtype, device)?;
     let latents = conform_audio_latent_length(&encoder.encode_audio(&decoded_audio)?, audio_shape)?;
@@ -2864,6 +3210,28 @@ fn maybe_load_native_conditioning_audio(
         latents,
         original_track,
     }))
+}
+
+fn build_temporal_token_denoise_mask(
+    range: &TimeRange,
+    positions: &Tensor,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let temporal = positions
+        .i((.., 0, .., ..))?
+        .to_device(&candle_core::Device::Cpu)?
+        .to_dtype(DType::F32)?;
+    let (batch, tokens, _) = temporal.dims3()?;
+    let mut values = Vec::with_capacity(batch * tokens);
+    for batch_item in temporal.to_vec3::<f32>()? {
+        for bounds in batch_item {
+            let start = bounds.first().copied().unwrap_or_default();
+            let end = bounds.get(1).copied().unwrap_or(start);
+            let active = end > range.start_seconds && start < range.end_seconds;
+            values.push(if active { 1.0f32 } else { 0.0f32 });
+        }
+    }
+    Tensor::from_vec(values, (batch, tokens), device).map_err(Into::into)
 }
 
 fn conform_audio_latent_length(
@@ -4583,6 +4951,30 @@ mod tests {
     }
 
     #[test]
+    fn retake_runtime_keeps_requested_full_resolution_shape() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.retake_range = Some(TimeRange {
+            start_seconds: 1.0,
+            end_seconds: 2.0,
+        });
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Retake;
+        rebuild_execution_graph(&mut plan, &req);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 1216);
+        assert_eq!(prepared.video_pixel_shape.height, 704);
+        assert_eq!(prepared.video_latent_shape.width, 38);
+        assert_eq!(prepared.video_latent_shape.height, 22);
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_plain_silent_one_stage_runs() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4643,6 +5035,46 @@ mod tests {
 
         assert!(keyframe_only_conditioning(&plan));
         assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_retake_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.retake_range = Some(TimeRange {
+            start_seconds: 0.5,
+            end_seconds: 1.25,
+        });
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Retake;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn temporal_token_denoise_mask_marks_only_overlapping_tokens() {
+        let positions = Tensor::from_vec(
+            vec![0.0f32, 0.5, 0.5, 1.0, 1.0, 1.5, 1.5, 2.0],
+            (1, 1, 4, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let range = TimeRange {
+            start_seconds: 0.75,
+            end_seconds: 1.6,
+        };
+
+        let mask =
+            super::build_temporal_token_denoise_mask(&range, &positions, &Device::Cpu).unwrap();
+
+        assert_eq!(
+            mask.to_vec2::<f32>().unwrap(),
+            vec![vec![0.0, 1.0, 1.0, 1.0]]
+        );
     }
 
     #[test]

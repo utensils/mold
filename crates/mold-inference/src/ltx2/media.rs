@@ -310,6 +310,11 @@ fn decode_video(input_video: &Path) -> Result<DecodedVideo> {
     })
 }
 
+pub(crate) fn decode_video_frames(input_video: &Path) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
+    let video = decode_video(input_video)?;
+    Ok((video.metadata, video.frames))
+}
+
 fn video_only_track_config(video: &VideoTrackInfo) -> TrackConfig {
     TrackConfig {
         track_type: TrackType::Video,
