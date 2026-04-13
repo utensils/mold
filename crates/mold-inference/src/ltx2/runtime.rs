@@ -847,8 +847,7 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_reference_video_conditioning
         && !plan.execution_graph.uses_retake_masking
         && plan.loras.is_empty()
-        && plan.spatial_upscale.is_none()
-        && plan.temporal_upscale.is_none();
+        && plan.spatial_upscale.is_none();
     let native_retake = plan.conditioning.video_path.is_some()
         && plan.execution_graph.uses_retake_masking
         && plan.loras.is_empty()
@@ -860,19 +859,16 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && !plan.execution_graph.uses_audio_conditioning
         && !plan.execution_graph.uses_retake_masking
         && !plan.loras.is_empty()
-        && plan.spatial_upscale.is_none()
-        && plan.temporal_upscale.is_none();
+        && plan.spatial_upscale.is_none();
     match plan.pipeline {
-        PipelineKind::Distilled => {
-            native_plain_or_image_conditioning && plan.temporal_upscale.is_none()
-        }
+        PipelineKind::Distilled => native_plain_or_image_conditioning,
         PipelineKind::OneStage => {
             native_plain_or_image_conditioning
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::TwoStage | PipelineKind::TwoStageHq | PipelineKind::Keyframe => {
-            native_plain_or_image_conditioning && plan.temporal_upscale.is_none()
+            native_plain_or_image_conditioning
         }
         PipelineKind::A2Vid => native_audio_conditioning,
         PipelineKind::IcLora => native_ic_lora,
@@ -1408,6 +1404,31 @@ fn build_video_conditioning_self_attention_mask(
     Ok(existing_mask)
 }
 
+fn maybe_apply_temporal_upsampler(
+    plan: &Ltx2GeneratePlan,
+    latents: &Tensor,
+    device: &candle_core::Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    if plan.temporal_upscale.is_none() {
+        return Ok(latents.clone());
+    }
+    let temporal_upsampler_path = plan
+        .temporal_upsampler_path
+        .as_ref()
+        .context("native LTX-2 temporal upscaling requires a temporal upsampler asset")?;
+    let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
+    let upsampler = LatentUpsampler::load(Path::new(temporal_upsampler_path), dtype, device)?;
+    let upsampled = latent_stats
+        .normalize(&upsampler.forward(&latent_stats.denormalize(&latents.to_dtype(dtype)?)?)?)?;
+    drop(upsampler);
+    drop(latent_stats);
+    if device.is_cuda() {
+        device.synchronize()?;
+    }
+    Ok(upsampled)
+}
+
 fn blend_conditioned_denoised(
     denoised: &Tensor,
     clean_latents: &Tensor,
@@ -1724,6 +1745,10 @@ fn render_real_distilled_av(
     device.synchronize()?;
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_drop");
+    }
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    if debug_enabled && plan.temporal_upscale.is_some() {
+        log_debug_vram("after_temporal_upsample");
     }
     if debug_enabled {
         log_tensor_stats("final_video_latents", &latents)?;
@@ -2076,6 +2101,7 @@ fn render_real_two_stage_av(
     )?;
     drop(stage2_transformer);
     device.synchronize()?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
     vae.use_tiling = false;
@@ -5562,6 +5588,20 @@ mod tests {
     fn supports_real_video_path_accepts_distilled_spatial_upscale_runs() {
         let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         req.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Distilled;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_distilled_temporal_upscale_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
         let preset = preset_for_model(&req.model).unwrap();
