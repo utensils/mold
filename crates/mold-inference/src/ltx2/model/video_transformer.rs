@@ -1252,13 +1252,10 @@ impl LtxAttention {
 
             if let Some((cos, sin)) = image_rotary_emb {
                 if is_self_attention {
-                    q =
-                        apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
-                    k =
-                        apply_rotary_emb(&k, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                    q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                    k = apply_rotary_emb(&k, cos, sin, self.rope_type, self.heads, self.head_dim)?;
                 } else if let Some((k_cos, k_sin)) = key_rotary_emb {
-                    q =
-                        apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
+                    q = apply_rotary_emb(&q, cos, sin, self.rope_type, self.heads, self.head_dim)?;
                     k = apply_rotary_emb(
                         &k,
                         k_cos,
@@ -1599,9 +1596,15 @@ impl LtxVideoTransformerBlock {
             norm_hidden.broadcast_mul(&s)?.broadcast_add(&sh)?
         };
 
-        let attn1 = self
-            .attn1
-            .forward(&norm_hidden, None, None, image_rotary_emb, None, None, false)?;
+        let attn1 = self.attn1.forward(
+            &norm_hidden,
+            None,
+            None,
+            image_rotary_emb,
+            None,
+            None,
+            false,
+        )?;
         let gate_msa = if gate_msa.dim(1)? == 1 {
             gate_msa.broadcast_as((b, hidden_states.dim(1)?, gate_msa.dim(2)?))?
         } else {
@@ -3196,9 +3199,7 @@ impl Ltx2AvTransformer3DModel {
             audio.cross_rope = Some(self.cross_rope.forward(&audio.x, &audio_cross_positions)?);
             video.cross_scale_shift_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_video_scale_shift_adaln_single,
-                audio_sigma
-                    .as_ref()
-                    .expect("audio sigma already validated"),
+                audio_sigma.as_ref().expect("audio sigma already validated"),
                 1.0,
                 batch,
             )?);
@@ -3210,9 +3211,7 @@ impl Ltx2AvTransformer3DModel {
             )?);
             video.cross_gate_timestep = Some(Self::prepare_cross_attention_timestep(
                 &self.av_ca_a2v_gate_adaln_single,
-                audio_sigma
-                    .as_ref()
-                    .expect("audio sigma already validated"),
+                audio_sigma.as_ref().expect("audio sigma already validated"),
                 av_scale,
                 batch,
             )?);
@@ -4575,7 +4574,8 @@ mod tests {
     fn av_transformer_uniform_tokenwise_timesteps_match_scalar_sigma_path() {
         let device = Device::Cpu;
         let config = tiny_av_config();
-        let model = Ltx2AvTransformer3DModel::new(&config, av_transformer_var_builder(), None).unwrap();
+        let model =
+            Ltx2AvTransformer3DModel::new(&config, av_transformer_var_builder(), None).unwrap();
 
         let video_hidden_states = Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],
@@ -4602,8 +4602,7 @@ mod tests {
         )
         .unwrap();
         let sigma = Tensor::new(&[0.75f32], &device).unwrap();
-        let video_timesteps =
-            Tensor::new(&[[0.75f32, 0.75, 0.75]], &device).unwrap();
+        let video_timesteps = Tensor::new(&[[0.75f32, 0.75, 0.75]], &device).unwrap();
         let audio_timesteps = Tensor::new(&[[0.75f32, 0.75]], &device).unwrap();
         let video_attention_mask = Tensor::new(&[[1u8, 1, 0, 0]], &device).unwrap();
         let audio_attention_mask = Tensor::new(&[[1u8, 0, 1, 0]], &device).unwrap();

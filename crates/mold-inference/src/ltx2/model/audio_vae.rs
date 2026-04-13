@@ -55,6 +55,28 @@ pub struct Ltx2AudioDecoderConfig {
     pub mel_bins: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct Ltx2AudioEncoderConfig {
+    pub ch: usize,
+    pub ch_mult: Vec<usize>,
+    pub num_res_blocks: usize,
+    pub attn_resolutions: Vec<usize>,
+    pub resolution: usize,
+    pub z_channels: usize,
+    pub double_z: bool,
+    pub norm_type: AudioNormType,
+    pub causality_axis: AudioCausalityAxis,
+    pub dropout: f64,
+    pub mid_block_add_attention: bool,
+    pub resamp_with_conv: bool,
+    pub in_channels: usize,
+    pub sample_rate: usize,
+    pub mel_hop_length: usize,
+    pub n_fft: usize,
+    pub is_causal: bool,
+    pub mel_bins: usize,
+}
+
 impl Ltx2AudioDecoderConfig {
     pub fn load(checkpoint_path: &Path) -> Result<Self> {
         let config_json = read_checkpoint_config_json(checkpoint_path)?;
@@ -81,6 +103,41 @@ impl Ltx2AudioDecoderConfig {
             mid_block_add_attention: ddconfig.mid_block_add_attention,
             sample_rate: checkpoint.audio_vae.model.params.sampling_rate,
             mel_hop_length: preprocessing.stft.hop_length,
+            is_causal: preprocessing.stft.causal,
+            mel_bins: preprocessing.mel.n_mel_channels,
+        })
+    }
+}
+
+impl Ltx2AudioEncoderConfig {
+    pub fn load(checkpoint_path: &Path) -> Result<Self> {
+        let config_json = read_checkpoint_config_json(checkpoint_path)?;
+        let checkpoint: CheckpointConfig =
+            serde_json::from_str(&config_json).with_context(|| {
+                format!(
+                    "failed to parse LTX-2 checkpoint config metadata from {}",
+                    checkpoint_path.display()
+                )
+            })?;
+        let ddconfig = checkpoint.audio_vae.model.params.ddconfig;
+        let preprocessing = checkpoint.audio_vae.preprocessing;
+        Ok(Self {
+            ch: ddconfig.ch,
+            ch_mult: ddconfig.ch_mult,
+            num_res_blocks: ddconfig.num_res_blocks,
+            attn_resolutions: ddconfig.attn_resolutions,
+            resolution: ddconfig.resolution,
+            z_channels: ddconfig.z_channels,
+            double_z: ddconfig.double_z.unwrap_or(true),
+            norm_type: ddconfig.norm_type,
+            causality_axis: ddconfig.causality_axis,
+            dropout: ddconfig.dropout,
+            mid_block_add_attention: ddconfig.mid_block_add_attention,
+            resamp_with_conv: ddconfig.resamp_with_conv.unwrap_or(true),
+            in_channels: ddconfig.in_channels,
+            sample_rate: checkpoint.audio_vae.model.params.sampling_rate,
+            mel_hop_length: preprocessing.stft.hop_length,
+            n_fft: preprocessing.stft.filter_length.unwrap_or(1024),
             is_causal: preprocessing.stft.causal,
             mel_bins: preprocessing.mel.n_mel_channels,
         })
@@ -120,7 +177,9 @@ struct CheckpointAudioDdConfig {
     ch_mult: Vec<usize>,
     num_res_blocks: usize,
     attn_resolutions: Vec<usize>,
+    double_z: Option<bool>,
     dropout: f64,
+    resamp_with_conv: Option<bool>,
     mid_block_add_attention: bool,
     norm_type: AudioNormType,
     causality_axis: AudioCausalityAxis,
@@ -136,6 +195,7 @@ struct CheckpointAudioPreprocessing {
 struct CheckpointStftConfig {
     hop_length: usize,
     causal: bool,
+    filter_length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +271,23 @@ impl AudioPerChannelStatistics {
             .to_dtype(x.dtype())?;
         x.broadcast_mul(&std)?
             .broadcast_add(&mean)
+            .map_err(Into::into)
+    }
+
+    fn normalize(&self, x: &Tensor) -> Result<Tensor> {
+        let (_, _, features) = x.dims3()?;
+        let mean = self
+            .mean
+            .reshape((1, 1, features))?
+            .to_device(x.device())?
+            .to_dtype(x.dtype())?;
+        let std = self
+            .std
+            .reshape((1, 1, features))?
+            .to_device(x.device())?
+            .to_dtype(x.dtype())?;
+        x.broadcast_sub(&mean)?
+            .broadcast_div(&std)
             .map_err(Into::into)
     }
 }
@@ -407,6 +484,59 @@ impl AudioMidBlock {
 }
 
 #[derive(Debug, Clone)]
+struct AudioDownsample {
+    conv: Conv2d,
+    pad_left: usize,
+    pad_right: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+}
+
+impl AudioDownsample {
+    fn load(
+        in_channels: usize,
+        with_conv: bool,
+        causality_axis: AudioCausalityAxis,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        if !with_conv {
+            bail!("audio VAE downsample without convolution is not implemented for native LTX-2");
+        }
+        let (pad_left, pad_right, pad_top, pad_bottom) = match causality_axis {
+            AudioCausalityAxis::None => (0, 1, 0, 1),
+            AudioCausalityAxis::Width => (2, 0, 0, 1),
+            AudioCausalityAxis::Height => (0, 1, 2, 0),
+            AudioCausalityAxis::WidthCompatibility => (1, 0, 0, 1),
+        };
+        let conv_vb = vb.pp("conv");
+        let weight = conv_vb.get((in_channels, in_channels, 3, 3), "weight")?;
+        let bias = conv_vb.get(in_channels, "bias").ok();
+        let conv = Conv2d::new(
+            weight,
+            bias,
+            Conv2dConfig {
+                stride: 2,
+                ..Default::default()
+            },
+        );
+        Ok(Self {
+            conv,
+            pad_left,
+            pad_right,
+            pad_top,
+            pad_bottom,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let padded = x
+            .pad_with_zeros(3, self.pad_left, self.pad_right)?
+            .pad_with_zeros(2, self.pad_top, self.pad_bottom)?;
+        padded.apply(&self.conv).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
 struct AudioUpsample {
     causality_axis: AudioCausalityAxis,
     conv: AudioCausalConv2d,
@@ -453,6 +583,169 @@ impl AudioUpsample {
 struct AudioDecoderStage {
     blocks: Vec<AudioResnetBlock>,
     upsample: Option<AudioUpsample>,
+}
+
+#[derive(Debug, Clone)]
+struct AudioEncoderStage {
+    blocks: Vec<AudioResnetBlock>,
+    downsample: Option<AudioDownsample>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Ltx2AudioEncoder {
+    pub config: Ltx2AudioEncoderConfig,
+    per_channel_statistics: AudioPerChannelStatistics,
+    patchifier: AudioPatchifier,
+    conv_in: AudioCausalConv2d,
+    down: Vec<AudioEncoderStage>,
+    mid: AudioMidBlock,
+    norm_out: AudioNorm,
+    conv_out: AudioCausalConv2d,
+}
+
+impl Ltx2AudioEncoder {
+    pub fn load_from_checkpoint(
+        checkpoint_path: &Path,
+        dtype: DType,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        let config = Ltx2AudioEncoderConfig::load(checkpoint_path)?;
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[PathBuf::from(checkpoint_path)], dtype, device)
+        }
+        .with_context(|| format!("failed to mmap {}", checkpoint_path.display()))?;
+        Self::new(config, vb)
+    }
+
+    pub fn new(config: Ltx2AudioEncoderConfig, vb: VarBuilder) -> Result<Self> {
+        if !config.attn_resolutions.is_empty() {
+            bail!("audio VAE encoder attention blocks are not implemented for native LTX-2");
+        }
+        if config.mid_block_add_attention {
+            bail!("audio VAE encoder mid-block attention is not implemented for native LTX-2");
+        }
+        if config.dropout != 0.0 {
+            bail!("audio VAE encoder dropout != 0.0 is not implemented for native LTX-2");
+        }
+
+        let audio_vb = vb.pp("audio_vae");
+        let encoder_vb = audio_vb.pp("encoder");
+        let per_channel_statistics = AudioPerChannelStatistics::load(audio_vb.clone(), config.ch)?;
+        let patchifier = AudioPatchifier::new(
+            config.sample_rate,
+            config.mel_hop_length,
+            LATENT_DOWNSAMPLE_FACTOR,
+            config.is_causal,
+            0,
+        );
+        let conv_in = AudioCausalConv2d::new(
+            config.in_channels,
+            config.ch,
+            3,
+            1,
+            config.causality_axis,
+            encoder_vb.pp("conv_in"),
+        )?;
+
+        let num_resolutions = config.ch_mult.len();
+        let mut down = Vec::with_capacity(num_resolutions);
+        let mut block_in = config.ch;
+        for level in 0..num_resolutions {
+            let block_out = config.ch * config.ch_mult[level];
+            let mut blocks = Vec::with_capacity(config.num_res_blocks);
+            for block_idx in 0..config.num_res_blocks {
+                let block = AudioResnetBlock::load(
+                    block_in,
+                    block_out,
+                    config.norm_type,
+                    config.causality_axis,
+                    encoder_vb.pp(format!("down.{level}.block.{block_idx}")),
+                )?;
+                block_in = block_out;
+                blocks.push(block);
+            }
+            let downsample = if level + 1 < num_resolutions {
+                Some(AudioDownsample::load(
+                    block_in,
+                    config.resamp_with_conv,
+                    config.causality_axis,
+                    encoder_vb.pp(format!("down.{level}.downsample")),
+                )?)
+            } else {
+                None
+            };
+            down.push(AudioEncoderStage { blocks, downsample });
+        }
+
+        let mid = AudioMidBlock::load(
+            block_in,
+            config.norm_type,
+            config.causality_axis,
+            encoder_vb.pp("mid"),
+        )?;
+        let norm_out = AudioNorm::load(block_in, config.norm_type, encoder_vb.pp("norm_out"))?;
+        let conv_out = AudioCausalConv2d::new(
+            block_in,
+            if config.double_z {
+                2 * config.z_channels
+            } else {
+                config.z_channels
+            },
+            3,
+            1,
+            config.causality_axis,
+            encoder_vb.pp("conv_out"),
+        )?;
+
+        Ok(Self {
+            config,
+            per_channel_statistics,
+            patchifier,
+            conv_in,
+            down,
+            mid,
+            norm_out,
+            conv_out,
+        })
+    }
+
+    pub fn encode(&self, spectrogram: &Tensor) -> Result<Tensor> {
+        let mut h = self.conv_in.forward(spectrogram)?;
+        for stage in &self.down {
+            for block in &stage.blocks {
+                h = block.forward(&h)?;
+            }
+            if let Some(downsample) = stage.downsample.as_ref() {
+                h = downsample.forward(&h)?;
+            }
+        }
+        h = self.mid.forward(&h)?;
+        h = self.norm_out.forward(&h)?;
+        h = silu(&h)?;
+        h = self.conv_out.forward(&h)?;
+        self.normalize_latents(&h)
+    }
+
+    fn normalize_latents(&self, latent_output: &Tensor) -> Result<Tensor> {
+        let (batch, channels, frames, mel_bins) = latent_output.dims4()?;
+        let means = if self.config.double_z {
+            latent_output.narrow(1, 0, self.config.z_channels.min(channels))?
+        } else {
+            latent_output.clone()
+        };
+        let (_, mean_channels, _, _) = means.dims4()?;
+        let latent_shape = AudioLatentShape {
+            batch,
+            channels: mean_channels,
+            frames,
+            mel_bins,
+        };
+        let latent_patched = self.patchifier.patchify(&means)?;
+        let latent_normalized = self.per_channel_statistics.normalize(&latent_patched)?;
+        self.patchifier
+            .unpatchify(&latent_normalized, latent_shape)
+            .map_err(Into::into)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -676,7 +969,8 @@ mod tests {
 
     use super::{
         adjust_decoded_output_shape, decoder_target_shape, AudioCausalConv2d, AudioCausalityAxis,
-        AudioNormType, AudioPerChannelStatistics, Ltx2AudioDecoder, Ltx2AudioDecoderConfig,
+        AudioDownsample, AudioNormType, AudioPerChannelStatistics, Ltx2AudioDecoder,
+        Ltx2AudioDecoderConfig, Ltx2AudioEncoder, Ltx2AudioEncoderConfig,
     };
     use crate::ltx2::model::AudioLatentShape;
 
@@ -701,6 +995,18 @@ mod tests {
     }
 
     #[test]
+    fn audio_per_channel_statistics_normalize_patchified_latents() {
+        let device = Device::Cpu;
+        let stats = AudioPerChannelStatistics {
+            mean: Tensor::from_vec(vec![1f32, 2.0], 2, &device).unwrap(),
+            std: Tensor::from_vec(vec![2f32, 4.0], 2, &device).unwrap(),
+        };
+        let x = Tensor::from_vec(vec![7f32, 22.0], (1, 1, 2), &device).unwrap();
+        let norm = stats.normalize(&x).unwrap();
+        assert_eq!(norm.to_vec3::<f32>().unwrap(), [[[3.0, 5.0]]]);
+    }
+
+    #[test]
     fn causal_height_conv2d_uses_top_only_padding() {
         let device = Device::Cpu;
         let vb = vb_from_tensors(vec![
@@ -719,6 +1025,34 @@ mod tests {
         assert_eq!(
             y.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![1.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn causal_height_downsample_uses_top_only_padding() {
+        let device = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "conv.weight",
+                Tensor::ones((1, 1, 3, 3), candle_core::DType::F32, &device).unwrap(),
+            ),
+            (
+                "conv.bias",
+                Tensor::zeros(1, candle_core::DType::F32, &device).unwrap(),
+            ),
+        ]);
+        let downsample = AudioDownsample::load(1, true, AudioCausalityAxis::Height, vb).unwrap();
+        let x = Tensor::from_vec(
+            vec![1f32, 10.0, 2.0, 20.0, 3.0, 30.0],
+            (1, 1, 3, 2),
+            &device,
+        )
+        .unwrap();
+        let y = downsample.forward(&x).unwrap();
+        assert_eq!(y.dims4().unwrap(), (1, 1, 2, 1));
+        assert_eq!(
+            y.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![11.0, 66.0]
         );
     }
 
@@ -845,5 +1179,80 @@ mod tests {
         let latent = Tensor::zeros((1, 1, 3, 2), candle_core::DType::F32, &device).unwrap();
         let decoded = decoder.decode(&latent).unwrap();
         assert_eq!(decoded.dims4().unwrap(), (1, 2, 9, 4));
+    }
+
+    #[test]
+    fn audio_encoder_forward_emits_normalized_latent_shape() {
+        let device = Device::Cpu;
+        let config = Ltx2AudioEncoderConfig {
+            ch: 8,
+            ch_mult: vec![1],
+            num_res_blocks: 1,
+            attn_resolutions: vec![],
+            resolution: 4,
+            z_channels: 2,
+            double_z: true,
+            norm_type: AudioNormType::Pixel,
+            causality_axis: AudioCausalityAxis::Height,
+            dropout: 0.0,
+            mid_block_add_attention: false,
+            resamp_with_conv: true,
+            in_channels: 2,
+            sample_rate: 16_000,
+            mel_hop_length: 160,
+            n_fft: 1024,
+            is_causal: true,
+            mel_bins: 4,
+        };
+        let zero1 = |len| Tensor::zeros(len, DType::F32, &device).unwrap();
+        let zero4 = |shape| Tensor::zeros(shape, DType::F32, &device).unwrap();
+        let vb = vb_from_tensors(vec![
+            ("audio_vae.per_channel_statistics.mean-of-means", zero1(8)),
+            (
+                "audio_vae.per_channel_statistics.std-of-means",
+                Tensor::ones(8, DType::F32, &device).unwrap(),
+            ),
+            ("audio_vae.encoder.conv_in.conv.weight", zero4((8, 2, 3, 3))),
+            ("audio_vae.encoder.conv_in.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.down.0.block.0.conv1.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.down.0.block.0.conv1.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.down.0.block.0.conv2.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.down.0.block.0.conv2.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.mid.block_1.conv1.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.mid.block_1.conv1.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.mid.block_1.conv2.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.mid.block_1.conv2.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.mid.block_2.conv1.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.mid.block_2.conv1.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.mid.block_2.conv2.conv.weight",
+                zero4((8, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.mid.block_2.conv2.conv.bias", zero1(8)),
+            (
+                "audio_vae.encoder.conv_out.conv.weight",
+                zero4((4, 8, 3, 3)),
+            ),
+            ("audio_vae.encoder.conv_out.conv.bias", zero1(4)),
+        ]);
+        let encoder = Ltx2AudioEncoder::new(config, vb).unwrap();
+        let spectrogram = Tensor::zeros((1, 2, 9, 4), candle_core::DType::F32, &device).unwrap();
+        let encoded = encoder.encode(&spectrogram).unwrap();
+        assert_eq!(encoded.dims4().unwrap(), (1, 2, 9, 4));
     }
 }

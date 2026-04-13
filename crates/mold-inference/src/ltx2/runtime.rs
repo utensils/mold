@@ -1195,7 +1195,11 @@ fn append_conditioning_attention_mask(
         )?,
     };
     let previous_ref_tokens = num_existing_tokens.saturating_sub(num_noisy_tokens);
-    let noisy_to_new = Tensor::ones((batch_size, num_noisy_tokens, num_new_tokens), DType::F32, device)?;
+    let noisy_to_new = Tensor::ones(
+        (batch_size, num_noisy_tokens, num_new_tokens),
+        DType::F32,
+        device,
+    )?;
     let prev_ref_to_new = Tensor::zeros(
         (batch_size, previous_ref_tokens, num_new_tokens),
         DType::F32,
@@ -1203,15 +1207,22 @@ fn append_conditioning_attention_mask(
     )?;
     let top_right = Tensor::cat(&[&noisy_to_new, &prev_ref_to_new], 1)?;
 
-    let new_to_noisy =
-        Tensor::ones((batch_size, num_new_tokens, num_noisy_tokens), DType::F32, device)?;
+    let new_to_noisy = Tensor::ones(
+        (batch_size, num_new_tokens, num_noisy_tokens),
+        DType::F32,
+        device,
+    )?;
     let new_to_prev_ref = Tensor::zeros(
         (batch_size, num_new_tokens, previous_ref_tokens),
         DType::F32,
         device,
     )?;
     let bottom_left = Tensor::cat(&[&new_to_noisy, &new_to_prev_ref], 2)?;
-    let bottom_right = Tensor::ones((batch_size, num_new_tokens, num_new_tokens), DType::F32, device)?;
+    let bottom_right = Tensor::ones(
+        (batch_size, num_new_tokens, num_new_tokens),
+        DType::F32,
+        device,
+    )?;
 
     let top = Tensor::cat(&[&top_left, &top_right], 2)?;
     let bottom = Tensor::cat(&[&bottom_left, &bottom_right], 2)?;
@@ -2162,8 +2173,11 @@ fn run_real_distilled_stage(
     let clean_video_latents = video_latents.clone();
     let video_denoise_mask =
         build_video_conditioning_denoise_mask(base_video_token_count, video_conditioning, &device)?;
-    let video_self_attention_mask =
-        build_video_conditioning_self_attention_mask(base_video_token_count, video_conditioning, &device)?;
+    let video_self_attention_mask = build_video_conditioning_self_attention_mask(
+        base_video_token_count,
+        video_conditioning,
+        &device,
+    )?;
     let video_positions = &conditioned_video_positions;
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
@@ -2209,237 +2223,82 @@ fn run_real_distilled_stage(
         } else {
             None
         };
-        let (mut video_denoised, audio_denoised, video_velocity): (Tensor, Option<Tensor>, Option<Tensor>) =
-            if let Some((video_guider, audio_guider)) = multimodal_guiders.as_ref() {
-                let (video_denoised, audio_denoised) = multimodal_guided_denoise_step(
-                    transformer,
+        let (mut video_denoised, audio_denoised, video_velocity): (
+            Tensor,
+            Option<Tensor>,
+            Option<Tensor>,
+        ) = if let Some((video_guider, audio_guider)) = multimodal_guiders.as_ref() {
+            let (video_denoised, audio_denoised) = multimodal_guided_denoise_step(
+                transformer,
+                &video_latents,
+                audio_latents.as_ref(),
+                cond_context,
+                audio_context,
+                cond_mask,
+                uncond_mask,
+                &video_sigma,
+                &video_timestep,
+                audio_sigma.as_ref(),
+                audio_timestep.as_ref(),
+                video_self_attention_mask.as_ref(),
+                video_positions,
+                audio_positions,
+                video_guider,
+                audio_guider,
+                step_idx,
+            )?;
+            (video_denoised, audio_denoised, None)
+        } else if let Some(audio_latents_ref) = audio_latents.as_ref() {
+            let audio_positions_ref = audio_positions
+                .as_ref()
+                .context("audio positions missing for multimodal distilled stage")?;
+            let audio_context_ref = audio_context
+                .as_ref()
+                .context("audio prompt conditioning missing for multimodal distilled stage")?;
+            if use_cfg {
+                let uncond_video_context =
+                    uncond_context.context("missing unconditional video conditioning for CFG")?;
+                let uncond_audio_context = uncond_audio_context
+                    .as_ref()
+                    .context("missing unconditional audio conditioning for CFG")?;
+                let (uncond_video_velocity, uncond_audio_velocity) = transformer.forward(
                     &video_latents,
-                    audio_latents.as_ref(),
-                    cond_context,
-                    audio_context,
-                    cond_mask,
-                    uncond_mask,
+                    Some(audio_latents_ref),
+                    uncond_video_context,
+                    Some(uncond_audio_context),
                     &video_sigma,
                     &video_timestep,
                     audio_sigma.as_ref(),
                     audio_timestep.as_ref(),
-                    video_self_attention_mask.as_ref(),
-                    video_positions,
-                    audio_positions,
-                    video_guider,
-                    audio_guider,
-                    step_idx,
-                )?;
-                (video_denoised, audio_denoised, None)
-            } else if let Some(audio_latents_ref) = audio_latents.as_ref() {
-                let audio_positions_ref = audio_positions
-                    .as_ref()
-                    .context("audio positions missing for multimodal distilled stage")?;
-                let audio_context_ref = audio_context
-                    .as_ref()
-                    .context("audio prompt conditioning missing for multimodal distilled stage")?;
-                if use_cfg {
-                    let uncond_video_context = uncond_context
-                        .context("missing unconditional video conditioning for CFG")?;
-                    let uncond_audio_context = uncond_audio_context
-                        .as_ref()
-                        .context("missing unconditional audio conditioning for CFG")?;
-                    let (uncond_video_velocity, uncond_audio_velocity) = transformer.forward(
-                        &video_latents,
-                        Some(audio_latents_ref),
-                        uncond_video_context,
-                        Some(uncond_audio_context),
-                        &video_sigma,
-                        &video_timestep,
-                        audio_sigma.as_ref(),
-                        audio_timestep.as_ref(),
-                        uncond_mask,
-                        uncond_mask,
-                        video_self_attention_mask.as_ref(),
-                        None,
-                        video_positions,
-                        Some(audio_positions_ref),
-                        None,
-                    )?;
-                    let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
-                        &video_latents,
-                        Some(audio_latents_ref),
-                        cond_context,
-                        Some(audio_context_ref),
-                        &video_sigma,
-                        &video_timestep,
-                        audio_sigma.as_ref(),
-                        audio_timestep.as_ref(),
-                        cond_mask,
-                        cond_mask,
-                        video_self_attention_mask.as_ref(),
-                        None,
-                        video_positions,
-                        Some(audio_positions_ref),
-                        None,
-                    )?;
-                    let uncond_audio_velocity = uncond_audio_velocity
-                        .context("audio branch unexpectedly returned no unconditional output")?;
-                    let cond_audio_velocity = cond_audio_velocity
-                        .context("audio branch unexpectedly returned no conditional output")?;
-                    (
-                        denoised_from_velocity(
-                            &video_latents,
-                            &guided_velocity_from_cfg(
-                                &video_latents,
-                                &cond_video_velocity,
-                                &uncond_video_velocity,
-                                sigma,
-                                guidance_scale,
-                            )?,
-                            sigma,
-                        )?,
-                        Some(denoised_from_velocity(
-                            audio_latents_ref,
-                            &guided_velocity_from_cfg(
-                                audio_latents_ref,
-                                &cond_audio_velocity,
-                                &uncond_audio_velocity,
-                                sigma,
-                                guidance_scale,
-                            )?,
-                            sigma,
-                        )?),
-                        Some(cond_video_velocity),
-                    )
-                } else {
-                    let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
-                        &video_latents,
-                        Some(audio_latents_ref),
-                        cond_context,
-                        Some(audio_context_ref),
-                        &video_sigma,
-                        &video_timestep,
-                        audio_sigma.as_ref(),
-                        audio_timestep.as_ref(),
-                        cond_mask,
-                        cond_mask,
-                        video_self_attention_mask.as_ref(),
-                        None,
-                        video_positions,
-                        Some(audio_positions_ref),
-                        None,
-                    )?;
-                    if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
-                        if let (Some(uncond_video_context), Some(uncond_audio_context)) =
-                            (uncond_context, uncond_audio_context.as_ref())
-                        {
-                            let (uncond_video_velocity, uncond_audio_velocity) = transformer
-                                .forward(
-                                    &video_latents,
-                                    Some(audio_latents_ref),
-                                    uncond_video_context,
-                                    Some(uncond_audio_context),
-                                    &video_sigma,
-                                    &video_timestep,
-                                    audio_sigma.as_ref(),
-                                    audio_timestep.as_ref(),
-                                    uncond_mask,
-                                    uncond_mask,
-                                    video_self_attention_mask.as_ref(),
-                                    None,
-                                    video_positions,
-                                    Some(audio_positions_ref),
-                                    None,
-                                )?;
-                            log_distilled_prompt_sensitivity(
-                                debug_stage,
-                                step_idx,
-                                sigma,
-                                &video_latents,
-                                &cond_video_velocity,
-                                &uncond_video_velocity,
-                                Some(audio_latents_ref),
-                                cond_audio_velocity.as_ref(),
-                                uncond_audio_velocity.as_ref(),
-                            )?;
-                        }
-                    }
-                    if step_idx == 0 {
-                        if let (Some(alt_video_context), Some(alt_audio_context)) =
-                            (alt_context, alt_audio_context.as_ref())
-                        {
-                            let (alt_video_velocity, alt_audio_velocity) = transformer.forward(
-                                &video_latents,
-                                Some(audio_latents_ref),
-                                alt_video_context,
-                                Some(alt_audio_context),
-                                &video_sigma,
-                                &video_timestep,
-                                audio_sigma.as_ref(),
-                                audio_timestep.as_ref(),
-                                alt_mask,
-                                alt_mask,
-                                video_self_attention_mask.as_ref(),
-                                None,
-                                video_positions,
-                                Some(audio_positions_ref),
-                                None,
-                            )?;
-                            log_distilled_alternate_prompt_sensitivity(
-                                debug_stage,
-                                step_idx,
-                                sigma,
-                                &video_latents,
-                                &cond_video_velocity,
-                                &alt_video_velocity,
-                                Some(audio_latents_ref),
-                                cond_audio_velocity.as_ref(),
-                                alt_audio_velocity.as_ref(),
-                            )?;
-                        }
-                    }
-                    (
-                        denoised_from_velocity(&video_latents, &cond_video_velocity, sigma)?,
-                        cond_audio_velocity
-                            .as_ref()
-                            .map(|velocity| denoised_from_velocity(audio_latents_ref, velocity, sigma))
-                            .transpose()?,
-                        Some(cond_video_velocity),
-                    )
-                }
-            } else if use_cfg {
-                let uncond_video_context =
-                    uncond_context.context("missing unconditional video conditioning for CFG")?;
-                let (uncond_video_velocity, _) = transformer.forward(
-                    &video_latents,
-                    None,
-                    uncond_video_context,
-                    None,
-                    &video_sigma,
-                    &video_timestep,
-                    None,
-                    None,
                     uncond_mask,
-                    None,
+                    uncond_mask,
                     video_self_attention_mask.as_ref(),
                     None,
                     video_positions,
-                    None,
+                    Some(audio_positions_ref),
                     None,
                 )?;
-                let (cond_video_velocity, _) = transformer.forward(
+                let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
                     &video_latents,
-                    None,
+                    Some(audio_latents_ref),
                     cond_context,
-                    None,
+                    Some(audio_context_ref),
                     &video_sigma,
                     &video_timestep,
-                    None,
-                    None,
+                    audio_sigma.as_ref(),
+                    audio_timestep.as_ref(),
                     cond_mask,
-                    None,
+                    cond_mask,
                     video_self_attention_mask.as_ref(),
                     None,
                     video_positions,
-                    None,
+                    Some(audio_positions_ref),
                     None,
                 )?;
+                let uncond_audio_velocity = uncond_audio_velocity
+                    .context("audio branch unexpectedly returned no unconditional output")?;
+                let cond_audio_velocity = cond_audio_velocity
+                    .context("audio branch unexpectedly returned no conditional output")?;
                 (
                     denoised_from_velocity(
                         &video_latents,
@@ -2452,44 +2311,56 @@ fn run_real_distilled_stage(
                         )?,
                         sigma,
                     )?,
-                    None,
+                    Some(denoised_from_velocity(
+                        audio_latents_ref,
+                        &guided_velocity_from_cfg(
+                            audio_latents_ref,
+                            &cond_audio_velocity,
+                            &uncond_audio_velocity,
+                            sigma,
+                            guidance_scale,
+                        )?,
+                        sigma,
+                    )?),
                     Some(cond_video_velocity),
                 )
             } else {
-                let (cond_video_velocity, _cond_audio_velocity) = transformer.forward(
+                let (cond_video_velocity, cond_audio_velocity) = transformer.forward(
                     &video_latents,
-                    None,
+                    Some(audio_latents_ref),
                     cond_context,
-                    None,
+                    Some(audio_context_ref),
                     &video_sigma,
                     &video_timestep,
-                    None,
-                    None,
+                    audio_sigma.as_ref(),
+                    audio_timestep.as_ref(),
                     cond_mask,
-                    None,
+                    cond_mask,
                     video_self_attention_mask.as_ref(),
                     None,
                     video_positions,
-                    None,
+                    Some(audio_positions_ref),
                     None,
                 )?;
                 if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
-                    if let Some(uncond_video_context) = uncond_context {
-                        let (uncond_video_velocity, _) = transformer.forward(
+                    if let (Some(uncond_video_context), Some(uncond_audio_context)) =
+                        (uncond_context, uncond_audio_context.as_ref())
+                    {
+                        let (uncond_video_velocity, uncond_audio_velocity) = transformer.forward(
                             &video_latents,
-                            None,
+                            Some(audio_latents_ref),
                             uncond_video_context,
-                            None,
+                            Some(uncond_audio_context),
                             &video_sigma,
                             &video_timestep,
-                            None,
-                            None,
+                            audio_sigma.as_ref(),
+                            audio_timestep.as_ref(),
                             uncond_mask,
-                            None,
+                            uncond_mask,
                             video_self_attention_mask.as_ref(),
                             None,
                             video_positions,
-                            None,
+                            Some(audio_positions_ref),
                             None,
                         )?;
                         log_distilled_prompt_sensitivity(
@@ -2499,29 +2370,31 @@ fn run_real_distilled_stage(
                             &video_latents,
                             &cond_video_velocity,
                             &uncond_video_velocity,
-                            None,
-                            None,
-                            None,
+                            Some(audio_latents_ref),
+                            cond_audio_velocity.as_ref(),
+                            uncond_audio_velocity.as_ref(),
                         )?;
                     }
                 }
                 if step_idx == 0 {
-                    if let Some(alt_video_context) = alt_context {
-                        let (alt_video_velocity, _) = transformer.forward(
+                    if let (Some(alt_video_context), Some(alt_audio_context)) =
+                        (alt_context, alt_audio_context.as_ref())
+                    {
+                        let (alt_video_velocity, alt_audio_velocity) = transformer.forward(
                             &video_latents,
-                            None,
+                            Some(audio_latents_ref),
                             alt_video_context,
-                            None,
+                            Some(alt_audio_context),
                             &video_sigma,
                             &video_timestep,
-                            None,
-                            None,
+                            audio_sigma.as_ref(),
+                            audio_timestep.as_ref(),
                             alt_mask,
-                            None,
+                            alt_mask,
                             video_self_attention_mask.as_ref(),
                             None,
                             video_positions,
-                            None,
+                            Some(audio_positions_ref),
                             None,
                         )?;
                         log_distilled_alternate_prompt_sensitivity(
@@ -2531,18 +2404,161 @@ fn run_real_distilled_stage(
                             &video_latents,
                             &cond_video_velocity,
                             &alt_video_velocity,
-                            None,
-                            None,
-                            None,
+                            Some(audio_latents_ref),
+                            cond_audio_velocity.as_ref(),
+                            alt_audio_velocity.as_ref(),
                         )?;
                     }
                 }
                 (
                     denoised_from_velocity(&video_latents, &cond_video_velocity, sigma)?,
-                    None,
+                    cond_audio_velocity
+                        .as_ref()
+                        .map(|velocity| denoised_from_velocity(audio_latents_ref, velocity, sigma))
+                        .transpose()?,
                     Some(cond_video_velocity),
                 )
-            };
+            }
+        } else if use_cfg {
+            let uncond_video_context =
+                uncond_context.context("missing unconditional video conditioning for CFG")?;
+            let (uncond_video_velocity, _) = transformer.forward(
+                &video_latents,
+                None,
+                uncond_video_context,
+                None,
+                &video_sigma,
+                &video_timestep,
+                None,
+                None,
+                uncond_mask,
+                None,
+                video_self_attention_mask.as_ref(),
+                None,
+                video_positions,
+                None,
+                None,
+            )?;
+            let (cond_video_velocity, _) = transformer.forward(
+                &video_latents,
+                None,
+                cond_context,
+                None,
+                &video_sigma,
+                &video_timestep,
+                None,
+                None,
+                cond_mask,
+                None,
+                video_self_attention_mask.as_ref(),
+                None,
+                video_positions,
+                None,
+                None,
+            )?;
+            (
+                denoised_from_velocity(
+                    &video_latents,
+                    &guided_velocity_from_cfg(
+                        &video_latents,
+                        &cond_video_velocity,
+                        &uncond_video_velocity,
+                        sigma,
+                        guidance_scale,
+                    )?,
+                    sigma,
+                )?,
+                None,
+                Some(cond_video_velocity),
+            )
+        } else {
+            let (cond_video_velocity, _cond_audio_velocity) = transformer.forward(
+                &video_latents,
+                None,
+                cond_context,
+                None,
+                &video_sigma,
+                &video_timestep,
+                None,
+                None,
+                cond_mask,
+                None,
+                video_self_attention_mask.as_ref(),
+                None,
+                video_positions,
+                None,
+                None,
+            )?;
+            if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
+                if let Some(uncond_video_context) = uncond_context {
+                    let (uncond_video_velocity, _) = transformer.forward(
+                        &video_latents,
+                        None,
+                        uncond_video_context,
+                        None,
+                        &video_sigma,
+                        &video_timestep,
+                        None,
+                        None,
+                        uncond_mask,
+                        None,
+                        video_self_attention_mask.as_ref(),
+                        None,
+                        video_positions,
+                        None,
+                        None,
+                    )?;
+                    log_distilled_prompt_sensitivity(
+                        debug_stage,
+                        step_idx,
+                        sigma,
+                        &video_latents,
+                        &cond_video_velocity,
+                        &uncond_video_velocity,
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+            }
+            if step_idx == 0 {
+                if let Some(alt_video_context) = alt_context {
+                    let (alt_video_velocity, _) = transformer.forward(
+                        &video_latents,
+                        None,
+                        alt_video_context,
+                        None,
+                        &video_sigma,
+                        &video_timestep,
+                        None,
+                        None,
+                        alt_mask,
+                        None,
+                        video_self_attention_mask.as_ref(),
+                        None,
+                        video_positions,
+                        None,
+                        None,
+                    )?;
+                    log_distilled_alternate_prompt_sensitivity(
+                        debug_stage,
+                        step_idx,
+                        sigma,
+                        &video_latents,
+                        &cond_video_velocity,
+                        &alt_video_velocity,
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+            }
+            (
+                denoised_from_velocity(&video_latents, &cond_video_velocity, sigma)?,
+                None,
+                Some(cond_video_velocity),
+            )
+        };
         if device.is_cuda() {
             device.synchronize()?;
         }
@@ -2912,7 +2928,12 @@ fn multimodal_guided_denoise_step(
             .as_ref()
             .context("missing unconditional video context for multimodal guidance")?;
         video_contexts.push(negative_video_context.clone());
-        audio_contexts.push(audio_guider.negative_context.clone().or_else(|| audio_context.cloned()));
+        audio_contexts.push(
+            audio_guider
+                .negative_context
+                .clone()
+                .or_else(|| audio_context.cloned()),
+        );
         video_masks.push(uncond_mask.cloned());
         audio_masks.push(uncond_mask.cloned());
         perturbations.push(PerturbationConfig::empty());
@@ -2940,7 +2961,8 @@ fn multimodal_guided_denoise_step(
         perturbations.push(PerturbationConfig::new(stg_perturbations));
         perturbed_index = Some(perturbations.len() - 1);
     }
-    if video_guider.do_isolated_modality_generation() || audio_guider.do_isolated_modality_generation()
+    if video_guider.do_isolated_modality_generation()
+        || audio_guider.do_isolated_modality_generation()
     {
         video_contexts.push(cond_context.clone());
         audio_contexts.push(audio_context.cloned());
@@ -3032,7 +3054,12 @@ fn multimodal_guided_denoise_step(
     let video_denoised = if video_skip {
         cond_video.clone()
     } else {
-        video_guider.calculate(&cond_video, &uncond_video, &perturbed_video, &modality_video)?
+        video_guider.calculate(
+            &cond_video,
+            &uncond_video,
+            &perturbed_video,
+            &modality_video,
+        )?
     };
 
     let audio_denoised = match (
@@ -3717,10 +3744,10 @@ mod tests {
     };
 
     use super::{
-        apply_stage_video_conditioning, apply_video_token_replacements, convert_velocity_to_x0,
-        build_video_conditioning_self_attention_mask, convert_x0_to_velocity,
-        decoded_video_to_frames, effective_native_guidance_scale, guided_velocity_from_cfg,
-        keyframe_only_conditioning, ltx2_video_transformer_config,
+        apply_stage_video_conditioning, apply_video_token_replacements,
+        build_video_conditioning_self_attention_mask, convert_velocity_to_x0,
+        convert_x0_to_velocity, decoded_video_to_frames, effective_native_guidance_scale,
+        guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
         reapply_stage_video_conditioning, source_image_only_conditioning,
         strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
         VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
@@ -4322,7 +4349,8 @@ mod tests {
             .unwrap();
         let sigma = Tensor::new(&[[0.5f32]], &Device::Cpu).unwrap();
 
-        let denoised = super::denoised_from_velocity_with_sigma(&sample, &velocity, &sigma).unwrap();
+        let denoised =
+            super::denoised_from_velocity_with_sigma(&sample, &velocity, &sigma).unwrap();
         let restored = super::velocity_from_denoised(&sample, &denoised, 0.5).unwrap();
 
         assert_eq!(denoised.dtype(), DType::F32);
