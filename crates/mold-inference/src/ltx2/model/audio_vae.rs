@@ -1570,18 +1570,24 @@ mod tests {
     }
 
     #[cfg(feature = "mp4")]
-    fn sample_audio_track(samples_per_channel: usize) -> Vec<f32> {
-        let mut samples = Vec::with_capacity(samples_per_channel * 2);
+    fn sample_audio_track(samples_per_channel: usize, sample_rate: u32, channels: u16) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(samples_per_channel * channels as usize);
         for idx in 0..samples_per_channel {
-            let t = idx as f32 / 48_000.0;
-            samples.push((t * std::f32::consts::TAU * 440.0).sin() * 0.25);
-            samples.push((t * std::f32::consts::TAU * 660.0).sin() * 0.25);
+            let t = idx as f32 / sample_rate as f32;
+            for channel in 0..channels {
+                let freq = if channel % 2 == 0 { 440.0 } else { 660.0 };
+                samples.push((t * std::f32::consts::TAU * freq).sin() * 0.25);
+            }
         }
         samples
     }
 
     #[cfg(feature = "mp4")]
-    fn write_mp4_with_native_aac() -> (tempfile::TempDir, PathBuf) {
+    fn write_mp4_with_native_aac_params(
+        sample_rate: u32,
+        channels: u16,
+        extension: &str,
+    ) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let video_path = dir.path().join("video.mp4");
         fs::write(
@@ -1589,16 +1595,21 @@ mod tests {
             video_enc::encode_mp4(&sample_frames(), 12).unwrap(),
         )
         .unwrap();
-        let audio_path = dir.path().join("video-audio.mp4");
+        let audio_path = dir.path().join(format!("video-audio.{extension}"));
         attach_aac_track_from_f32_interleaved(
             &video_path,
             &audio_path,
-            &sample_audio_track(4_096),
-            48_000,
-            2,
+            &sample_audio_track((sample_rate / 12).max(1024) as usize, sample_rate, channels),
+            sample_rate,
+            channels,
         )
         .unwrap();
         (dir, audio_path)
+    }
+
+    #[cfg(feature = "mp4")]
+    fn write_mp4_with_native_aac() -> (tempfile::TempDir, PathBuf) {
+        write_mp4_with_native_aac_params(48_000, 2, "mp4")
     }
 
     #[test]
@@ -1941,5 +1952,29 @@ mod tests {
         assert_eq!(decoded.sample_rate, 48_000);
         assert_eq!(decoded.channel_count(), 2);
         assert_eq!(decoded.sample_count(), 2_400);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn decoded_audio_from_mp4_fallback_handles_mono_24khz_native_aac() {
+        let (_dir, path) = write_mp4_with_native_aac_params(24_000, 1, "mp4");
+
+        let decoded = DecodedAudio::from_file(&path, Some(0.05)).unwrap().unwrap();
+
+        assert_eq!(decoded.sample_rate, 24_000);
+        assert_eq!(decoded.channel_count(), 1);
+        assert_eq!(decoded.sample_count(), 1_200);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn decoded_audio_from_m4a_extension_uses_mp4_ingest_path() {
+        let (_dir, path) = write_mp4_with_native_aac_params(16_000, 2, "m4a");
+
+        let decoded = DecodedAudio::from_file(&path, Some(0.05)).unwrap().unwrap();
+
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channel_count(), 2);
+        assert_eq!(decoded.sample_count(), 800);
     }
 }
