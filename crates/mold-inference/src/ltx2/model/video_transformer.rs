@@ -1404,17 +1404,39 @@ fn chunked_attention(
     query_chunk_size: usize,
     key_chunk_size: usize,
 ) -> Result<Tensor> {
+    let q = if q.dtype() == DType::F32 {
+        q.clone()
+    } else {
+        q.to_dtype(DType::F32)?
+    };
+    let k = if k.dtype() == DType::F32 {
+        k.clone()
+    } else {
+        k.to_dtype(DType::F32)?
+    };
+    let v = if v.dtype() == DType::F32 {
+        v.clone()
+    } else {
+        v.to_dtype(DType::F32)?
+    };
+    let attn_mask = attn_mask
+        .map(|mask| {
+            if mask.dtype() == DType::F32 {
+                Ok(mask.clone())
+            } else {
+                mask.to_dtype(DType::F32)
+            }
+        })
+        .transpose()?;
     let q_len = q.dim(2)?;
     let k_len = k.dim(2)?;
     let value_dim = v.dim(3)?;
+    let k_t = k.transpose(D::Minus1, D::Minus2)?.contiguous()?;
     let mut outputs = Vec::with_capacity(q_len.div_ceil(query_chunk_size));
     let mut q_offset = 0;
     while q_offset < q_len {
         let q_chunk_len = query_chunk_size.min(q_len - q_offset);
-        let q_chunk = q
-            .narrow(2, q_offset, q_chunk_len)?
-            .contiguous()?
-            .to_dtype(DType::F32)?;
+        let q_chunk = q.narrow(2, q_offset, q_chunk_len)?.contiguous()?;
         let (b_sz, h_sz, _, _) = q_chunk.dims4()?;
         let mut running_max =
             Tensor::full(f32::NEG_INFINITY, (b_sz, h_sz, q_chunk_len, 1), q.device())?;
@@ -1426,19 +1448,12 @@ fn chunked_attention(
         let mut k_offset = 0;
         while k_offset < k_len {
             let k_chunk_len = key_chunk_size.min(k_len - k_offset);
-            let k_chunk = k
-                .narrow(2, k_offset, k_chunk_len)?
-                .contiguous()?
-                .to_dtype(DType::F32)?;
-            let v_chunk = v
-                .narrow(2, k_offset, k_chunk_len)?
-                .contiguous()?
-                .to_dtype(DType::F32)?;
+            let k_chunk = k_t.narrow(3, k_offset, k_chunk_len)?.contiguous()?;
+            let v_chunk = v.narrow(2, k_offset, k_chunk_len)?.contiguous()?;
 
-            let mut att =
-                q_chunk.matmul(&k_chunk.transpose(D::Minus1, D::Minus2)?.contiguous()?)?;
+            let mut att = q_chunk.matmul(&k_chunk)?;
             att = (att * (scale as f64))?;
-            if let Some(mask) = attn_mask {
+            if let Some(mask) = attn_mask.as_ref() {
                 let mask = mask
                     .narrow(2, q_offset, q_chunk_len)?
                     .narrow(3, k_offset, k_chunk_len)?
@@ -4660,6 +4675,36 @@ mod tests {
         let chunked = super::chunked_attention(&q, &k, &v, Some(&mask), scale, 2, 3).unwrap();
 
         assert_tensors_close(&full, &chunked, 1e-5);
+    }
+
+    #[test]
+    fn chunked_attention_matches_full_attention_with_bf16_inputs() {
+        let device = Device::Cpu;
+        let q = Tensor::from_vec(patterned_values(40, 29), (1, 2, 5, 4), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::from_vec(patterned_values(40, 31), (1, 2, 5, 4), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::from_vec(patterned_values(40, 37), (1, 2, 5, 4), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let scale = 1f32 / 2f32.sqrt();
+
+        let full = super::full_attention(
+            &q.to_dtype(DType::F32).unwrap(),
+            &k.to_dtype(DType::F32).unwrap(),
+            &v.to_dtype(DType::F32).unwrap(),
+            None,
+            scale,
+        )
+        .unwrap();
+        let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
+
+        assert_tensors_close(&full, &chunked, 1e-3);
     }
 
     #[test]
