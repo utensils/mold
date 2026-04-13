@@ -37,6 +37,19 @@ impl Ltx2Engine {
         std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some()
     }
 
+    fn debug_timings_enabled() -> bool {
+        std::env::var_os("MOLD_LTX2_DEBUG_TIMINGS").is_some()
+    }
+
+    fn log_timing(label: &str, start: Instant) {
+        if Self::debug_timings_enabled() {
+            eprintln!(
+                "[ltx2-timing] {label} {:.3}s",
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     pub fn new(model_name: String, paths: ModelPaths, _load_strategy: LoadStrategy) -> Self {
         Self {
             model_name,
@@ -282,6 +295,7 @@ impl Ltx2Engine {
             )?;
         }
 
+        let output_encode_start = Instant::now();
         let output_bytes = match req.output_format {
             OutputFormat::Apng => {
                 let metadata = video_enc::VideoMetadata {
@@ -329,8 +343,12 @@ impl Ltx2Engine {
             }
             other => bail!("{other:?} is not supported for LTX-2 video output"),
         };
+        Self::log_timing("pipeline.encode_output", output_encode_start);
 
+        let thumbnail_start = Instant::now();
         let thumbnail = video_enc::first_frame_png(&rendered.frames)?;
+        Self::log_timing("pipeline.encode_thumbnail", thumbnail_start);
+        let gif_preview_start = Instant::now();
         let gif_preview = if req.gif_preview {
             if req.output_format == OutputFormat::Gif {
                 output_bytes.clone()
@@ -340,7 +358,9 @@ impl Ltx2Engine {
         } else {
             Vec::new()
         };
+        Self::log_timing("pipeline.encode_gif_preview", gif_preview_start);
 
+        let probe_start = Instant::now();
         let probe = if req.output_format == OutputFormat::Mp4 {
             let path = work_dir.join("probe.mp4");
             fs::write(&path, &output_bytes)?;
@@ -348,6 +368,7 @@ impl Ltx2Engine {
         } else {
             None
         };
+        Self::log_timing("pipeline.probe_output", probe_start);
 
         Ok((output_bytes, thumbnail, gif_preview, probe))
     }
@@ -380,7 +401,9 @@ impl InferenceEngine for Ltx2Engine {
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
+        let materialize_start = Instant::now();
         let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        Self::log_timing("pipeline.materialize_request", materialize_start);
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
         self.emit(&format!(
             "Planned native LTX-2 graph: preset={}, denoise_stages={}, blocks={}, prompt_tokens={}/{}",
@@ -391,7 +414,9 @@ impl InferenceEngine for Ltx2Engine {
             plan.prompt_tokens.unconditional.valid_len()
         ));
         if self.native_runtime.is_none() {
+            let create_runtime_start = Instant::now();
             self.native_runtime = Some(self.create_runtime_session(&plan)?);
+            Self::log_timing("pipeline.create_runtime", create_runtime_start);
         }
         let mut runtime = self
             .native_runtime
@@ -399,11 +424,17 @@ impl InferenceEngine for Ltx2Engine {
             .context("native LTX-2 runtime session was not initialized")?;
 
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
+        let prepare_start = Instant::now();
         let prepared = runtime.prepare(&plan)?;
+        Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
+        let render_start = Instant::now();
         let rendered = runtime.render_native_video(&plan, &prepared)?;
+        Self::log_timing("pipeline.render_runtime", render_start);
+        let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
+        Self::log_timing("pipeline.encode_native_video", encode_start);
         self.native_runtime = Some(runtime);
 
         let duration_ms =
