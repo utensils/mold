@@ -6,10 +6,19 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, Module, VarBuilder};
+use rustfft::{num_complex::Complex32, FftPlanner};
 use serde::Deserialize;
 use serde_json::Value;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::default::{get_codecs, get_probe};
 
 use super::video_vae::PerChannelRmsNorm;
 use super::{AudioLatentShape, AudioPatchifier};
@@ -237,6 +246,391 @@ pub(crate) fn read_checkpoint_config_json(checkpoint_path: &Path) -> Result<Stri
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .context("safetensors metadata did not contain a 'config' entry")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedAudio {
+    pub sample_rate: usize,
+    pub channels: Vec<Vec<f32>>,
+}
+
+impl DecodedAudio {
+    pub fn from_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open source audio '{}'", path.display()))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let probed = get_probe()
+            .format(
+                &Hint::new(),
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .with_context(|| format!("failed to probe source audio '{}'", path.display()))?;
+        let mut format = probed.format;
+        let track = match format
+            .tracks()
+            .iter()
+            .find(|track| track.codec_params.sample_rate.is_some())
+        {
+            Some(track) => track.clone(),
+            None => return Ok(None),
+        };
+        let track_id = track.id;
+        let mut decoder = get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .with_context(|| {
+                format!(
+                    "failed to create decoder for source audio '{}'",
+                    path.display()
+                )
+            })?;
+
+        let mut sample_rate = track.codec_params.sample_rate.unwrap_or(16_000) as usize;
+        let mut channels = track
+            .codec_params
+            .channels
+            .map(|channels| channels.count())
+            .unwrap_or(2);
+        let mut planar = vec![Vec::new(); channels];
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(SymphoniaError::IoError(_)) => break,
+                Err(err) => return Err(err.into()),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            let decoded = match decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(SymphoniaError::IoError(_)) => break,
+                Err(SymphoniaError::ResetRequired) => {
+                    bail!(
+                        "source audio decoder requested a reset while decoding '{}'",
+                        path.display()
+                    );
+                }
+                Err(err) => return Err(err.into()),
+            };
+            sample_rate = decoded.spec().rate as usize;
+            channels = decoded.spec().channels.count();
+            if planar.len() != channels {
+                if planar.iter().all(Vec::is_empty) {
+                    planar = vec![Vec::new(); channels];
+                } else {
+                    bail!(
+                        "source audio '{}' changed channel count mid-stream from {} to {}",
+                        path.display(),
+                        planar.len(),
+                        channels
+                    );
+                }
+            }
+
+            let mut sample_buf =
+                SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+            sample_buf.copy_interleaved_ref(decoded);
+            let frames = sample_buf.samples().len() / channels;
+            let interleaved = sample_buf.samples();
+            for frame_idx in 0..frames {
+                let offset = frame_idx * channels;
+                for channel_idx in 0..channels {
+                    planar[channel_idx].push(interleaved[offset + channel_idx]);
+                }
+            }
+        }
+
+        if planar.first().is_none_or(Vec::is_empty) {
+            return Ok(None);
+        }
+
+        let decoded = Self {
+            sample_rate,
+            channels: planar,
+        };
+        Ok(Some(decoded.trimmed(max_duration_seconds)))
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.channels.first().map_or(0, Vec::len)
+    }
+
+    pub fn trimmed(&self, max_duration_seconds: Option<f32>) -> Self {
+        let Some(max_duration_seconds) = max_duration_seconds else {
+            return self.clone();
+        };
+        let max_samples =
+            (max_duration_seconds.max(0.0) * self.sample_rate as f32).round() as usize;
+        let channels = self
+            .channels
+            .iter()
+            .map(|channel| channel[..channel.len().min(max_samples)].to_vec())
+            .collect();
+        Self {
+            sample_rate: self.sample_rate,
+            channels,
+        }
+    }
+
+    pub fn to_tensor(
+        &self,
+        target_sample_rate: usize,
+        target_channels: usize,
+        device: &candle_core::Device,
+    ) -> Result<Tensor> {
+        let channels = conform_audio_channels(&self.channels, target_channels);
+        let channels = if self.sample_rate == target_sample_rate {
+            channels
+        } else {
+            resample_audio_channels_linear(&channels, self.sample_rate, target_sample_rate)
+        };
+        let sample_count = channels.first().map_or(0, Vec::len);
+        let mut flat = Vec::with_capacity(target_channels * sample_count);
+        for channel in &channels {
+            flat.extend_from_slice(channel);
+        }
+        Tensor::from_vec(flat, (1, target_channels, sample_count), device).map_err(Into::into)
+    }
+}
+
+fn conform_audio_channels(channels: &[Vec<f32>], target_channels: usize) -> Vec<Vec<f32>> {
+    if target_channels == 0 {
+        return Vec::new();
+    }
+    if channels.is_empty() {
+        return vec![Vec::new(); target_channels];
+    }
+    if channels.len() == target_channels {
+        return channels.to_vec();
+    }
+    if channels.len() == 1 {
+        return vec![channels[0].clone(); target_channels];
+    }
+    let sample_count = channels[0].len();
+    let mut conformed = Vec::with_capacity(target_channels);
+    for channel_idx in 0..target_channels {
+        if let Some(channel) = channels.get(channel_idx) {
+            conformed.push(channel.clone());
+        } else {
+            conformed.push(vec![0.0; sample_count]);
+        }
+    }
+    conformed
+}
+
+fn resample_audio_channels_linear(
+    channels: &[Vec<f32>],
+    src_rate: usize,
+    dst_rate: usize,
+) -> Vec<Vec<f32>> {
+    if src_rate == dst_rate {
+        return channels.to_vec();
+    }
+    let src_len = channels.first().map_or(0, Vec::len);
+    if src_len == 0 {
+        return vec![Vec::new(); channels.len()];
+    }
+    let dst_len = (((src_len as f64) * (dst_rate as f64)) / (src_rate as f64))
+        .round()
+        .max(1.0) as usize;
+    channels
+        .iter()
+        .map(|channel| {
+            if channel.len() == 1 {
+                return vec![channel[0]; dst_len];
+            }
+            let mut out = Vec::with_capacity(dst_len);
+            for dst_idx in 0..dst_len {
+                let src_pos = (dst_idx as f64) * (src_rate as f64) / (dst_rate as f64);
+                let left = src_pos.floor() as usize;
+                let right = (left + 1).min(channel.len() - 1);
+                let frac = (src_pos - left as f64) as f32;
+                let left_sample = channel[left];
+                let right_sample = channel[right];
+                out.push(left_sample + (right_sample - left_sample) * frac);
+            }
+            out
+        })
+        .collect()
+}
+
+fn reflect_index(mut index: isize, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let max = (len - 1) as isize;
+    while index < 0 || index > max {
+        if index < 0 {
+            index = -index;
+        } else {
+            index = 2 * max - index;
+        }
+    }
+    index as usize
+}
+
+fn reflect_pad_1d(samples: &[f32], pad: usize) -> Vec<f32> {
+    if pad == 0 {
+        return samples.to_vec();
+    }
+    let mut out = Vec::with_capacity(samples.len() + pad * 2);
+    for idx in 0..pad {
+        let reflected = reflect_index(idx as isize - pad as isize, samples.len());
+        out.push(samples[reflected]);
+    }
+    out.extend_from_slice(samples);
+    for idx in 0..pad {
+        let reflected = reflect_index(samples.len() as isize + idx as isize, samples.len());
+        out.push(samples[reflected]);
+    }
+    out
+}
+
+fn build_hann_window(win_length: usize) -> Vec<f32> {
+    (0..win_length)
+        .map(|idx| {
+            let phase = 2.0 * std::f64::consts::PI * idx as f64 / win_length as f64;
+            (0.5 - 0.5 * phase.cos()) as f32
+        })
+        .collect()
+}
+
+fn hz_to_mel_slaney(hz: f64) -> f64 {
+    let f_sp = 200.0 / 3.0;
+    let min_log_hz = 1_000.0;
+    let min_log_mel = min_log_hz / f_sp;
+    let log_step = (6.4f64).ln() / 27.0;
+    if hz < min_log_hz {
+        hz / f_sp
+    } else {
+        min_log_mel + (hz / min_log_hz).ln() / log_step
+    }
+}
+
+fn mel_to_hz_slaney(mel: f64) -> f64 {
+    let f_sp = 200.0 / 3.0;
+    let min_log_hz = 1_000.0;
+    let min_log_mel = min_log_hz / f_sp;
+    let log_step = (6.4f64).ln() / 27.0;
+    if mel < min_log_mel {
+        mel * f_sp
+    } else {
+        min_log_hz * (log_step * (mel - min_log_mel)).exp()
+    }
+}
+
+fn build_slaney_mel_filterbank(sample_rate: usize, n_fft: usize, n_mels: usize) -> Vec<Vec<f32>> {
+    let n_freqs = n_fft / 2 + 1;
+    let mel_min = hz_to_mel_slaney(0.0);
+    let mel_max = hz_to_mel_slaney(sample_rate as f64 / 2.0);
+    let mel_points = (0..(n_mels + 2))
+        .map(|idx| {
+            let ratio = idx as f64 / (n_mels + 1) as f64;
+            mel_to_hz_slaney(mel_min + (mel_max - mel_min) * ratio)
+        })
+        .collect::<Vec<_>>();
+    let fft_freqs = (0..n_freqs)
+        .map(|idx| sample_rate as f64 * idx as f64 / n_fft as f64)
+        .collect::<Vec<_>>();
+    let mut filters = vec![vec![0.0f32; n_freqs]; n_mels];
+    for mel_idx in 0..n_mels {
+        let lower = mel_points[mel_idx];
+        let center = mel_points[mel_idx + 1];
+        let upper = mel_points[mel_idx + 2];
+        let enorm = if upper > lower {
+            2.0 / (upper - lower)
+        } else {
+            0.0
+        } as f32;
+        for (freq_idx, freq) in fft_freqs.iter().copied().enumerate() {
+            let weight = if freq >= lower && freq <= center && center > lower {
+                (freq - lower) / (center - lower)
+            } else if freq >= center && freq <= upper && upper > center {
+                (upper - freq) / (upper - center)
+            } else {
+                0.0
+            };
+            filters[mel_idx][freq_idx] = (weight as f32) * enorm;
+        }
+    }
+    filters
+}
+
+fn waveform_to_log_mel(
+    waveform: &Tensor,
+    sample_rate: usize,
+    n_mels: usize,
+    hop_length: usize,
+    n_fft: usize,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let waveform = waveform
+        .to_device(&candle_core::Device::Cpu)?
+        .to_dtype(DType::F32)?;
+    let (batch, channels, samples) = waveform.dims3()?;
+    if batch != 1 {
+        bail!("native LTX-2 audio frontend currently expects batch=1, got {batch}");
+    }
+    let planar = waveform.i(0)?.to_vec2::<f32>()?;
+    let pad = n_fft / 2;
+    let window = build_hann_window(n_fft);
+    let mel_filters = build_slaney_mel_filterbank(sample_rate, n_fft, n_mels);
+    let mut fft_planner = FftPlanner::<f32>::new();
+    let fft = fft_planner.plan_fft_forward(n_fft);
+    let mut flat = Vec::new();
+    let mut expected_frames = None;
+
+    for channel in planar.iter().take(channels) {
+        let padded = reflect_pad_1d(channel, pad);
+        if padded.len() < n_fft {
+            bail!("source audio is too short to build a mel spectrogram");
+        }
+        let frame_count = 1 + (padded.len() - n_fft) / hop_length;
+        if let Some(expected_frames) = expected_frames {
+            if expected_frames != frame_count {
+                bail!(
+                    "native LTX-2 audio frontend produced inconsistent frame counts across channels"
+                );
+            }
+        } else {
+            expected_frames = Some(frame_count);
+        }
+        for frame_idx in 0..frame_count {
+            let offset = frame_idx * hop_length;
+            let mut spectrum = vec![Complex32::new(0.0, 0.0); n_fft];
+            for (fft_idx, value) in padded[offset..(offset + n_fft)].iter().copied().enumerate() {
+                spectrum[fft_idx].re = value * window[fft_idx];
+            }
+            fft.process(&mut spectrum);
+            let magnitudes = spectrum[..(n_fft / 2 + 1)]
+                .iter()
+                .map(|bin| (bin.re * bin.re + bin.im * bin.im).sqrt())
+                .collect::<Vec<_>>();
+            for mel_filter in &mel_filters {
+                let mel = mel_filter
+                    .iter()
+                    .zip(magnitudes.iter())
+                    .map(|(weight, magnitude)| weight * magnitude)
+                    .sum::<f32>()
+                    .max(1e-5)
+                    .ln();
+                flat.push(mel);
+            }
+        }
+    }
+
+    let frames = expected_frames.unwrap_or_else(|| {
+        let _ = samples;
+        0
+    });
+    Tensor::from_vec(flat, (1, channels, frames, n_mels), device).map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -746,6 +1140,21 @@ impl Ltx2AudioEncoder {
             .unpatchify(&latent_normalized, latent_shape)
             .map_err(Into::into)
     }
+
+    pub fn encode_audio(&self, audio: &DecodedAudio) -> Result<Tensor> {
+        let device = self.per_channel_statistics.mean.device();
+        let dtype = self.per_channel_statistics.mean.dtype();
+        let waveform = audio.to_tensor(self.config.sample_rate, self.config.in_channels, device)?;
+        let mel = waveform_to_log_mel(
+            &waveform,
+            self.config.sample_rate,
+            self.config.mel_bins,
+            self.config.mel_hop_length,
+            self.config.n_fft,
+            device,
+        )?;
+        self.encode(&mel.to_dtype(dtype)?)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -963,15 +1372,18 @@ fn adjust_decoded_output_shape(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
 
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::VarBuilder;
 
     use super::{
-        adjust_decoded_output_shape, decoder_target_shape, AudioCausalConv2d, AudioCausalityAxis,
-        AudioDownsample, AudioNormType, AudioPerChannelStatistics, Ltx2AudioDecoder,
-        Ltx2AudioDecoderConfig, Ltx2AudioEncoder, Ltx2AudioEncoderConfig,
+        adjust_decoded_output_shape, decoder_target_shape, waveform_to_log_mel, AudioCausalConv2d,
+        AudioCausalityAxis, AudioDownsample, AudioNormType, AudioPerChannelStatistics,
+        DecodedAudio, Ltx2AudioDecoder, Ltx2AudioDecoderConfig, Ltx2AudioEncoder,
+        Ltx2AudioEncoderConfig,
     };
+    use crate::ltx2::media::encode_wav_f32_interleaved;
     use crate::ltx2::model::AudioLatentShape;
 
     fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
@@ -1254,5 +1666,53 @@ mod tests {
         let spectrogram = Tensor::zeros((1, 2, 9, 4), candle_core::DType::F32, &device).unwrap();
         let encoded = encoder.encode(&spectrogram).unwrap();
         assert_eq!(encoded.dims4().unwrap(), (1, 2, 9, 4));
+    }
+
+    #[test]
+    fn decoded_audio_from_wav_trims_to_requested_duration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wav_path = temp_dir.path().join("source.wav");
+        let mut samples = Vec::new();
+        for idx in 0..1600 {
+            let value = idx as f32 / 1600.0;
+            samples.push(value);
+            samples.push(-value);
+        }
+        fs::write(
+            &wav_path,
+            encode_wav_f32_interleaved(&samples, 16_000, 2).unwrap(),
+        )
+        .unwrap();
+
+        let decoded = DecodedAudio::from_file(&wav_path, Some(0.05))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.channel_count(), 2);
+        assert_eq!(decoded.sample_count(), 800);
+    }
+
+    #[test]
+    fn decoded_audio_to_tensor_resamples_and_duplicates_mono() {
+        let decoded = DecodedAudio {
+            sample_rate: 8_000,
+            channels: vec![vec![0.0, 1.0, 0.0, -1.0]],
+        };
+
+        let waveform = decoded.to_tensor(16_000, 2, &Device::Cpu).unwrap();
+
+        assert_eq!(waveform.dims3().unwrap(), (1, 2, 8));
+        let channels = waveform.i(0).unwrap().to_vec2::<f32>().unwrap();
+        assert_eq!(channels[0], channels[1]);
+    }
+
+    #[test]
+    fn waveform_to_log_mel_emits_expected_shape() {
+        let waveform = Tensor::zeros((1, 2, 640), DType::F32, &Device::Cpu).unwrap();
+
+        let mel = waveform_to_log_mel(&waveform, 16_000, 4, 160, 1024, &Device::Cpu).unwrap();
+
+        assert_eq!(mel.dims4().unwrap(), (1, 2, 5, 4));
     }
 }

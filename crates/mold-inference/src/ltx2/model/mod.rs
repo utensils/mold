@@ -10,8 +10,8 @@ pub mod vocoder;
 
 #[allow(unused_imports)]
 pub use audio_vae::{
-    AudioCausalityAxis, AudioNormType, Ltx2AudioDecoder, Ltx2AudioDecoderConfig, Ltx2AudioEncoder,
-    Ltx2AudioEncoderConfig,
+    AudioCausalityAxis, AudioNormType, DecodedAudio, Ltx2AudioDecoder, Ltx2AudioDecoderConfig,
+    Ltx2AudioEncoder, Ltx2AudioEncoderConfig,
 };
 #[allow(unused_imports)]
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};

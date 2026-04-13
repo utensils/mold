@@ -2979,12 +2979,18 @@ impl Ltx2AvTransformer3DModel {
 
     fn prepare_self_attention_mask(mask: Option<&Tensor>, dtype: DType) -> Result<Option<Tensor>> {
         match mask {
-            Some(mask) => Ok(Some(
-                mask.to_dtype(dtype)?
-                    .affine(1.0, -1.0)?
-                    .affine(10000.0, 0.0)?
-                    .unsqueeze(1)?,
-            )),
+            Some(mask) => {
+                let mask_f32 = mask.to_dtype(DType::F32)?;
+                let positive = mask_f32.gt(&mask_f32.zeros_like()?)?;
+                let log_bias = mask_f32.clamp(f32::MIN_POSITIVE, f32::INFINITY)?.log()?;
+                let neg_inf =
+                    Tensor::full(f32::NEG_INFINITY, mask_f32.shape().dims(), mask.device())?;
+                let bias = positive
+                    .where_cond(&log_bias, &neg_inf)?
+                    .to_dtype(dtype)?
+                    .unsqueeze(1)?;
+                Ok(Some(bias))
+            }
             None => Ok(None),
         }
     }
@@ -4031,6 +4037,32 @@ mod tests {
 
         assert_eq!(modulated.dtype(), DType::BF16);
         assert_eq!(gated.dtype(), DType::BF16);
+    }
+
+    #[test]
+    fn prepare_self_attention_mask_matches_upstream_log_bias_semantics() {
+        let raw = Tensor::new(
+            &[[[1.0f32, 0.5, 0.0], [0.25, 1.0, 0.125], [0.0, 0.0, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let mask = Ltx2AvTransformer3DModel::prepare_self_attention_mask(Some(&raw), DType::BF16)
+            .unwrap()
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+
+        let values = mask.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(mask.dims4().unwrap(), (1, 1, 3, 3));
+        assert!((values[0] - 0.0).abs() < 1e-6);
+        assert!((values[1] - 0.5f32.ln()).abs() < 1e-2);
+        assert!(values[2].is_infinite() && values[2].is_sign_negative());
+        assert!((values[3] - 0.25f32.ln()).abs() < 1e-2);
+        assert!((values[5] - 0.125f32.ln()).abs() < 1e-2);
+        assert!(values[6].is_infinite() && values[6].is_sign_negative());
+        assert!(values[7].is_infinite() && values[7].is_sign_negative());
+        assert!((values[8] - 0.0).abs() < 1e-6);
     }
 
     #[test]
