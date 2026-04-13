@@ -863,16 +863,16 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.spatial_upscale.is_none()
         && plan.temporal_upscale.is_none();
     match plan.pipeline {
-        PipelineKind::Distilled => native_plain_or_image_conditioning,
+        PipelineKind::Distilled => {
+            native_plain_or_image_conditioning && plan.temporal_upscale.is_none()
+        }
         PipelineKind::OneStage => {
             native_plain_or_image_conditioning
                 && plan.spatial_upscale.is_none()
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::TwoStage | PipelineKind::TwoStageHq | PipelineKind::Keyframe => {
-            native_plain_or_image_conditioning
-                && plan.spatial_upscale.is_none()
-                && plan.temporal_upscale.is_none()
+            native_plain_or_image_conditioning && plan.temporal_upscale.is_none()
         }
         PipelineKind::A2Vid => native_audio_conditioning,
         PipelineKind::IcLora => native_ic_lora,
@@ -5556,6 +5556,34 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(!super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_distilled_spatial_upscale_runs() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::Distilled;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_two_stage_spatial_upscale_runs() {
+        let mut req = req("ltx-2-19b:fp8", OutputFormat::Mp4, Some(false));
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
     }
 
     #[test]
