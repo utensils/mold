@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{Device, Tensor};
 use mold_core::{GenerateRequest, LoraWeight};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +135,40 @@ pub(crate) fn load_lora_registry(loras: &[LoraWeight]) -> Result<Option<Arc<Ltx2
     } else {
         Ok(Some(Arc::new(registry)))
     }
+}
+
+fn read_reference_downscale_factor(path: &Path) -> usize {
+    let Ok(data) = std::fs::read(path) else {
+        return 1;
+    };
+    let Ok((_header_len, metadata)) = safetensors::tensor::SafeTensors::read_metadata(&data) else {
+        return 1;
+    };
+    metadata
+        .metadata()
+        .as_ref()
+        .and_then(|metadata| metadata.get("reference_downscale_factor"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
+pub(crate) fn reference_video_downscale_factor(loras: &[LoraWeight]) -> Result<usize> {
+    let mut resolved = 1usize;
+    for lora in loras {
+        let scale = read_reference_downscale_factor(Path::new(&lora.path));
+        if scale == 1 {
+            continue;
+        }
+        if resolved != 1 && resolved != scale {
+            bail!(
+                "conflicting reference_downscale_factor values in LoRAs: already have {resolved}, but {} specifies {scale}",
+                PathBuf::from(&lora.path).display()
+            );
+        }
+        resolved = scale;
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn normalize_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
@@ -368,5 +402,78 @@ mod tests {
         assert!((adapters[0].scale - 1.0).abs() < 1e-6);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reference_video_downscale_factor_reads_metadata() {
+        let path = temp_file("ref-scale");
+        let data = vec![0u8; 4 * std::mem::size_of::<f32>()];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 4], &data).unwrap(),
+        );
+        let metadata = Some(HashMap::from([(
+            "reference_downscale_factor".to_string(),
+            "2".to_string(),
+        )]));
+        serialize_to_file(&tensors, &metadata, &path).unwrap();
+
+        let scale = reference_video_downscale_factor(&[LoraWeight {
+            path: path.to_string_lossy().to_string(),
+            scale: 1.0,
+        }])
+        .unwrap();
+
+        assert_eq!(scale, 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reference_video_downscale_factor_rejects_conflicting_values() {
+        let path_one = temp_file("ref-scale-one");
+        let path_two = temp_file("ref-scale-two");
+        let data = vec![0u8; 4 * std::mem::size_of::<f32>()];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 4], &data).unwrap(),
+        );
+        serialize_to_file(
+            &tensors,
+            &Some(HashMap::from([(
+                "reference_downscale_factor".to_string(),
+                "2".to_string(),
+            )])),
+            &path_one,
+        )
+        .unwrap();
+        serialize_to_file(
+            &tensors,
+            &Some(HashMap::from([(
+                "reference_downscale_factor".to_string(),
+                "4".to_string(),
+            )])),
+            &path_two,
+        )
+        .unwrap();
+
+        let err = reference_video_downscale_factor(&[
+            LoraWeight {
+                path: path_one.to_string_lossy().to_string(),
+                scale: 1.0,
+            },
+            LoraWeight {
+                path: path_two.to_string_lossy().to_string(),
+                scale: 1.0,
+            },
+        ])
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("conflicting reference_downscale_factor"));
+        let _ = std::fs::remove_file(path_one);
+        let _ = std::fs::remove_file(path_two);
     }
 }

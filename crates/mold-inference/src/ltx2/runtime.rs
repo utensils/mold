@@ -19,6 +19,7 @@ use super::guidance::{
     BatchedPerturbationConfig, MultiModalGuider, MultiModalGuiderParams, Perturbation,
     PerturbationConfig, PerturbationType,
 };
+use super::lora;
 use super::media;
 use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
@@ -466,10 +467,10 @@ impl Ltx2RuntimeSession {
             PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device),
             PipelineKind::TwoStage
             | PipelineKind::TwoStageHq
+            | PipelineKind::IcLora
             | PipelineKind::Keyframe
             | PipelineKind::A2Vid => render_real_two_stage_av(plan, prepared, device),
             PipelineKind::Retake => render_real_retake_av(plan, prepared, device),
-            _ => return Ok(None),
         };
         match render {
             Ok(rendered) => Ok(Some(rendered)),
@@ -734,7 +735,7 @@ fn effective_native_guidance_scale(plan: &Ltx2GeneratePlan) -> f64 {
 
 fn stage_guidance_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<f64> {
     Ok(match (plan.pipeline, stage_index) {
-        (PipelineKind::Distilled | PipelineKind::Retake, _) => 1.0,
+        (PipelineKind::Distilled | PipelineKind::IcLora | PipelineKind::Retake, _) => 1.0,
         (PipelineKind::TwoStage, 1)
         | (PipelineKind::TwoStageHq, 1)
         | (PipelineKind::A2Vid, 1)
@@ -853,6 +854,14 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
         && plan.loras.is_empty()
         && plan.spatial_upscale.is_none()
         && plan.temporal_upscale.is_none();
+    let native_ic_lora = plan.conditioning.audio_path.is_none()
+        && plan.conditioning.video_path.is_some()
+        && plan.execution_graph.uses_reference_video_conditioning
+        && !plan.execution_graph.uses_audio_conditioning
+        && !plan.execution_graph.uses_retake_masking
+        && !plan.loras.is_empty()
+        && plan.spatial_upscale.is_none()
+        && plan.temporal_upscale.is_none();
     match plan.pipeline {
         PipelineKind::Distilled => native_plain_or_image_conditioning,
         PipelineKind::OneStage => {
@@ -866,8 +875,8 @@ fn supports_real_video_path(plan: &Ltx2GeneratePlan) -> bool {
                 && plan.temporal_upscale.is_none()
         }
         PipelineKind::A2Vid => native_audio_conditioning,
+        PipelineKind::IcLora => native_ic_lora,
         PipelineKind::Retake => native_retake,
-        _ => false,
     }
 }
 
@@ -887,6 +896,9 @@ fn denoise_pass_plan(
 }
 
 fn stage_lora_stack(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Vec<LoraWeight>> {
+    if matches!(plan.pipeline, PipelineKind::IcLora) && stage_index > 0 {
+        return Ok(Vec::new());
+    }
     let mut loras = plan.loras.clone();
     if let Some(scale) = stage_distilled_lora_scale(plan, stage_index)? {
         let path = plan
@@ -974,13 +986,56 @@ fn offset_video_time_positions(pixel_coords: &Tensor, frame_offset: u32) -> Resu
     Tensor::cat(&[temporal, height_width], 1).map_err(Into::into)
 }
 
+fn scale_video_spatial_positions(positions: &Tensor, factor: usize) -> Result<Tensor> {
+    if factor == 1 {
+        return Ok(positions.clone());
+    }
+    let temporal = positions.i((.., 0..1, .., ..))?;
+    let height = positions
+        .i((.., 1..2, .., ..))?
+        .affine(factor as f64, 0.0)?;
+    let width = positions
+        .i((.., 2..3, .., ..))?
+        .affine(factor as f64, 0.0)?;
+    Tensor::cat(&[temporal, height, width], 1).map_err(Into::into)
+}
+
+fn append_condition_from_video_latents(
+    latents: &Tensor,
+    pixel_shape: VideoPixelShape,
+    frame_offset: u32,
+    spatial_position_scale: usize,
+    strength: f64,
+) -> Result<VideoTokenAppendCondition> {
+    let patchifier = VideoLatentPatchifier::new(1);
+    let tokens = patchifier.patchify(&latents.to_dtype(DType::F32)?)?;
+    let latent_shape = video_latent_shape_from_tensor(latents)?;
+    let latent_coords = patchifier.get_patch_grid_bounds(latent_shape, latents.device())?;
+    let pixel_coords =
+        get_pixel_coords(&latent_coords, SpatioTemporalScaleFactors::default(), true)?;
+    let positions = scale_video_spatial_positions(
+        &scale_video_time_to_seconds(
+            &offset_video_time_positions(&pixel_coords, frame_offset)?,
+            pixel_shape.fps,
+        )?,
+        spatial_position_scale,
+    )?
+    .to_dtype(DType::F32)?;
+    Ok(VideoTokenAppendCondition {
+        tokens,
+        positions,
+        strength,
+    })
+}
+
 fn maybe_load_stage_video_conditioning(
     plan: &Ltx2GeneratePlan,
     pixel_shape: VideoPixelShape,
     device: &candle_core::Device,
     dtype: DType,
+    include_reference_video: bool,
 ) -> Result<StageVideoConditioning> {
-    if plan.conditioning.images.is_empty() {
+    if plan.conditioning.images.is_empty() && !include_reference_video {
         return Ok(StageVideoConditioning::default());
     }
 
@@ -1021,24 +1076,71 @@ fn maybe_load_stage_video_conditioning(
                 strength: image.strength as f64,
             });
         } else {
-            let latent_shape = video_latent_shape_from_tensor(&latents)?;
-            let latent_coords = patchifier.get_patch_grid_bounds(latent_shape, device)?;
-            let pixel_coords = get_pixel_coords(
-                &latent_coords,
-                SpatioTemporalScaleFactors::default(),
-                image.frame == 0,
-            )?;
-            let positions = scale_video_time_to_seconds(
-                &offset_video_time_positions(&pixel_coords, image.frame)?,
-                pixel_shape.fps,
-            )?
-            .to_dtype(DType::F32)?;
-            conditioning.appended.push(VideoTokenAppendCondition {
-                tokens,
-                positions,
-                strength: image.strength as f64,
-            });
+            conditioning
+                .appended
+                .push(append_condition_from_video_latents(
+                    &latents,
+                    pixel_shape,
+                    image.frame,
+                    1,
+                    image.strength as f64,
+                )?);
         }
+    }
+    if include_reference_video {
+        let video_path = plan.conditioning.video_path.as_ref().with_context(|| {
+            format!(
+                "native {:?} stage requested reference video conditioning without a staged source_video",
+                plan.pipeline
+            )
+        })?;
+        let reference_downscale_factor = lora::reference_video_downscale_factor(&plan.loras)?;
+        if pixel_shape.width % reference_downscale_factor != 0
+            || pixel_shape.height % reference_downscale_factor != 0
+        {
+            anyhow::bail!(
+                "native LTX-2 IC-LoRA output dimensions ({}x{}) must be divisible by reference_downscale_factor ({reference_downscale_factor})",
+                pixel_shape.width,
+                pixel_shape.height
+            );
+        }
+        let ref_width = pixel_shape.width / reference_downscale_factor;
+        let ref_height = pixel_shape.height / reference_downscale_factor;
+        let (_metadata, mut frames) = media::decode_video_frames(Path::new(video_path))?;
+        if frames.len() > pixel_shape.frames {
+            frames.truncate(pixel_shape.frames);
+        }
+        let resized = frames
+            .into_iter()
+            .map(|frame| {
+                if frame.width() == ref_width as u32 && frame.height() == ref_height as u32 {
+                    frame
+                } else {
+                    imageops::resize(
+                        &frame,
+                        ref_width as u32,
+                        ref_height as u32,
+                        imageops::FilterType::Lanczos3,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let video = video_tensor_from_frames(&resized, device, dtype)?;
+        let latents = vae.encode(&video).with_context(|| {
+            format!(
+                "failed to encode native LTX-2 IC-LoRA reference video '{}'",
+                video_path
+            )
+        })?;
+        conditioning
+            .appended
+            .push(append_condition_from_video_latents(
+                &latents,
+                pixel_shape,
+                0,
+                reference_downscale_factor,
+                1.0,
+            )?);
     }
     drop(vae);
     if device.is_cuda() {
@@ -1430,8 +1532,13 @@ fn render_real_distilled_av(
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
-    let stage1_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        prepared.video_pixel_shape,
+        device,
+        dtype,
+        false,
+    )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -1515,7 +1622,7 @@ fn render_real_distilled_av(
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype)?;
+        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -1773,8 +1880,13 @@ fn render_real_two_stage_av(
     let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
     let stage1_sampler = stage_sampler_mode(plan, 0)?;
     let stage1_loras = stage_lora_stack(plan, 0)?;
-    let stage1_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        prepared.video_pixel_shape,
+        device,
+        dtype,
+        matches!(plan.pipeline, PipelineKind::IcLora),
+    )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
@@ -1858,7 +1970,7 @@ fn render_real_two_stage_av(
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
     let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype)?;
+        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
         debug_vae.use_tiling = false;
@@ -2114,8 +2226,13 @@ fn render_real_one_stage_av(
 
     let dtype = gpu_dtype(device);
     let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
-    let stage1_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage1_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        prepared.video_pixel_shape,
+        device,
+        dtype,
+        false,
+    )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
@@ -2255,8 +2372,13 @@ fn render_real_retake_av(
         dtype,
     )?
     .context("native LTX-2 retake requires a source_video")?;
-    let stage_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, prepared.video_pixel_shape, device, dtype)?;
+    let stage_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        prepared.video_pixel_shape,
+        device,
+        dtype,
+        false,
+    )?;
     let video_retake_mask =
         build_temporal_token_denoise_mask(retake_range, &video_positions, device)?;
     let stage1_video_noise = seeded_randn(
@@ -4287,7 +4409,8 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
     use mold_core::{
-        GenerateRequest, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat, TimeRange,
+        GenerateRequest, LoraWeight, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat,
+        TimeRange,
     };
 
     use super::{
@@ -4557,12 +4680,13 @@ mod tests {
         preset: crate::ltx2::preset::Ltx2ModelPreset,
         conditioning: StagedConditioning,
     ) -> Ltx2GeneratePlan {
+        let loras = crate::ltx2::lora::normalize_loras(req);
         let graph = crate::ltx2::execution::build_execution_graph(
             req,
             PipelineKind::Distilled,
             &conditioning,
             &preset,
-            0,
+            loras.len(),
         );
         Ltx2GeneratePlan {
             pipeline: PipelineKind::Distilled,
@@ -4589,7 +4713,7 @@ mod tests {
             quantization: Some("fp8-cast".to_string()),
             streaming_prefetch_count: Some(2),
             conditioning,
-            loras: vec![],
+            loras,
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
@@ -4975,6 +5099,30 @@ mod tests {
     }
 
     #[test]
+    fn ic_lora_runtime_keeps_requested_stage1_shape() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::IcLora;
+        rebuild_execution_graph(&mut plan, &req);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 608);
+        assert_eq!(prepared.video_pixel_shape.height, 352);
+        assert_eq!(prepared.video_latent_shape.width, 19);
+        assert_eq!(prepared.video_latent_shape.height, 11);
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_plain_silent_one_stage_runs() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -5201,6 +5349,27 @@ mod tests {
     }
 
     #[test]
+    fn scale_video_spatial_positions_multiplies_only_height_and_width_axes() {
+        let positions = Tensor::from_vec(
+            vec![
+                0.5f32, 1.5, //
+                10.0, 11.0, //
+                20.0, 21.0,
+            ],
+            (1, 3, 1, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let scaled = super::scale_video_spatial_positions(&positions, 2).unwrap();
+
+        assert_eq!(
+            scaled.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.5, 1.5, 20.0, 22.0, 40.0, 42.0]
+        );
+    }
+
+    #[test]
     fn supports_real_video_path_accepts_plain_silent_two_stage_runs() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -5222,6 +5391,24 @@ mod tests {
         let preset = preset_for_model(&req.model).unwrap();
         let mut plan = build_plan(&req, preset, conditioning);
         plan.pipeline = PipelineKind::A2Vid;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn supports_real_video_path_accepts_ic_lora_runs() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::IcLora;
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
@@ -5278,6 +5465,30 @@ mod tests {
         let loras = super::stage_lora_stack(&plan, 1).unwrap();
 
         assert!(loras.is_empty());
+    }
+
+    #[test]
+    fn stage_lora_stack_skips_user_loras_for_ic_lora_second_pass() {
+        let mut req = req("ltx-2-19b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 0.8,
+        }]);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::IcLora;
+        rebuild_execution_graph(&mut plan, &req);
+
+        let stage1_loras = super::stage_lora_stack(&plan, 0).unwrap();
+        let stage2_loras = super::stage_lora_stack(&plan, 1).unwrap();
+
+        assert_eq!(stage1_loras.len(), 1);
+        assert!(stage2_loras.is_empty());
+        assert_eq!(super::stage_guidance_scale(&plan, 0).unwrap(), 1.0);
+        assert_eq!(super::stage_guidance_scale(&plan, 1).unwrap(), 1.0);
     }
 
     #[test]
