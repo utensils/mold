@@ -31,10 +31,11 @@ features:
       image, saves to disk.'
   - icon:
       src: /icons/grid.svg
-    title: 10 Model Families
+    title: 11 Model Families
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
-      Qwen-Image-Edit, Wuerstchen v2, and LTX Video. Images and video.
-      Quantized variants fit any GPU.
+      Qwen-Image-Edit, Wuerstchen v2, LTX Video, and LTX-2 / LTX-2.3. Images,
+      native joint audio-video, and quantized variants that fit a wide range of
+      GPUs.
   - icon:
       src: /icons/rust.svg
     title: Linux NVIDIA + macOS Metal

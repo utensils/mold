@@ -19,6 +19,10 @@ struct LatentUpsamplerConfig {
     spatial_upsample: bool,
     #[serde(default)]
     temporal_upsample: bool,
+    #[serde(default = "default_spatial_scale")]
+    spatial_scale: f32,
+    #[serde(default)]
+    rational_resampler: bool,
 }
 
 impl Default for LatentUpsamplerConfig {
@@ -30,6 +34,8 @@ impl Default for LatentUpsamplerConfig {
             dims: default_dims(),
             spatial_upsample: default_spatial_upsample(),
             temporal_upsample: false,
+            spatial_scale: default_spatial_scale(),
+            rational_resampler: false,
         }
     }
 }
@@ -52,6 +58,10 @@ fn default_dims() -> usize {
 
 fn default_spatial_upsample() -> bool {
     true
+}
+
+fn default_spatial_scale() -> f32 {
+    2.0
 }
 
 #[derive(Clone, Debug)]
@@ -108,26 +118,26 @@ impl NonCausalConv3d {
         })
     }
 
-    fn pad_time_replicate(&self, x: &Tensor) -> Result<Tensor> {
-        let (_, _, t, _, _) = x.dims5()?;
+    fn pad_time(&self, x: &Tensor) -> Result<Tensor> {
+        let (b, c, _t, h, w) = x.dims5()?;
         if self.kt <= 1 {
             return Ok(x.clone());
         }
 
         let left = (self.kt - 1) / 2;
         let right = (self.kt - 1) / 2;
-        let first = x.i((.., .., 0, .., ..))?.unsqueeze(2)?;
-        let last = x.i((.., .., t - 1, .., ..))?.unsqueeze(2)?;
 
+        // Match upstream Conv3d(..., padding=1) semantics for the LTX-2
+        // spatial upsampler: temporal padding is zero-filled, not replicated.
         let pad_left = if left == 0 {
             None
         } else {
-            Some(first.repeat((1, 1, left, 1, 1))?)
+            Some(Tensor::zeros((b, c, left, h, w), x.dtype(), x.device())?)
         };
         let pad_right = if right == 0 {
             None
         } else {
-            Some(last.repeat((1, 1, right, 1, 1))?)
+            Some(Tensor::zeros((b, c, right, h, w), x.dtype(), x.device())?)
         };
 
         match (pad_left, pad_right) {
@@ -139,7 +149,7 @@ impl NonCausalConv3d {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = self.pad_time_replicate(x)?;
+        let x = self.pad_time(x)?;
         let (_, _, t_pad, _, _) = x.dims5()?;
         let needed = (self.kt - 1) * self.dil_t + 1;
         if t_pad < needed {
@@ -218,15 +228,123 @@ pub struct LatentUpsampler {
     initial_conv: NonCausalConv3d,
     initial_norm: GroupNorm,
     res_blocks: Vec<ResBlock3d>,
-    upsample_conv: Conv2d,
+    upsampler: Upsampler,
     post_upsample_res_blocks: Vec<ResBlock3d>,
     final_conv: NonCausalConv3d,
+}
+
+enum Upsampler {
+    Spatial(SpatialUpsampler2d),
+    Temporal(TemporalUpsampler3d),
+    SpatioTemporal(SpatioTemporalUpsampler3d),
+}
+
+enum SpatialUpsampler2d {
+    PixelShuffle {
+        conv: Conv2d,
+        scale: usize,
+    },
+    Rational {
+        conv: Conv2d,
+        scale: usize,
+        blur_down: Conv2d,
+    },
+}
+
+impl SpatialUpsampler2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::PixelShuffle { conv, scale } => {
+                let x = conv.forward(x)?;
+                Ok(candle_nn::ops::pixel_shuffle(&x, *scale)?)
+            }
+            Self::Rational {
+                conv,
+                scale,
+                blur_down,
+            } => {
+                let x = conv.forward(x)?;
+                let x = candle_nn::ops::pixel_shuffle(&x, *scale)?;
+                Ok(blur_down.forward(&x)?)
+            }
+        }
+    }
+}
+
+struct TemporalUpsampler3d {
+    conv: NonCausalConv3d,
+    scale: usize,
+}
+
+impl TemporalUpsampler3d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = self.conv.forward(x)?;
+        pixel_shuffle_time(&x, self.scale)
+    }
+}
+
+struct SpatioTemporalUpsampler3d {
+    conv: NonCausalConv3d,
+    scale_t: usize,
+    scale_h: usize,
+    scale_w: usize,
+}
+
+impl SpatioTemporalUpsampler3d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = self.conv.forward(x)?;
+        pixel_shuffle_3d(&x, self.scale_t, self.scale_h, self.scale_w)
+    }
+}
+
+fn pixel_shuffle_time(x: &Tensor, scale: usize) -> Result<Tensor> {
+    let (b, channels, frames, height, width) = x.dims5()?;
+    if channels % scale != 0 {
+        bail!("temporal pixel shuffle requires channels ({channels}) divisible by scale ({scale})");
+    }
+    let out_channels = channels / scale;
+    x.reshape((b, out_channels, scale, frames, height, width))?
+        .permute((0, 1, 3, 2, 4, 5))?
+        .reshape((b, out_channels, frames * scale, height, width))
+        .map_err(Into::into)
+}
+
+fn pixel_shuffle_3d(x: &Tensor, scale_t: usize, scale_h: usize, scale_w: usize) -> Result<Tensor> {
+    let (b, channels, frames, height, width) = x.dims5()?;
+    let scale = scale_t * scale_h * scale_w;
+    if channels % scale != 0 {
+        bail!(
+            "3D pixel shuffle requires channels ({channels}) divisible by scale product ({scale})"
+        );
+    }
+    let out_channels = channels / scale;
+    let shape = [
+        b,
+        out_channels,
+        scale_t,
+        scale_h,
+        scale_w,
+        frames,
+        height,
+        width,
+    ];
+    let dims = [0usize, 1, 5, 2, 6, 3, 7, 4];
+    x.reshape(&shape)?
+        .permute(dims.as_slice())?
+        .reshape((
+            b,
+            out_channels,
+            frames * scale_t,
+            height * scale_h,
+            width * scale_w,
+        ))
+        .map_err(Into::into)
 }
 
 impl LatentUpsampler {
     pub fn load(path: &Path, dtype: DType, device: &candle_core::Device) -> Result<Self> {
         let config = Self::load_config(path)?;
-        if config.dims != 3 || !config.spatial_upsample || config.temporal_upsample {
+        if config.dims != 3 || (!config.spatial_upsample && !config.temporal_upsample) {
             bail!(
                 "unsupported latent upsampler config: dims={}, spatial_upsample={}, temporal_upsample={}",
                 config.dims,
@@ -255,11 +373,59 @@ impl LatentUpsampler {
                     path.display()
                 )
             })?;
+        let tensors = safetensors::SafeTensors::deserialize(&data).with_context(|| {
+            format!(
+                "failed to parse latent upsampler tensors from {}",
+                path.display()
+            )
+        })?;
         let metadata = metadata.metadata().as_ref();
-        let Some(config_json) = metadata.and_then(|metadata| metadata.get("config")) else {
-            return Ok(LatentUpsamplerConfig::default());
+        let mut config =
+            if let Some(config_json) = metadata.and_then(|metadata| metadata.get("config")) {
+                serde_json::from_str(config_json)?
+            } else {
+                LatentUpsamplerConfig::default()
+            };
+
+        if let Ok(tensor) = tensors.tensor("initial_conv.bias") {
+            config.mid_channels = tensor.shape()[0];
+        }
+        if let Ok(tensor) = tensors.tensor("final_conv.bias") {
+            config.in_channels = tensor.shape()[0];
+        }
+        if tensors.tensor("upsampler.conv.weight").is_ok() {
+            config.rational_resampler = true;
+        }
+
+        let upsampler_weight = if let Ok(tensor) = tensors.tensor("upsampler.conv.weight") {
+            Some(tensor)
+        } else {
+            tensors.tensor("upsampler.0.weight").ok()
         };
-        Ok(serde_json::from_str(config_json)?)
+        if let Some(weight) = upsampler_weight {
+            let ratio = weight.shape()[0] / config.mid_channels.max(1);
+            config.spatial_scale = match ratio {
+                4 => 2.0,
+                9 => 1.5,
+                16 => 4.0,
+                _ => config.spatial_scale,
+            };
+        }
+
+        let mut block_count = 0usize;
+        loop {
+            let key = format!("res_blocks.{block_count}.conv1.weight");
+            if tensors.tensor(&key).is_ok() {
+                block_count += 1;
+            } else {
+                break;
+            }
+        }
+        if block_count > 0 {
+            config.num_blocks_per_stage = block_count;
+        }
+
+        Ok(config)
     }
 
     fn new(config: LatentUpsamplerConfig, vb: VarBuilder) -> Result<Self> {
@@ -282,16 +448,89 @@ impl LatentUpsampler {
             )?);
         }
 
-        let upsample_conv = conv2d(
-            config.mid_channels,
-            4 * config.mid_channels,
-            3,
-            Conv2dConfig {
-                padding: 1,
-                ..Default::default()
-            },
-            vb.pp("upsampler.0"),
-        )?;
+        let upsampler = if config.spatial_upsample && config.temporal_upsample {
+            Upsampler::SpatioTemporal(SpatioTemporalUpsampler3d {
+                conv: NonCausalConv3d::new(
+                    config.mid_channels,
+                    8 * config.mid_channels,
+                    (3, 3, 3),
+                    (1, 1, 1),
+                    (1, 1, 1),
+                    1,
+                    vb.pp("upsampler.0"),
+                )?,
+                scale_t: 2,
+                scale_h: 2,
+                scale_w: 2,
+            })
+        } else if config.temporal_upsample {
+            Upsampler::Temporal(TemporalUpsampler3d {
+                conv: NonCausalConv3d::new(
+                    config.mid_channels,
+                    2 * config.mid_channels,
+                    (3, 3, 3),
+                    (1, 1, 1),
+                    (1, 1, 1),
+                    1,
+                    vb.pp("upsampler.0"),
+                )?,
+                scale: 2,
+            })
+        } else if config.rational_resampler {
+            let scale = match config.spatial_scale {
+                scale if (scale - 1.5).abs() < f32::EPSILON => 3,
+                scale if (scale - 2.0).abs() < f32::EPSILON => 2,
+                scale if (scale - 4.0).abs() < f32::EPSILON => 4,
+                other => bail!("unsupported rational latent upsampler scale: {other}"),
+            };
+            let den = match scale {
+                3 => 2,
+                2 | 4 => 1,
+                _ => unreachable!("validated scale above"),
+            };
+            let conv = conv2d(
+                config.mid_channels,
+                scale * scale * config.mid_channels,
+                3,
+                Conv2dConfig {
+                    padding: 1,
+                    ..Default::default()
+                },
+                vb.pp("upsampler").pp("conv"),
+            )?;
+            let blur_kernel = vb
+                .pp("upsampler")
+                .pp("blur_down")
+                .get((1, 1, 5, 5), "kernel")?
+                .repeat((config.mid_channels, 1, 1, 1))?;
+            let blur_down = Conv2d::new(
+                blur_kernel,
+                None,
+                Conv2dConfig {
+                    padding: 2,
+                    stride: den,
+                    groups: config.mid_channels,
+                    ..Default::default()
+                },
+            );
+            Upsampler::Spatial(SpatialUpsampler2d::Rational {
+                conv,
+                scale,
+                blur_down,
+            })
+        } else {
+            let conv = conv2d(
+                config.mid_channels,
+                4 * config.mid_channels,
+                3,
+                Conv2dConfig {
+                    padding: 1,
+                    ..Default::default()
+                },
+                vb.pp("upsampler.0"),
+            )?;
+            Upsampler::Spatial(SpatialUpsampler2d::PixelShuffle { conv, scale: 2 })
+        };
 
         let mut post_upsample_res_blocks = Vec::with_capacity(config.num_blocks_per_stage);
         for i in 0..config.num_blocks_per_stage {
@@ -316,7 +555,7 @@ impl LatentUpsampler {
             initial_conv,
             initial_norm,
             res_blocks,
-            upsample_conv,
+            upsampler,
             post_upsample_res_blocks,
             final_conv,
         })
@@ -331,20 +570,73 @@ impl LatentUpsampler {
             x = block.forward(&x)?;
         }
 
-        // Spatial-only upsampling: flatten frames into the batch, apply the
-        // 2D conv + pixel shuffle branch, then restore [B, C, F, H, W].
-        let x2 = x
-            .permute((0, 2, 1, 3, 4))?
-            .reshape((b * f, self.config.mid_channels, h, w))?;
-        let x2 = self.upsample_conv.forward(&x2)?;
-        let x2 = candle_nn::ops::pixel_shuffle(&x2, 2)?;
-        let (_bf, c2, h2, w2) = x2.dims4()?;
-        let mut x = x2.reshape((b, f, c2, h2, w2))?.permute((0, 2, 1, 3, 4))?;
+        let mut x = match &self.upsampler {
+            Upsampler::Spatial(upsampler) => {
+                let x2 =
+                    x.permute((0, 2, 1, 3, 4))?
+                        .reshape((b * f, self.config.mid_channels, h, w))?;
+                let x2 = upsampler.forward(&x2)?;
+                let (_bf, c2, h2, w2) = x2.dims4()?;
+                x2.reshape((b, f, c2, h2, w2))?.permute((0, 2, 1, 3, 4))?
+            }
+            Upsampler::Temporal(upsampler) => {
+                let x = upsampler.forward(&x)?;
+                x.i((.., .., 1.., .., ..))?
+            }
+            Upsampler::SpatioTemporal(upsampler) => {
+                let x = upsampler.forward(&x)?;
+                x.i((.., .., 1.., .., ..))?
+            }
+        };
 
         for block in &self.post_upsample_res_blocks {
             x = block.forward(&x)?;
         }
 
         self.final_conv.forward(&x)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::{Device, Tensor};
+    use candle_nn::VarBuilder;
+
+    use super::{pixel_shuffle_time, NonCausalConv3d};
+
+    #[test]
+    fn upsampler_conv3d_matches_zero_padded_temporal_convolution() {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 4.0], (1, 1, 3, 1, 1), &device).unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::from_vec(vec![0.0f32], 1, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, candle_core::DType::F32, &device);
+        let conv = NonCausalConv3d::new(1, 1, (3, 1, 1), (1, 1, 1), (1, 1, 1), 1, vb).unwrap();
+
+        let input = Tensor::from_vec(vec![10.0f32, 20.0], (1, 1, 2, 1, 1), &device).unwrap();
+        let output = conv.forward(&input).unwrap();
+
+        let actual = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(actual, vec![100.0, 50.0]);
+    }
+
+    #[test]
+    fn temporal_pixel_shuffle_doubles_time_axis() {
+        let device = Device::Cpu;
+        let input =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2, 1, 1), &device).unwrap();
+        let output = pixel_shuffle_time(&input, 2).unwrap();
+
+        assert_eq!(output.dims5().unwrap(), (1, 1, 4, 1, 1));
+        let actual = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(actual, vec![1.0, 3.0, 2.0, 4.0]);
     }
 }

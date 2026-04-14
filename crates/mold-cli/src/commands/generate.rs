@@ -5,8 +5,9 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
-    GenerateRequest, GenerateResponse, GenerateServerAction, ImageData, LoraWeight, MoldClient,
-    OutputFormat, Scheduler,
+    GenerateRequest, GenerateResponse, GenerateServerAction, ImageData, KeyframeCondition,
+    LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient,
+    OutputFormat, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -145,6 +146,20 @@ fn apply_local_engine_env_overrides(
     }
 }
 
+pub struct Ltx2Options {
+    pub frames: Option<u32>,
+    pub fps: Option<u32>,
+    pub enable_audio: Option<bool>,
+    pub audio_file: Option<Vec<u8>>,
+    pub source_video: Option<Vec<u8>>,
+    pub keyframes: Option<Vec<KeyframeCondition>>,
+    pub pipeline: Option<Ltx2PipelineMode>,
+    pub loras: Option<Vec<LoraWeight>>,
+    pub retake_range: Option<TimeRange>,
+    pub spatial_upscale: Option<Ltx2SpatialUpscale>,
+    pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
@@ -156,8 +171,7 @@ pub async fn run(
     guidance: Option<f64>,
     seed: Option<u64>,
     batch: u32,
-    frames: Option<u32>,
-    fps: Option<u32>,
+    ltx2: Ltx2Options,
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
@@ -183,9 +197,39 @@ pub async fn run(
     lora: Option<LoraWeight>,
     expand: Option<bool>,
 ) -> Result<()> {
-    // Default video models to APNG (lossless, metadata-rich) unless user specified a format
-    let output_format = if frames.is_some() && format == OutputFormat::Png {
-        OutputFormat::Apng
+    let Ltx2Options {
+        frames,
+        fps,
+        enable_audio,
+        audio_file,
+        source_video,
+        keyframes,
+        pipeline,
+        loras,
+        retake_range,
+        spatial_upscale,
+        temporal_upscale,
+    } = ltx2;
+
+    // Load config and pull model-specific defaults.
+    let ctx = CliContext::new(host.as_deref());
+    let config = ctx.config().clone();
+    // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
+    // Otherwise we defer to env/config/default precedence inside Config.
+    let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
+    let model_cfg = config.resolved_model_config(model);
+    let family = resolve_family(model, &config);
+    let effective_frames = frames.or_else(|| model_cfg.effective_frames());
+    let effective_fps = fps.or_else(|| model_cfg.effective_fps());
+    let is_ltx2 = family.as_deref() == Some("ltx2");
+
+    // Default video models to a sensible container unless the user explicitly picked one.
+    let output_format = if format == OutputFormat::Png && effective_frames.is_some() {
+        if is_ltx2 {
+            OutputFormat::Mp4
+        } else {
+            OutputFormat::Apng
+        }
     } else {
         format
     };
@@ -201,15 +245,6 @@ pub async fn run(
             );
         }
     }
-
-    // Load config and pull model-specific defaults.
-    let ctx = CliContext::new(host.as_deref());
-    let config = ctx.config().clone();
-    // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
-    // Otherwise we defer to env/config/default precedence inside Config.
-    let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
-    let model_cfg = config.resolved_model_config(model);
-    let family = resolve_family(model, &config);
 
     // Default to the source image size for img2img/inpainting when neither
     // dimension was provided. We still normalize to the validation envelope
@@ -254,10 +289,19 @@ pub async fn run(
         expand,
         original_prompt,
         lora: lora.clone(),
-        frames,
-        fps,
+        frames: effective_frames,
+        fps: effective_fps,
         upscale_model: None,
         gif_preview: preview,
+        enable_audio,
+        audio_file,
+        source_video,
+        keyframes,
+        pipeline,
+        loras,
+        retake_range,
+        spatial_upscale,
+        temporal_upscale,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -329,15 +373,23 @@ pub async fn run(
             control_scale
         );
     }
-    let is_video = frames.is_some();
-    if let Some(f) = frames {
-        let effective_fps = fps.unwrap_or(24);
+    let is_video = effective_frames.is_some();
+    if let Some(f) = effective_frames {
+        let effective_fps = effective_fps.unwrap_or(24);
         status!(
             "{} Video mode: {} frames @ {} fps",
             theme::icon_mode(),
             f,
             effective_fps,
         );
+        if is_ltx2 {
+            let audio_mode = if enable_audio == Some(false) {
+                "silent"
+            } else {
+                "audio+video"
+            };
+            status!("{} LTX-2 pipeline: {}", theme::icon_mode(), audio_mode);
+        }
     }
     status!(
         "{} Generating {}x{} ({} steps, guidance {:.1})",

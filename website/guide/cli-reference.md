@@ -13,44 +13,53 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 
 ### Options
 
-| Flag                               | Description                                                                |
-| ---------------------------------- | -------------------------------------------------------------------------- |
-| `-m, --model <MODEL>`              | Explicit model override                                                    |
-| `-o, --output <PATH>`              | Output file (default: `./mold-{model}-{ts}.png`)                           |
-| `--width <N>`                      | Image width                                                                |
-| `--height <N>`                     | Image height                                                               |
-| `--steps <N>`                      | Inference steps                                                            |
-| `--seed <N>`                       | Random seed                                                                |
-| `--batch <N>`                      | Number of images (1+)                                                      |
-| `--guidance <N>`                   | Guidance scale                                                             |
-| `--frames <N>`                     | Video frame count (8n+1, video models only)                                |
-| `--fps <N>`                        | Video frames per second (default: 24)                                      |
-| `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`                                |
-| `--local`                          | Skip server, run locally                                                   |
-| `--eager`                          | Keep all components loaded (more VRAM)                                     |
-| `--offload`                        | CPU↔GPU block streaming (less VRAM)                                        |
-| `--lora <PATH>`                    | LoRA adapter safetensors                                                   |
-| `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                                                    |
-| `-i, --image <PATH>`               | Source image. Repeat for `qwen-image-edit`; `-` stdin is single-image only |
-| `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                                               |
-| `--mask <PATH>`                    | Inpainting mask                                                            |
-| `--control <PATH>`                 | ControlNet control image                                                   |
-| `--control-model <NAME>`           | ControlNet model name                                                      |
-| `--control-scale <FLOAT>`          | ControlNet scale (0.0–2.0)                                                 |
-| `-n, --negative-prompt`            | Negative prompt (CFG models)                                               |
-| `--no-negative`                    | Suppress config default negative                                           |
-| `--no-metadata`                    | Disable PNG metadata                                                       |
-| `--preview`                        | Display image inline in terminal                                           |
-| `--expand`                         | Enable prompt expansion                                                    |
-| `--no-expand`                      | Disable prompt expansion                                                   |
-| `--expand-backend <URL>`           | Expansion backend URL                                                      |
-| `--expand-model <MODEL>`           | LLM model for expansion                                                    |
-| `--t5-variant <TAG>`               | T5 encoder variant                                                         |
-| `--qwen3-variant <TAG>`            | Qwen3 encoder variant                                                      |
-| `--qwen2-variant <TAG>`            | Qwen2.5-VL text encoder variant for the Qwen family                        |
-| `--qwen2-text-encoder-mode <MODE>` | Qwen2.5-VL placement/staging mode for the Qwen family                      |
-| `--scheduler <SCHED>`              | Noise scheduler (ddim, euler-ancestral, uni-pc)                            |
-| `--host <URL>`                     | Override MOLD_HOST                                                         |
+| Flag                               | Description                                                                                                     |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `-m, --model <MODEL>`              | Explicit model override                                                                                         |
+| `-o, --output <PATH>`              | Output file (default: `./mold-{model}-{ts}.png`)                                                                |
+| `--width <N>`                      | Image width                                                                                                     |
+| `--height <N>`                     | Image height                                                                                                    |
+| `--steps <N>`                      | Inference steps                                                                                                 |
+| `--seed <N>`                       | Random seed                                                                                                     |
+| `--batch <N>`                      | Number of images (1+)                                                                                           |
+| `--guidance <N>`                   | Guidance scale                                                                                                  |
+| `--frames <N>`                     | Video frame count (8n+1, video models only)                                                                     |
+| `--fps <N>`                        | Video frames per second (default: 24)                                                                           |
+| `--audio`, `--no-audio`            | Keep or strip the synchronized audio track for LTX-2 MP4 output                                                 |
+| `--audio-file <PATH>`              | Conditioning audio file for LTX-2 audio-to-video                                                                |
+| `--video <PATH>`                   | Source video for LTX-2 retake / video-conditioning flows                                                        |
+| `--keyframe <FRAME:PATH>`          | LTX-2 keyframe conditioning. Repeat for multiple keyframes                                                      |
+| `--pipeline <MODE>`                | LTX-2 pipeline: `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake` |
+| `--retake <START:END>`             | LTX-2 retake time range in seconds                                                                              |
+| `--camera-control <NAME\|PATH>`    | LTX-2 camera-control preset name or explicit `.safetensors` path                                                |
+| `--spatial-upscale <MODE>`         | LTX-2 spatial upscaling (`x2` across the family, `x1.5` for `ltx-2.3-*`)                                        |
+| `--temporal-upscale <MODE>`        | LTX-2 temporal upscaling (`x2` in the native runtime)                                                           |
+| `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`                                                                     |
+| `--local`                          | Skip server, run locally                                                                                        |
+| `--eager`                          | Keep all components loaded (more VRAM)                                                                          |
+| `--offload`                        | CPU↔GPU block streaming (less VRAM)                                                                             |
+| `--lora <PATH>`                    | LoRA adapter safetensors. Repeat for stacked LTX-2 adapters                                                     |
+| `--lora-scale <FLOAT>`             | LoRA strength (0.0–2.0)                                                                                         |
+| `-i, --image <PATH>`               | Source image. Repeat for `qwen-image-edit`; `-` stdin is single-image only                                      |
+| `--strength <FLOAT>`               | Denoising strength (0.0–1.0)                                                                                    |
+| `--mask <PATH>`                    | Inpainting mask                                                                                                 |
+| `--control <PATH>`                 | ControlNet control image                                                                                        |
+| `--control-model <NAME>`           | ControlNet model name                                                                                           |
+| `--control-scale <FLOAT>`          | ControlNet scale (0.0–2.0)                                                                                      |
+| `-n, --negative-prompt`            | Negative prompt (CFG models)                                                                                    |
+| `--no-negative`                    | Suppress config default negative                                                                                |
+| `--no-metadata`                    | Disable PNG metadata                                                                                            |
+| `--preview`                        | Display image inline in terminal                                                                                |
+| `--expand`                         | Enable prompt expansion                                                                                         |
+| `--no-expand`                      | Disable prompt expansion                                                                                        |
+| `--expand-backend <URL>`           | Expansion backend URL                                                                                           |
+| `--expand-model <MODEL>`           | LLM model for expansion                                                                                         |
+| `--t5-variant <TAG>`               | T5 encoder variant                                                                                              |
+| `--qwen3-variant <TAG>`            | Qwen3 encoder variant                                                                                           |
+| `--qwen2-variant <TAG>`            | Qwen2.5-VL text encoder variant for the Qwen family                                                             |
+| `--qwen2-text-encoder-mode <MODE>` | Qwen2.5-VL placement/staging mode for the Qwen family                                                           |
+| `--scheduler <SCHED>`              | Noise scheduler (ddim, euler-ancestral, uni-pc)                                                                 |
+| `--host <URL>`                     | Override MOLD_HOST                                                                                              |
 
 ### Qwen Family Encoder Controls
 
@@ -72,6 +81,26 @@ reduce unified-memory pressure during denoising.
 - `qwen-image-edit` does not support `--image -`.
 - `qwen-image-edit` supports quantized `--qwen2-variant` values by pairing GGUF language weights with the staged Qwen2.5-VL vision tower used for image conditioning.
 - The first edit image drives the default output width/height when you omit both flags.
+
+### LTX-2 Notes
+
+- This family defaults to `mp4` when you do not explicitly choose another video format.
+- If you explicitly choose `gif`, `apng`, or `webp`, mold exports a silent animation.
+- `--camera-control dolly-in|dolly-left|dolly-out|dolly-right|jib-down|jib-up|static`
+  auto-resolves the published LTX-2 19B camera LoRAs.
+- LTX-2 runs natively in Rust inside `mold-inference`; no Python bridge or
+  upstream checkout is required.
+- Backend policy: CUDA is supported, CPU is correctness-only, and Metal is
+  unsupported for this family.
+- On 24 GB Ada GPUs such as the RTX 4090, the verified local FP8 path uses
+  native staged loading, layer streaming, and the compatible `fp8-cast` mode
+  rather than Hopper-only `fp8-scaled-mm`.
+- The native CUDA matrix is validated across text+audio-video, image-to-video,
+  audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
+  temporal upscale workflows.
+- `mold serve` accepts inline source media up to `64 MiB` by default, which is
+  enough for common retake and audio-to-video requests without extra server
+  tuning.
 
 ## `mold expand`
 

@@ -208,9 +208,10 @@ mod tests {
         );
         serialize_to_file(&tensors, &None, &path).unwrap();
 
-        let total =
-            filtered_safetensors_tensor_bytes(&[path.clone()], |name| name.starts_with("visual."))
-                .unwrap();
+        let total = filtered_safetensors_tensor_bytes(std::slice::from_ref(&path), |name| {
+            name.starts_with("visual.")
+        })
+        .unwrap();
         assert_eq!(total, visual_data.len() as u64);
 
         let _ = std::fs::remove_file(path);

@@ -23,6 +23,8 @@ pub enum ModelComponent {
     TransformerShard, // One shard of a multi-file transformer (Z-Image BF16)
     Vae,
     SpatialUpscaler, // LTX latent upsampler / spatial upscaler weights
+    TemporalUpscaler,
+    DistilledLora,
     T5Encoder,
     ClipEncoder,
     T5Tokenizer,
@@ -159,6 +161,14 @@ impl ModelManifest {
                 .spatial_upscaler
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
+            temporal_upscaler: paths
+                .temporal_upscaler
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            distilled_lora: paths
+                .distilled_lora
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             t5_encoder: paths
                 .t5_encoder
                 .as_ref()
@@ -258,7 +268,10 @@ pub fn model_base_name(model_name: &str) -> &str {
 fn is_model_specific_component(component: ModelComponent) -> bool {
     matches!(
         component,
-        ModelComponent::Transformer | ModelComponent::TransformerShard | ModelComponent::Upscaler
+        ModelComponent::Transformer
+            | ModelComponent::TransformerShard
+            | ModelComponent::DistilledLora
+            | ModelComponent::Upscaler
     )
 }
 
@@ -1176,6 +1189,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(qwen_image_manifests());
     manifests.extend(wuerstchen_manifests());
     manifests.extend(ltx_video_manifests());
+    manifests.extend(ltx2_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
@@ -3722,10 +3736,11 @@ pub fn is_file_cached(manifest: &ModelManifest, file: &ModelFile) -> bool {
 
 /// Convert a `ModelManifest` to a `ModelPaths` from resolved download paths.
 ///
-/// For diffusion models, Transformer (or TransformerShards) and VAE are always required.
+/// For diffusion models, Transformer (or TransformerShards) and VAE are usually required.
 /// For upscaler models, only the Upscaler component is required (mapped to `transformer`).
 /// For utility models (e.g., qwen3-expand), only the Transformer is required (no VAE).
-/// Other components are optional — each engine validates what it needs at load time.
+/// LTX-2 family manifests use a single-file upstream checkpoint and do not require a separate
+/// VAE asset. Other components are optional — each engine validates what it needs at load time.
 pub fn paths_from_downloads(
     downloads: &[(ModelComponent, PathBuf)],
     family: &str,
@@ -3753,6 +3768,8 @@ pub fn paths_from_downloads(
             transformer_shards: Vec::new(),
             vae: PathBuf::new(),
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder: None,
             clip_encoder: None,
             t5_tokenizer: None,
@@ -3771,8 +3788,8 @@ pub fn paths_from_downloads(
     let transformer =
         find(ModelComponent::Transformer).or_else(|| transformer_shards.first().cloned())?;
 
-    // Utility models (e.g., qwen3-expand): transformer + optional tokenizer, no VAE
-    let vae = if UTILITY_FAMILIES.contains(&family) {
+    // Utility models and LTX-2: transformer + optional tokenizer, no standalone VAE asset
+    let vae = if UTILITY_FAMILIES.contains(&family) || family == "ltx2" {
         find(ModelComponent::Vae).unwrap_or_default()
     } else {
         find(ModelComponent::Vae)?
@@ -3783,6 +3800,8 @@ pub fn paths_from_downloads(
         transformer_shards,
         vae,
         spatial_upscaler: find(ModelComponent::SpatialUpscaler),
+        temporal_upscaler: find(ModelComponent::TemporalUpscaler),
+        distilled_lora: find(ModelComponent::DistilledLora),
         t5_encoder: find(ModelComponent::T5Encoder),
         clip_encoder: find(ModelComponent::ClipEncoder),
         t5_tokenizer: find(ModelComponent::T5Tokenizer),
@@ -4000,6 +4019,255 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
             defaults: multiscale_distilled_defaults,
             hidden: false,
         },
+    ]
+}
+
+fn shared_ltx2_files() -> Vec<ModelFile> {
+    let gemma_repo = "google/gemma-3-12b-it-qat-q4_0-unquantized".to_string();
+    [
+        "config.json",
+        "generation_config.json",
+        "model-00001-of-00005.safetensors",
+        "model-00002-of-00005.safetensors",
+        "model-00003-of-00005.safetensors",
+        "model-00004-of-00005.safetensors",
+        "model-00005-of-00005.safetensors",
+        "model.safetensors.index.json",
+        "added_tokens.json",
+        "chat_template.json",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "special_tokens_map.json",
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+    ]
+    .into_iter()
+    .map(|hf_filename| {
+        let (size_bytes, sha256) = match hf_filename {
+            "model-00001-of-00005.safetensors" => (
+                4_979_902_192,
+                Some("e6fb899db428481aafb45a20130457df6e247e7cb03b7d9f01ee4bc2a9a08138"),
+            ),
+            "model-00002-of-00005.safetensors" => (
+                4_931_296_592,
+                Some("d251e7fe9799d529405ddb61705a44cd700bd30a8b66a8d44ae26ddf8365dbc6"),
+            ),
+            "model-00003-of-00005.safetensors" => (
+                4_931_296_656,
+                Some("0684ef801385f0669a0b3e4ab160c50877efdbfa40eb97788595985de2743e78"),
+            ),
+            "model-00004-of-00005.safetensors" => (
+                4_931_296_656,
+                Some("b4b964e6526f81ccfa625c900b72ce92d5e0fd2debb75998763038ad06b9c541"),
+            ),
+            "model-00005-of-00005.safetensors" => (
+                4_601_000_928,
+                Some("4ef2de8f93e165b4e02425769fc566000b0674256ef0c3a27b23a0d45eb12088"),
+            ),
+            "tokenizer.json" => (
+                33_384_570,
+                Some("7d4046bf0505a327dd5a0abbb427ecd4fc82f99c2ceaa170bc61ecde12809b0c"),
+            ),
+            "tokenizer.model" => (
+                4_689_074,
+                Some("1299c11d7cf632ef3b4e11937501358ada021bbdf7c47638d13c0ee982f2e79c"),
+            ),
+            _ => (0, None),
+        };
+        ModelFile {
+            hf_repo: gemma_repo.clone(),
+            hf_filename: hf_filename.to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes,
+            gated: true,
+            sha256,
+        }
+    })
+    .collect()
+}
+
+fn ltx2_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 8,
+        guidance: 3.0,
+        width: 1216,
+        height: 704,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: Some(97),
+        fps: Some(24),
+    };
+
+    let make_manifest = |name: &str,
+                         description: &str,
+                         transformer_repo: &str,
+                         transformer_file: &str,
+                         shared_repo: &str,
+                         spatial_file: &str,
+                         spatial_file_x1_5: Option<&str>,
+                         temporal_file: &str,
+                         distilled_lora: Option<&str>| {
+        let mut files = shared_ltx2_files();
+        let (transformer_size_bytes, transformer_sha256) = match transformer_file {
+            "ltx-2-19b-dev-fp8.safetensors" => (
+                27_078_716_018,
+                "8a67e709b6d1adc061cb19921887a5c15754178199e45801a04310e9b522760d",
+            ),
+            "ltx-2-19b-distilled-fp8.safetensors" => (
+                27_078_716_346,
+                "8ae14327130c6ffdc87705b02c8e7654aa5c6d9a7f28a52d0acc1c30cb0d2932",
+            ),
+            "ltx-2.3-22b-dev-fp8.safetensors" => (
+                29_145_431_166,
+                "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450",
+            ),
+            "ltx-2.3-22b-distilled-fp8.safetensors" => (
+                29_531_884_062,
+                "d9646b6f2d5c42d337b23671634c43bfeece6989644f51b4a3aa088465ccd3b2",
+            ),
+            other => panic!("unexpected LTX-2 transformer file '{other}'"),
+        };
+        files.push(ModelFile {
+            hf_repo: transformer_repo.to_string(),
+            hf_filename: transformer_file.to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: transformer_size_bytes,
+            gated: false,
+            sha256: Some(transformer_sha256),
+        });
+        let (spatial_size_bytes, spatial_sha256) = match spatial_file {
+            "ltx-2-spatial-upscaler-x2-1.0.safetensors" => (
+                995_765_578,
+                "3160fabf8edf0bc4dd8de40353a180813b111ce586b655ad54af9a7b8c6736de",
+            ),
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors" => (
+                995_743_504,
+                "93800de87dbc448b5b31f3c5c3a1579ba6335151de061a564f6f026b0fc770ad",
+            ),
+            other => panic!("unexpected LTX-2 spatial upscaler file '{other}'"),
+        };
+        files.push(ModelFile {
+            hf_repo: shared_repo.to_string(),
+            hf_filename: spatial_file.to_string(),
+            component: ModelComponent::SpatialUpscaler,
+            size_bytes: spatial_size_bytes,
+            gated: false,
+            sha256: Some(spatial_sha256),
+        });
+        if let Some(spatial_file_x1_5) = spatial_file_x1_5 {
+            let (spatial_size_bytes, spatial_sha256) = match spatial_file_x1_5 {
+                "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors" => (
+                    1_090_125_794,
+                    "b2b3193e68cb04b4701e1d59bec4ed5d5e3e84506d9a42d5a129d37d39823df7",
+                ),
+                other => panic!("unexpected LTX-2 x1.5 spatial upscaler file '{other}'"),
+            };
+            files.push(ModelFile {
+                hf_repo: shared_repo.to_string(),
+                hf_filename: spatial_file_x1_5.to_string(),
+                component: ModelComponent::SpatialUpscaler,
+                size_bytes: spatial_size_bytes,
+                gated: false,
+                sha256: Some(spatial_sha256),
+            });
+        }
+        let (temporal_size_bytes, temporal_sha256) = match temporal_file {
+            "ltx-2-temporal-upscaler-x2-1.0.safetensors" => (
+                261_965_800,
+                "9a35c2eb92f6ed39369fcb83045daa070bc7c2a97fc7267abd6291203fd05b88",
+            ),
+            "ltx-2.3-temporal-upscaler-x2-1.0.safetensors" => (
+                261_944_000,
+                "2bc3300f2b3c3c1834d72164fbf13a3b9fd73e5a741e8a2c3f4035f89a75c3fe",
+            ),
+            other => panic!("unexpected LTX-2 temporal upscaler file '{other}'"),
+        };
+        files.push(ModelFile {
+            hf_repo: shared_repo.to_string(),
+            hf_filename: temporal_file.to_string(),
+            component: ModelComponent::TemporalUpscaler,
+            size_bytes: temporal_size_bytes,
+            gated: false,
+            sha256: Some(temporal_sha256),
+        });
+        if let Some(distilled_lora) = distilled_lora {
+            let (distilled_lora_size_bytes, distilled_lora_sha256) = match distilled_lora {
+                "ltx-2-19b-distilled-lora-384.safetensors" => (
+                    7_674_558_424,
+                    "2718f89582003cbb5b616635f18c091641917a3f3e5a2f2ad0fb3d5fdd153534",
+                ),
+                "ltx-2.3-22b-distilled-lora-384.safetensors" => (
+                    7_605_507_256,
+                    "2943ab994f3c9d88052e5a2a34cca14e4a2dfc36b1d8c407931d52d5c25dd72b",
+                ),
+                other => panic!("unexpected LTX-2 distilled LoRA file '{other}'"),
+            };
+            files.push(ModelFile {
+                hf_repo: shared_repo.to_string(),
+                hf_filename: distilled_lora.to_string(),
+                component: ModelComponent::DistilledLora,
+                size_bytes: distilled_lora_size_bytes,
+                gated: false,
+                sha256: Some(distilled_lora_sha256),
+            });
+        }
+        ModelManifest {
+            name: name.to_string(),
+            family: "ltx2".to_string(),
+            description: description.to_string(),
+            files,
+            defaults: defaults.clone(),
+            hidden: false,
+        }
+    };
+
+    vec![
+        make_manifest(
+            "ltx-2-19b-dev:fp8",
+            "LTX-2 19B dev FP8 — joint audio-video generation",
+            "Lightricks/LTX-2",
+            "ltx-2-19b-dev-fp8.safetensors",
+            "Lightricks/LTX-2",
+            "ltx-2-spatial-upscaler-x2-1.0.safetensors",
+            None,
+            "ltx-2-temporal-upscaler-x2-1.0.safetensors",
+            Some("ltx-2-19b-distilled-lora-384.safetensors"),
+        ),
+        make_manifest(
+            "ltx-2-19b-distilled:fp8",
+            "LTX-2 19B distilled FP8 — faster joint audio-video generation",
+            "Lightricks/LTX-2",
+            "ltx-2-19b-distilled-fp8.safetensors",
+            "Lightricks/LTX-2",
+            "ltx-2-spatial-upscaler-x2-1.0.safetensors",
+            None,
+            "ltx-2-temporal-upscaler-x2-1.0.safetensors",
+            None,
+        ),
+        make_manifest(
+            "ltx-2.3-22b-dev:fp8",
+            "LTX-2.3 22B dev FP8 — highest quality joint audio-video model",
+            "Lightricks/LTX-2.3-fp8",
+            "ltx-2.3-22b-dev-fp8.safetensors",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
+            "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-22b-distilled-lora-384.safetensors"),
+        ),
+        make_manifest(
+            "ltx-2.3-22b-distilled:fp8",
+            "LTX-2.3 22B distilled FP8 — fastest joint audio-video pipeline",
+            "Lightricks/LTX-2.3-fp8",
+            "ltx-2.3-22b-distilled-fp8.safetensors",
+            "Lightricks/LTX-2.3",
+            "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            Some("ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
+            "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
+            None,
+        ),
     ]
 }
 
@@ -4690,8 +4958,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 93
-        assert_eq!(known_manifests().len(), 93);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 97
+        assert_eq!(known_manifests().len(), 97);
     }
 
     #[test]
@@ -4723,6 +4991,70 @@ mod tests {
                     .iter()
                     .any(|file| file.component == ModelComponent::SpatialUpscaler),
                 "{model} missing spatial upscaler component"
+            );
+        }
+    }
+
+    #[test]
+    fn ltx2_manifests_include_verified_hashes_for_transformers_and_gemma() {
+        for model in [
+            "ltx-2-19b-dev:fp8",
+            "ltx-2-19b-distilled:fp8",
+            "ltx-2.3-22b-dev:fp8",
+            "ltx-2.3-22b-distilled:fp8",
+        ] {
+            let manifest = find_manifest(model).expect("manifest should exist");
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Transformer)
+                .expect("transformer entry should exist");
+            assert!(
+                transformer.sha256.is_some(),
+                "{model} missing transformer sha256"
+            );
+
+            let gemma_shards = manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    file.component == ModelComponent::TextEncoder
+                        && file.hf_filename.ends_with(".safetensors")
+                })
+                .count();
+            assert_eq!(gemma_shards, 5, "{model} missing Gemma shard entries");
+            for file in manifest.files.iter().filter(|file| {
+                file.component == ModelComponent::TextEncoder
+                    && (file.hf_filename.ends_with(".safetensors")
+                        || file.hf_filename == "tokenizer.json"
+                        || file.hf_filename == "tokenizer.model")
+            }) {
+                assert!(
+                    file.sha256.is_some(),
+                    "{model} missing sha256 for {}",
+                    file.hf_filename
+                );
+                assert!(file.gated, "{model} should mark Gemma asset as gated");
+            }
+        }
+    }
+
+    #[test]
+    fn ltx2_22b_manifests_include_x1_5_spatial_upscaler_after_x2_default() {
+        for model in ["ltx-2.3-22b-dev:fp8", "ltx-2.3-22b-distilled:fp8"] {
+            let manifest = find_manifest(model).expect("manifest should exist");
+            let spatial_files: Vec<&str> = manifest
+                .files
+                .iter()
+                .filter(|file| file.component == ModelComponent::SpatialUpscaler)
+                .map(|file| file.hf_filename.as_str())
+                .collect();
+            assert_eq!(
+                spatial_files,
+                vec![
+                    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+                    "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
+                ]
             );
         }
     }
@@ -4798,8 +5130,13 @@ mod tests {
     fn manifest_has_required_components() {
         for manifest in known_manifests() {
             let components: Vec<_> = manifest.files.iter().map(|f| f.component).collect();
-            // All diffusion models need VAE (except ControlNet, utility models, and upscalers)
-            if !manifest.is_utility() && !manifest.is_upscaler() && !manifest.is_auxiliary() {
+            // All diffusion models need VAE except families that intentionally ship a
+            // single-file upstream checkpoint without a standalone VAE asset.
+            if !manifest.is_utility()
+                && !manifest.is_upscaler()
+                && !manifest.is_auxiliary()
+                && manifest.family != "ltx2"
+            {
                 assert!(
                     components.contains(&ModelComponent::Vae),
                     "{} missing Vae",
@@ -4974,6 +5311,28 @@ mod tests {
                     assert!(
                         !components.contains(&ModelComponent::T5Encoder),
                         "{} (flux2) should not have T5Encoder",
+                        manifest.name
+                    );
+                }
+                "ltx2" => {
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (ltx2) missing Transformer",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::SpatialUpscaler),
+                        "{} (ltx2) missing SpatialUpscaler",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TemporalUpscaler),
+                        "{} (ltx2) missing TemporalUpscaler",
+                        manifest.name
+                    );
+                    assert!(
+                        components.contains(&ModelComponent::TextEncoder),
+                        "{} (ltx2) missing Gemma text encoder files",
                         manifest.name
                     );
                 }
@@ -5414,31 +5773,28 @@ mod tests {
 
     #[test]
     fn total_size_includes_shared_components() {
-        // Models with shared files must have total > transformer-only size
+        // Models with shared files must have total >= model-specific size.
         for manifest in known_manifests() {
             if manifest.is_auxiliary() || manifest.is_upscaler() {
                 continue; // ControlNet and upscalers are single-file models
             }
-            let transformer_bytes: u64 = manifest
+            let model_specific_bytes: u64 = manifest
                 .files
                 .iter()
-                .filter(|f| {
-                    f.component == ModelComponent::Transformer
-                        || f.component == ModelComponent::TransformerShard
-                })
+                .filter(|f| is_model_specific_component(f.component))
                 .map(|f| f.size_bytes)
                 .sum();
             let total = manifest.total_size_bytes();
             assert!(
-                total >= transformer_bytes,
-                "{}: total ({}) should be >= transformer-only ({})",
+                total >= model_specific_bytes,
+                "{}: total ({}) should be >= model-specific ({})",
                 manifest.name,
                 total,
-                transformer_bytes
+                model_specific_bytes
             );
             assert_eq!(
                 manifest.model_size_bytes(),
-                transformer_bytes,
+                model_specific_bytes,
                 "{}: model size should match model-specific files",
                 manifest.name
             );

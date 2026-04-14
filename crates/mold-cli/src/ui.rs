@@ -19,6 +19,7 @@ pub(crate) fn family_label(family: &str) -> &str {
         "qwen-image-edit" => "Qwen-Image-Edit",
         "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
         "ltx-video" | "ltx_video" => "LTX Video",
+        "ltx2" => "LTX-2",
         "controlnet" => "ControlNet",
         "qwen3-expand" => "Expand",
         "upscaler" => "Upscaler",
@@ -38,6 +39,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "qwen-image" | "qwen_image" | "qwen-image-edit" => padded.bright_blue().to_string(),
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "ltx-video" | "ltx_video" => padded.red().to_string(),
+        "ltx2" => padded.truecolor(255, 140, 80).to_string(),
         "controlnet" => padded.bright_red().to_string(),
         "qwen3-expand" => padded.bright_cyan().to_string(),
         "upscaler" => padded.bright_purple().to_string(),
@@ -62,6 +64,7 @@ pub(crate) fn format_family(family: &str) -> String {
             | "wuerstchen-v2"
             | "ltx-video"
             | "ltx_video"
+            | "ltx2"
             | "controlnet"
             | "qwen3-expand"
             | "upscaler"
@@ -498,6 +501,12 @@ mod tests {
     fn format_family_qwen_image_edit_matches_qwen_image_label() {
         let result = format_family("qwen-image-edit");
         assert!(result.contains("Qwen-Image-Edit"));
+    }
+
+    #[test]
+    fn format_family_ltx2_has_dedicated_label() {
+        let result = format_family("ltx2");
+        assert!(result.contains("LTX-2"));
     }
 
     #[test]

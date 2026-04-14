@@ -1501,6 +1501,8 @@ mod tests {
             transformer_shards: vec![],
             vae,
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder: None,
             clip_encoder: decoder_clip_encoder,
             t5_tokenizer: None,
@@ -1602,9 +1604,9 @@ mod tests {
         let alpha_cumprod = alpha_cumprod.clamp(0.0001, 0.9999);
         let sqrt_alpha = alpha_cumprod.sqrt() as f32;
         let sqrt_one_minus_alpha = (1.0 - alpha_cumprod).sqrt() as f32;
-        let expected = vec![
+        let expected = [
             2.0f32 * sqrt_alpha + 3.0 * sqrt_one_minus_alpha,
-            -1.0f32 * sqrt_alpha + 4.0 * sqrt_one_minus_alpha,
+            -sqrt_alpha + 4.0 * sqrt_one_minus_alpha,
         ];
 
         for (actual, expected) in actual.iter().zip(expected.iter()) {

@@ -1271,6 +1271,8 @@ mod tests {
             transformer_shards,
             vae,
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder: None,
             clip_encoder: None,
             t5_tokenizer: None,

@@ -16,7 +16,7 @@ mod metrics_test;
 mod routes_test;
 
 use anyhow::Result;
-use axum::middleware;
+use axum::{extract::DefaultBodyLimit, middleware};
 use mold_core::{Config, ModelPaths};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -26,6 +26,8 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use state::QueueHandle;
+
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()> {
     Config::install_runtime_models_dir_override(models_dir.clone());
@@ -157,6 +159,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     // is always accessible for monitoring scrapers (Prometheus, Grafana Agent, etc.).
     #[allow(unused_mut)]
     let mut app = routes::create_router(state)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn_with_state(
             rl_config,

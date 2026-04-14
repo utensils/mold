@@ -234,9 +234,13 @@
               pkgs.openssl
               pkgs.nasm
               pkgs.git
+              pkgs.gh
+              pkgs.jq
               pkgs.viu
+              pkgs.mpv
               pkgs.cargo-llvm-cov
               pkgs.ffmpeg
+              pkgs.imagemagick
               pkgs.bun
               pkgs.nodePackages.prettier
               pkgs.tmux
@@ -395,6 +399,12 @@
               }
               {
                 category = "check";
+                name = "test-ltx2";
+                help = "targeted LTX-2 / LTX-2.3 tests";
+                command = "cargo test \"$@\" ltx2";
+              }
+              {
+                category = "check";
                 name = "fmt";
                 help = "cargo fmt";
                 command = "cargo fmt \"$@\"";
@@ -444,6 +454,31 @@
                 name = "discord-bot";
                 help = "start the mold Discord bot";
                 command = "cargo run -p mold-ai --features ${devFeatures} -- discord \"$@\"";
+              }
+              {
+                category = "run";
+                name = "build-ltx2";
+                help = "build mold with the full feature set for LTX-2 work";
+                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+              }
+              {
+                category = "run";
+                name = "smoke-ltx2";
+                help = "run a local LTX-2 / LTX-2.3 smoke inference";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- run --local \"$@\"";
+              }
+              {
+                category = "run";
+                name = "contact-sheet";
+                help = "build native review artifacts from a clip via the Rust ltx2_review tool";
+                command = ''
+                  set -euo pipefail
+                  if [ "$#" -lt 1 ]; then
+                    echo "usage: contact-sheet <input.mp4> [more.mp4...]"
+                    exit 1
+                  fi
+                  cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- "$@"
+                '';
               }
               {
                 category = "docs";

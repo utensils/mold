@@ -4,9 +4,14 @@ use mold_core::manifest::{
     all_generation_model_names, is_known_model, looks_like_model_name, resolve_model_name,
     suggest_similar_models,
 };
-use mold_core::{Config, LoraWeight, OutputFormat, Scheduler};
+use mold_core::{
+    Config, KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale,
+    Ltx2TemporalUpscale, OutputFormat, Scheduler, TimeRange,
+};
 use std::io::{IsTerminal, Read};
 use std::path::Path;
+
+use crate::{Ltx2SpatialUpscaleArg, Ltx2TemporalUpscaleArg};
 
 use super::generate;
 
@@ -82,6 +87,19 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
         .unwrap_or_else(|| "flux".to_string())
 }
 
+#[derive(Default, Clone, Copy)]
+struct FileArgRefs<'a> {
+    lora: Option<&'a str>,
+    image: Option<&'a str>,
+    mask: Option<&'a str>,
+    control: Option<&'a str>,
+    audio: Option<&'a str>,
+    video: Option<&'a str>,
+    camera_control: Option<&'a str>,
+    output: Option<&'a str>,
+}
+
+#[cfg(test)]
 fn validate_file_args(
     lora: Option<&str>,
     image: Option<&str>,
@@ -89,44 +107,57 @@ fn validate_file_args(
     control: Option<&str>,
     output: Option<&str>,
 ) -> Result<()> {
+    validate_file_args_full(FileArgRefs {
+        lora,
+        image,
+        mask,
+        control,
+        output,
+        ..FileArgRefs::default()
+    })
+}
+
+fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
     // -- --lora validation --
-    if let Some(lora_path) = lora {
-        let p = Path::new(lora_path);
-        if p.is_dir() {
-            // List .safetensors files in the directory as suggestions
-            let mut suggestions: Vec<String> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if let Some(name_str) = name.to_str() {
-                        if name_str.ends_with(".safetensors") {
-                            suggestions.push(entry.path().display().to_string());
+    if let Some(lora_path) = args.lora {
+        if !is_virtual_lora_alias(lora_path) {
+            let p = Path::new(lora_path);
+            if p.is_dir() {
+                // List .safetensors files in the directory as suggestions
+                let mut suggestions: Vec<String> = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(p) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        if let Some(name_str) = name.to_str() {
+                            if name_str.ends_with(".safetensors") {
+                                suggestions.push(entry.path().display().to_string());
+                            }
                         }
                     }
                 }
-            }
-            suggestions.sort();
-            let mut msg = format!("--lora path '{}' is a directory, not a file", lora_path);
-            if suggestions.is_empty() {
-                msg.push_str(" (no .safetensors files found inside)");
-            } else {
-                msg.push_str(". Did you mean one of these?");
-                for s in &suggestions {
-                    msg.push_str(&format!("\n    {s}"));
+                suggestions.sort();
+                let mut msg = format!("--lora path '{}' is a directory, not a file", lora_path);
+                if suggestions.is_empty() {
+                    msg.push_str(" (no .safetensors files found inside)");
+                } else {
+                    msg.push_str(". Did you mean one of these?");
+                    for s in &suggestions {
+                        msg.push_str(&format!("\n    {s}"));
+                    }
                 }
+                anyhow::bail!(msg);
             }
-            anyhow::bail!(msg);
-        }
-        if !p.exists() {
-            anyhow::bail!("--lora file not found: {lora_path}");
-        }
-        if !lora_path.ends_with(".safetensors") {
-            anyhow::bail!("--lora file must be a .safetensors file, got: {lora_path}");
+            if !p.exists() {
+                anyhow::bail!("--lora file not found: {lora_path}");
+            }
+            if !lora_path.ends_with(".safetensors") {
+                anyhow::bail!("--lora file must be a .safetensors file, got: {lora_path}");
+            }
         }
     }
 
     // -- --image validation --
-    if let Some(img_path) = image {
+    if let Some(img_path) = args.image {
         if img_path != "-" {
             let p = Path::new(img_path);
             if p.is_dir() {
@@ -139,7 +170,7 @@ fn validate_file_args(
     }
 
     // -- --mask validation --
-    if let Some(mask_path) = mask {
+    if let Some(mask_path) = args.mask {
         let p = Path::new(mask_path);
         if p.is_dir() {
             anyhow::bail!("--mask path is a directory, not an image file: {mask_path}");
@@ -150,7 +181,7 @@ fn validate_file_args(
     }
 
     // -- --control validation --
-    if let Some(ctrl_path) = control {
+    if let Some(ctrl_path) = args.control {
         let p = Path::new(ctrl_path);
         if p.is_dir() {
             anyhow::bail!("--control path is a directory, not an image file: {ctrl_path}");
@@ -160,8 +191,43 @@ fn validate_file_args(
         }
     }
 
+    if let Some(audio_path) = args.audio {
+        let p = Path::new(audio_path);
+        if p.is_dir() {
+            anyhow::bail!("--audio-file path is a directory, not a file: {audio_path}");
+        }
+        if !p.exists() {
+            anyhow::bail!("--audio-file file not found: {audio_path}");
+        }
+    }
+
+    if let Some(video_path) = args.video {
+        let p = Path::new(video_path);
+        if p.is_dir() {
+            anyhow::bail!("--video path is a directory, not a file: {video_path}");
+        }
+        if !p.exists() {
+            anyhow::bail!("--video file not found: {video_path}");
+        }
+    }
+
+    if let Some(camera_control_path) = args
+        .camera_control
+        .filter(|value| value.ends_with(".safetensors"))
+    {
+        let p = Path::new(camera_control_path);
+        if p.is_dir() {
+            anyhow::bail!(
+                "--camera-control path is a directory, not a .safetensors file: {camera_control_path}"
+            );
+        }
+        if !p.exists() {
+            anyhow::bail!("--camera-control file not found: {camera_control_path}");
+        }
+    }
+
     // -- --output validation --
-    if let Some(out_path) = output {
+    if let Some(out_path) = args.output {
         if out_path != "-" {
             let p = Path::new(out_path);
             if p.is_dir() {
@@ -182,6 +248,12 @@ fn validate_file_args(
     Ok(())
 }
 
+fn is_virtual_lora_alias(value: &str) -> bool {
+    value
+        .strip_prefix("camera-control:")
+        .is_some_and(|preset| !preset.trim().is_empty())
+}
+
 fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> {
     if family == "qwen-image-edit" && image.iter().any(|img| img == "-") {
         anyhow::bail!("qwen-image-edit does not support --image -; pass file paths instead");
@@ -190,6 +262,70 @@ fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> 
         anyhow::bail!("multiple --image values are only supported for qwen-image-edit models");
     }
     Ok(())
+}
+
+fn parse_pipeline(value: Option<String>) -> Result<Option<Ltx2PipelineMode>> {
+    value
+        .map(|value| match value.as_str() {
+            "one-stage" => Ok(Ltx2PipelineMode::OneStage),
+            "two-stage" => Ok(Ltx2PipelineMode::TwoStage),
+            "two-stage-hq" => Ok(Ltx2PipelineMode::TwoStageHq),
+            "distilled" => Ok(Ltx2PipelineMode::Distilled),
+            "ic-lora" => Ok(Ltx2PipelineMode::IcLora),
+            "keyframe" => Ok(Ltx2PipelineMode::Keyframe),
+            "a2vid" => Ok(Ltx2PipelineMode::A2Vid),
+            "retake" => Ok(Ltx2PipelineMode::Retake),
+            _ => anyhow::bail!("unsupported LTX-2 pipeline: {value}"),
+        })
+        .transpose()
+}
+
+fn parse_spatial_upscale(value: Option<Ltx2SpatialUpscaleArg>) -> Option<Ltx2SpatialUpscale> {
+    value.map(|value| match value {
+        Ltx2SpatialUpscaleArg::X1_5 => Ltx2SpatialUpscale::X1_5,
+        Ltx2SpatialUpscaleArg::X2 => Ltx2SpatialUpscale::X2,
+    })
+}
+
+fn parse_temporal_upscale(value: Option<Ltx2TemporalUpscaleArg>) -> Option<Ltx2TemporalUpscale> {
+    value.map(|Ltx2TemporalUpscaleArg::X2| Ltx2TemporalUpscale::X2)
+}
+
+fn parse_retake_range(value: Option<String>) -> Result<Option<TimeRange>> {
+    value
+        .map(|value| {
+            let (start, end) = value
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("--retake must be in <start:end> format"))?;
+            Ok(TimeRange {
+                start_seconds: start.parse()?,
+                end_seconds: end.parse()?,
+            })
+        })
+        .transpose()
+}
+
+fn parse_keyframes(values: &[String]) -> Result<Option<Vec<KeyframeCondition>>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    let mut keyframes = Vec::with_capacity(values.len());
+    for value in values {
+        let (frame, path) = value
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("--keyframe must be in <frame:path> format"))?;
+        let path = Path::new(path);
+        if !path.exists() {
+            anyhow::bail!("--keyframe file not found: {}", path.display());
+        }
+        keyframes.push(KeyframeCondition {
+            frame: frame.parse()?,
+            image: std::fs::read(path)?,
+        });
+    }
+
+    Ok(Some(keyframes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,6 +341,16 @@ pub async fn run(
     batch: u32,
     frames: Option<u32>,
     fps: Option<u32>,
+    audio: bool,
+    no_audio: bool,
+    audio_file: Option<String>,
+    video: Option<String>,
+    keyframe: Vec<String>,
+    pipeline: Option<String>,
+    retake: Option<String>,
+    spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
+    temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
+    camera_control: Option<String>,
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
@@ -217,7 +363,7 @@ pub async fn run(
     scheduler: Option<Scheduler>,
     eager: bool,
     offload: bool,
-    lora: Option<String>,
+    lora: Vec<String>,
     lora_scale: f64,
     image: Vec<String>,
     strength: f64,
@@ -238,15 +384,27 @@ pub async fn run(
     let family = resolve_family(&model, &config);
 
     // Validate file-based arguments early — before expansion or inference.
-    validate_file_args(
-        lora.as_deref(),
-        image.first().map(String::as_str),
-        mask.as_deref(),
-        control.as_deref(),
-        output.as_deref(),
-    )?;
+    validate_file_args_full(FileArgRefs {
+        lora: lora.first().map(String::as_str),
+        image: image.first().map(String::as_str),
+        mask: mask.as_deref(),
+        control: control.as_deref(),
+        audio: audio_file.as_deref(),
+        video: video.as_deref(),
+        camera_control: camera_control.as_deref(),
+        output: output.as_deref(),
+    })?;
+    for lora_path in &lora {
+        validate_file_args_full(FileArgRefs {
+            lora: Some(lora_path.as_str()),
+            ..FileArgRefs::default()
+        })?;
+    }
     for extra_image in image.iter().skip(1) {
-        validate_file_args(None, Some(extra_image.as_str()), None, None, None)?;
+        validate_file_args_full(FileArgRefs {
+            image: Some(extra_image.as_str()),
+            ..FileArgRefs::default()
+        })?;
     }
 
     validate_image_args_for_family(&family, &image)?;
@@ -292,6 +450,13 @@ pub async fn run(
     } else {
         None
     };
+    let audio_file_bytes = audio_file.as_deref().map(std::fs::read).transpose()?;
+    let source_video_bytes = video.as_deref().map(std::fs::read).transpose()?;
+    let keyframes = parse_keyframes(&keyframe)?;
+    let pipeline = parse_pipeline(pipeline)?;
+    let retake_range = parse_retake_range(retake)?;
+    let spatial_upscale = parse_spatial_upscale(spatial_upscale);
+    let temporal_upscale = parse_temporal_upscale(temporal_upscale);
 
     // If no prompt from args, try reading from stdin (supports piping)
     // When --image - is used, stdin is consumed for the image, so prompt must come from args.
@@ -506,8 +671,12 @@ pub async fn run(
         model_cfg.effective_negative_prompt(&config)
     };
 
-    // Resolve LoRA: CLI --lora overrides config default
-    let effective_lora = if let Some(ref lora_path) = lora {
+    if family != "ltx2" && lora.len() > 1 {
+        anyhow::bail!("multiple --lora values are only supported for LTX-2 / LTX-2.3 models");
+    }
+
+    // Resolve LoRA: explicit CLI values override config defaults.
+    let effective_lora = if let Some(lora_path) = lora.first() {
         Some(LoraWeight {
             path: lora_path.clone(),
             scale: lora_scale,
@@ -517,6 +686,30 @@ pub async fn run(
         model_cfg
             .effective_lora()
             .map(|(path, scale)| LoraWeight { path, scale })
+    };
+    let loras = if family == "ltx2"
+        && (!lora.is_empty() || effective_lora.is_some() || camera_control.is_some())
+    {
+        let mut loras = Vec::new();
+        if !lora.is_empty() {
+            loras.extend(lora.iter().cloned().map(|path| LoraWeight {
+                path,
+                scale: lora_scale,
+            }));
+        } else if let Some(lora) = effective_lora.clone() {
+            loras.push(lora);
+        }
+        if let Some(camera_control) = camera_control {
+            let path = if camera_control.ends_with(".safetensors") {
+                camera_control
+            } else {
+                format!("camera-control:{camera_control}")
+            };
+            loras.push(LoraWeight { path, scale: 1.0 });
+        }
+        Some(loras)
+    } else {
+        None
     };
 
     generate::run(
@@ -529,8 +722,25 @@ pub async fn run(
         guidance,
         seed,
         batch,
-        frames,
-        fps,
+        generate::Ltx2Options {
+            frames,
+            fps,
+            enable_audio: if audio {
+                Some(true)
+            } else if no_audio {
+                Some(false)
+            } else {
+                None
+            },
+            audio_file: audio_file_bytes,
+            source_video: source_video_bytes,
+            keyframes,
+            pipeline,
+            loras,
+            retake_range,
+            spatial_upscale,
+            temporal_upscale,
+        },
         host,
         format,
         no_metadata,
@@ -796,6 +1006,11 @@ mod tests {
         assert!(validate_file_args(Some(path.to_str().unwrap()), None, None, None, None,).is_ok());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn validate_lora_camera_control_alias() {
+        assert!(validate_file_args(Some("camera-control:static"), None, None, None, None).is_ok());
     }
 
     // -- --image tests --

@@ -122,20 +122,21 @@ See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference
 
 ## Models
 
-Supports 10 model families with 80+ variants:
+Supports 11 model families with 80+ variants:
 
-| Family | Models | Highlights |
-|--------|--------|------------|
-| **FLUX.1** | schnell, dev, + fine-tunes | Best quality, 4-25 steps, LoRA support |
-| **Flux.2 Klein** | 4B and 9B | Fast 4-step, low VRAM, default model |
-| **SDXL** | base, turbo, + fine-tunes | Fast, flexible, negative prompts |
-| **SD 1.5** | base + fine-tunes | Lightweight, ControlNet support |
-| **SD 3.5** | large, medium, turbo | Triple encoder, high quality |
-| **Z-Image** | turbo | Fast 9-step, Qwen3 encoder |
-| **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
-| **Qwen-Image-Edit** | 2511 | Multimodal image editing, repeatable `--image`, negative prompts |
-| **Wuerstchen** | v2 | 42x latent compression |
-| **LTX Video** | 0.9.6, 0.9.8 | Text-to-video with APNG/GIF/WebP/MP4 output |
+| Family              | Models                     | Highlights                                                       |
+| ------------------- | -------------------------- | ---------------------------------------------------------------- |
+| **FLUX.1**          | schnell, dev, + fine-tunes | Best quality, 4-25 steps, LoRA support                           |
+| **Flux.2 Klein**    | 4B and 9B                  | Fast 4-step, low VRAM, default model                             |
+| **SDXL**            | base, turbo, + fine-tunes  | Fast, flexible, negative prompts                                 |
+| **SD 1.5**          | base + fine-tunes          | Lightweight, ControlNet support                                  |
+| **SD 3.5**          | large, medium, turbo       | Triple encoder, high quality                                     |
+| **Z-Image**         | turbo                      | Fast 9-step, Qwen3 encoder                                       |
+| **Qwen-Image**      | base + 2512                | High resolution, CFG guidance, GGUF quant support                |
+| **Qwen-Image-Edit** | 2511                       | Multimodal image editing, repeatable `--image`, negative prompts |
+| **Wuerstchen**      | v2                         | 42x latent compression                                           |
+| **LTX-2 / LTX-2.3** | 19B, 22B                   | Joint audio-video generation, MP4-first workflows                |
+| **LTX Video**       | 0.9.6, 0.9.8               | Text-to-video with APNG/GIF/WebP/MP4 output                      |
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 
@@ -159,6 +160,35 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 `shared/LTX-Video/...`, and intentionally continues using the compatible
 `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 
+### LTX-2 / LTX-2.3
+
+Current supported LTX-2 checkpoints are:
+
+- `ltx-2-19b-dev:fp8`
+- `ltx-2-19b-distilled:fp8`
+- `ltx-2.3-22b-dev:fp8`
+- `ltx-2.3-22b-distilled:fp8`
+
+Recommended default today: `ltx-2-19b-distilled:fp8`.
+
+This family is separate from `ltx-video`: it defaults to MP4, supports
+synchronized audio, audio-to-video, keyframe interpolation, retake workflows,
+stacked LoRAs, and camera-control LoRAs. The implementation is native Rust in
+`mold-inference` with no Python bridge or upstream checkout requirement. CUDA
+is the supported backend for real local generation, CPU is a correctness-only
+fallback, and Metal is explicitly unsupported for this family. On 24 GB Ada
+GPUs such as the RTX 4090, mold uses native staged loading, layer streaming,
+and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
+`fp8-scaled-mm`. The native CUDA acceptance matrix is now validated across 19B
+and 22B text+audio-video, image-to-video, audio-to-video, keyframe, retake,
+public IC-LoRA, spatial upscaling (`x1.5` / `x2` where published), and
+temporal upscaling (`x2`). The shared Gemma text assets are gated on Hugging
+Face, so `mold pull` requires approved access to
+`google/gemma-3-12b-it-qat-q4_0-unquantized`.
+When you send source media through `mold serve`, the built-in request body
+limit is `64 MiB`, which is enough for common retake and audio-to-video
+requests without changing server config.
+
 ## Features
 
 - **txt2img, img2img, multimodal edit, inpainting** — full generation pipeline
@@ -179,15 +209,15 @@ under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
 
 ## Deployment
 
-| Method | Guide |
-|--------|-------|
-| **NixOS module** | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos) |
+| Method              | Guide                                                                   |
+| ------------------- | ----------------------------------------------------------------------- |
+| **NixOS module**    | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos)   |
 | **Docker / RunPod** | [Deployment: Docker](https://utensils.github.io/mold/deployment/docker) |
-| **Systemd** | [Deployment: Overview](https://utensils.github.io/mold/deployment/) |
+| **Systemd**         | [Deployment: Overview](https://utensils.github.io/mold/deployment/)     |
 
 ## How it works
 
-Single Rust binary built on [candle](https://github.com/huggingface/candle) — pure Rust ML, no Python, no libtorch.
+Single Rust binary built on [candle](https://github.com/huggingface/candle) for the in-tree model families. LTX-2 now runs through the native Rust stack in `mold-inference`, so the full model surface stays in Rust with no libtorch dependency.
 
 ```
 mold run "a cat"

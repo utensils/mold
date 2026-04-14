@@ -43,6 +43,10 @@ pub struct ModelConfig {
     pub vae: Option<String>,
     /// LTX latent upsampler / spatial upscaler weights.
     pub spatial_upscaler: Option<String>,
+    /// Optional temporal upscaler weights for LTX-2/LTX-2.3.
+    pub temporal_upscaler: Option<String>,
+    /// Optional distilled LoRA bundled with a model manifest.
+    pub distilled_lora: Option<String>,
     pub t5_encoder: Option<String>,
     pub clip_encoder: Option<String>,
     pub t5_tokenizer: Option<String>,
@@ -100,6 +104,8 @@ impl ModelConfig {
             &self.transformer,
             &self.vae,
             &self.spatial_upscaler,
+            &self.temporal_upscaler,
+            &self.distilled_lora,
             &self.t5_encoder,
             &self.clip_encoder,
             &self.t5_tokenizer,
@@ -192,6 +198,8 @@ pub struct ModelPaths {
     pub transformer_shards: Vec<PathBuf>,
     pub vae: PathBuf,
     pub spatial_upscaler: Option<PathBuf>,
+    pub temporal_upscaler: Option<PathBuf>,
+    pub distilled_lora: Option<PathBuf>,
     pub t5_encoder: Option<PathBuf>,
     pub clip_encoder: Option<PathBuf>,
     pub t5_tokenizer: Option<PathBuf>,
@@ -240,6 +248,14 @@ impl ModelPaths {
             model_cfg.and_then(|m| m.spatial_upscaler.as_deref()),
             "MOLD_SPATIAL_UPSCALER_PATH",
         );
+        let temporal_upscaler = Self::resolve_path(
+            model_cfg.and_then(|m| m.temporal_upscaler.as_deref()),
+            "MOLD_TEMPORAL_UPSCALER_PATH",
+        );
+        let distilled_lora = Self::resolve_path(
+            model_cfg.and_then(|m| m.distilled_lora.as_deref()),
+            "MOLD_DISTILLED_LORA_PATH",
+        );
         let t5_encoder = Self::resolve_path(
             model_cfg.and_then(|m| m.t5_encoder.as_deref()),
             "MOLD_T5_PATH",
@@ -282,6 +298,8 @@ impl ModelPaths {
             transformer_shards,
             vae,
             spatial_upscaler,
+            temporal_upscaler,
+            distilled_lora,
             t5_encoder,
             clip_encoder,
             t5_tokenizer,
@@ -994,6 +1012,12 @@ fn overlay_model_paths(target: &mut ModelConfig, source: &ModelConfig) {
     if source.spatial_upscaler.is_some() {
         target.spatial_upscaler = source.spatial_upscaler.clone();
     }
+    if source.temporal_upscaler.is_some() {
+        target.temporal_upscaler = source.temporal_upscaler.clone();
+    }
+    if source.distilled_lora.is_some() {
+        target.distilled_lora = source.distilled_lora.clone();
+    }
 
     if source.t5_encoder.is_some() {
         target.t5_encoder = source.t5_encoder.clone();
@@ -1043,6 +1067,14 @@ fn resolved_manifest_paths_exist(
         ModelComponent::Vae => paths.vae.exists(),
         ModelComponent::SpatialUpscaler => paths
             .spatial_upscaler
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::TemporalUpscaler => paths
+            .temporal_upscaler
+            .as_ref()
+            .is_some_and(|path| path.exists()),
+        ModelComponent::DistilledLora => paths
+            .distilled_lora
             .as_ref()
             .is_some_and(|path| path.exists()),
         ModelComponent::T5Encoder => paths.t5_encoder.as_ref().is_some_and(|path| path.exists()),

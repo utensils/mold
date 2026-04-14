@@ -190,20 +190,24 @@
   margin: 2rem 0;
 }
 
-.gallery-grid img {
+.gallery-grid img,
+.gallery-grid video {
   border-radius: 8px;
   width: 100%;
+  display: block;
   transition:
     transform 0.2s ease,
     box-shadow 0.2s ease;
 }
 
-.gallery-grid img:hover {
+.gallery-grid img:hover,
+.gallery-grid video:hover {
   transform: scale(1.02);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
 }
 
-.dark .gallery-grid img:hover {
+.dark .gallery-grid img:hover,
+.dark .gallery-grid video:hover {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 

@@ -294,19 +294,21 @@ mod tests {
 
     #[test]
     fn clear_server_status_resets() {
-        let mut ri = ResourceInfo::default();
-        ri.server_status = Some(mold_core::ServerStatus {
-            version: "0.6.3".to_string(),
-            git_sha: None,
-            build_date: None,
-            models_loaded: vec![],
-            busy: false,
-            current_generation: None,
-            gpu_info: None,
-            uptime_secs: 0,
-            hostname: None,
-            memory_status: None,
-        });
+        let mut ri = ResourceInfo {
+            server_status: Some(mold_core::ServerStatus {
+                version: "0.6.3".to_string(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 0,
+                hostname: None,
+                memory_status: None,
+            }),
+            ..Default::default()
+        };
         ri.clear_server_status();
         assert!(ri.server_status.is_none());
     }

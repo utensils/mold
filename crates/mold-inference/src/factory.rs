@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::engine::{InferenceEngine, LoadStrategy};
 use crate::flux::FluxEngine;
 use crate::flux2::Flux2Engine;
+use crate::ltx2::Ltx2Engine;
 use crate::ltx_video::LtxVideoEngine;
 use crate::qwen_image::QwenImageEngine;
 use crate::sd15::SD15Engine;
@@ -161,13 +162,14 @@ pub fn create_engine_with_pool(
                 shared_pool,
             )))
         }
+        "ltx2" | "ltx-2" => Ok(Box::new(Ltx2Engine::new(model_name, paths, load_strategy))),
         "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
             model_name,
             paths,
             load_strategy,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
             other,
             model_name
         ),
@@ -185,6 +187,8 @@ mod tests {
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/vae"),
             spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
             t5_encoder: Some(PathBuf::from("/tmp/t5")),
             clip_encoder: Some(PathBuf::from("/tmp/clip")),
             t5_tokenizer: Some(PathBuf::from("/tmp/t5_tok")),
@@ -292,6 +296,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.model_name(), "flux2-klein:bf16");
+    }
+
+    #[test]
+    fn unknown_family_error_lists_ltx_families() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-model".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("mystery".to_string()),
+                ..Default::default()
+            },
+        );
+        let err = create_engine(
+            "my-model".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+            false,
+        )
+        .err()
+        .expect("unknown family should fail");
+        let message = err.to_string();
+        assert!(message.contains("ltx-video"));
+        assert!(message.contains("ltx2"));
     }
 
     #[test]
