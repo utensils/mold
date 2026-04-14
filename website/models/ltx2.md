@@ -96,6 +96,44 @@ mold run ltx-2.3-22b-distilled:fp8 \
   --format mp4
 ```
 
+## Example Clips
+
+Here are a few longer LTX-2 examples rendered with mold. The docs page embeds
+lightweight `webm` previews so the examples load quickly in the browser.
+
+<div class="gallery-grid">
+<figure>
+
+<video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-lighthouse-640x384-97f-12fps-seed424301.webm"></video>
+
+**ltx-2-19b-distilled:fp8** — 97 frames, 640x384, 12 fps
+
+_Storm-lashed lighthouse at dusk, gliding coastal pass, thunder, rain, wind,
+and surf._
+
+</figure>
+<figure>
+
+<video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-subway-drummer-640x384-97f-12fps-seed424302.webm"></video>
+
+**ltx-2-19b-distilled:fp8** — 97 frames, 640x384, 12 fps
+
+_Subway-tunnel drummer performance, orbiting concert camera, percussion, reverb,
+and distant train rumble._
+
+</figure>
+<figure>
+
+<video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-seaplane-640x384-97f-12fps-seed424303.webm"></video>
+
+**ltx-2.3-22b-distilled:fp8** — 97 frames, 640x384, 12 fps
+
+_Red seaplane over an Arctic fjord at sunrise, wingtip bank, spray off the
+floats, propeller engine, wind, and water hiss._
+
+</figure>
+</div>
+
 ## Notes
 
 - `--audio` and `--no-audio` control whether the returned MP4 keeps the audio
