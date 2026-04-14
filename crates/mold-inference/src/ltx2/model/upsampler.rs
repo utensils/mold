@@ -139,6 +139,7 @@ mod tests {
 
     use super::{
         derive_stage1_render_shape, spatially_upsample_frames, temporally_upsample_frames_x2,
+        LTX2_SPATIAL_LATENT_STRIDE,
     };
 
     #[test]
@@ -152,9 +153,31 @@ mod tests {
             None,
         );
         assert_eq!(shape.width, 800);
-        assert_eq!(shape.height, 464);
+        assert_eq!(shape.height, 480);
         assert_eq!(shape.frames, 17);
         assert_eq!(shape.fps, 12);
+    }
+
+    #[test]
+    fn x1_5_stage_one_shape_is_minimal_covering_latent_grid() {
+        let shape = derive_stage1_render_shape(
+            1216,
+            704,
+            17,
+            12,
+            Some(mold_core::Ltx2SpatialUpscale::X1_5),
+            None,
+        );
+        let target_height_latent = 704_u32.div_ceil(LTX2_SPATIAL_LATENT_STRIDE);
+        let stage1_height_latent = shape.height / LTX2_SPATIAL_LATENT_STRIDE;
+        let recovered_target_height_latent = (3 * stage1_height_latent + 1) / 2;
+        assert_eq!(target_height_latent, 22);
+        assert_eq!(stage1_height_latent, 15);
+        assert!(recovered_target_height_latent >= target_height_latent);
+
+        let smaller_stage1_height_latent = stage1_height_latent - 1;
+        let smaller_recovered_target_height_latent = (3 * smaller_stage1_height_latent + 1) / 2;
+        assert!(smaller_recovered_target_height_latent < target_height_latent);
     }
 
     #[test]

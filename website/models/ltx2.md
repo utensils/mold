@@ -5,13 +5,13 @@ separate `ltx2` family from the older `ltx-video` checkpoints, with defaults
 aimed at synchronized MP4 output and the upstream two-stage / distilled
 pipelines.
 
-::: warning Current implementation
+::: tip Current status
 LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the supported
 backend for real local generation, CPU is a correctness-oriented fallback, and
-Metal is explicitly unsupported for this family. The verified coherent native
-smoke path on this branch is the LTX-2.3 22B CUDA text-to-video flow; the
-remaining CUDA acceptance matrix is still being re-verified before this issue
-closes.
+Metal is explicitly unsupported for this family. The native CUDA workflow
+matrix is validated across 19B/22B text+audio-video, image-to-video,
+audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` /
+`x2` where published), and temporal upscale (`x2`).
 :::
 
 ## Supported Models
@@ -32,6 +32,8 @@ closes.
 - Retake / partial regeneration via `--video` + `--retake`
 - IC-LoRA and stacked LoRAs via repeatable `--lora`
 - Camera-control preset names for the published LTX-2 19B camera LoRAs
+- Spatial upscale `x2` across the family and `x1.5` for `ltx-2.3-*`
+- Temporal upscale `x2`
 
 ## Current Constraints
 
@@ -74,6 +76,20 @@ mold run ltx-2-19b-distilled:fp8 \
 mold run ltx-2-19b-distilled:fp8 \
   "a lantern-lit cave entrance" \
   --camera-control dolly-in \
+  --format mp4
+
+# Retake a source clip over a time range
+mold run ltx-2-19b-distilled:fp8 \
+  "replace the actor with a chrome mannequin" \
+  --pipeline retake \
+  --video ./source.mp4 \
+  --retake 1.5:3.5 \
+  --format mp4
+
+# Spatial upscale on a published LTX-2.3 asset
+mold run ltx-2.3-22b-distilled:fp8 \
+  "red sports car in rain, cinematic reflections" \
+  --spatial-upscale x1.5 \
   --format mp4
 ```
 

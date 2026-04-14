@@ -61,15 +61,16 @@ features today?
 
 ## Video Generation
 
-| Family     | txt2vid | img2vid | audio2vid | retake | audio track |
-| ---------- | ------- | ------- | --------- | ------ | ----------- |
-| LTX Video  | Yes     | Not yet | No        | No     | No          |
-| LTX-2      | Yes     | Yes     | Yes       | Yes    | Yes         |
-| All others | No      | No      | No        | No     | No          |
+| Family     | txt2vid | img2vid | audio2vid | keyframe | retake | IC-LoRA | audio track |
+| ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ----------- |
+| LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No          |
+| LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes         |
+| All others | No      | No      | No        | No       | No     | No      | No          |
 
-Video output defaults to APNG (lossless, metadata-rich). Also supports GIF
-(256-color, pipe-friendly), WebP (feature-gated), and MP4/H.264 (feature-gated).
-Use `--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
+LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 defaults to MP4 so
+it can preserve synchronized audio when requested. Both families also support
+GIF, and feature-gated WebP/MP4 outputs where applicable. Use
+`--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
 Dimensions must be multiples of 32.
 
 The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
@@ -92,6 +93,9 @@ the full multiscale refinement path.
   still loading the Qwen2.5-VL vision tower for image conditioning.
 - LTX-2 now wires `x2` spatial upscaling across the family, `x1.5` spatial
   upscaling for `ltx-2.3-*`, and `x2` temporal upscaling in the native runtime.
+- LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
+  audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
+  temporal upscale workflows.
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).

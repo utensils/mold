@@ -1128,8 +1128,10 @@ fn maybe_load_stage_video_conditioning(
             )
         })?;
         let reference_downscale_factor = lora::reference_video_downscale_factor(&plan.loras)?;
-        if pixel_shape.width % reference_downscale_factor != 0
-            || pixel_shape.height % reference_downscale_factor != 0
+        if !pixel_shape.width.is_multiple_of(reference_downscale_factor)
+            || !pixel_shape
+                .height
+                .is_multiple_of(reference_downscale_factor)
         {
             anyhow::bail!(
                 "native LTX-2 IC-LoRA output dimensions ({}x{}) must be divisible by reference_downscale_factor ({reference_downscale_factor})",
@@ -3161,7 +3163,7 @@ fn run_real_distilled_stage(
             if let (Some(audio_latents), Some(audio_denoised)) =
                 (audio_latents.as_ref(), audio_denoised.as_ref())
             {
-                log_tensor_stats("audio_x0", &audio_denoised)?;
+                log_tensor_stats("audio_x0", audio_denoised)?;
                 let audio_velocity = velocity_from_denoised(audio_latents, audio_denoised, sigma)?;
                 log_tensor_stats("audio_velocity", &audio_velocity)?;
             }
@@ -3412,7 +3414,7 @@ fn maybe_load_native_conditioning_audio(
     dtype: DType,
 ) -> Result<Option<NativeConditioningAudio>> {
     let explicit_audio_path = plan.conditioning.audio_path.as_ref();
-    let audio_path = explicit_audio_path.or_else(|| {
+    let audio_path = explicit_audio_path.or({
         if plan.execution_graph.uses_retake_masking {
             plan.conditioning.video_path.as_ref()
         } else {
@@ -5010,6 +5012,24 @@ mod tests {
         assert_eq!(prepared.video_pixel_shape.width, 608);
         assert_eq!(prepared.video_pixel_shape.height, 352);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
+    }
+
+    #[test]
+    fn runtime_prepare_uses_stage_one_shape_for_x1_5_spatial_upscale() {
+        let mut req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+
+        assert_eq!(prepared.video_pixel_shape.width, 800);
+        assert_eq!(prepared.video_pixel_shape.height, 480);
+        assert_eq!(prepared.video_latent_shape.width, 25);
+        assert_eq!(prepared.video_latent_shape.height, 15);
     }
 
     #[test]

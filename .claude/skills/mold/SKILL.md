@@ -113,12 +113,14 @@ mold run flux-dev:bf16 "oil painting" --lora art.safetensors --image photo.png -
 ```
 
 **Requirements:**
+
 - FLUX models only (BF16 or GGUF quantized)
 - LoRA file must be `.safetensors` format (diffusers-format keys)
 - BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
+
 ```toml
 [models."flux-dev:bf16"]
 # ... other fields ...
@@ -178,50 +180,50 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`
 
-**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the verified path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The verified coherent native smoke path on this branch is the LTX-2.3 22B CUDA text-to-video flow; the remaining CUDA acceptance matrix is still being re-verified.
+**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the validated path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The native CUDA matrix is validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
 
 ### Model Selection Guide
 
 Pick the right model for the task:
 
-| Model | Speed | Quality | Best For |
-|-------|-------|---------|----------|
-| `flux-schnell:q8` | Fast (4 steps) | Good | Quick iterations, drafts |
-| `flux-dev:q4` | Slow (25 steps) | Excellent | Final quality, detailed |
-| `flux2-klein:q8` | Fast (4 steps) | Good | Low VRAM, lightweight FLUX |
-| `flux2-klein-9b:q8` | Fast (4 steps) | Excellent | Higher quality 9B, non-commercial |
-| `sdxl-turbo:fp16` | Fast (4 steps) | Good | Quick SDXL generation |
-| `sd15:fp16` | Medium (25 steps) | Good | ControlNet, 512x512 |
-| `z-image-turbo:q8` | Fast (9 steps) | Excellent | High quality, Qwen3 encoder |
-| `qwen-image:q4` | Slow (50 steps) | Good | Stable base Qwen GGUF on 24 GB cards |
-| `qwen-image-2512:q4` | Slow (50 steps) | Good | Stable 2512 GGUF on 24 GB cards |
-| `qwen-image:q8` | Slow (50 steps) | Better | Best base GGUF quality, validated at 768x768 on 24 GB |
-| `ltx-video-0.9.6-distilled:bf16` | Fast (8 steps) | Good | Text-to-video, 30fps |
-| `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7+3 steps) | Better | Newer checkpoint family with full multiscale refinement |
-| `ltx-2-19b-distilled:fp8` | Slow (8 steps) | Better | Joint audio-video, recommended LTX-2 default |
-| `ltx-2.3-22b-distilled:fp8` | Slow (8 steps) | Best | Larger joint audio-video path |
+| Model                               | Speed             | Quality   | Best For                                                |
+| ----------------------------------- | ----------------- | --------- | ------------------------------------------------------- |
+| `flux-schnell:q8`                   | Fast (4 steps)    | Good      | Quick iterations, drafts                                |
+| `flux-dev:q4`                       | Slow (25 steps)   | Excellent | Final quality, detailed                                 |
+| `flux2-klein:q8`                    | Fast (4 steps)    | Good      | Low VRAM, lightweight FLUX                              |
+| `flux2-klein-9b:q8`                 | Fast (4 steps)    | Excellent | Higher quality 9B, non-commercial                       |
+| `sdxl-turbo:fp16`                   | Fast (4 steps)    | Good      | Quick SDXL generation                                   |
+| `sd15:fp16`                         | Medium (25 steps) | Good      | ControlNet, 512x512                                     |
+| `z-image-turbo:q8`                  | Fast (9 steps)    | Excellent | High quality, Qwen3 encoder                             |
+| `qwen-image:q4`                     | Slow (50 steps)   | Good      | Stable base Qwen GGUF on 24 GB cards                    |
+| `qwen-image-2512:q4`                | Slow (50 steps)   | Good      | Stable 2512 GGUF on 24 GB cards                         |
+| `qwen-image:q8`                     | Slow (50 steps)   | Better    | Best base GGUF quality, validated at 768x768 on 24 GB   |
+| `ltx-video-0.9.6-distilled:bf16`    | Fast (8 steps)    | Good      | Text-to-video, 30fps                                    |
+| `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7+3 steps)  | Better    | Newer checkpoint family with full multiscale refinement |
+| `ltx-2-19b-distilled:fp8`           | Slow (8 steps)    | Better    | Joint audio-video, recommended LTX-2 default            |
+| `ltx-2.3-22b-distilled:fp8`         | Slow (8 steps)    | Best      | Larger joint audio-video path                           |
 
 Default model if none specified: `flux2-klein:q8`
 
 ### Model Defaults
 
-| Model | Steps | Guidance | Resolution |
-|-------|-------|----------|------------|
-| `flux-schnell` | 4 | 0.0 | 1024x1024 |
-| `flux-dev` | 25 | 3.5 | 1024x1024 |
-| `sdxl-base` | 25 | 7.5 | 1024x1024 |
-| `sdxl-turbo` | 4 | 0.0 | 512x512 |
-| `sd15` | 25 | 7.5 | 512x512 |
-| `sd3.5-large` | 28 | 4.0 | 1024x1024 |
-| `z-image-turbo` | 9 | 0.0 | 1024x1024 |
-| `flux2-klein` | 4 | 0.0 | 1024x1024 |
-| `flux2-klein-9b` | 4 | 1.0 | 1024x1024 |
-| `qwen-image` | 50 | 4.0 | 1328x1328 |
-| `qwen-image-2512` | 50 | 4.0 | 1328x1328 |
-| `ltx-video-0.9.6-distilled` | 8 | 1.0 | 1216x704 (25 frames, 30fps) |
-| `ltx-video-0.9.8-2b-distilled` | 7+3 | 1.0 | 1216x704 (25 frames, 30fps, multiscale refine) |
-| `ltx-2-19b-distilled` | 8 | 3.0 | 1216x704 (97 frames, 24fps, mp4 default) |
-| `ltx-2.3-22b-distilled` | 8 | 3.0 | 1216x704 (97 frames, 24fps, mp4 default) |
+| Model                          | Steps | Guidance | Resolution                                     |
+| ------------------------------ | ----- | -------- | ---------------------------------------------- |
+| `flux-schnell`                 | 4     | 0.0      | 1024x1024                                      |
+| `flux-dev`                     | 25    | 3.5      | 1024x1024                                      |
+| `sdxl-base`                    | 25    | 7.5      | 1024x1024                                      |
+| `sdxl-turbo`                   | 4     | 0.0      | 512x512                                        |
+| `sd15`                         | 25    | 7.5      | 512x512                                        |
+| `sd3.5-large`                  | 28    | 4.0      | 1024x1024                                      |
+| `z-image-turbo`                | 9     | 0.0      | 1024x1024                                      |
+| `flux2-klein`                  | 4     | 0.0      | 1024x1024                                      |
+| `flux2-klein-9b`               | 4     | 1.0      | 1024x1024                                      |
+| `qwen-image`                   | 50    | 4.0      | 1328x1328                                      |
+| `qwen-image-2512`              | 50    | 4.0      | 1328x1328                                      |
+| `ltx-video-0.9.6-distilled`    | 8     | 1.0      | 1216x704 (25 frames, 30fps)                    |
+| `ltx-video-0.9.8-2b-distilled` | 7+3   | 1.0      | 1216x704 (25 frames, 30fps, multiscale refine) |
+| `ltx-2-19b-distilled`          | 8     | 3.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
+| `ltx-2.3-22b-distilled`        | 8     | 3.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
 
 ### Available Models
 
@@ -251,12 +253,13 @@ Default model if none specified: `flux2-klein:q8`
 
 **LTX-2 / LTX-2.3**: `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 **Qwen-Image text encoder controls**:
+
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 - On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) to reduce memory pressure
 - On CUDA, `auto` prefers BF16 when there is enough post-transformer headroom and falls back to quantized GGUF variants for resident/edit paths when BF16 would be too heavy
 - `qwen-image-edit-2511:*` uses repeatable `--image` inputs and a distinct `qwen-image-edit` family. Local inference is implemented with the Qwen2.5-VL vision tower, packed edit latents, and true-CFG norm rescaling. Quantized `--qwen2-variant` values are supported for the edit family through a GGUF language path plus staged vision sidecar.
-**ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
+  **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
 **Utility (LLM)**: `qwen3-expand:q8`, `qwen3-expand-small:q8`
 
@@ -344,13 +347,13 @@ mold upscale large_photo.png --tile-size 256
 
 ### Available Upscaler Models
 
-| Model | Scale | Size | Best For |
-|-------|-------|------|----------|
-| `real-esrgan-x4plus:fp16` | 4x | 32 MB | General photos (default) |
-| `real-esrgan-x4plus:fp32` | 4x | 64 MB | General photos (full precision) |
-| `real-esrgan-x2plus:fp16` | 2x | 32 MB | Subtle 2x enhancement |
-| `real-esrgan-x4plus-anime:fp16` | 4x | 8.5 MB | Anime/illustration |
-| `real-esrgan-anime-v3:fp32` | 4x | 2.4 MB | Fast anime/video |
+| Model                           | Scale | Size   | Best For                        |
+| ------------------------------- | ----- | ------ | ------------------------------- |
+| `real-esrgan-x4plus:fp16`       | 4x    | 32 MB  | General photos (default)        |
+| `real-esrgan-x4plus:fp32`       | 4x    | 64 MB  | General photos (full precision) |
+| `real-esrgan-x2plus:fp16`       | 2x    | 32 MB  | Subtle 2x enhancement           |
+| `real-esrgan-x4plus-anime:fp16` | 4x    | 8.5 MB | Anime/illustration              |
+| `real-esrgan-anime-v3:fp32`     | 4x    | 2.4 MB | Fast anime/video                |
 
 ## Model Management
 
@@ -429,37 +432,37 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 
 ## Key Environment Variables
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `MOLD_HOME` | `~/.mold` | Base directory for config, cache, and default models |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein` | Default model (smart fallback to only downloaded model) |
-| `MOLD_HOST` | `http://localhost:7680` | Remote server URL |
-| `MOLD_MODELS_DIR` | `$MOLD_HOME/models` | Model storage path |
-| `MOLD_OUTPUT_DIR` | `~/.mold/output` | Image output directory (set empty to disable) |
-| `MOLD_THUMBNAIL_WARMUP` | unset | Set `1` to prebuild gallery thumbnails at server startup |
-| `MOLD_PORT` | `7680` | Server port |
-| `MOLD_LOG` | `warn` | Log level (trace/debug/info/warn/error) |
-| `MOLD_EAGER` | unset | Set `1` to keep all components loaded |
-| `MOLD_OFFLOAD` | unset | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower) |
-| `MOLD_EMBED_METADATA` | `1` | Set `0` to disable PNG metadata |
-| `MOLD_PREVIEW` | unset | Set `1` to display generated images inline in the terminal |
-| `MOLD_T5_VARIANT` | `auto` | T5 encoder: auto/fp16/q8/q6/q5/q4/q3 |
-| `MOLD_QWEN3_VARIANT` | `auto` | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3 |
-| `MOLD_SCHEDULER` | unset | SD1.5/SDXL: ddim/euler-ancestral/uni-pc |
-| `MOLD_API_KEY` | unset | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
-| `MOLD_RATE_LIMIT` | unset | Per-IP rate limit for generation endpoints (e.g., `10/min`) |
-| `MOLD_RATE_LIMIT_BURST` | unset | Burst allowance override (defaults to 2x rate) |
-| `MOLD_CORS_ORIGIN` | unset | Restrict server CORS to specific origin |
-| `MOLD_UPSCALE_MODEL` | unset | Default upscaler model for `mold upscale` |
-| `MOLD_UPSCALE_TILE_SIZE` | unset | Tile size for memory-efficient upscaling (0 to disable) |
-| `MOLD_EXPAND` | unset | Set `1` to enable prompt expansion by default |
-| `MOLD_EXPAND_BACKEND` | `local` | Expansion backend: `local` or OpenAI-compatible API URL |
-| `MOLD_EXPAND_MODEL` | `qwen3-expand:q8` | LLM model for local expansion |
-| `MOLD_EXPAND_TEMPERATURE` | `0.7` | Sampling temperature for expansion |
-| `MOLD_EXPAND_THINKING` | unset | Set `1` to enable thinking mode in expansion LLM |
-| `MOLD_EXPAND_SYSTEM_PROMPT` | unset | Custom single-expansion system prompt template |
-| `MOLD_EXPAND_BATCH_PROMPT` | unset | Custom batch-variation system prompt template |
-| `HF_TOKEN` | unset | HuggingFace token for gated models |
+| Variable                    | Default                 | Purpose                                                                    |
+| --------------------------- | ----------------------- | -------------------------------------------------------------------------- |
+| `MOLD_HOME`                 | `~/.mold`               | Base directory for config, cache, and default models                       |
+| `MOLD_DEFAULT_MODEL`        | `flux2-klein`           | Default model (smart fallback to only downloaded model)                    |
+| `MOLD_HOST`                 | `http://localhost:7680` | Remote server URL                                                          |
+| `MOLD_MODELS_DIR`           | `$MOLD_HOME/models`     | Model storage path                                                         |
+| `MOLD_OUTPUT_DIR`           | `~/.mold/output`        | Image output directory (set empty to disable)                              |
+| `MOLD_THUMBNAIL_WARMUP`     | unset                   | Set `1` to prebuild gallery thumbnails at server startup                   |
+| `MOLD_PORT`                 | `7680`                  | Server port                                                                |
+| `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
+| `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
+| `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower)           |
+| `MOLD_EMBED_METADATA`       | `1`                     | Set `0` to disable PNG metadata                                            |
+| `MOLD_PREVIEW`              | unset                   | Set `1` to display generated images inline in the terminal                 |
+| `MOLD_T5_VARIANT`           | `auto`                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                       |
+| `MOLD_QWEN3_VARIANT`        | `auto`                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                      |
+| `MOLD_SCHEDULER`            | unset                   | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                    |
+| `MOLD_API_KEY`              | unset                   | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
+| `MOLD_RATE_LIMIT`           | unset                   | Per-IP rate limit for generation endpoints (e.g., `10/min`)                |
+| `MOLD_RATE_LIMIT_BURST`     | unset                   | Burst allowance override (defaults to 2x rate)                             |
+| `MOLD_CORS_ORIGIN`          | unset                   | Restrict server CORS to specific origin                                    |
+| `MOLD_UPSCALE_MODEL`        | unset                   | Default upscaler model for `mold upscale`                                  |
+| `MOLD_UPSCALE_TILE_SIZE`    | unset                   | Tile size for memory-efficient upscaling (0 to disable)                    |
+| `MOLD_EXPAND`               | unset                   | Set `1` to enable prompt expansion by default                              |
+| `MOLD_EXPAND_BACKEND`       | `local`                 | Expansion backend: `local` or OpenAI-compatible API URL                    |
+| `MOLD_EXPAND_MODEL`         | `qwen3-expand:q8`       | LLM model for local expansion                                              |
+| `MOLD_EXPAND_TEMPERATURE`   | `0.7`                   | Sampling temperature for expansion                                         |
+| `MOLD_EXPAND_THINKING`      | unset                   | Set `1` to enable thinking mode in expansion LLM                           |
+| `MOLD_EXPAND_SYSTEM_PROMPT` | unset                   | Custom single-expansion system prompt template                             |
+| `MOLD_EXPAND_BATCH_PROMPT`  | unset                   | Custom batch-variation system prompt template                              |
+| `HF_TOKEN`                  | unset                   | HuggingFace token for gated models                                         |
 
 ## Inference Modes
 
@@ -512,13 +515,13 @@ mold discord
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MOLD_DISCORD_TOKEN` | — | Bot token (falls back to `DISCORD_TOKEN`) |
-| `MOLD_HOST` | `http://localhost:7680` | mold server URL |
-| `MOLD_DISCORD_COOLDOWN` | `10` | Per-user cooldown (seconds) |
-| `MOLD_DISCORD_ALLOWED_ROLES` | — | Comma-separated role names/IDs for access control (unset = all) |
-| `MOLD_DISCORD_DAILY_QUOTA` | — | Max generations per user per UTC day (unset = unlimited) |
+| Variable                     | Default                 | Description                                                     |
+| ---------------------------- | ----------------------- | --------------------------------------------------------------- |
+| `MOLD_DISCORD_TOKEN`         | —                       | Bot token (falls back to `DISCORD_TOKEN`)                       |
+| `MOLD_HOST`                  | `http://localhost:7680` | mold server URL                                                 |
+| `MOLD_DISCORD_COOLDOWN`      | `10`                    | Per-user cooldown (seconds)                                     |
+| `MOLD_DISCORD_ALLOWED_ROLES` | —                       | Comma-separated role names/IDs for access control (unset = all) |
+| `MOLD_DISCORD_DAILY_QUOTA`   | —                       | Max generations per user per UTC day (unset = unlimited)        |
 
 ### NixOS
 

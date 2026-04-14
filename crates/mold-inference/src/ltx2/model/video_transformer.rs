@@ -59,7 +59,7 @@ fn should_synchronize_streaming_layer(
 ) -> bool {
     let interval = prefetch_count.max(1);
     let layer_num = index + 1;
-    layer_num % interval == 0 || layer_num == total_layers
+    layer_num.is_multiple_of(interval) || layer_num == total_layers
 }
 
 // ---------------------------------------------------------------------------

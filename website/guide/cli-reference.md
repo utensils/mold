@@ -14,7 +14,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 ### Options
 
 | Flag                               | Description                                                                                                     |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `-m, --model <MODEL>`              | Explicit model override                                                                                         |
 | `-o, --output <PATH>`              | Output file (default: `./mold-{model}-{ts}.png`)                                                                |
 | `--width <N>`                      | Image width                                                                                                     |
@@ -31,7 +31,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--keyframe <FRAME:PATH>`          | LTX-2 keyframe conditioning. Repeat for multiple keyframes                                                      |
 | `--pipeline <MODE>`                | LTX-2 pipeline: `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake` |
 | `--retake <START:END>`             | LTX-2 retake time range in seconds                                                                              |
-| `--camera-control <NAME            | PATH>`                                                                                                          | LTX-2 camera-control preset name or explicit `.safetensors` path |
+| `--camera-control <NAME\|PATH>`    | LTX-2 camera-control preset name or explicit `.safetensors` path                                                |
 | `--spatial-upscale <MODE>`         | LTX-2 spatial upscaling (`x2` across the family, `x1.5` for `ltx-2.3-*`)                                        |
 | `--temporal-upscale <MODE>`        | LTX-2 temporal upscaling (`x2` in the native runtime)                                                           |
 | `--format <FMT>`                   | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`                                                                     |
@@ -95,6 +95,9 @@ reduce unified-memory pressure during denoising.
 - On 24 GB Ada GPUs such as the RTX 4090, the verified local FP8 path uses
   native staged loading, layer streaming, and the compatible `fp8-cast` mode
   rather than Hopper-only `fp8-scaled-mm`.
+- The native CUDA matrix is validated across text+audio-video, image-to-video,
+  audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
+  temporal upscale workflows.
 
 ## `mold expand`
 

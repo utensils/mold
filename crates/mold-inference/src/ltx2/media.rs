@@ -575,7 +575,7 @@ pub(crate) fn encode_wav_f32_interleaved(
     let byte_rate = sample_rate
         .checked_mul(block_align as u32)
         .context("WAV byte rate overflowed")?;
-    let data_size = (samples.len() * std::mem::size_of::<f32>()) as u32;
+    let data_size = std::mem::size_of_val(samples) as u32;
     let riff_size = 36u32
         .checked_add(data_size)
         .context("WAV RIFF size overflowed")?;

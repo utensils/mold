@@ -124,19 +124,19 @@ See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference
 
 Supports 11 model families with 80+ variants:
 
-| Family | Models | Highlights |
-|--------|--------|------------|
-| **FLUX.1** | schnell, dev, + fine-tunes | Best quality, 4-25 steps, LoRA support |
-| **Flux.2 Klein** | 4B and 9B | Fast 4-step, low VRAM, default model |
-| **SDXL** | base, turbo, + fine-tunes | Fast, flexible, negative prompts |
-| **SD 1.5** | base + fine-tunes | Lightweight, ControlNet support |
-| **SD 3.5** | large, medium, turbo | Triple encoder, high quality |
-| **Z-Image** | turbo | Fast 9-step, Qwen3 encoder |
-| **Qwen-Image** | base + 2512 | High resolution, CFG guidance, GGUF quant support |
-| **Qwen-Image-Edit** | 2511 | Multimodal image editing, repeatable `--image`, negative prompts |
-| **Wuerstchen** | v2 | 42x latent compression |
-| **LTX-2 / LTX-2.3** | 19B, 22B | Joint audio-video generation, MP4-first workflows |
-| **LTX Video** | 0.9.6, 0.9.8 | Text-to-video with APNG/GIF/WebP/MP4 output |
+| Family              | Models                     | Highlights                                                       |
+| ------------------- | -------------------------- | ---------------------------------------------------------------- |
+| **FLUX.1**          | schnell, dev, + fine-tunes | Best quality, 4-25 steps, LoRA support                           |
+| **Flux.2 Klein**    | 4B and 9B                  | Fast 4-step, low VRAM, default model                             |
+| **SDXL**            | base, turbo, + fine-tunes  | Fast, flexible, negative prompts                                 |
+| **SD 1.5**          | base + fine-tunes          | Lightweight, ControlNet support                                  |
+| **SD 3.5**          | large, medium, turbo       | Triple encoder, high quality                                     |
+| **Z-Image**         | turbo                      | Fast 9-step, Qwen3 encoder                                       |
+| **Qwen-Image**      | base + 2512                | High resolution, CFG guidance, GGUF quant support                |
+| **Qwen-Image-Edit** | 2511                       | Multimodal image editing, repeatable `--image`, negative prompts |
+| **Wuerstchen**      | v2                         | 42x latent compression                                           |
+| **LTX-2 / LTX-2.3** | 19B, 22B                   | Joint audio-video generation, MP4-first workflows                |
+| **LTX Video**       | 0.9.6, 0.9.8               | Text-to-video with APNG/GIF/WebP/MP4 output                      |
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 
@@ -179,9 +179,10 @@ is the supported backend for real local generation, CPU is a correctness-only
 fallback, and Metal is explicitly unsupported for this family. On 24 GB Ada
 GPUs such as the RTX 4090, mold uses native staged loading, layer streaming,
 and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
-`fp8-scaled-mm`. The verified coherent native smoke path on this branch is the
-LTX-2.3 22B CUDA text-to-video flow; the rest of the full CUDA acceptance
-matrix is still being re-verified.
+`fp8-scaled-mm`. The native CUDA acceptance matrix is now validated across 19B
+and 22B text+audio-video, image-to-video, audio-to-video, keyframe, retake,
+public IC-LoRA, spatial upscaling (`x1.5` / `x2` where published), and
+temporal upscaling (`x2`).
 
 ## Features
 
@@ -203,11 +204,11 @@ matrix is still being re-verified.
 
 ## Deployment
 
-| Method | Guide |
-|--------|-------|
-| **NixOS module** | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos) |
+| Method              | Guide                                                                   |
+| ------------------- | ----------------------------------------------------------------------- |
+| **NixOS module**    | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos)   |
 | **Docker / RunPod** | [Deployment: Docker](https://utensils.github.io/mold/deployment/docker) |
-| **Systemd** | [Deployment: Overview](https://utensils.github.io/mold/deployment/) |
+| **Systemd**         | [Deployment: Overview](https://utensils.github.io/mold/deployment/)     |
 
 ## How it works
 

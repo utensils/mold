@@ -160,6 +160,10 @@ LTX-2 also adds:
 - `--spatial-upscale <x1.5|x2>`
 - `--temporal-upscale x2`
 
+The native CUDA matrix is validated across 19B/22B text+audio-video,
+image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial
+upscale, and temporal upscale workflows.
+
 ::: warning Backend policy
 LTX-2 now runs natively in Rust inside `mold-inference`. CUDA is the supported
 backend for real local generation, CPU is correctness-only, and Metal is

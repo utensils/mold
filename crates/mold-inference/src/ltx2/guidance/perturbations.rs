@@ -92,7 +92,7 @@ impl BatchedPerturbationConfig {
         device: &Device,
     ) -> Result<Tensor> {
         let values = self.mask_values(kind, block);
-        Ok(Tensor::from_vec(values, self.perturbations.len(), device)?)
+        Tensor::from_vec(values, self.perturbations.len(), device)
     }
 
     pub fn mask_like(
@@ -106,7 +106,7 @@ impl BatchedPerturbationConfig {
             .to_dtype(values.dtype())?;
         let mut shape = vec![mask.dim(0)?];
         shape.extend(std::iter::repeat_n(1usize, values.rank().saturating_sub(1)));
-        Ok(mask.reshape(shape)?)
+        mask.reshape(shape)
     }
 
     pub fn any_in_batch(&self, kind: PerturbationType, block: usize) -> bool {

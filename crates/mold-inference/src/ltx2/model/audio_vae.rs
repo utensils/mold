@@ -1295,9 +1295,7 @@ impl Ltx2AudioEncoder {
         };
         let latent_patched = self.patchifier.patchify(&means)?;
         let latent_normalized = self.per_channel_statistics.normalize(&latent_patched)?;
-        self.patchifier
-            .unpatchify(&latent_normalized, latent_shape)
-            .map_err(Into::into)
+        self.patchifier.unpatchify(&latent_normalized, latent_shape)
     }
 
     pub fn encode_audio(&self, audio: &DecodedAudio) -> Result<Tensor> {

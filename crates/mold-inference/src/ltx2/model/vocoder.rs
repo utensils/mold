@@ -77,7 +77,7 @@ enum CheckpointVocoderLayout {
     Legacy(Ltx2GeneratorConfig),
     Nested {
         vocoder: Ltx2GeneratorConfig,
-        bwe: Ltx2BweConfig,
+        bwe: Box<Ltx2BweConfig>,
     },
 }
 
@@ -100,7 +100,7 @@ impl Ltx2VocoderConfig {
             CheckpointVocoderLayout::Nested { vocoder, bwe } => Ok(Self {
                 output_sample_rate: bwe.output_sampling_rate,
                 vocoder,
-                bwe: Some(bwe),
+                bwe: Some(*bwe),
             }),
         }
     }
@@ -135,8 +135,7 @@ impl SnakeBeta {
             .to_dtype(x.dtype())?
             .exp()?;
         let sin_sq = x.broadcast_mul(&alpha)?.sin()?.sqr()?;
-        x.broadcast_add(&sin_sq.broadcast_div(&beta)?)
-            .map_err(Into::into)
+        Ok(x.broadcast_add(&sin_sq.broadcast_div(&beta)?)?)
     }
 }
 
@@ -154,7 +153,7 @@ impl CheckpointUpSample1d {
         let kernel_size = filter.dims3()?.2;
         let pad = kernel_size / ratio - 1;
         let pad_left = pad * ratio + (kernel_size - ratio) / 2;
-        let pad_right = pad * ratio + (kernel_size - ratio + 1) / 2;
+        let pad_right = pad * ratio + (kernel_size - ratio).div_ceil(2);
         Ok(Self {
             ratio,
             pad,
@@ -183,12 +182,11 @@ impl CheckpointUpSample1d {
             .affine(self.ratio as f64, 0.0)
             .context("checkpoint upsample affine failed")?;
         let out_len = y.dims3()?.2;
-        y.narrow(
+        Ok(y.narrow(
             2,
             self.pad_left,
             out_len.saturating_sub(self.pad_left + self.pad_right),
-        )
-        .map_err(Into::into)
+        )?)
     }
 }
 
@@ -235,7 +233,6 @@ impl CheckpointDownSample1d {
                     self.ratio
                 )
             })
-            .map_err(Into::into)
     }
 }
 

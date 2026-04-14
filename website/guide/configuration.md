@@ -177,6 +177,7 @@ For Qwen-Image and Qwen-Image-Edit:
 | `MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN`        | —                          | Debug-only LTX-2 switch to bypass cross-attention AdaLN modulation                                           |
 | `MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION` | —                          | Debug-only LTX-2 switch to bypass transformer gated attention                                                |
 | `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`            | —                          | Force the native LTX-2 prompt encoder onto CPU while leaving the rest of the runtime on the selected backend |
+| `MOLD_LTX2_DEBUG_TIMINGS`                             | —                          | Emit native LTX-2 pipeline, phase, and denoise timing summaries for optimization work                        |
 | `MOLD_LTX2_DEBUG_STAGE_PREFIX`                        | —                          | Write decoded native LTX-2 stage artifacts using this filename prefix                                        |
 | `MOLD_LTX2_DEBUG_BLOCKS`                              | —                          | Emit per-block native LTX-2 transformer debug logs                                                           |
 | `MOLD_LTX2_DEBUG_BLOCK_DETAIL`                        | —                          | Restrict detailed native LTX-2 block logging to a specific transformer block index                           |
