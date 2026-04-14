@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_conditioning_inferrs_mp4_audio_extension_from_container_bytes() {
+    fn stage_conditioning_infers_mp4_audio_extension_from_container_bytes() {
         let work_dir = tempfile::tempdir().unwrap();
         let mut req = req();
         req.audio_file = Some(fake_mp4_bytes());
