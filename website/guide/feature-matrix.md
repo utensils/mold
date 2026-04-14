@@ -77,6 +77,27 @@ The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
 the full multiscale refinement path.
 
+## Backend Support
+
+| Family          | CUDA | Metal       | CPU              |
+| --------------- | ---- | ----------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes  | Yes         | Yes (slow)       |
+| SDXL / SD 1.5   | Yes  | Yes         | Yes              |
+| SD 3.5          | Yes  | Yes         | Yes              |
+| Z-Image         | Yes  | Yes         | Yes              |
+| Wuerstchen v2   | Yes  | Yes         | Yes              |
+| Qwen-Image      | Yes  | Yes         | Yes              |
+| Qwen-Image-Edit | Yes  | Yes         | Yes              |
+| LTX Video       | Yes  | Yes         | Yes              |
+| **LTX-2**       | Yes  | **Not yet** | Correctness-only |
+
+::: warning LTX-2 is CUDA-only for real generation
+LTX-2 / LTX-2.3 does **not** support Apple Metal in this release. The native
+runtime runs on CUDA; the CPU path exists for correctness-oriented coverage and
+can be extremely slow. On macOS you can still use every other family through
+the Metal backend — LTX-2 is the only family that is currently CUDA-gated.
+:::
+
 ## Notes
 
 - ControlNet is currently available only for SD 1.5.
@@ -96,6 +117,8 @@ the full multiscale refinement path.
 - LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
   audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
   temporal upscale workflows.
+- LTX-2 is CUDA-only for real generation: CPU is correctness-only, and Metal is
+  not supported in this release.
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).
