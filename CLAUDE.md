@@ -128,7 +128,7 @@ Shared library used by all other crates:
 
 ### mold-inference
 
-Nine model families, each with its own pipeline implementing the `InferenceEngine` trait:
+Ten model families, each with its own pipeline implementing the `InferenceEngine` trait:
 
 ```rust
 pub trait InferenceEngine: Send + Sync {
@@ -152,6 +152,7 @@ pub trait InferenceEngine: Send + Sync {
 - `"z-image"` → `ZImageEngine` — Qwen3 text encoder, flow-matching transformer with 3D RoPE
 - `"wuerstchen"` (also `"wuerstchen-v2"`) → `WuerstchenEngine` — CLIP-G text encoder, 3-stage cascade (Prior → Decoder → VQ-GAN), 42x latent compression
 - `"ltx-video"` → `LtxVideoEngine` — T5-XXL text encoding, flow-matching transformer, 3D causal VAE, text-to-video (APNG/GIF/WebP/MP4 output). Current supported checkpoints are `0.9.6` and `0.9.8`; `0.9.8` pulls a spatial upscaler asset and currently runs first-pass generation only.
+- `"ltx2"` (also `"ltx-2"`) → `Ltx2Engine` — Gemma 3 text encoder with LTX-2 connectors, joint audio-video DiT transformer, 3D causal video VAE, audio VAE + vocoder, MP4-first output with real AAC audio. Covers 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5`/`x2`), and temporal upscale (`x2`). **CUDA-only for real generation** — CPU is a correctness-oriented fallback, and Metal is explicitly unsupported for this family. The native runtime is in `ltx2/` with runtime orchestration, guidance/perturbation paths, stacked LoRAs + camera-control presets, and a native MP4/GIF/APNG/WebP media pipeline.
 
 **Additional modules:**
 - `encoders/variant_resolution.rs` — Shared T5/Qwen3 encoder variant resolution (auto-fallback quantization)

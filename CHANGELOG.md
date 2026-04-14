@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-14
+
+*Native Rust LTX-2 / LTX-2.3 joint audio-video generation.*
+
 ### Added
 
 - **LTX-2 / LTX-2.3 joint audio-video generation**: added the new `ltx2` model family with `ltx-2-19b-{dev,distilled}:fp8` and `ltx-2.3-22b-{dev,distilled}:fp8` manifests, synchronized MP4-first video metadata, request fields for audio/video/keyframes/retake/upscaling, and a separate `Ltx2Engine` wired into the inference factory through the in-tree Rust runtime.
@@ -382,7 +386,9 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/utensils/mold/compare/v0.6.3...v0.7.0
+[0.6.3]: https://github.com/utensils/mold/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/utensils/mold/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/utensils/mold/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/utensils/mold/compare/v0.5.3...v0.6.0
