@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 // LTX-2 video transformer — adapted from candle-transformers-mold's LTX Video model.
@@ -70,13 +69,16 @@ fn should_synchronize_streaming_layer(
 pub struct Ltx2VideoTransformer3DModelConfig {
     pub in_channels: usize,
     pub out_channels: usize,
+    #[allow(dead_code)]
     pub patch_size: usize,
+    #[allow(dead_code)]
     pub patch_size_t: usize,
     pub num_attention_heads: usize,
     pub attention_head_dim: usize,
     pub cross_attention_dim: usize,
     pub num_layers: usize,
     pub qk_norm: String,
+    #[allow(dead_code)]
     pub norm_elementwise_affine: bool,
     pub norm_eps: f64,
     pub caption_channels: usize,
@@ -297,13 +299,6 @@ impl LtxLinear {
                 linear: nn::Linear::new(weight, bias),
                 adapters,
             })
-        }
-    }
-
-    fn weight_dtype(&self) -> DType {
-        match self {
-            Self::Standard { linear, .. } => linear.weight().dtype(),
-            Self::Fp8 { weight, .. } => weight.dtype(),
         }
     }
 }
@@ -664,6 +659,7 @@ pub struct PixArtAlphaTextProjection {
 }
 
 impl PixArtAlphaTextProjection {
+    #[allow(dead_code)]
     pub fn new(in_features: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
         Self::new_with_out_features(in_features, hidden_size, hidden_size, vb)
     }
@@ -743,6 +739,7 @@ pub struct AdaLayerNormSingle {
 }
 
 impl AdaLayerNormSingle {
+    #[allow(dead_code)]
     pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
         Self::new_with_coefficient(dim, 6, vb)
     }
@@ -993,6 +990,7 @@ impl Ltx2VideoRotaryPosEmbed {
         duplicated.reshape(new_shape)
     }
 
+    #[allow(dead_code)]
     pub fn forward(&self, hidden_states: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
         self.forward_for_dtype(hidden_states.device(), hidden_states.dtype(), positions)
     }
@@ -1490,6 +1488,7 @@ fn chunked_attention(
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct LtxVideoTransformerBlock {
     norm1: RmsNorm,
     attn1: LtxAttention,
@@ -1500,6 +1499,7 @@ pub struct LtxVideoTransformerBlock {
     scale_shift_table: Tensor,
 }
 
+#[allow(dead_code)]
 impl LtxVideoTransformerBlock {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1686,11 +1686,13 @@ impl LtxVideoTransformerBlock {
 // LTX-2 video transformer — top-level model
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 enum TransformerBlockSource {
     Eager(Vec<LtxVideoTransformerBlock>),
     Streaming(VarBuilder<'static>),
 }
 
+#[allow(dead_code)]
 pub struct Ltx2VideoTransformer3DModel {
     proj_in: nn::Linear,
     scale_shift_table: Tensor,
@@ -1708,6 +1710,7 @@ pub struct Ltx2VideoTransformer3DModel {
     timestep_scale_multiplier: f64,
 }
 
+#[allow(dead_code)]
 impl Ltx2VideoTransformer3DModel {
     pub fn new(config: &Ltx2VideoTransformer3DModelConfig, vb: VarBuilder) -> Result<Self> {
         let out_channels = if config.out_channels == 0 {
@@ -4662,7 +4665,7 @@ mod tests {
         let q = Tensor::from_vec(patterned_values(40, 17), (1, 2, 5, 4), &device).unwrap();
         let k = Tensor::from_vec(patterned_values(40, 19), (1, 2, 5, 4), &device).unwrap();
         let v = Tensor::from_vec(patterned_values(40, 23), (1, 2, 5, 4), &device).unwrap();
-        let mut mask_values = vec![0.0f32; 1 * 2 * 5 * 5];
+        let mut mask_values = vec![0.0f32; 2 * 5 * 5];
         for head in 0..2 {
             let base = head * 25;
             mask_values[base + 3] = f32::NEG_INFINITY;

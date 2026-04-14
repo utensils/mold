@@ -72,27 +72,27 @@ pub(crate) struct Ltx2ModelPreset {
 }
 
 impl Ltx2ModelPreset {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn transformer_inner_dim(self) -> usize {
         self.transformer.num_attention_heads * self.transformer.attention_head_dim
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn audio_transformer_inner_dim(self) -> usize {
         self.transformer.audio_num_attention_heads * self.transformer.audio_attention_head_dim
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn gemma_flat_dim(self) -> usize {
         self.gemma.hidden_size * (self.gemma.num_hidden_layers + 1)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn video_connector_inner_dim(self) -> usize {
         self.connectors.video_num_attention_heads * self.connectors.video_attention_head_dim
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn audio_connector_inner_dim(self) -> usize {
         self.connectors.audio_num_attention_heads * self.connectors.audio_attention_head_dim
     }

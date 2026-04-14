@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
@@ -57,6 +55,7 @@ pub struct Ltx2AudioDecoderConfig {
     pub ch_mult: Vec<usize>,
     pub num_res_blocks: usize,
     pub attn_resolutions: Vec<usize>,
+    #[allow(dead_code)]
     pub resolution: usize,
     pub z_channels: usize,
     pub norm_type: AudioNormType,
@@ -75,6 +74,7 @@ pub struct Ltx2AudioEncoderConfig {
     pub ch_mult: Vec<usize>,
     pub num_res_blocks: usize,
     pub attn_resolutions: Vec<usize>,
+    #[allow(dead_code)]
     pub resolution: usize,
     pub z_channels: usize,
     pub double_z: bool,
@@ -182,6 +182,7 @@ struct CheckpointAudioVaeParams {
 
 #[derive(Debug, Deserialize)]
 struct CheckpointAudioDdConfig {
+    #[allow(dead_code)]
     mel_bins: usize,
     z_channels: usize,
     resolution: usize,
@@ -926,8 +927,6 @@ impl AudioCausalConv2d {
 
 #[derive(Debug, Clone)]
 struct AudioResnetBlock {
-    in_channels: usize,
-    out_channels: usize,
     norm1: AudioNorm,
     conv1: AudioCausalConv2d,
     norm2: AudioNorm,
@@ -974,8 +973,6 @@ impl AudioResnetBlock {
             None
         };
         Ok(Self {
-            in_channels,
-            out_channels,
             norm1,
             conv1,
             norm2,

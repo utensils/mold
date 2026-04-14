@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::large_enum_variant)]
 
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
@@ -34,6 +33,7 @@ impl PerChannelRmsNorm {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 struct Conv3dLikeConfig {
     stride_t: usize,
     stride_h: usize,
@@ -50,6 +50,7 @@ pub(crate) enum SpatialPaddingMode {
 #[derive(Debug, Clone)]
 pub struct Ltx2VideoCausalConv3d {
     kt: usize,
+    #[allow(dead_code)]
     is_causal_default: bool,
     cfg: Conv3dLikeConfig,
     spatial_pad_h: usize,
@@ -224,6 +225,7 @@ impl Ltx2VideoCausalConv3d {
         }
     }
 
+    #[allow(dead_code)]
     pub fn forward_default(&self, x: &Tensor) -> Result<Tensor> {
         self.forward(x, self.is_causal_default)
     }
@@ -655,6 +657,7 @@ impl VaeBlockConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum LatentLogVar {
     PerChannel,
     Uniform,
@@ -988,6 +991,7 @@ fn unpatchify_video(sample: &Tensor, patch_size_hw: usize, patch_size_t: usize) 
 
 #[derive(Clone, Debug)]
 pub struct DecoderOutput {
+    #[allow(dead_code)]
     pub sample: Tensor,
 }
 
@@ -1179,8 +1183,11 @@ pub struct AutoencoderKLLtx2Video {
     decoder: Ltx2VideoDecoder,
     latents_mean: Tensor,
     latents_std: Tensor,
+    #[allow(dead_code)]
     scaling_factor: f64,
+    #[allow(dead_code)]
     spatial_compression_ratio: usize,
+    #[allow(dead_code)]
     temporal_compression_ratio: usize,
     config: AutoencoderKLLtx2VideoConfig,
     pub use_tiling: bool,
@@ -1247,26 +1254,32 @@ impl AutoencoderKLLtx2Video {
         latents.broadcast_mul(&std)?.broadcast_add(&mean)
     }
 
+    #[allow(dead_code)]
     pub fn latents_mean(&self) -> &Tensor {
         &self.latents_mean
     }
 
+    #[allow(dead_code)]
     pub fn latents_std(&self) -> &Tensor {
         &self.latents_std
     }
 
+    #[allow(dead_code)]
     pub fn scaling_factor(&self) -> f64 {
         self.scaling_factor
     }
 
+    #[allow(dead_code)]
     pub fn spatial_compression_ratio(&self) -> usize {
         self.spatial_compression_ratio
     }
 
+    #[allow(dead_code)]
     pub fn temporal_compression_ratio(&self) -> usize {
         self.temporal_compression_ratio
     }
 
+    #[allow(dead_code)]
     pub fn config(&self) -> &AutoencoderKLLtx2VideoConfig {
         &self.config
     }

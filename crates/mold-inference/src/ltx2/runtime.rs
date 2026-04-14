@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::{Context, Result};
@@ -40,7 +39,7 @@ use crate::device::{fmt_gb, free_vram_bytes};
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
-use crate::progress::ProgressReporter;
+use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 use crate::weight_loader::load_fp8_safetensors;
 use mold_core::{LoraWeight, Ltx2SpatialUpscale, TimeRange};
 
@@ -60,6 +59,7 @@ pub struct NativePreparedRun {
     pub audio_latent_shape: Option<AudioLatentShape>,
     pub video_positions: Tensor,
     pub audio_positions: Option<Tensor>,
+    #[allow(dead_code)]
     pub cross_modal_temporal_positions: Option<(Tensor, Tensor)>,
     pub retake_mask: Option<Vec<f32>>,
 }
@@ -136,11 +136,19 @@ impl Ltx2VaeLatentStats {
         let mean = if stats_vb.contains_tensor("mean-of-means") {
             stats_vb.get(config.latent_channels, "mean-of-means")?
         } else {
+            tracing::debug!(
+                checkpoint = %plan.checkpoint_path,
+                "native LTX-2 VAE checkpoint missing mean-of-means statistics, falling back to config defaults"
+            );
             Tensor::new(config.latents_mean.as_slice(), device)?.to_dtype(dtype)?
         };
         let std = if stats_vb.contains_tensor("std-of-means") {
             stats_vb.get(config.latent_channels, "std-of-means")?
         } else {
+            tracing::debug!(
+                checkpoint = %plan.checkpoint_path,
+                "native LTX-2 VAE checkpoint missing std-of-means statistics, falling back to config defaults"
+            );
             Tensor::new(config.latents_std.as_slice(), device)?.to_dtype(dtype)?
         };
         Ok(Self { mean, std })
@@ -392,12 +400,13 @@ impl Ltx2RuntimeSession {
         &self,
         plan: &Ltx2GeneratePlan,
         prepared: &NativePreparedRun,
+        progress: Option<&ProgressCallback>,
     ) -> Result<NativeRenderedVideo> {
         let device = self
             .device
             .as_ref()
             .context("native LTX-2 compute device was not initialized")?;
-        if let Some(rendered) = self.try_render_real_video(plan, prepared, device)? {
+        if let Some(rendered) = self.try_render_real_video(plan, prepared, device, progress)? {
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
                     "[ltx2-debug] render_native_video using real path pipeline={:?}",
@@ -470,6 +479,7 @@ impl Ltx2RuntimeSession {
         plan: &Ltx2GeneratePlan,
         prepared: &NativePreparedRun,
         device: &candle_core::Device,
+        progress: Option<&ProgressCallback>,
     ) -> Result<Option<NativeRenderedVideo>> {
         if !supports_real_video_path(plan) {
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
@@ -490,14 +500,14 @@ impl Ltx2RuntimeSession {
             return Ok(None);
         }
         let render = match plan.pipeline {
-            PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device),
-            PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device),
+            PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device, progress),
+            PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device, progress),
             PipelineKind::TwoStage
             | PipelineKind::TwoStageHq
             | PipelineKind::IcLora
             | PipelineKind::Keyframe
-            | PipelineKind::A2Vid => render_real_two_stage_av(plan, prepared, device),
-            PipelineKind::Retake => render_real_retake_av(plan, prepared, device),
+            | PipelineKind::A2Vid => render_real_two_stage_av(plan, prepared, device, progress),
+            PipelineKind::Retake => render_real_retake_av(plan, prepared, device, progress),
         };
         match render {
             Ok(rendered) => Ok(Some(rendered)),
@@ -598,6 +608,21 @@ fn tensor_energy(tensor: &Tensor) -> Result<f32> {
         .abs()?
         .mean_all()?
         .to_scalar::<f32>()?)
+}
+
+fn emit_denoise_progress(
+    progress: Option<&ProgressCallback>,
+    step: usize,
+    total: usize,
+    elapsed: std::time::Duration,
+) {
+    if let Some(progress) = progress {
+        progress(ProgressEvent::DenoiseStep {
+            step,
+            total,
+            elapsed,
+        });
+    }
 }
 
 fn load_conditioning_overlays(
@@ -1027,11 +1052,13 @@ fn pixel_shape_for_video_latents(latent_shape: VideoLatentShape, fps: u32) -> Vi
     }
 }
 
+#[allow(dead_code)]
 fn source_image_only_conditioning(plan: &Ltx2GeneratePlan) -> bool {
     matches!(plan.conditioning.images.as_slice(), [image] if image.frame == 0)
         && !plan.execution_graph.uses_keyframe_conditioning
 }
 
+#[allow(dead_code)]
 fn keyframe_only_conditioning(plan: &Ltx2GeneratePlan) -> bool {
     !plan.conditioning.images.is_empty()
         && plan.conditioning.images.iter().all(|image| image.frame > 0)
@@ -1525,6 +1552,7 @@ fn render_real_distilled_av(
     plan: &Ltx2GeneratePlan,
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let cond_context = prepared
@@ -1669,6 +1697,7 @@ fn render_real_distilled_av(
         None,
         Some("distilled.stage1"),
         debug_enabled.then_some("stage1"),
+        progress,
     )?;
     log_timing("distilled.stage1.denoise", stage1_denoise_start);
     if debug_enabled {
@@ -1820,6 +1849,7 @@ fn render_real_distilled_av(
         None,
         Some("distilled.stage2"),
         debug_enabled.then_some("stage2"),
+        progress,
     )?;
     log_timing("distilled.stage2.denoise", stage2_denoise_start);
     if debug_enabled {
@@ -1900,6 +1930,7 @@ fn render_real_two_stage_av(
     plan: &Ltx2GeneratePlan,
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let cond_context = prepared
@@ -2051,6 +2082,7 @@ fn render_real_two_stage_av(
         frozen_audio_denoise_mask.as_ref(),
         Some("two_stage.stage1"),
         debug_enabled.then_some("stage1"),
+        progress,
     )?;
     log_timing("two_stage.stage1.denoise", stage1_denoise_start);
     drop(stage1_transformer);
@@ -2205,6 +2237,7 @@ fn render_real_two_stage_av(
         frozen_audio_denoise_mask.as_ref(),
         Some("two_stage.stage2"),
         debug_enabled.then_some("stage2"),
+        progress,
     )?;
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
@@ -2277,6 +2310,7 @@ fn render_real_one_stage_av(
     plan: &Ltx2GeneratePlan,
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let cond_context = prepared
@@ -2415,6 +2449,7 @@ fn render_real_one_stage_av(
         None,
         Some("one_stage"),
         debug_enabled.then_some("one-stage"),
+        progress,
     )?;
     if debug_enabled {
         log_debug_vram("after_one_stage_denoise");
@@ -2477,6 +2512,7 @@ fn render_real_retake_av(
     plan: &Ltx2GeneratePlan,
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let cond_context = prepared
@@ -2595,6 +2631,7 @@ fn render_real_retake_av(
         audio_retake_mask.as_ref(),
         Some("retake.stage1"),
         debug_enabled.then_some("retake"),
+        progress,
     )?;
     drop(transformer);
     if device.is_cuda() {
@@ -2672,6 +2709,7 @@ fn run_real_distilled_stage(
     audio_denoise_mask: Option<&Tensor>,
     timing_label: Option<&str>,
     debug_stage: Option<&str>,
+    progress: Option<&ProgressCallback>,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let device = video_start_latents.device().clone();
     let video_patchifier = VideoLatentPatchifier::new(1);
@@ -2810,6 +2848,7 @@ fn run_real_distilled_stage(
         .take(run_sigmas.len().saturating_sub(1))
         .enumerate()
     {
+        let step_start = Instant::now();
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6} entering");
         }
@@ -3182,6 +3221,12 @@ fn run_real_distilled_stage(
             };
         }
         update_secs += update_start.elapsed().as_secs_f64();
+        emit_denoise_progress(
+            progress,
+            step_idx + 1,
+            run_sigmas.len() - 1,
+            step_start.elapsed(),
+        );
 
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");
@@ -3683,10 +3728,7 @@ fn cat_optional_batches(parts: &[Option<Tensor>]) -> Result<Option<Tensor>> {
     if !parts.iter().all(Option::is_some) {
         anyhow::bail!("batched optional tensors must be either all present or all absent");
     }
-    let tensors = parts
-        .iter()
-        .map(|part| part.as_ref().expect("validated above"))
-        .collect::<Vec<_>>();
+    let tensors = parts.iter().flatten().collect::<Vec<_>>();
     Tensor::cat(&tensors, 0).map(Some).map_err(Into::into)
 }
 
@@ -4600,6 +4642,7 @@ fn tensor_l2_distance(lhs: &Tensor, rhs: &Tensor) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -4612,11 +4655,12 @@ mod tests {
         apply_stage_video_conditioning, apply_video_token_replacements,
         build_video_conditioning_self_attention_mask, convert_velocity_to_x0,
         convert_x0_to_velocity, decoded_video_to_frames, effective_native_guidance_scale,
-        guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
-        reapply_stage_video_conditioning, should_inspect_step_velocity,
-        source_image_only_conditioning, strip_appended_video_conditioning, Ltx2RuntimeSession,
-        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
-        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        emit_denoise_progress, guided_velocity_from_cfg, keyframe_only_conditioning,
+        ltx2_video_transformer_config, reapply_stage_video_conditioning,
+        should_inspect_step_velocity, source_image_only_conditioning,
+        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
+        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
+        LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -4628,6 +4672,7 @@ mod tests {
     use crate::ltx2::text::prompt_encoder::{
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
+    use crate::progress::{ProgressCallback, ProgressEvent};
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
@@ -4904,7 +4949,7 @@ mod tests {
             num_frames: req.frames.unwrap(),
             frame_rate: req.fps.unwrap(),
             num_inference_steps: req.steps,
-            guidance: req.guidance as f64,
+            guidance: req.guidance,
             quantization: Some("fp8-cast".to_string()),
             streaming_prefetch_count: Some(2),
             conditioning,
@@ -4913,6 +4958,27 @@ mod tests {
             spatial_upscale: req.spatial_upscale,
             temporal_upscale: req.temporal_upscale,
         }
+    }
+
+    #[test]
+    fn emit_denoise_progress_reports_progress_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let callback: ProgressCallback = Box::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+
+        emit_denoise_progress(Some(&callback), 3, 8, std::time::Duration::from_millis(12));
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ProgressEvent::DenoiseStep {
+                step: 3,
+                total: 8,
+                ..
+            }]
+        ));
     }
 
     fn rebuild_execution_graph(plan: &mut Ltx2GeneratePlan, req: &GenerateRequest) {
@@ -4959,7 +5025,7 @@ mod tests {
             (1, 3, 8)
         );
 
-        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared, None).unwrap();
         assert_eq!(rendered.frames.len(), 97);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
         assert!(rendered.has_audio);
@@ -4982,7 +5048,7 @@ mod tests {
         assert!(prepared.audio_positions.is_some());
         assert!(prepared.cross_modal_temporal_positions.is_some());
 
-        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared, None).unwrap();
         assert_eq!(rendered.frames.len(), 97);
         assert!(!rendered.has_audio);
         assert_eq!(rendered.audio_sample_rate, None);
@@ -5024,7 +5090,7 @@ mod tests {
 
         let mut session = runtime_session();
         let prepared = session.prepare(&plan).unwrap();
-        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared, None).unwrap();
 
         assert_eq!(prepared.video_pixel_shape.frames, 9);
         assert_eq!(prepared.video_pixel_shape.fps as u32, 6);
@@ -5043,7 +5109,7 @@ mod tests {
 
         let mut session = runtime_session();
         let prepared = session.prepare(&plan).unwrap();
-        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared, None).unwrap();
 
         assert_eq!(prepared.video_pixel_shape.width, 608);
         assert_eq!(prepared.video_pixel_shape.height, 352);
@@ -5151,7 +5217,7 @@ mod tests {
             .take()
             .map(|tensor| tensor.to_dtype(DType::BF16).unwrap());
 
-        let rendered = session.render_native_video(&plan, &prepared).unwrap();
+        let rendered = session.render_native_video(&plan, &prepared, None).unwrap();
 
         assert_eq!(rendered.frames.len(), 97);
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));

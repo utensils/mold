@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
@@ -20,10 +18,12 @@ pub struct PromptTokens {
 }
 
 impl PromptTokens {
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.input_ids.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.input_ids.is_empty()
     }
@@ -46,10 +46,12 @@ pub struct EncodedPromptPair {
 }
 
 impl EncodedPromptPair {
+    #[allow(dead_code)]
     pub fn batch_input_ids(&self) -> [&[u32]; 2] {
         [&self.conditional.input_ids, &self.unconditional.input_ids]
     }
 
+    #[allow(dead_code)]
     pub fn batch_attention_mask(&self) -> [&[u8]; 2] {
         [
             &self.conditional.attention_mask,
@@ -220,6 +222,7 @@ impl GemmaAssets {
     }
 }
 
+#[allow(dead_code)]
 pub fn pad_to_alignment(
     input_ids: &[u32],
     attention_mask: &[u8],
@@ -245,6 +248,7 @@ pub fn pad_to_alignment(
     }
 }
 
+#[allow(dead_code)]
 pub fn left_pad_batch(sequences: &[Vec<u32>], pad_token_id: u32) -> (Vec<Vec<u32>>, Vec<Vec<u8>>) {
     let width = sequences
         .iter()

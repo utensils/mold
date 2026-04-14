@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use candle_core::{Device, Result, Tensor};
 
 #[allow(clippy::enum_variant_names)]

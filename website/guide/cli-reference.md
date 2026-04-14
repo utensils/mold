@@ -98,6 +98,9 @@ reduce unified-memory pressure during denoising.
 - The native CUDA matrix is validated across text+audio-video, image-to-video,
   audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale, and
   temporal upscale workflows.
+- `mold serve` accepts inline source media up to `64 MiB` by default, which is
+  enough for common retake and audio-to-video requests without extra server
+  tuning.
 
 ## `mold expand`
 

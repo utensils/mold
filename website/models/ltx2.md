@@ -46,6 +46,9 @@ audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` /
   LTX-2.3, pass an explicit `.safetensors` path.
 - The Gemma text encoder source is gated on Hugging Face, so you must have
   access approved before `mold pull` will complete.
+- When you send source media through `mold serve`, the built-in request body
+  limit is `64 MiB`, which covers common inline retake and audio-to-video
+  requests.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::{bail, Result};
@@ -11,6 +10,7 @@ use crate::ltx2::model::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PaddingSide {
     Left,
     Right,
@@ -563,9 +563,13 @@ impl BasicTransformerBlock1D {
 pub struct Embeddings1DConnector {
     transformer_1d_blocks: Vec<BasicTransformerBlock1D>,
     learnable_registers: Option<Tensor>,
+    #[allow(dead_code)]
     positional_embedding_theta: f64,
+    #[allow(dead_code)]
     positional_embedding_max_pos: Vec<usize>,
+    #[allow(dead_code)]
     rope_type: LtxRopeType,
+    #[allow(dead_code)]
     double_precision_rope: bool,
 }
 
@@ -634,6 +638,7 @@ impl Embeddings1DConnector {
         Ok((hidden_states, attention_mask))
     }
 
+    #[allow(dead_code)]
     pub fn positional_embedding_theta(&self) -> f64 {
         self.positional_embedding_theta
     }

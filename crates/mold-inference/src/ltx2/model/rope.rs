@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
 
@@ -7,6 +5,7 @@ use super::patchifiers::{AudioPatchifier, VideoLatentPatchifier};
 use super::shapes::{AudioLatentShape, SpatioTemporalScaleFactors, VideoLatentShape};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum LtxRopeType {
     Interleaved,
     Split,

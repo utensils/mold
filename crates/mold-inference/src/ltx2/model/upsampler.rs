@@ -170,13 +170,13 @@ mod tests {
         );
         let target_height_latent = 704_u32.div_ceil(LTX2_SPATIAL_LATENT_STRIDE);
         let stage1_height_latent = shape.height / LTX2_SPATIAL_LATENT_STRIDE;
-        let recovered_target_height_latent = (3 * stage1_height_latent + 1) / 2;
+        let recovered_target_height_latent = (3 * stage1_height_latent).div_ceil(2);
         assert_eq!(target_height_latent, 22);
         assert_eq!(stage1_height_latent, 15);
         assert!(recovered_target_height_latent >= target_height_latent);
 
         let smaller_stage1_height_latent = stage1_height_latent - 1;
-        let smaller_recovered_target_height_latent = (3 * smaller_stage1_height_latent + 1) / 2;
+        let smaller_recovered_target_height_latent = (3 * smaller_stage1_height_latent).div_ceil(2);
         assert!(smaller_recovered_target_height_latent < target_height_latent);
     }
 

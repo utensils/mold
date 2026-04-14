@@ -6782,7 +6782,7 @@ mod tests {
         params.model = "flux-dev:q4".to_string();
         params.steps = 1;
 
-        let catalog = vec![make_test_catalog_entry(
+        let catalog = [make_test_catalog_entry(
             "flux-dev:q4",
             20,
             3.5,
@@ -6811,7 +6811,7 @@ mod tests {
         let original_steps = params.steps;
         params.model = "nonexistent-model".to_string();
 
-        let catalog = vec![make_test_catalog_entry(
+        let catalog = [make_test_catalog_entry(
             "flux-dev:q4",
             99,
             9.9,
@@ -6860,19 +6860,21 @@ mod tests {
 
     #[test]
     fn clear_server_status_reverts_to_local() {
-        let mut ri = crate::ui::info::ResourceInfo::default();
-        ri.server_status = Some(mold_core::ServerStatus {
-            version: "0.6.3".to_string(),
-            git_sha: None,
-            build_date: None,
-            models_loaded: vec![],
-            busy: false,
-            current_generation: None,
-            gpu_info: None,
-            uptime_secs: 0,
-            hostname: Some("remote".to_string()),
-            memory_status: Some("VRAM: 16.0 GB free".to_string()),
-        });
+        let mut ri = crate::ui::info::ResourceInfo {
+            server_status: Some(mold_core::ServerStatus {
+                version: "0.6.3".to_string(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 0,
+                hostname: Some("remote".to_string()),
+                memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            }),
+            ..Default::default()
+        };
         ri.clear_server_status();
         assert!(ri.server_status.is_none());
         ri.refresh_local();

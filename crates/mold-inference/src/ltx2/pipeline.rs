@@ -138,7 +138,7 @@ impl Ltx2Engine {
         assets::request_quantization(&self.model_name)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     fn camera_control_preset(name: &str) -> Option<lora::CameraControlPreset> {
         lora::camera_control_preset(name)
     }
@@ -428,7 +428,7 @@ impl InferenceEngine for Ltx2Engine {
         Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
         let render_start = Instant::now();
-        let rendered = runtime.render_native_video(&plan, &prepared)?;
+        let rendered = runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref())?;
         Self::log_timing("pipeline.render_runtime", render_start);
         let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =

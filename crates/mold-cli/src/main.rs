@@ -26,6 +26,20 @@ enum LogFormat {
     Json,
 }
 
+#[derive(Clone, clap::ValueEnum)]
+pub(crate) enum Ltx2SpatialUpscaleArg {
+    #[value(name = "x1.5")]
+    X1_5,
+    #[value(name = "x2")]
+    X2,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub(crate) enum Ltx2TemporalUpscaleArg {
+    #[value(name = "x2")]
+    X2,
+}
+
 /// Sentinel error: the command already printed diagnostics to stderr.
 /// The main handler should just exit(1) without printing anything extra.
 #[derive(Debug)]
@@ -222,12 +236,12 @@ Examples:
         retake: Option<String>,
 
         /// Spatial upscaling mode for LTX-2.3.
-        #[arg(long, help_heading = "Video", value_parser = ["x1.5", "x2"])]
-        spatial_upscale: Option<String>,
+        #[arg(long, help_heading = "Video", value_enum)]
+        spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
 
         /// Temporal upscaling mode for LTX-2.3.
-        #[arg(long, help_heading = "Video", value_parser = ["x2"])]
-        temporal_upscale: Option<String>,
+        #[arg(long, help_heading = "Video", value_enum)]
+        temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
 
         /// Camera-control LoRA preset name or .safetensors path.
         #[arg(long, help_heading = "Video")]

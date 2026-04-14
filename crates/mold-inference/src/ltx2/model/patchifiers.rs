@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{bail, Result};
 use candle_core::{Device, Tensor};
 
@@ -21,6 +19,7 @@ impl VideoLatentPatchifier {
         }
     }
 
+    #[allow(dead_code)]
     pub fn patch_size(self) -> (usize, usize, usize) {
         (self.patch_size_t, self.patch_size_h, self.patch_size_w)
     }
@@ -144,6 +143,7 @@ impl AudioPatchifier {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_token_count(self, shape: AudioLatentShape) -> usize {
         shape.frames
     }

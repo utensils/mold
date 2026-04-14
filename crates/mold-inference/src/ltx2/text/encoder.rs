@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -388,6 +386,7 @@ pub struct GemmaHiddenStateEncoder {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum GemmaLayerSource {
     Eager(Vec<DecoderLayer>),
     Streaming {
@@ -397,6 +396,7 @@ enum GemmaLayerSource {
 }
 
 impl GemmaHiddenStateEncoder {
+    #[allow(dead_code)]
     pub fn new(cfg: &GemmaConfig, vb: VarBuilder) -> Result<Self> {
         let model_vb = vb.pp("model");
         let embed_tokens =
@@ -450,6 +450,7 @@ impl GemmaHiddenStateEncoder {
         Self::new_streaming(&ltx_gemma_config(), vb)
     }
 
+    #[allow(dead_code)]
     pub fn load_from_root(root: &Path, device: &Device, dtype: DType) -> Result<Self> {
         let assets = GemmaAssets::discover(root)?;
         Self::load_from_assets(&assets, device, dtype)

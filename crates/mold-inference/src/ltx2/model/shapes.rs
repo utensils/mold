@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VideoPixelShape {
     pub batch: usize,
@@ -36,10 +34,12 @@ pub struct VideoLatentShape {
 }
 
 impl VideoLatentShape {
+    #[allow(dead_code)]
     pub fn token_count(self) -> usize {
         self.frames * self.height * self.width
     }
 
+    #[allow(dead_code)]
     pub fn mask_shape(self) -> Self {
         Self {
             channels: 1,
@@ -81,10 +81,12 @@ pub struct AudioLatentShape {
 }
 
 impl AudioLatentShape {
+    #[allow(dead_code)]
     pub fn token_count(self) -> usize {
         self.frames
     }
 
+    #[allow(dead_code)]
     pub fn mask_shape(self) -> Self {
         Self {
             channels: 1,

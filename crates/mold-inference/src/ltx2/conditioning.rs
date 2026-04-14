@@ -104,7 +104,7 @@ pub(crate) fn stage_conditioning(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn retake_frame_window(
     range: &TimeRange,
     fps: u32,
@@ -133,7 +133,7 @@ pub(crate) fn retake_frame_window(
     Ok(start..=end)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn retake_temporal_mask(
     range: &TimeRange,
     fps: u32,

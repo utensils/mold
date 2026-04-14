@@ -11,6 +11,8 @@ use mold_core::{
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
+use crate::{Ltx2SpatialUpscaleArg, Ltx2TemporalUpscaleArg};
+
 use super::generate;
 
 /// Provide model name completions for shell tab-completion.
@@ -278,23 +280,15 @@ fn parse_pipeline(value: Option<String>) -> Result<Option<Ltx2PipelineMode>> {
         .transpose()
 }
 
-fn parse_spatial_upscale(value: Option<String>) -> Result<Option<Ltx2SpatialUpscale>> {
-    value
-        .map(|value| match value.as_str() {
-            "x1.5" => Ok(Ltx2SpatialUpscale::X1_5),
-            "x2" => Ok(Ltx2SpatialUpscale::X2),
-            _ => anyhow::bail!("unsupported spatial upscale mode: {value}"),
-        })
-        .transpose()
+fn parse_spatial_upscale(value: Option<Ltx2SpatialUpscaleArg>) -> Option<Ltx2SpatialUpscale> {
+    value.map(|value| match value {
+        Ltx2SpatialUpscaleArg::X1_5 => Ltx2SpatialUpscale::X1_5,
+        Ltx2SpatialUpscaleArg::X2 => Ltx2SpatialUpscale::X2,
+    })
 }
 
-fn parse_temporal_upscale(value: Option<String>) -> Result<Option<Ltx2TemporalUpscale>> {
-    value
-        .map(|value| match value.as_str() {
-            "x2" => Ok(Ltx2TemporalUpscale::X2),
-            _ => anyhow::bail!("unsupported temporal upscale mode: {value}"),
-        })
-        .transpose()
+fn parse_temporal_upscale(value: Option<Ltx2TemporalUpscaleArg>) -> Option<Ltx2TemporalUpscale> {
+    value.map(|Ltx2TemporalUpscaleArg::X2| Ltx2TemporalUpscale::X2)
 }
 
 fn parse_retake_range(value: Option<String>) -> Result<Option<TimeRange>> {
@@ -354,8 +348,8 @@ pub async fn run(
     keyframe: Vec<String>,
     pipeline: Option<String>,
     retake: Option<String>,
-    spatial_upscale: Option<String>,
-    temporal_upscale: Option<String>,
+    spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
+    temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
     camera_control: Option<String>,
     host: Option<String>,
     format: OutputFormat,
@@ -461,8 +455,8 @@ pub async fn run(
     let keyframes = parse_keyframes(&keyframe)?;
     let pipeline = parse_pipeline(pipeline)?;
     let retake_range = parse_retake_range(retake)?;
-    let spatial_upscale = parse_spatial_upscale(spatial_upscale)?;
-    let temporal_upscale = parse_temporal_upscale(temporal_upscale)?;
+    let spatial_upscale = parse_spatial_upscale(spatial_upscale);
+    let temporal_upscale = parse_temporal_upscale(temporal_upscale);
 
     // If no prompt from args, try reading from stdin (supports piping)
     // When --image - is used, stdin is consumed for the image, so prompt must come from args.

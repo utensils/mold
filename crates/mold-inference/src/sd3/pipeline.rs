@@ -1051,6 +1051,7 @@ mod tests {
         path
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sd3_model_paths(
         transformer: PathBuf,
         vae: PathBuf,

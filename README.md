@@ -185,6 +185,9 @@ public IC-LoRA, spatial upscaling (`x1.5` / `x2` where published), and
 temporal upscaling (`x2`). The shared Gemma text assets are gated on Hugging
 Face, so `mold pull` requires approved access to
 `google/gemma-3-12b-it-qat-q4_0-unquantized`.
+When you send source media through `mold serve`, the built-in request body
+limit is `64 MiB`, which is enough for common retake and audio-to-video
+requests without changing server config.
 
 ## Features
 

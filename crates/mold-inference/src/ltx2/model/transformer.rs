@@ -1,17 +1,18 @@
-#![allow(dead_code)]
-
 use anyhow::{bail, Result};
 use candle_core::Tensor;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TransformerModalityInputs {
     pub latent: Tensor,
     pub context: Tensor,
     pub positions: Tensor,
     pub attention_mask: Option<Tensor>,
+    #[allow(dead_code)]
     pub enabled: bool,
 }
 
+#[allow(dead_code)]
 impl TransformerModalityInputs {
     pub fn latent_shape(&self) -> Result<(usize, usize, usize)> {
         self.latent.dims3().map_err(Into::into)
@@ -46,17 +47,20 @@ impl TransformerModalityInputs {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct TransformerInputContract {
     pub video: Option<TransformerModalityInputs>,
     pub audio: Option<TransformerModalityInputs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct TransformerOutputContract {
     pub video_shape: Option<(usize, usize, usize)>,
     pub audio_shape: Option<(usize, usize, usize)>,
 }
 
+#[allow(dead_code)]
 impl TransformerInputContract {
     pub fn validate(&self) -> Result<TransformerOutputContract> {
         if self.video.is_none() && self.audio.is_none() {

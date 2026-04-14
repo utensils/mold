@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod perturbations;
 
 use std::collections::BTreeMap;
@@ -93,11 +91,14 @@ impl MultiModalGuider {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MultiModalGuiderFactory {
+    #[allow(dead_code)]
     negative_context: Option<Tensor>,
     params_by_sigma: Vec<(f32, MultiModalGuiderParams)>,
 }
 
+#[allow(dead_code)]
 impl MultiModalGuiderFactory {
     pub fn constant(params: MultiModalGuiderParams, negative_context: Option<Tensor>) -> Self {
         Self {
@@ -136,6 +137,7 @@ impl MultiModalGuiderFactory {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub struct OrderedSigma(pub f32);
 
 impl Eq for OrderedSigma {}

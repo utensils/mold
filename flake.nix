@@ -481,19 +481,6 @@
                 '';
               }
               {
-                category = "run";
-                name = "issue-note";
-                help = "post a progress update to GitHub issue #187";
-                command = ''
-                  set -euo pipefail
-                  if [ "$#" -lt 1 ]; then
-                    echo "usage: issue-note <message>"
-                    exit 1
-                  fi
-                  gh issue comment 187 --repo utensils/mold --body "$*"
-                '';
-              }
-              {
                 category = "docs";
                 name = "docs-dev";
                 help = "start VitePress dev server for docs";

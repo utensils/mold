@@ -1,12 +1,12 @@
-#![allow(dead_code)]
-
 use anyhow::{bail, Result};
 use candle_core::{DType, Tensor};
 
+#[allow(dead_code)]
 pub const DISTILLED_SIGMA_VALUES: &[f32] = &[
     1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0,
 ];
 
+#[allow(dead_code)]
 pub const STAGE_2_DISTILLED_SIGMA_VALUES: &[f32] = &[0.909375, 0.725, 0.421875, 0.0];
 
 pub fn to_velocity(sample: &Tensor, sigma: f64, denoised_sample: &Tensor) -> Result<Tensor> {
@@ -20,6 +20,7 @@ pub fn to_velocity(sample: &Tensor, sigma: f64, denoised_sample: &Tensor) -> Res
         .map_err(Into::into)
 }
 
+#[allow(dead_code)]
 pub fn to_denoised(sample: &Tensor, velocity: &Tensor, sigma: f64) -> Result<Tensor> {
     Ok(sample
         .to_dtype(DType::F32)?
@@ -44,6 +45,7 @@ pub fn euler_step(
         .broadcast_add(&(velocity * dt)?)?)
 }
 
+#[allow(dead_code)]
 pub fn apply_denoise_mask(
     denoised: &Tensor,
     denoise_mask: Option<&Tensor>,
@@ -58,6 +60,7 @@ pub fn apply_denoise_mask(
     }
 }
 
+#[allow(dead_code)]
 pub fn euler_denoising_loop<F>(
     initial_sample: &Tensor,
     sigmas: &[f32],
@@ -81,6 +84,7 @@ where
     Ok(sample)
 }
 
+#[allow(dead_code)]
 pub fn phi(j: usize, neg_h: f64) -> f64 {
     if neg_h.abs() < 1e-10 {
         return 1.0 / factorial(j) as f64;
@@ -91,6 +95,7 @@ pub fn phi(j: usize, neg_h: f64) -> f64 {
     (neg_h.exp() - remainder) / neg_h.powi(j as i32)
 }
 
+#[allow(dead_code)]
 pub fn res2s_coefficients(h: f64, c2: f64) -> (f64, f64, f64) {
     let a21 = c2 * phi(1, -h * c2);
     let b2 = phi(2, -h) / c2;
@@ -137,6 +142,7 @@ pub fn res2s_step(
     drift.broadcast_add(&noise_term).map_err(Into::into)
 }
 
+#[allow(dead_code)]
 pub fn res2s_denoising_loop<F>(
     initial_sample: &Tensor,
     sigmas: &[f32],
@@ -168,6 +174,7 @@ where
     Ok(sample)
 }
 
+#[allow(dead_code)]
 fn factorial(n: usize) -> usize {
     (1..=n).product::<usize>().max(1)
 }

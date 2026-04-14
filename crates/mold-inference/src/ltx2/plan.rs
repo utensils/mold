@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use mold_core::{LoraWeight, Ltx2SpatialUpscale, Ltx2TemporalUpscale, TimeRange};
 
 use super::conditioning::StagedConditioning;
@@ -32,11 +30,13 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) checkpoint_is_distilled: bool,
     pub(crate) execution_graph: Ltx2ExecutionGraph,
     pub(crate) checkpoint_path: String,
+    #[allow(dead_code)]
     pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,
     pub(crate) spatial_upsampler_path: Option<String>,
     pub(crate) temporal_upsampler_path: Option<String>,
     pub(crate) gemma_root: String,
+    #[allow(dead_code)]
     pub(crate) output_path: String,
     pub(crate) prompt: String,
     pub(crate) negative_prompt: Option<String>,
@@ -48,6 +48,7 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) frame_rate: u32,
     pub(crate) num_inference_steps: u32,
     pub(crate) guidance: f64,
+    #[allow(dead_code)]
     pub(crate) quantization: Option<String>,
     pub(crate) streaming_prefetch_count: Option<u32>,
     pub(crate) conditioning: StagedConditioning,

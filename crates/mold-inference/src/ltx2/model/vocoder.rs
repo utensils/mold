@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 
@@ -573,7 +571,6 @@ impl BigVganGenerator {
 #[derive(Debug, Clone)]
 struct StftFn {
     forward_basis: Tensor,
-    inverse_basis: Tensor,
     hop_length: usize,
     win_length: usize,
 }
@@ -589,10 +586,6 @@ impl StftFn {
             forward_basis: vb.get(
                 (((filter_length / 2) + 1) * 2, 1, filter_length),
                 "forward_basis",
-            )?,
-            inverse_basis: vb.get(
-                (((filter_length / 2) + 1) * 2, 1, filter_length),
-                "inverse_basis",
             )?,
             hop_length,
             win_length,

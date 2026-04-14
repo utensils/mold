@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -37,6 +36,7 @@ pub struct ProbeMetadata {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct VideoTrackInfo {
     track_id: u32,
     width: u32,
@@ -44,9 +44,13 @@ struct VideoTrackInfo {
     fps: u32,
     frames: Option<u32>,
     duration_ms: Option<u64>,
+    #[allow(dead_code)]
     timescale: u32,
+    #[allow(dead_code)]
     language: String,
+    #[allow(dead_code)]
     seq_param_set: Vec<u8>,
+    #[allow(dead_code)]
     pic_param_set: Vec<u8>,
 }
 
@@ -315,6 +319,7 @@ pub(crate) fn decode_video_frames(input_video: &Path) -> Result<(ProbeMetadata, 
     Ok((video.metadata, video.frames))
 }
 
+#[allow(dead_code)]
 fn video_only_track_config(video: &VideoTrackInfo) -> TrackConfig {
     TrackConfig {
         track_type: TrackType::Video,
@@ -329,6 +334,7 @@ fn video_only_track_config(video: &VideoTrackInfo) -> TrackConfig {
     }
 }
 
+#[allow(dead_code)]
 fn mp4_config() -> Result<Mp4Config> {
     Ok(Mp4Config {
         major_brand: "isom".parse()?,
@@ -343,6 +349,7 @@ fn mp4_config() -> Result<Mp4Config> {
     })
 }
 
+#[allow(dead_code)]
 fn copy_video_only_mp4(input_mp4: &Path, out_path: &Path) -> Result<()> {
     let mut reader = read_mp4(input_mp4)?;
     let video = find_video_track(&reader)?;
@@ -468,6 +475,7 @@ pub(crate) fn attach_aac_track_from_f32_interleaved(
 }
 
 #[cfg(not(feature = "mp4"))]
+#[allow(dead_code)]
 pub(crate) fn attach_aac_track_from_f32_interleaved(
     _input_mp4: &Path,
     _out_path: &Path,
@@ -478,6 +486,7 @@ pub(crate) fn attach_aac_track_from_f32_interleaved(
     bail!("MP4 output requires the 'mp4' feature");
 }
 
+#[allow(dead_code)]
 pub(crate) fn transcode_output(
     input_mp4: &Path,
     output_format: OutputFormat,
@@ -514,6 +523,7 @@ pub(crate) fn transcode_output(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn strip_audio_track(input_mp4: &Path, out_path: &Path) -> Result<()> {
     copy_video_only_mp4(input_mp4, out_path)
 }
