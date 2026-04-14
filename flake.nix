@@ -477,7 +477,7 @@
                     echo "usage: contact-sheet <input.mp4> [more.mp4...]"
                     exit 1
                   fi
-                  cargo run -p mold-ai-inference --features mp4 --bin ltx2_review -- "$@"
+                  cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- "$@"
                 '';
               }
               {

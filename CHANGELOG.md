@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Manifest plumbing**: `ModelPaths`, manifests, validation, and `mold info` now understand temporal upscalers and distilled LoRAs.
 - **LTX-2 native upscaling path**: temporal `x2` upscaling now reaches the native Rust runtime, and the stage-1 render plan derives lower-resolution/lower-fps shapes before native spatial and temporal upsampling restore the requested output dimensions.
 - **LTX-2 operator docs**: README, website docs, and the shared mold skill now describe the completed native Rust workflow matrix instead of the earlier partial-acceptance state.
+- **LTX-2 CLI plumbing**: the internal `mold run` video-generation call path now bundles LTX-2-specific knobs into a dedicated `Ltx2Options` struct instead of threading another long positional argument list through `generate::run`.
+- **LTX-2 developer binaries**: `ltx2_review`, `ltx2_checkpoint_probe`, and `ltx2_vae_probe` now build only when `mold-ai-inference` is compiled with `--features dev-bins`, so normal workspace and CI builds no longer compile those helper binaries implicitly.
 - **`--image` CLI semantics**: `mold run --image` is now repeatable. Non-edit families still accept at most one source image; `qwen-image-edit` maps repeated `--image` flags into `edit_images`.
 - **TUI capability modeling**: `qwen-image-edit` now appears as a source-image editing family instead of img2img, so the TUI exposes a source image and negative prompt without img2img-only controls like `strength`, `mask`, `ControlNet`, or `LoRA`.
 
@@ -36,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LTX-2.3 x1.5 spatial upscale requests**: `--spatial-upscale x1.5` now passes validation and resolves the published `ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors` asset on demand instead of failing before the request reaches the engine.
 - **LTX-2 temporal upscale requests**: `--temporal-upscale x2` now passes validation, resolves the configured temporal upsampler asset, and executes the native temporal interpolation path instead of failing as unimplemented.
 - **LTX-2 native acceptance closure**: the public native Rust CUDA workflow matrix is now validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
+- **LTX-2 request validation**: megapixel-limit errors now report the current `1.8MP` ceiling, current LTX frame-grid validation is scoped to the LTX families that require `8n+1`, unknown-family errors for LTX-2-only request fields are clearer, and oversized inline `audio_file` / `source_video` payloads now fail fast with a `64 MiB` limit.
 - **TUI remote server awareness**: the Info panel, model defaults, and model management now reflect the connected server instead of the local machine ([#158](https://github.com/utensils/mold/issues/158)):
   - Info panel queries `/api/status` for memory, GPU, and busy state when connected to a remote server
   - Model parameter defaults (steps, guidance, width, height) come from the server's catalog instead of local `config.toml`

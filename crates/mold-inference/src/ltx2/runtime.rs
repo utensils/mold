@@ -117,6 +117,103 @@ impl StageVideoConditioning {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RenderPromptInputOptions {
+    include_unconditional: bool,
+    include_alt: bool,
+}
+
+#[derive(Debug)]
+struct RenderPromptInputs {
+    cond_context: Tensor,
+    uncond_context: Option<Tensor>,
+    audio_shape: Option<AudioLatentShape>,
+    audio_context: Option<Tensor>,
+    uncond_audio_context: Option<Tensor>,
+    alt_context: Option<Tensor>,
+    alt_audio_context: Option<Tensor>,
+    video_positions: Tensor,
+    audio_positions: Option<Tensor>,
+}
+
+fn prepare_render_prompt_inputs(
+    prepared: &NativePreparedRun,
+    device: &candle_core::Device,
+    options: RenderPromptInputOptions,
+) -> Result<RenderPromptInputs> {
+    let cond_context = prepared
+        .prompt
+        .conditional
+        .video_encoding
+        .to_device(device)?;
+    let uncond_context = if options.include_unconditional {
+        Some(
+            prepared
+                .prompt
+                .unconditional
+                .video_encoding
+                .to_device(device)?,
+        )
+    } else {
+        None
+    };
+    let audio_context = prepared
+        .prompt
+        .conditional
+        .audio_encoding
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+    let uncond_audio_context = if options.include_unconditional {
+        prepared
+            .prompt
+            .unconditional
+            .audio_encoding
+            .as_ref()
+            .map(|tensor| tensor.to_device(device))
+            .transpose()?
+    } else {
+        None
+    };
+    let alt_context = if options.include_alt {
+        prepared
+            .debug_alt_prompt
+            .as_ref()
+            .map(|prompt| prompt.video_encoding.to_device(device))
+            .transpose()?
+    } else {
+        None
+    };
+    let alt_audio_context = if options.include_alt {
+        prepared
+            .debug_alt_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.audio_encoding.as_ref())
+            .map(|tensor| tensor.to_device(device))
+            .transpose()?
+    } else {
+        None
+    };
+    let video_positions = prepared.video_positions.to_device(device)?;
+    let audio_positions = prepared
+        .audio_positions
+        .as_ref()
+        .map(|tensor| tensor.to_device(device))
+        .transpose()?;
+
+    Ok(RenderPromptInputs {
+        cond_context,
+        uncond_context,
+        audio_shape: prepared.audio_latent_shape,
+        audio_context,
+        uncond_audio_context,
+        alt_context,
+        alt_audio_context,
+        video_positions,
+        audio_positions,
+    })
+}
+
 struct Ltx2VaeLatentStats {
     mean: Tensor,
     std: Tensor,
@@ -1555,42 +1652,15 @@ fn render_real_distilled_av(
     progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
-    let cond_context = prepared
-        .prompt
-        .conditional
-        .video_encoding
-        .to_device(device)?;
-    let uncond_context = prepared
-        .prompt
-        .unconditional
-        .video_encoding
-        .to_device(device)?;
-    let audio_shape = prepared.audio_latent_shape;
-    let audio_context = prepared
-        .prompt
-        .conditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let uncond_audio_context = prepared
-        .prompt
-        .unconditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let alt_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .map(|prompt| prompt.video_encoding.to_device(device))
-        .transpose()?;
-    let alt_audio_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .and_then(|prompt| prompt.audio_encoding.as_ref())
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
+    let prompt_inputs = prepare_render_prompt_inputs(
+        prepared,
+        device,
+        RenderPromptInputOptions {
+            include_unconditional: false,
+            include_alt: true,
+        },
+    )?;
+    let audio_shape = prompt_inputs.audio_shape;
     // Upstream LTX-2 diffusion stages pass connector outputs directly as the
     // text context and leave `context_mask=None` in the transformer modality
     // wrapper. The connector has already packed padded tokens into registers
@@ -1598,14 +1668,7 @@ fn render_real_distilled_av(
     // cross-attention here over-constrains the prompt path and does not match
     // the published inference stack.
     let cond_mask: Option<&Tensor> = None;
-    let uncond_mask: Option<&Tensor> = None;
     let alt_mask: Option<&Tensor> = None;
-    let video_positions = prepared.video_positions.to_device(device)?;
-    let audio_positions = prepared
-        .audio_positions
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
     let stage1_video_noise = seeded_randn(
         plan.seed,
         &[
@@ -1634,8 +1697,8 @@ fn render_real_distilled_av(
     };
 
     if debug_enabled {
-        log_tensor_stats("video_context", &cond_context)?;
-        if let Some(audio_context) = audio_context.as_ref() {
+        log_tensor_stats("video_context", &prompt_inputs.cond_context)?;
+        if let Some(audio_context) = prompt_inputs.audio_context.as_ref() {
             log_tensor_stats("audio_context", audio_context)?;
         }
         log_tensor_stats("initial_video_latents", &stage1_video_noise)?;
@@ -1676,14 +1739,14 @@ fn render_real_distilled_av(
         None,
         stage1_audio_noise.as_ref(),
         None,
-        &video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
+        &prompt_inputs.video_positions,
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         None,
-        alt_context.as_ref(),
-        audio_context.as_ref(),
+        prompt_inputs.alt_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
         None,
-        alt_audio_context.as_ref(),
+        prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
         None,
         alt_mask,
@@ -1829,13 +1892,13 @@ fn render_real_distilled_av(
         stage2_audio_start.as_ref(),
         None,
         &stage2_video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         None,
-        alt_context.as_ref(),
-        audio_context.as_ref(),
+        prompt_inputs.alt_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
         None,
-        alt_audio_context.as_ref(),
+        prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
         None,
         alt_mask,
@@ -1897,17 +1960,9 @@ fn render_real_distilled_av(
     drop(stage1_video_latents);
     drop(stage1_audio_noise);
     drop(stage1_video_noise);
-    drop(audio_positions);
-    drop(video_positions);
-    let _ = alt_mask;
-    let _ = uncond_mask;
     let _ = cond_mask;
-    drop(alt_audio_context);
-    drop(uncond_audio_context);
-    drop(audio_context);
-    drop(alt_context);
-    drop(uncond_context);
-    drop(cond_context);
+    let _ = alt_mask;
+    drop(prompt_inputs);
     drop(latent_stats);
     if device.is_cuda() {
         device.synchronize()?;
@@ -1933,51 +1988,18 @@ fn render_real_two_stage_av(
     progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
-    let cond_context = prepared
-        .prompt
-        .conditional
-        .video_encoding
-        .to_device(device)?;
-    let uncond_context = prepared
-        .prompt
-        .unconditional
-        .video_encoding
-        .to_device(device)?;
-    let audio_shape = prepared.audio_latent_shape;
-    let audio_context = prepared
-        .prompt
-        .conditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let uncond_audio_context = prepared
-        .prompt
-        .unconditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let alt_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .map(|prompt| prompt.video_encoding.to_device(device))
-        .transpose()?;
-    let alt_audio_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .and_then(|prompt| prompt.audio_encoding.as_ref())
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
+    let prompt_inputs = prepare_render_prompt_inputs(
+        prepared,
+        device,
+        RenderPromptInputOptions {
+            include_unconditional: true,
+            include_alt: true,
+        },
+    )?;
+    let audio_shape = prompt_inputs.audio_shape;
     let cond_mask: Option<&Tensor> = None;
     let uncond_mask: Option<&Tensor> = None;
     let alt_mask: Option<&Tensor> = None;
-    let video_positions = prepared.video_positions.to_device(device)?;
-    let audio_positions = prepared
-        .audio_positions
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
     let stage1_video_noise = seeded_randn(
         plan.seed,
         &[
@@ -2055,16 +2077,18 @@ fn render_real_two_stage_av(
         None,
         stage1_audio_start,
         None,
-        &video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
-        stage1_requires_uncond.then_some(&uncond_context),
-        alt_context.as_ref(),
-        audio_context.as_ref(),
+        &prompt_inputs.video_positions,
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         stage1_requires_uncond
-            .then_some(uncond_audio_context.as_ref())
+            .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
-        alt_audio_context.as_ref(),
+        prompt_inputs.alt_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
+        stage1_requires_uncond
+            .then_some(prompt_inputs.uncond_audio_context.as_ref())
+            .flatten(),
+        prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
         if stage1_requires_uncond {
             uncond_mask
@@ -2211,15 +2235,17 @@ fn render_real_two_stage_av(
         stage2_audio_start.as_ref(),
         None,
         &stage2_video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
-        stage2_requires_uncond.then_some(&uncond_context),
-        alt_context.as_ref(),
-        audio_context.as_ref(),
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         stage2_requires_uncond
-            .then_some(uncond_audio_context.as_ref())
+            .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
-        alt_audio_context.as_ref(),
+        prompt_inputs.alt_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
+        stage2_requires_uncond
+            .then_some(prompt_inputs.uncond_audio_context.as_ref())
+            .flatten(),
+        prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
         if stage2_requires_uncond {
             uncond_mask
@@ -2277,17 +2303,10 @@ fn render_real_two_stage_av(
     drop(frozen_audio_denoise_mask);
     drop(conditioned_audio);
     drop(stage1_video_noise);
-    drop(audio_positions);
-    drop(video_positions);
-    let _ = alt_mask;
-    let _ = uncond_mask;
     let _ = cond_mask;
-    drop(alt_audio_context);
-    drop(uncond_audio_context);
-    drop(audio_context);
-    drop(alt_context);
-    drop(uncond_context);
-    drop(cond_context);
+    let _ = uncond_mask;
+    let _ = alt_mask;
+    drop(prompt_inputs);
     drop(latent_stats);
     if device.is_cuda() {
         device.synchronize()?;
@@ -2313,51 +2332,18 @@ fn render_real_one_stage_av(
     progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
-    let cond_context = prepared
-        .prompt
-        .conditional
-        .video_encoding
-        .to_device(device)?;
-    let uncond_context = prepared
-        .prompt
-        .unconditional
-        .video_encoding
-        .to_device(device)?;
-    let audio_shape = prepared.audio_latent_shape;
-    let audio_context = prepared
-        .prompt
-        .conditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let uncond_audio_context = prepared
-        .prompt
-        .unconditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
-    let alt_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .map(|prompt| prompt.video_encoding.to_device(device))
-        .transpose()?;
-    let alt_audio_context = prepared
-        .debug_alt_prompt
-        .as_ref()
-        .and_then(|prompt| prompt.audio_encoding.as_ref())
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
+    let prompt_inputs = prepare_render_prompt_inputs(
+        prepared,
+        device,
+        RenderPromptInputOptions {
+            include_unconditional: true,
+            include_alt: true,
+        },
+    )?;
+    let audio_shape = prompt_inputs.audio_shape;
     let cond_mask: Option<&Tensor> = None;
     let uncond_mask: Option<&Tensor> = None;
     let alt_mask: Option<&Tensor> = None;
-    let video_positions = prepared.video_positions.to_device(device)?;
-    let audio_positions = prepared
-        .audio_positions
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
     let stage1_video_noise = seeded_randn(
         plan.seed,
         &[
@@ -2386,8 +2372,8 @@ fn render_real_one_stage_av(
     };
 
     if debug_enabled {
-        log_tensor_stats("video_context", &cond_context)?;
-        if let Some(audio_context) = audio_context.as_ref() {
+        log_tensor_stats("video_context", &prompt_inputs.cond_context)?;
+        if let Some(audio_context) = prompt_inputs.audio_context.as_ref() {
             log_tensor_stats("audio_context", audio_context)?;
         }
         log_tensor_stats("initial_video_latents", &stage1_video_noise)?;
@@ -2422,16 +2408,18 @@ fn render_real_one_stage_av(
         None,
         stage1_audio_noise.as_ref(),
         None,
-        &video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
-        stage1_requires_uncond.then_some(&uncond_context),
-        alt_context.as_ref(),
-        audio_context.as_ref(),
+        &prompt_inputs.video_positions,
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         stage1_requires_uncond
-            .then_some(uncond_audio_context.as_ref())
+            .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
-        alt_audio_context.as_ref(),
+        prompt_inputs.alt_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
+        stage1_requires_uncond
+            .then_some(prompt_inputs.uncond_audio_context.as_ref())
+            .flatten(),
+        prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
         if stage1_requires_uncond {
             uncond_mask
@@ -2480,17 +2468,10 @@ fn render_real_one_stage_av(
     drop(stage1_audio_latents);
     drop(stage1_audio_noise);
     drop(stage1_video_noise);
-    drop(audio_positions);
-    drop(video_positions);
-    let _ = alt_mask;
-    let _ = uncond_mask;
     let _ = cond_mask;
-    drop(alt_audio_context);
-    drop(uncond_audio_context);
-    drop(audio_context);
-    drop(alt_context);
-    drop(uncond_context);
-    drop(cond_context);
+    let _ = uncond_mask;
+    let _ = alt_mask;
+    drop(prompt_inputs);
     if device.is_cuda() {
         device.synchronize()?;
     }
@@ -2515,26 +2496,16 @@ fn render_real_retake_av(
     progress: Option<&ProgressCallback>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
-    let cond_context = prepared
-        .prompt
-        .conditional
-        .video_encoding
-        .to_device(device)?;
-    let audio_shape = prepared.audio_latent_shape;
-    let audio_context = prepared
-        .prompt
-        .conditional
-        .audio_encoding
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
+    let prompt_inputs = prepare_render_prompt_inputs(
+        prepared,
+        device,
+        RenderPromptInputOptions {
+            include_unconditional: false,
+            include_alt: false,
+        },
+    )?;
+    let audio_shape = prompt_inputs.audio_shape;
     let cond_mask: Option<&Tensor> = None;
-    let video_positions = prepared.video_positions.to_device(device)?;
-    let audio_positions = prepared
-        .audio_positions
-        .as_ref()
-        .map(|tensor| tensor.to_device(device))
-        .transpose()?;
     let dtype = gpu_dtype(device);
     let retake_range = plan
         .retake_range
@@ -2556,7 +2527,7 @@ fn render_real_retake_av(
         false,
     )?;
     let video_retake_mask =
-        build_temporal_token_denoise_mask(retake_range, &video_positions, device)?;
+        build_temporal_token_denoise_mask(retake_range, &prompt_inputs.video_positions, device)?;
     let stage1_video_noise = seeded_randn(
         plan.seed,
         &[
@@ -2572,7 +2543,7 @@ fn render_real_retake_av(
     let conditioned_audio = maybe_load_native_conditioning_audio(plan, audio_shape, device, dtype)?;
     let audio_retake_mask = match (
         retake_range,
-        audio_positions.as_ref(),
+        prompt_inputs.audio_positions.as_ref(),
         conditioned_audio.as_ref(),
     ) {
         (range, Some(audio_positions), Some(_)) => Some(build_temporal_token_denoise_mask(
@@ -2610,12 +2581,12 @@ fn render_real_retake_av(
         Some(&source_video.latents),
         stage1_audio_noise.as_ref(),
         conditioned_audio.as_ref().map(|audio| &audio.latents),
-        &video_positions,
-        audio_positions.as_ref(),
-        &cond_context,
+        &prompt_inputs.video_positions,
+        prompt_inputs.audio_positions.as_ref(),
+        &prompt_inputs.cond_context,
         None,
         None,
-        audio_context.as_ref(),
+        prompt_inputs.audio_context.as_ref(),
         None,
         None,
         cond_mask,
@@ -2657,10 +2628,8 @@ fn render_real_retake_av(
     drop(video_retake_mask);
     drop(conditioned_audio);
     drop(source_video);
-    drop(audio_positions);
-    drop(video_positions);
-    drop(audio_context);
-    drop(cond_context);
+    let _ = cond_mask;
+    drop(prompt_inputs);
     if device.is_cuda() {
         device.synchronize()?;
     }

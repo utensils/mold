@@ -722,23 +722,25 @@ pub async fn run(
         guidance,
         seed,
         batch,
-        frames,
-        fps,
-        if audio {
-            Some(true)
-        } else if no_audio {
-            Some(false)
-        } else {
-            None
+        generate::Ltx2Options {
+            frames,
+            fps,
+            enable_audio: if audio {
+                Some(true)
+            } else if no_audio {
+                Some(false)
+            } else {
+                None
+            },
+            audio_file: audio_file_bytes,
+            source_video: source_video_bytes,
+            keyframes,
+            pipeline,
+            loras,
+            retake_range,
+            spatial_upscale,
+            temporal_upscale,
         },
-        audio_file_bytes,
-        source_video_bytes,
-        keyframes,
-        pipeline,
-        loras,
-        retake_range,
-        spatial_upscale,
-        temporal_upscale,
         host,
         format,
         no_metadata,

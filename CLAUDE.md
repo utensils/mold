@@ -56,6 +56,7 @@ cargo test -p mold-ai-core                           # Single crate
 ./scripts/fetch-tokenizers.sh                        # Pre-download tokenizer files
 cargo run -p mold-ai -- run "a cat"                  # Generate image
 cargo run -p mold-ai -- serve                        # Start server
+cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- clip.mp4
 ```
 
 ### CI (GitHub Actions)
@@ -110,7 +111,7 @@ crates/
 
 **Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`), `metrics` (Prometheus `/metrics` endpoint via `mold-server`).
 
-**Feature flags** (on `mold-inference`): `cuda`, `metal`, `expand` (same as above), `webp` (animated WebP output via libwebp FFI), `mp4` (AAC encoding for MP4 muxing on native video paths). H.264/MP4 decode is part of the baseline LTX-2 source-video ingest stack, so `mp4` no longer gates the full video media dependency graph. GIF and APNG output still work without enabling `mp4`.
+**Feature flags** (on `mold-inference`): `cuda`, `metal`, `expand` (same as above), `webp` (animated WebP output via libwebp FFI), `mp4` (AAC encoding for MP4 muxing on native video paths), `dev-bins` (native LTX-2 review/probe helper binaries). H.264/MP4 decode is part of the baseline LTX-2 source-video ingest stack, so `mp4` no longer gates the full video media dependency graph. GIF and APNG output still work without enabling `mp4`.
 
 ### mold-core
 

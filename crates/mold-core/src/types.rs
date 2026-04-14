@@ -283,7 +283,8 @@ pub struct GenerateRequest {
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
-    /// Number of video frames to generate. Must be 8n+1 (9, 17, 25, 33, …).
+    /// Number of video frames to generate.
+    /// Current LTX-Video / LTX-2 pipelines require 8n+1 (9, 17, 25, 33, …).
     /// Only used by video model families (e.g. ltx-video). Ignored by image models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames: Option<u32>,

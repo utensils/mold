@@ -7,7 +7,7 @@ use mold_inference::ltx2::media::{extract_gif_preview, probe_video, write_contac
 fn main() -> Result<()> {
     let inputs = env::args().skip(1).collect::<Vec<_>>();
     if inputs.is_empty() {
-        bail!("usage: cargo run -p mold-ai-inference --features mp4 --bin ltx2_review -- <video.mp4> [more.mp4...]");
+        bail!("usage: cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- <video.mp4> [more.mp4...]");
     }
 
     for input in inputs {

@@ -146,6 +146,20 @@ fn apply_local_engine_env_overrides(
     }
 }
 
+pub struct Ltx2Options {
+    pub frames: Option<u32>,
+    pub fps: Option<u32>,
+    pub enable_audio: Option<bool>,
+    pub audio_file: Option<Vec<u8>>,
+    pub source_video: Option<Vec<u8>>,
+    pub keyframes: Option<Vec<KeyframeCondition>>,
+    pub pipeline: Option<Ltx2PipelineMode>,
+    pub loras: Option<Vec<LoraWeight>>,
+    pub retake_range: Option<TimeRange>,
+    pub spatial_upscale: Option<Ltx2SpatialUpscale>,
+    pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
@@ -157,17 +171,7 @@ pub async fn run(
     guidance: Option<f64>,
     seed: Option<u64>,
     batch: u32,
-    frames: Option<u32>,
-    fps: Option<u32>,
-    enable_audio: Option<bool>,
-    audio_file: Option<Vec<u8>>,
-    source_video: Option<Vec<u8>>,
-    keyframes: Option<Vec<KeyframeCondition>>,
-    pipeline: Option<Ltx2PipelineMode>,
-    loras: Option<Vec<LoraWeight>>,
-    retake_range: Option<TimeRange>,
-    spatial_upscale: Option<Ltx2SpatialUpscale>,
-    temporal_upscale: Option<Ltx2TemporalUpscale>,
+    ltx2: Ltx2Options,
     host: Option<String>,
     format: OutputFormat,
     no_metadata: bool,
@@ -193,6 +197,20 @@ pub async fn run(
     lora: Option<LoraWeight>,
     expand: Option<bool>,
 ) -> Result<()> {
+    let Ltx2Options {
+        frames,
+        fps,
+        enable_audio,
+        audio_file,
+        source_video,
+        keyframes,
+        pipeline,
+        loras,
+        retake_range,
+        spatial_upscale,
+        temporal_upscale,
+    } = ltx2;
+
     // Load config and pull model-specific defaults.
     let ctx = CliContext::new(host.as_deref());
     let config = ctx.config().clone();

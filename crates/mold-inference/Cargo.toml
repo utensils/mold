@@ -8,6 +8,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Candle-based inference engine for mold — FLUX, SDXL, SD3.5, Z-Image diffusion models"
+autobins = false
 
 [lib]
 name = "mold_inference"
@@ -19,6 +20,22 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]
+dev-bins = []
+
+[[bin]]
+name = "ltx2_checkpoint_probe"
+path = "src/bin/ltx2_checkpoint_probe.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "ltx2_review"
+path = "src/bin/ltx2_review.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "ltx2_vae_probe"
+path = "src/bin/ltx2_vae_probe.rs"
+required-features = ["dev-bins", "mp4"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.6.0" }

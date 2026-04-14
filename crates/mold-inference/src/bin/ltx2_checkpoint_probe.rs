@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     let checkpoint = args
         .next()
         .map(PathBuf::from)
-        .context("usage: cargo run -p mold-ai-inference --bin ltx2_checkpoint_probe -- <checkpoint.safetensors> [pattern ...]")?;
+        .context("usage: cargo run -p mold-ai-inference --features dev-bins --bin ltx2_checkpoint_probe -- <checkpoint.safetensors> [pattern ...]")?;
     if !checkpoint.is_file() {
         bail!("checkpoint not found: {}", checkpoint.display());
     }

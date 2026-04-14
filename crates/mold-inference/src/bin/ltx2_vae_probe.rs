@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 3 {
         bail!(
-            "usage: cargo run -p mold-ai-inference --features cuda,mp4 --bin ltx2_vae_probe -- <checkpoint.safetensors> <input-image> <output.mp4> [width] [height] [frames] [fps]"
+            "usage: cargo run -p mold-ai-inference --features cuda,mp4,dev-bins --bin ltx2_vae_probe -- <checkpoint.safetensors> <input-image> <output.mp4> [width] [height] [frames] [fps]"
         );
     }
 
