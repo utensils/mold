@@ -110,7 +110,7 @@ crates/
 
 **Feature flags** (on `mold-cli`): `cuda` (CUDA GPU), `metal` (Metal GPU), `preview` (terminal image display), `discord` (Discord bot subcommand + `mold serve --discord`), `expand` (local LLM prompt expansion via `mold-inference`), `tui` (interactive terminal UI via `mold tui`), `metrics` (Prometheus `/metrics` endpoint via `mold-server`).
 
-**Feature flags** (on `mold-inference`): `cuda`, `metal`, `expand` (same as above), `webp` (animated WebP output via libwebp FFI), `mp4` (H.264/MP4 output via OpenH264 + muxide). The `webp` and `mp4` features are optional — GIF and APNG work without them.
+**Feature flags** (on `mold-inference`): `cuda`, `metal`, `expand` (same as above), `webp` (animated WebP output via libwebp FFI), `mp4` (AAC encoding for MP4 muxing on native video paths). H.264/MP4 decode is part of the baseline LTX-2 source-video ingest stack, so `mp4` no longer gates the full video media dependency graph. GIF and APNG output still work without enabling `mp4`.
 
 ### mold-core
 

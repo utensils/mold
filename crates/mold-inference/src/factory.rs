@@ -169,7 +169,7 @@ pub fn create_engine_with_pool(
             load_strategy,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
             other,
             model_name
         ),
@@ -296,6 +296,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.model_name(), "flux2-klein:bf16");
+    }
+
+    #[test]
+    fn unknown_family_error_lists_ltx_families() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-model".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("mystery".to_string()),
+                ..Default::default()
+            },
+        );
+        let err = create_engine(
+            "my-model".to_string(),
+            dummy_paths(),
+            &config,
+            LoadStrategy::Sequential,
+            false,
+        )
+        .err()
+        .expect("unknown family should fail");
+        let message = err.to_string();
+        assert!(message.contains("ltx-video"));
+        assert!(message.contains("ltx2"));
     }
 
     #[test]

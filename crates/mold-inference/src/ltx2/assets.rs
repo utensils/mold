@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Result};
-use mold_core::{Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelPaths};
+use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
+use mold_core::{download, Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelPaths};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn gemma_root(paths: &ModelPaths) -> Result<PathBuf> {
@@ -30,13 +31,12 @@ pub(crate) fn resolve_spatial_upscaler_path(
             if !model_name.contains("ltx-2.3") {
                 bail!("x1.5 spatial upscaling is currently published for LTX-2.3 only");
             }
-            mold_core::download::download_single_file_sync(
-                "Lightricks/LTX-2.3",
+            resolve_manifest_file(
+                model_name,
+                ModelComponent::SpatialUpscaler,
                 "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
-                Some("shared/LTX-2.3"),
             )
             .map(Some)
-            .map_err(|err| anyhow!("failed to download LTX-2.3 x1.5 spatial upscaler: {err}"))
         }
     }
 }
@@ -55,6 +55,37 @@ pub(crate) fn resolve_temporal_upscaler_path(
             })
             .map(Some),
     }
+}
+
+fn resolve_manifest_file(
+    model_name: &str,
+    component: ModelComponent,
+    hf_filename: &str,
+) -> Result<PathBuf> {
+    let manifest = find_manifest(model_name)
+        .ok_or_else(|| anyhow!("no manifest found for model '{model_name}'"))?;
+    let file = manifest
+        .files
+        .iter()
+        .find(|file| file.component == component && file.hf_filename == hf_filename)
+        .ok_or_else(|| {
+            anyhow!(
+                "manifest for '{model_name}' is missing required asset '{}'",
+                hf_filename
+            )
+        })?;
+    let canonical = storage_path(manifest, file);
+    let target_subdir = canonical
+        .parent()
+        .map(|path| path.to_string_lossy().to_string());
+    download::cached_file_path(&file.hf_repo, &file.hf_filename, target_subdir.as_deref())
+        .ok_or_else(|| {
+            anyhow!(
+                "required asset '{}' is not installed; run `mold pull {}` first",
+                hf_filename,
+                manifest.name
+            )
+        })
 }
 
 #[cfg(test)]
@@ -116,6 +147,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("LTX-2.3 only"));
+    }
+
+    #[test]
+    fn x1_5_spatial_upscaling_uses_manifest_asset_entry() {
+        let manifest = find_manifest("ltx-2.3-22b-distilled:fp8").unwrap();
+        assert!(manifest.files.iter().any(|file| {
+            file.component == ModelComponent::SpatialUpscaler
+                && file.hf_filename == "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"
+        }));
     }
 
     #[test]

@@ -415,15 +415,12 @@ impl InferenceEngine for Ltx2Engine {
             plan.prompt_tokens.conditional.valid_len(),
             plan.prompt_tokens.unconditional.valid_len()
         ));
-        if self.native_runtime.is_none() {
-            let create_runtime_start = Instant::now();
-            self.native_runtime = Some(self.create_runtime_session(&plan)?);
-            Self::log_timing("pipeline.create_runtime", create_runtime_start);
-        }
-        let mut runtime = self
-            .native_runtime
-            .take()
-            .context("native LTX-2 runtime session was not initialized")?;
+        let create_runtime_start = Instant::now();
+        let mut runtime = match self.native_runtime.take() {
+            Some(runtime) => runtime,
+            None => self.create_runtime_session(&plan)?,
+        };
+        Self::log_timing("pipeline.create_runtime", create_runtime_start);
 
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
         let prepare_start = Instant::now();
@@ -437,8 +434,6 @@ impl InferenceEngine for Ltx2Engine {
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
         Self::log_timing("pipeline.encode_native_video", encode_start);
-        self.native_runtime = Some(runtime);
-
         let duration_ms =
             Some((plan.num_frames as u64 * 1000).div_ceil(plan.frame_rate.max(1) as u64));
         let width = probe
@@ -1057,5 +1052,6 @@ mod tests {
         assert_eq!(video.frames, 17);
         assert_eq!(video.fps, 12);
         assert!(!video.has_audio);
+        assert!(engine.native_runtime.is_none());
     }
 }

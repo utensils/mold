@@ -190,11 +190,11 @@ Examples:
         fps: Option<u32>,
 
         /// Enable synchronized audio for LTX-2 / LTX-2.3 generation.
-        #[arg(long, help_heading = "Video")]
+        #[arg(long, help_heading = "Video", conflicts_with = "no_audio")]
         audio: bool,
 
         /// Disable synchronized audio for LTX-2 / LTX-2.3 generation.
-        #[arg(long, help_heading = "Video")]
+        #[arg(long, help_heading = "Video", conflicts_with = "audio")]
         no_audio: bool,
 
         /// Conditioning audio file for audio-to-video generation.
@@ -1267,6 +1267,14 @@ mod tests {
             Commands::Run { guidance, .. } => assert_eq!(guidance, Some(7.5)),
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn run_audio_flags_conflict() {
+        let err = try_parse(&["run", "ltx-2.3-22b-distilled:fp8", "--audio", "--no-audio"])
+            .err()
+            .expect("conflicting audio flags should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

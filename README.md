@@ -182,7 +182,9 @@ and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
 `fp8-scaled-mm`. The native CUDA acceptance matrix is now validated across 19B
 and 22B text+audio-video, image-to-video, audio-to-video, keyframe, retake,
 public IC-LoRA, spatial upscaling (`x1.5` / `x2` where published), and
-temporal upscaling (`x2`).
+temporal upscaling (`x2`). The shared Gemma text assets are gated on Hugging
+Face, so `mold pull` requires approved access to
+`google/gemma-3-12b-it-qat-q4_0-unquantized`.
 
 ## Features
 

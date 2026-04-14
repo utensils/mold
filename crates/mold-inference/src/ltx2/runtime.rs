@@ -205,16 +205,6 @@ impl Ltx2RuntimeSession {
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
         let prepare_total_start = Instant::now();
-        let mut prompt_encoder = self
-            .prompt_encoder
-            .take()
-            .context("native LTX-2 prompt encoder has already been consumed")?;
-        let prompt_device_is_cuda = prompt_encoder.device().is_cuda();
-        let prepared_device = if prompt_device_is_cuda || prompt_encoder.device().is_metal() {
-            candle_core::Device::Cpu
-        } else {
-            prompt_encoder.device().clone()
-        };
         let mut stage1_shape = derive_stage1_render_shape(
             plan.width,
             plan.height,
@@ -239,48 +229,66 @@ impl Ltx2RuntimeSession {
             stage1_shape.width = implicit_x2_shape.width;
             stage1_shape.height = implicit_x2_shape.height;
         }
-        let prompt_encode_start = Instant::now();
-        let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
-        let prompt = move_prompt_encoding_to_device(
-            prompt_encoder.encode_prompt_pair_with_unconditional(
-                &plan.prompt_tokens,
-                encode_unconditional_prompt,
-            )?,
-            &prepared_device,
-        )?;
-        log_timing("prepare.prompt_pair", prompt_encode_start);
-        let alt_prompt_start = Instant::now();
-        let debug_alt_prompt = match ltx_debug_alt_prompt() {
-            Some(alt_prompt) => {
-                let assets = super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
-                    .with_context(|| {
-                        format!(
+        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = {
+            let mut prompt_encoder = self
+                .prompt_encoder
+                .take()
+                .context("native LTX-2 prompt encoder is unavailable")?;
+            let prompt_device_is_cuda = prompt_encoder.device().is_cuda();
+            let prepared_device = if prompt_device_is_cuda || prompt_encoder.device().is_metal() {
+                candle_core::Device::Cpu
+            } else {
+                prompt_encoder.device().clone()
+            };
+            let prompt_encode_start = Instant::now();
+            let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
+            let prompt = move_prompt_encoding_to_device(
+                prompt_encoder.encode_prompt_pair_with_unconditional(
+                    &plan.prompt_tokens,
+                    encode_unconditional_prompt,
+                )?,
+                &prepared_device,
+            )?;
+            log_timing("prepare.prompt_pair", prompt_encode_start);
+            let alt_prompt_start = Instant::now();
+            let debug_alt_prompt = match ltx_debug_alt_prompt() {
+                Some(alt_prompt) => {
+                    let assets =
+                        super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
+                            .with_context(|| {
+                                format!(
                             "failed to discover Gemma assets for alternate prompt debug at '{}'",
                             plan.gemma_root
                         )
-                    })?;
-                let alt_tokens =
-                    assets.encode_prompt_pair(&alt_prompt, plan.negative_prompt.as_deref())?;
-                let alt_prompt = prompt_encoder
-                    .encode_prompt_pair(&alt_tokens)
-                    .context("failed to encode alternate debug prompt")?;
-                Some(move_embeddings_output_to_device(
-                    alt_prompt.conditional,
-                    &prepared_device,
-                )?)
+                            })?;
+                    let alt_tokens =
+                        assets.encode_prompt_pair(&alt_prompt, plan.negative_prompt.as_deref())?;
+                    let alt_prompt = prompt_encoder
+                        .encode_prompt_pair(&alt_tokens)
+                        .context("failed to encode alternate debug prompt")?;
+                    Some(move_embeddings_output_to_device(
+                        alt_prompt.conditional,
+                        &prepared_device,
+                    )?)
+                }
+                None => None,
+            };
+            log_timing("prepare.alt_prompt", alt_prompt_start);
+            let prompt_debug_start = Instant::now();
+            if ltx_debug_enabled() {
+                log_prompt_debug_stats(plan, &prompt)?;
+                if let Some(alt_prompt) = debug_alt_prompt.as_ref() {
+                    log_alt_prompt_debug_stats(plan, &prompt.conditional, alt_prompt)?;
+                }
             }
-            None => None,
+            log_timing("prepare.prompt_debug", prompt_debug_start);
+            (
+                prompt_device_is_cuda,
+                prepared_device,
+                prompt,
+                debug_alt_prompt,
+            )
         };
-        log_timing("prepare.alt_prompt", alt_prompt_start);
-        let prompt_debug_start = Instant::now();
-        if ltx_debug_enabled() {
-            log_prompt_debug_stats(plan, &prompt)?;
-            if let Some(alt_prompt) = debug_alt_prompt.as_ref() {
-                log_alt_prompt_debug_stats(plan, &prompt.conditional, alt_prompt)?;
-            }
-        }
-        log_timing("prepare.prompt_debug", prompt_debug_start);
-        drop(prompt_encoder);
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
@@ -773,6 +781,10 @@ fn stage_sampler_mode(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Sam
     })
 }
 
+fn multimodal_guider_requires_unconditional_context(params: &MultiModalGuiderParams) -> bool {
+    (params.cfg_scale - 1.0).abs() > f64::EPSILON
+}
+
 fn stage_multimodal_guider_params(
     plan: &Ltx2GeneratePlan,
     stage_index: usize,
@@ -852,13 +864,28 @@ fn prompt_requires_unconditional_context(plan: &Ltx2GeneratePlan) -> Result<bool
 
 fn prompt_requires_unconditional_context_for_plan(plan: &Ltx2GeneratePlan) -> Result<bool> {
     for stage_index in 0..plan.execution_graph.denoise_passes.len() {
-        if stage_guidance_scale(plan, stage_index)? > 1.0
-            || stage_multimodal_guider_params(plan, stage_index).is_some()
-        {
+        if stage_requires_unconditional_context(plan, stage_index)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn stage_requires_unconditional_context(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+) -> Result<bool> {
+    if stage_guidance_scale(plan, stage_index)? > 1.0 {
+        return Ok(true);
+    }
+    Ok(
+        stage_multimodal_guider_params(plan, stage_index).is_some_and(
+            |(video_params, audio_params)| {
+                multimodal_guider_requires_unconditional_context(&video_params)
+                    || multimodal_guider_requires_unconditional_context(&audio_params)
+            },
+        ),
+    )
 }
 
 fn stage_distilled_lora_scale(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Option<f64>> {
@@ -1987,6 +2014,7 @@ fn render_real_two_stage_av(
         .map(|audio| &audio.latents)
         .or(stage1_audio_noise.as_ref());
     let stage1_denoise_start = Instant::now();
+    let stage1_requires_uncond = stage_requires_unconditional_context(plan, 0)?;
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -1999,15 +2027,15 @@ fn render_real_two_stage_av(
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        (stage1_guidance_scale > 1.0).then_some(&uncond_context),
+        stage1_requires_uncond.then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        (stage1_guidance_scale > 1.0)
+        stage1_requires_uncond
             .then_some(uncond_audio_context.as_ref())
             .flatten(),
         alt_audio_context.as_ref(),
         cond_mask,
-        if stage1_guidance_scale > 1.0 {
+        if stage1_requires_uncond {
             uncond_mask
         } else {
             None
@@ -2140,6 +2168,7 @@ fn render_real_two_stage_av(
         stage2_transformer_load_start,
     );
     let stage2_denoise_start = Instant::now();
+    let stage2_requires_uncond = stage_requires_unconditional_context(plan, 1)?;
     let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -2152,15 +2181,15 @@ fn render_real_two_stage_av(
         &stage2_video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        (stage2_guidance_scale > 1.0).then_some(&uncond_context),
+        stage2_requires_uncond.then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        (stage2_guidance_scale > 1.0)
+        stage2_requires_uncond
             .then_some(uncond_audio_context.as_ref())
             .flatten(),
         alt_audio_context.as_ref(),
         cond_mask,
-        if stage2_guidance_scale > 1.0 {
+        if stage2_requires_uncond {
             uncond_mask
         } else {
             None
@@ -2349,6 +2378,7 @@ fn render_real_one_stage_av(
     if debug_enabled {
         log_debug_vram("after_one_stage_transformer_load");
     }
+    let stage1_requires_uncond = stage_requires_unconditional_context(plan, 0)?;
     let (latents, stage1_audio_latents) = run_real_distilled_stage(
         &transformer,
         prepared.video_latent_shape,
@@ -2361,15 +2391,15 @@ fn render_real_one_stage_av(
         &video_positions,
         audio_positions.as_ref(),
         &cond_context,
-        (stage1_guidance_scale > 1.0).then_some(&uncond_context),
+        stage1_requires_uncond.then_some(&uncond_context),
         alt_context.as_ref(),
         audio_context.as_ref(),
-        (stage1_guidance_scale > 1.0)
+        stage1_requires_uncond
             .then_some(uncond_audio_context.as_ref())
             .flatten(),
         alt_audio_context.as_ref(),
         cond_mask,
-        if stage1_guidance_scale > 1.0 {
+        if stage1_requires_uncond {
             uncond_mask
         } else {
             None
@@ -4124,10 +4154,16 @@ fn ltx2_scheduler_config() -> FlowMatchEulerDiscreteSchedulerConfig {
 
 fn remap_ltx2_transformer_key(name: &str) -> String {
     let mapped = name
-        .replace("proj_in", "patchify_proj")
-        .replace("time_embed", "adaln_single")
-        .replace("norm_q", "q_norm")
-        .replace("norm_k", "k_norm");
+        .split('.')
+        .map(|component| match component {
+            "proj_in" => "patchify_proj",
+            "time_embed" => "adaln_single",
+            "norm_q" => "q_norm",
+            "norm_k" => "k_norm",
+            _ => component,
+        })
+        .collect::<Vec<_>>()
+        .join(".");
     format!("model.diffusion_model.{mapped}")
 }
 
@@ -5296,6 +5332,55 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::prompt_requires_unconditional_context_for_plan(&plan).unwrap());
+    }
+
+    #[test]
+    fn stage_unconditional_context_follows_multimodal_guidance_at_guidance_one() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.guidance = 1.0;
+        rebuild_execution_graph(&mut plan, &req);
+
+        assert!(super::stage_requires_unconditional_context(&plan, 0).unwrap());
+        assert!(!super::stage_requires_unconditional_context(&plan, 1).unwrap());
+    }
+
+    #[test]
+    fn runtime_session_prepare_consumes_prompt_encoder() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        session.prepare(&plan).unwrap();
+
+        assert!(session.prepare(&plan).is_err());
+    }
+
+    #[test]
+    fn remap_ltx2_transformer_key_rewrites_only_exact_path_segments() {
+        assert_eq!(
+            super::remap_ltx2_transformer_key("proj_in.weight"),
+            "model.diffusion_model.patchify_proj.weight"
+        );
+        assert_eq!(
+            super::remap_ltx2_transformer_key("blocks.0.norm_q.weight"),
+            "model.diffusion_model.blocks.0.q_norm.weight"
+        );
+        assert_eq!(
+            super::remap_ltx2_transformer_key("blocks.0.patchify_proj_in.weight"),
+            "model.diffusion_model.blocks.0.patchify_proj_in.weight"
+        );
+        assert_eq!(
+            super::remap_ltx2_transformer_key("blocks.0.norm_q_extra.weight"),
+            "model.diffusion_model.blocks.0.norm_q_extra.weight"
+        );
     }
 
     #[test]
