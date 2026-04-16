@@ -54,7 +54,7 @@ pub fn build_model_catalog(
         .iter()
         .filter(|(name, _)| crate::manifest::find_manifest(name).is_none())
         .collect();
-    config_only.sort_by(|(left, _), (right, _)| left.cmp(right));
+    config_only.sort_by_key(|(name, _)| *name);
 
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
