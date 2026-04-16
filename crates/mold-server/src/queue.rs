@@ -264,15 +264,51 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
             // Send SSE complete event
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Complete(SseCompleteEvent {
-                    image: base64::engine::general_purpose::STANDARD.encode(&img.data),
-                    format: img.format,
-                    width: img.width,
-                    height: img.height,
-                    seed_used: response.seed_used,
-                    generation_time_ms: response.generation_time_ms,
-                    model: response.model.clone(),
-                }));
+                let b64 = base64::engine::general_purpose::STANDARD;
+                let event = if let Some(ref video) = response.video {
+                    // Video response: encode the actual video data + metadata
+                    SseCompleteEvent {
+                        image: b64.encode(&video.data),
+                        format: video.format,
+                        width: video.width,
+                        height: video.height,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                        model: response.model.clone(),
+                        video_frames: Some(video.frames),
+                        video_fps: Some(video.fps),
+                        video_thumbnail: Some(b64.encode(&video.thumbnail)),
+                        video_gif_preview: if video.gif_preview.is_empty() {
+                            None
+                        } else {
+                            Some(b64.encode(&video.gif_preview))
+                        },
+                        video_has_audio: video.has_audio,
+                        video_duration_ms: video.duration_ms,
+                        video_audio_sample_rate: video.audio_sample_rate,
+                        video_audio_channels: video.audio_channels,
+                    }
+                } else {
+                    // Image response: same as before
+                    SseCompleteEvent {
+                        image: b64.encode(&img.data),
+                        format: img.format,
+                        width: img.width,
+                        height: img.height,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                        model: response.model.clone(),
+                        video_frames: None,
+                        video_fps: None,
+                        video_thumbnail: None,
+                        video_gif_preview: None,
+                        video_has_audio: false,
+                        video_duration_ms: None,
+                        video_audio_sample_rate: None,
+                        video_audio_channels: None,
+                    }
+                };
+                let _ = tx.send(SseMessage::Complete(event));
             }
 
             // Send result through oneshot

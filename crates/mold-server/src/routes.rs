@@ -320,9 +320,40 @@ async fn generate(
                 }
             }
             // For video responses, return the actual video data (not the thumbnail)
+            // and send video metadata in headers so the client can reconstruct VideoData.
             let output_data = if let Some(ref video) = response.video {
                 let ct = HeaderValue::from_static(video.format.content_type());
                 headers.insert(header::CONTENT_TYPE, ct);
+                if let Ok(v) = HeaderValue::from_str(&video.frames.to_string()) {
+                    headers.insert("x-mold-video-frames", v);
+                }
+                if let Ok(v) = HeaderValue::from_str(&video.fps.to_string()) {
+                    headers.insert("x-mold-video-fps", v);
+                }
+                if let Ok(v) = HeaderValue::from_str(&video.width.to_string()) {
+                    headers.insert("x-mold-video-width", v);
+                }
+                if let Ok(v) = HeaderValue::from_str(&video.height.to_string()) {
+                    headers.insert("x-mold-video-height", v);
+                }
+                if video.has_audio {
+                    headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
+                }
+                if let Some(dur) = video.duration_ms {
+                    if let Ok(v) = HeaderValue::from_str(&dur.to_string()) {
+                        headers.insert("x-mold-video-duration-ms", v);
+                    }
+                }
+                if let Some(sr) = video.audio_sample_rate {
+                    if let Ok(v) = HeaderValue::from_str(&sr.to_string()) {
+                        headers.insert("x-mold-video-audio-sample-rate", v);
+                    }
+                }
+                if let Some(ch) = video.audio_channels {
+                    if let Ok(v) = HeaderValue::from_str(&ch.to_string()) {
+                        headers.insert("x-mold-video-audio-channels", v);
+                    }
+                }
                 video.data.clone()
             } else {
                 img.data
