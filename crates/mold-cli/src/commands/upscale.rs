@@ -184,12 +184,10 @@ async fn upscale_local(
                 ProgressEvent::Info { message } => {
                     eprintln!("{} {message}", theme::icon_info());
                 }
-                ProgressEvent::DenoiseStep { step, total, .. } => {
-                    if total > 1 {
-                        eprint!("\r{} Tile {step}/{total}", theme::icon_info());
-                        if step == total {
-                            eprintln!();
-                        }
+                ProgressEvent::DenoiseStep { step, total, .. } if total > 1 => {
+                    eprint!("\r{} Tile {step}/{total}", theme::icon_info());
+                    if step == total {
+                        eprintln!();
                     }
                 }
                 _ => {}

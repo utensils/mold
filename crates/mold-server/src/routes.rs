@@ -1458,7 +1458,7 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
         }
     }
 
-    images.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    images.sort_by_key(|img| std::cmp::Reverse(img.timestamp));
     images
 }
 

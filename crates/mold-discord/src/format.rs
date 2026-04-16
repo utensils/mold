@@ -95,11 +95,7 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
 /// Build a text progress bar: `[=========>          ]`
 fn progress_bar(current: usize, total: usize) -> String {
     let width = 20;
-    let filled = if total > 0 {
-        (current * width) / total
-    } else {
-        0
-    };
+    let filled = (current * width).checked_div(total).unwrap_or(0);
     let fill_len = if filled > 0 && filled < width {
         filled - 1
     } else {
