@@ -77,21 +77,15 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     ""
                 } else {
                     match field_type {
-                        SettingsFieldType::Text | SettingsFieldType::Path => {
-                            if is_selected {
-                                " \u{25bc}"
-                            } else {
-                                ""
-                            }
+                        SettingsFieldType::Text | SettingsFieldType::Path if is_selected => {
+                            " \u{25bc}"
                         }
                         SettingsFieldType::Number { .. }
                         | SettingsFieldType::Toggle { .. }
-                        | SettingsFieldType::Bool => {
-                            if is_selected {
-                                " \u{25c0}\u{25b6}"
-                            } else {
-                                ""
-                            }
+                        | SettingsFieldType::Bool
+                            if is_selected =>
+                        {
+                            " \u{25c0}\u{25b6}"
                         }
                         _ => "",
                     }

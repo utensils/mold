@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-04-16
+
+### Fixed
+
+- **Video outputs saved as single-frame PNGs instead of real mp4/gif/apng files**: both the SSE and non-SSE HTTP transport paths between server and client discarded `VideoData`, causing the CLI to save a first-frame PNG thumbnail with the requested video extension. The SSE `SseCompleteEvent` now carries optional video metadata fields (`video_frames`, `video_fps`, `video_thumbnail`, `video_gif_preview`, audio metadata) and the non-SSE path sends `x-mold-video-*` response headers so the client can reconstruct the full `VideoData` in both code paths ([#224](https://github.com/utensils/mold/issues/224)).
+
 ## [0.7.0] - 2026-04-14
 
 *Native Rust LTX-2 / LTX-2.3 joint audio-video generation.*

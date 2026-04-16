@@ -784,10 +784,15 @@ pub enum SseProgressEvent {
     },
 }
 
-/// Completion event sent when image generation finishes successfully.
+/// Completion event sent when image/video generation finishes successfully.
+///
+/// For image responses, `image` contains base64-encoded image data and the
+/// `video_*` fields are absent.  For video responses, `image` contains
+/// base64-encoded video data (MP4/GIF/APNG/WebP) and the `video_*` fields
+/// carry the metadata needed to reconstruct [`VideoData`] on the client.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseCompleteEvent {
-    /// Base64-encoded image data.
+    /// Base64-encoded payload — image bytes for images, video bytes for video.
     pub image: String,
     pub format: OutputFormat,
     #[schema(example = 1024)]
@@ -802,6 +807,32 @@ pub struct SseCompleteEvent {
     #[serde(default)]
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
+
+    // ── Video-only fields (absent for image responses) ──────────────────
+    /// Number of frames.  Presence of this field signals a video response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_frames: Option<u32>,
+    /// Frames per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_fps: Option<u32>,
+    /// Base64-encoded first-frame PNG thumbnail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_thumbnail: Option<String>,
+    /// Base64-encoded animated GIF preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_gif_preview: Option<String>,
+    /// Whether this video includes a synchronized audio track.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub video_has_audio: bool,
+    /// Total encoded duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_duration_ms: Option<u64>,
+    /// Audio sample rate in Hz (when audio is present).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_audio_sample_rate: Option<u32>,
+    /// Number of audio channels (when audio is present).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_audio_channels: Option<u32>,
 }
 
 /// SSE event emitted when an upscale request completes.
@@ -1309,12 +1340,24 @@ mod tests {
             seed_used: 42,
             generation_time_ms: 5000,
             model: "flux-schnell:q8".to_string(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
         };
         let json = serde_json::to_string(&event).unwrap();
+        // Video fields should be absent from the serialized JSON
+        assert!(!json.contains("video_frames"));
+        assert!(!json.contains("video_fps"));
         let back: SseCompleteEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.width, 1024);
         assert_eq!(back.seed_used, 42);
         assert_eq!(back.model, "flux-schnell:q8");
+        assert!(back.video_frames.is_none());
     }
 
     #[test]
@@ -1852,6 +1895,125 @@ mod tests {
             r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4,"batch_size":1}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert!(req.upscale_model.is_none());
+    }
+
+    // ── Video SSE transport tests ────────────────────────────────────────
+
+    #[test]
+    fn sse_complete_event_video_roundtrip() {
+        let event = SseCompleteEvent {
+            image: "dmlkZW9fYnl0ZXM=".to_string(), // "video_bytes" base64
+            format: OutputFormat::Mp4,
+            width: 832,
+            height: 480,
+            seed_used: 99,
+            generation_time_ms: 12000,
+            model: "ltx-2.3-22b-distilled:fp8".to_string(),
+            video_frames: Some(33),
+            video_fps: Some(12),
+            video_thumbnail: Some("dGh1bWI=".to_string()), // "thumb" base64
+            video_gif_preview: Some("Z2lm".to_string()),   // "gif" base64
+            video_has_audio: true,
+            video_duration_ms: Some(2750),
+            video_audio_sample_rate: Some(44100),
+            video_audio_channels: Some(2),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("video_frames"));
+        assert!(json.contains("video_fps"));
+        assert!(json.contains("video_thumbnail"));
+        assert!(json.contains("video_gif_preview"));
+        assert!(json.contains("video_has_audio"));
+        assert!(json.contains("video_duration_ms"));
+        assert!(json.contains("video_audio_sample_rate"));
+        assert!(json.contains("video_audio_channels"));
+
+        let back: SseCompleteEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.video_frames, Some(33));
+        assert_eq!(back.video_fps, Some(12));
+        assert!(back.video_has_audio);
+        assert_eq!(back.video_duration_ms, Some(2750));
+        assert_eq!(back.video_audio_sample_rate, Some(44100));
+        assert_eq!(back.video_audio_channels, Some(2));
+        assert_eq!(back.video_thumbnail.as_deref(), Some("dGh1bWI="));
+        assert_eq!(back.video_gif_preview.as_deref(), Some("Z2lm"));
+        assert_eq!(back.format, OutputFormat::Mp4);
+    }
+
+    #[test]
+    fn sse_complete_event_video_no_audio_omits_audio_fields() {
+        let event = SseCompleteEvent {
+            image: "data".to_string(),
+            format: OutputFormat::Gif,
+            width: 512,
+            height: 512,
+            seed_used: 1,
+            generation_time_ms: 100,
+            model: "ltx-video:bf16".to_string(),
+            video_frames: Some(17),
+            video_fps: Some(24),
+            video_thumbnail: Some("dGh1bWI=".to_string()),
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        // Audio-related fields should be absent when not set
+        assert!(!json.contains("video_has_audio"));
+        assert!(!json.contains("video_audio_sample_rate"));
+        assert!(!json.contains("video_audio_channels"));
+        assert!(!json.contains("video_gif_preview"));
+        // But video fields should be present
+        assert!(json.contains("video_frames"));
+        assert!(json.contains("video_fps"));
+
+        let back: SseCompleteEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.video_frames, Some(17));
+        assert!(!back.video_has_audio);
+        assert!(back.video_gif_preview.is_none());
+    }
+
+    #[test]
+    fn sse_complete_event_backward_compat_no_video_fields() {
+        // Older servers send no video fields at all — everything defaults.
+        let json = r#"{"image":"aW1n","format":"png","width":1024,"height":1024,"seed_used":42,"generation_time_ms":5000,"model":"flux-dev:q8"}"#;
+        let event: SseCompleteEvent = serde_json::from_str(json).unwrap();
+        assert!(event.video_frames.is_none());
+        assert!(event.video_fps.is_none());
+        assert!(event.video_thumbnail.is_none());
+        assert!(event.video_gif_preview.is_none());
+        assert!(!event.video_has_audio);
+        assert!(event.video_duration_ms.is_none());
+        assert!(event.video_audio_sample_rate.is_none());
+        assert!(event.video_audio_channels.is_none());
+        assert_eq!(event.model, "flux-dev:q8");
+        assert_eq!(event.width, 1024);
+    }
+
+    #[test]
+    fn sse_complete_event_image_no_video_fields_in_json() {
+        // An image-only event should not include any video_* keys in JSON
+        let event = SseCompleteEvent {
+            image: "aW1n".to_string(),
+            format: OutputFormat::Png,
+            width: 1024,
+            height: 1024,
+            seed_used: 1,
+            generation_time_ms: 100,
+            model: "flux-dev:q8".to_string(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("video_"));
     }
 }
 

@@ -528,12 +528,8 @@ impl OffloadedQwenImageTransformer {
         // Load first block on CPU to measure actual size
         let first_block = OffloadedQwenBlock::load(cfg, cpu_vb.pp("transformer_blocks").pp(0))?;
         let block_size = Self::block_size_bytes(&first_block);
-        let max_gpu_blocks = if block_size > 0 {
-            (vram_budget / block_size) as usize
-        } else {
-            0
-        }
-        .min(cfg.num_layers);
+        let max_gpu_blocks = vram_budget.checked_div(block_size).unwrap_or(0) as usize;
+        let max_gpu_blocks = max_gpu_blocks.min(cfg.num_layers);
 
         progress.info(&format!(
             "Block size: {} MB, VRAM budget: {} MB → {} of {} blocks on GPU",

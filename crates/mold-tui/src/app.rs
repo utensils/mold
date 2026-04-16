@@ -1778,15 +1778,11 @@ impl App {
                             self.update_model(&model);
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                    KeyCode::Up | KeyCode::Char('k') if *selected > 0 => {
+                        *selected -= 1;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if *selected + 1 < filtered.len() {
-                            *selected += 1;
-                        }
+                    KeyCode::Down | KeyCode::Char('j') if *selected + 1 < filtered.len() => {
+                        *selected += 1;
                     }
                     KeyCode::Char(c) => {
                         filter.push(c);
@@ -1810,15 +1806,11 @@ impl App {
                             self.spawn_upscale(model);
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                    KeyCode::Up | KeyCode::Char('k') if *selected > 0 => {
+                        *selected -= 1;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if *selected + 1 < filtered.len() {
-                            *selected += 1;
-                        }
+                    KeyCode::Down | KeyCode::Char('j') if *selected + 1 < filtered.len() => {
+                        *selected += 1;
                     }
                     KeyCode::Char(c) => {
                         filter.push(c);
@@ -1927,18 +1919,16 @@ impl App {
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k')
-                        if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Up =>
+                        if (key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Up)
+                            && *selected > 0 =>
                     {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                        *selected -= 1;
                     }
                     KeyCode::Down | KeyCode::Char('j')
-                        if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Down =>
+                        if (key.modifiers == KeyModifiers::NONE || key.code == KeyCode::Down)
+                            && *selected + 1 < results.len() =>
                     {
-                        if *selected + 1 < results.len() {
-                            *selected += 1;
-                        }
+                        *selected += 1;
                     }
                     KeyCode::Char(c) => {
                         filter.push(c);
@@ -2226,21 +2216,17 @@ impl App {
                     View::Settings => View::Models,
                 };
             }
-            Action::FocusNext => {
-                if self.active_view == View::Generate {
-                    self.generate.focus = self
-                        .generate
-                        .focus
-                        .next(self.generate.capabilities.supports_negative_prompt);
-                }
+            Action::FocusNext if self.active_view == View::Generate => {
+                self.generate.focus = self
+                    .generate
+                    .focus
+                    .next(self.generate.capabilities.supports_negative_prompt);
             }
-            Action::FocusPrev => {
-                if self.active_view == View::Generate {
-                    self.generate.focus = self
-                        .generate
-                        .focus
-                        .prev(self.generate.capabilities.supports_negative_prompt);
-                }
+            Action::FocusPrev if self.active_view == View::Generate => {
+                self.generate.focus = self
+                    .generate
+                    .focus
+                    .prev(self.generate.capabilities.supports_negative_prompt);
             }
             Action::Up => match self.active_view {
                 View::Generate => {
@@ -2320,10 +2306,8 @@ impl App {
                     self.increment_param(-1);
                 }
             }
-            Action::Generate => {
-                if self.active_view == View::Generate && !self.generate.generating {
-                    self.start_generation();
-                }
+            Action::Generate if self.active_view == View::Generate && !self.generate.generating => {
+                self.start_generation();
             }
             Action::Confirm => match self.active_view {
                 View::Generate => {
@@ -2356,46 +2340,44 @@ impl App {
                 }
                 View::Settings => self.settings_confirm(),
             },
-            Action::PullModel => {
-                if self.active_view == View::Models {
-                    if let Some(model) = self.models.catalog.get(self.models.selected) {
-                        let model_name = model.name.clone();
-                        let tx = self.bg_tx.clone();
+            Action::PullModel if self.active_view == View::Models => {
+                if let Some(model) = self.models.catalog.get(self.models.selected) {
+                    let model_name = model.name.clone();
+                    let tx = self.bg_tx.clone();
 
-                        if self.should_poll_remote() {
-                            // Pull via server when connected remotely
-                            let url = self.server_url.clone().unwrap();
-                            self.tokio_handle.spawn(async move {
-                                let client = mold_core::MoldClient::new(&url);
-                                let (progress_tx, mut progress_rx) =
-                                    mpsc::unbounded_channel::<SseProgressEvent>();
-                                let tx_fwd = tx.clone();
-                                tokio::spawn(async move {
-                                    while let Some(event) = progress_rx.recv().await {
-                                        let _ = tx_fwd.send(BackgroundEvent::Progress(event));
-                                    }
-                                });
-                                match client.pull_model_stream(&model_name, progress_tx).await {
-                                    Ok(()) => {
-                                        let _ = tx.send(BackgroundEvent::PullComplete(model_name));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(BackgroundEvent::Error(format!(
-                                            "Server pull failed: {e}"
-                                        )));
-                                    }
+                    if self.should_poll_remote() {
+                        // Pull via server when connected remotely
+                        let url = self.server_url.clone().unwrap();
+                        self.tokio_handle.spawn(async move {
+                            let client = mold_core::MoldClient::new(&url);
+                            let (progress_tx, mut progress_rx) =
+                                mpsc::unbounded_channel::<SseProgressEvent>();
+                            let tx_fwd = tx.clone();
+                            tokio::spawn(async move {
+                                while let Some(event) = progress_rx.recv().await {
+                                    let _ = tx_fwd.send(BackgroundEvent::Progress(event));
                                 }
                             });
-                        } else {
-                            // Pull locally when no server connected
-                            self.tokio_handle.spawn(async move {
-                                if let Err(msg) =
-                                    crate::backend::auto_pull_model(&model_name, &tx).await
-                                {
-                                    let _ = tx.send(BackgroundEvent::Error(msg));
+                            match client.pull_model_stream(&model_name, progress_tx).await {
+                                Ok(()) => {
+                                    let _ = tx.send(BackgroundEvent::PullComplete(model_name));
                                 }
-                            });
-                        }
+                                Err(e) => {
+                                    let _ = tx.send(BackgroundEvent::Error(format!(
+                                        "Server pull failed: {e}"
+                                    )));
+                                }
+                            }
+                        });
+                    } else {
+                        // Pull locally when no server connected
+                        self.tokio_handle.spawn(async move {
+                            if let Err(msg) =
+                                crate::backend::auto_pull_model(&model_name, &tx).await
+                            {
+                                let _ = tx.send(BackgroundEvent::Error(msg));
+                            }
+                        });
                     }
                 }
             }
@@ -2466,32 +2448,30 @@ impl App {
                     self.generate.error_message = None;
                 }
             }
-            Action::HistoryPrev => {
+            Action::HistoryPrev
                 if self.active_view == View::Generate
-                    && self.generate.focus == GenerateFocus::Prompt
-                {
-                    let current = self.generate.prompt.lines().join("\n");
-                    if let Some(prompt) = self.history.prev(&current) {
-                        self.generate.prompt =
-                            TextArea::new(prompt.lines().map(String::from).collect());
-                        self.generate
-                            .prompt
-                            .set_cursor_line_style(ratatui::style::Style::default());
-                    }
+                    && self.generate.focus == GenerateFocus::Prompt =>
+            {
+                let current = self.generate.prompt.lines().join("\n");
+                if let Some(prompt) = self.history.prev(&current) {
+                    self.generate.prompt =
+                        TextArea::new(prompt.lines().map(String::from).collect());
+                    self.generate
+                        .prompt
+                        .set_cursor_line_style(ratatui::style::Style::default());
                 }
             }
-            Action::HistoryNext => {
+            Action::HistoryNext
                 if self.active_view == View::Generate
-                    && self.generate.focus == GenerateFocus::Prompt
-                {
-                    let current = self.generate.prompt.lines().join("\n");
-                    if let Some(prompt) = self.history.next(&current) {
-                        self.generate.prompt =
-                            TextArea::new(prompt.lines().map(String::from).collect());
-                        self.generate
-                            .prompt
-                            .set_cursor_line_style(ratatui::style::Style::default());
-                    }
+                    && self.generate.focus == GenerateFocus::Prompt =>
+            {
+                let current = self.generate.prompt.lines().join("\n");
+                if let Some(prompt) = self.history.next(&current) {
+                    self.generate.prompt =
+                        TextArea::new(prompt.lines().map(String::from).collect());
+                    self.generate
+                        .prompt
+                        .set_cursor_line_style(ratatui::style::Style::default());
                 }
             }
             Action::SearchHistory => {
@@ -2507,93 +2487,80 @@ impl App {
                     results: all,
                 });
             }
-            Action::Unfocus => {
-                if self.active_view == View::Generate {
-                    self.generate.focus = GenerateFocus::Navigation;
-                }
+            Action::Unfocus if self.active_view == View::Generate => {
+                self.generate.focus = GenerateFocus::Navigation;
             }
-            Action::GridLeft => {
+            Action::GridLeft
                 if self.active_view == View::Gallery
                     && self.gallery.view_mode == GalleryViewMode::Grid
-                    && self.gallery.selected > 0
-                {
-                    self.gallery.selected -= 1;
-                }
+                    && self.gallery.selected > 0 =>
+            {
+                self.gallery.selected -= 1;
             }
-            Action::GridRight => {
+            Action::GridRight
                 if self.active_view == View::Gallery
                     && self.gallery.view_mode == GalleryViewMode::Grid
-                    && self.gallery.selected + 1 < self.gallery.entries.len()
-                {
-                    self.gallery.selected += 1;
+                    && self.gallery.selected + 1 < self.gallery.entries.len() =>
+            {
+                self.gallery.selected += 1;
+            }
+            Action::EditAndGenerate if self.active_view == View::Gallery => {
+                self.load_gallery_into_generate();
+            }
+            Action::Regenerate if self.active_view == View::Gallery => {
+                self.load_gallery_into_generate();
+                if !self.generate.generating {
+                    self.start_generation();
                 }
             }
-            Action::EditAndGenerate => {
-                if self.active_view == View::Gallery {
-                    self.load_gallery_into_generate();
-                }
-            }
-            Action::Regenerate => {
-                if self.active_view == View::Gallery {
-                    self.load_gallery_into_generate();
-                    if !self.generate.generating {
-                        self.start_generation();
-                    }
-                }
-            }
-            Action::DeleteImage => {
-                if self.active_view == View::Gallery {
-                    if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
-                        let filename = entry.filename();
-                        self.popup = Some(Popup::Confirm {
-                            message: format!("Delete {filename}?"),
-                            on_confirm: ConfirmAction::DeleteGalleryImage,
-                        });
-                    }
+            Action::DeleteImage if self.active_view == View::Gallery => {
+                if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
+                    let filename = entry.filename();
+                    self.popup = Some(Popup::Confirm {
+                        message: format!("Delete {filename}?"),
+                        on_confirm: ConfirmAction::DeleteGalleryImage,
+                    });
                 }
             }
             Action::OpenFile => {
                 self.open_gallery_file();
             }
-            Action::UpscaleImage => {
+            Action::UpscaleImage
                 if self.active_view == View::Gallery
                     && !self.upscale_in_progress
-                    && self.gallery.entries.get(self.gallery.selected).is_some()
-                {
-                    let models = self.available_upscaler_models();
-                    self.popup = Some(Popup::UpscaleModelSelector {
-                        filter: String::new(),
-                        selected: 0,
-                        filtered: models,
-                    });
-                }
+                    && self.gallery.entries.get(self.gallery.selected).is_some() =>
+            {
+                let models = self.available_upscaler_models();
+                self.popup = Some(Popup::UpscaleModelSelector {
+                    filter: String::new(),
+                    selected: 0,
+                    filtered: models,
+                });
             }
-            Action::RemoveModel => {
-                if self.active_view == View::Models {
-                    if let Some(model) = self.models.catalog.get(self.models.selected) {
-                        if !model.downloaded {
-                            return;
-                        }
-                        let name = model.info.name.clone();
-
-                        // Block removal during active generation or pull
-                        if self.generate.generating && self.generate.params.model == name {
-                            self.generate.error_message =
-                                Some("Cannot remove a model while generating".to_string());
-                            return;
-                        }
-                        if mold_core::download::has_pulling_marker(&name) {
-                            self.generate.error_message =
-                                Some("Cannot remove a model while it is being pulled".to_string());
-                            return;
-                        }
-
-                        let message = self.build_remove_model_message(&name);
-                        self.popup = Some(Popup::Confirm {
-                            message,
-                            on_confirm: ConfirmAction::RemoveModel(name),
-                        });
+            Action::RemoveModel if self.active_view == View::Models => {
+                if let Some(model) = self.models.catalog.get(self.models.selected) {
+                    if !model.downloaded {
+                        return;
                     }
+                    let name = model.info.name.clone();
+
+                    // Block removal during active generation or pull
+                    if self.generate.generating && self.generate.params.model == name {
+                        self.generate.error_message =
+                            Some("Cannot remove a model while generating".to_string());
+                        return;
+                    }
+                    if mold_core::download::has_pulling_marker(&name) {
+                        self.generate.error_message =
+                            Some("Cannot remove a model while it is being pulled".to_string());
+                        return;
+                    }
+
+                    let message = self.build_remove_model_message(&name);
+                    self.popup = Some(Popup::Confirm {
+                        message,
+                        on_confirm: ConfirmAction::RemoveModel(name),
+                    });
                 }
             }
             _ => {}
@@ -3507,10 +3474,8 @@ impl App {
             SettingsFieldType::Number { min, max, step } => {
                 self.settings_adjust_number(key, delta as f64 * step, min, max);
             }
-            SettingsFieldType::Toggle { options } => {
-                if !options.is_empty() {
-                    self.settings_cycle_toggle(key, &options, delta);
-                }
+            SettingsFieldType::Toggle { options } if !options.is_empty() => {
+                self.settings_cycle_toggle(key, &options, delta);
             }
             SettingsFieldType::Bool => {
                 self.settings_toggle_bool(key);

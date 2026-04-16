@@ -2,6 +2,7 @@ use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
     ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    VideoData,
 };
 use anyhow::Result;
 use base64::Engine as _;
@@ -58,7 +59,10 @@ impl MoldClient {
         Ok(bytes)
     }
 
-    /// Generate an image and return a minimal response wrapping the raw bytes.
+    /// Generate an image or video and return the response wrapping the raw bytes.
+    ///
+    /// For video responses the server sends `x-mold-video-*` metadata headers
+    /// alongside the raw video bytes so we can reconstruct [`VideoData`].
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
         let fallback_seed = req.seed.unwrap_or(0);
         let width = req.width;
@@ -84,21 +88,46 @@ impl MoldClient {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(fallback_seed);
 
+        // Detect video response via x-mold-video-frames header
+        let video_meta = parse_video_headers(resp.headers());
+
         let data = resp.bytes().await?.to_vec();
         let generation_time_ms = start.elapsed().as_millis() as u64;
 
-        Ok(GenerateResponse {
-            images: vec![ImageData {
+        let video = video_meta.map(|meta| VideoData {
+            data: data.clone(),
+            format,
+            width: meta.width.unwrap_or(width),
+            height: meta.height.unwrap_or(height),
+            frames: meta.frames,
+            fps: meta.fps,
+            thumbnail: Vec::new(),
+            gif_preview: Vec::new(),
+            has_audio: meta.has_audio,
+            duration_ms: meta.duration_ms,
+            audio_sample_rate: meta.audio_sample_rate,
+            audio_channels: meta.audio_channels,
+        });
+
+        // For video responses, images is empty — the payload lives in `video`.
+        let images = if video.is_some() {
+            Vec::new()
+        } else {
+            vec![ImageData {
                 data,
                 format,
                 width,
                 height,
                 index: 0,
-            }],
+            }]
+        };
+
+        Ok(GenerateResponse {
+            images,
             generation_time_ms,
             model,
             seed_used,
-            video: None,
+            video,
         })
     }
 
@@ -204,8 +233,9 @@ impl MoldClient {
                     }
                     "complete" => {
                         let complete: SseCompleteEvent = serde_json::from_str(&data)?;
-                        let image_data =
+                        let payload =
                             base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
+                        let b64 = base64::engine::general_purpose::STANDARD;
                         // Use server-provided model name (source of truth);
                         // fall back to request model for backwards compat with
                         // older servers that don't include it.
@@ -214,18 +244,53 @@ impl MoldClient {
                         } else {
                             complete.model
                         };
-                        return Ok(Some(GenerateResponse {
-                            images: vec![ImageData {
-                                data: image_data,
+
+                        // Detect video response via video_frames field
+                        let (images, video) = if let (Some(frames), Some(fps)) =
+                            (complete.video_frames, complete.video_fps)
+                        {
+                            let thumbnail = complete
+                                .video_thumbnail
+                                .as_deref()
+                                .and_then(|s| b64.decode(s).ok())
+                                .unwrap_or_default();
+                            let gif_preview = complete
+                                .video_gif_preview
+                                .as_deref()
+                                .and_then(|s| b64.decode(s).ok())
+                                .unwrap_or_default();
+                            let vd = VideoData {
+                                data: payload,
+                                format: complete.format,
+                                width: complete.width,
+                                height: complete.height,
+                                frames,
+                                fps,
+                                thumbnail,
+                                gif_preview,
+                                has_audio: complete.video_has_audio,
+                                duration_ms: complete.video_duration_ms,
+                                audio_sample_rate: complete.video_audio_sample_rate,
+                                audio_channels: complete.video_audio_channels,
+                            };
+                            (Vec::new(), Some(vd))
+                        } else {
+                            let img = ImageData {
+                                data: payload,
                                 format: complete.format,
                                 width: complete.width,
                                 height: complete.height,
                                 index: 0,
-                            }],
+                            };
+                            (vec![img], None)
+                        };
+
+                        return Ok(Some(GenerateResponse {
+                            images,
                             generation_time_ms: complete.generation_time_ms,
                             model,
                             seed_used: complete.seed_used,
-                            video: None,
+                            video,
                         }));
                     }
                     "error" => {
@@ -519,6 +584,68 @@ impl MoldClient {
     }
 }
 
+/// Parsed video metadata from `x-mold-video-*` response headers.
+struct VideoMeta {
+    frames: u32,
+    fps: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+    has_audio: bool,
+    duration_ms: Option<u64>,
+    audio_sample_rate: Option<u32>,
+    audio_channels: Option<u32>,
+}
+
+/// Parse video metadata from HTTP response headers.
+/// Returns `Some` when `x-mold-video-frames` is present, indicating a video response.
+fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta> {
+    let frames = headers
+        .get("x-mold-video-frames")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok())?;
+    let fps = headers
+        .get("x-mold-video-fps")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(24);
+    let width = headers
+        .get("x-mold-video-width")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let height = headers
+        .get("x-mold-video-height")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let has_audio = headers
+        .get("x-mold-video-has-audio")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s == "1")
+        .unwrap_or(false);
+    let duration_ms = headers
+        .get("x-mold-video-duration-ms")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let audio_sample_rate = headers
+        .get("x-mold-video-audio-sample-rate")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let audio_channels = headers
+        .get("x-mold-video-audio-channels")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    Some(VideoMeta {
+        frames,
+        fps,
+        width,
+        height,
+        has_audio,
+        duration_ms,
+        audio_sample_rate,
+        audio_channels,
+    })
+}
+
 fn next_sse_event(buffer: &mut String) -> Option<String> {
     for separator in ["\r\n\r\n", "\n\n"] {
         if let Some(pos) = buffer.find(separator) {
@@ -737,5 +864,69 @@ mod tests {
         let event = next_sse_event(&mut buffer).expect("expected one event");
         assert!(event.contains("event: progress"));
         assert_eq!(buffer, "rest");
+    }
+
+    // ── Video header parsing tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_video_headers_returns_none_without_frames() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(parse_video_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn parse_video_headers_returns_some_with_frames() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-video-frames", "33".parse().unwrap());
+        headers.insert("x-mold-video-fps", "12".parse().unwrap());
+        headers.insert("x-mold-video-width", "832".parse().unwrap());
+        headers.insert("x-mold-video-height", "480".parse().unwrap());
+
+        let meta = parse_video_headers(&headers).expect("should detect video");
+        assert_eq!(meta.frames, 33);
+        assert_eq!(meta.fps, 12);
+        assert_eq!(meta.width, Some(832));
+        assert_eq!(meta.height, Some(480));
+        assert!(!meta.has_audio);
+        assert!(meta.duration_ms.is_none());
+    }
+
+    #[test]
+    fn parse_video_headers_with_audio_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-video-frames", "17".parse().unwrap());
+        headers.insert("x-mold-video-fps", "24".parse().unwrap());
+        headers.insert("x-mold-video-has-audio", "1".parse().unwrap());
+        headers.insert("x-mold-video-duration-ms", "2750".parse().unwrap());
+        headers.insert("x-mold-video-audio-sample-rate", "44100".parse().unwrap());
+        headers.insert("x-mold-video-audio-channels", "2".parse().unwrap());
+
+        let meta = parse_video_headers(&headers).expect("should detect video");
+        assert_eq!(meta.frames, 17);
+        assert_eq!(meta.fps, 24);
+        assert!(meta.has_audio);
+        assert_eq!(meta.duration_ms, Some(2750));
+        assert_eq!(meta.audio_sample_rate, Some(44100));
+        assert_eq!(meta.audio_channels, Some(2));
+    }
+
+    #[test]
+    fn parse_video_headers_fps_defaults_to_24() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-video-frames", "10".parse().unwrap());
+        // No fps header — should default to 24
+
+        let meta = parse_video_headers(&headers).expect("should detect video");
+        assert_eq!(meta.fps, 24);
+    }
+
+    #[test]
+    fn parse_video_headers_has_audio_absent_is_false() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-video-frames", "10".parse().unwrap());
+        // No has-audio header
+
+        let meta = parse_video_headers(&headers).expect("should detect video");
+        assert!(!meta.has_audio);
     }
 }

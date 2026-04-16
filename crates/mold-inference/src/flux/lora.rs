@@ -240,9 +240,8 @@ fn fused_slice_range(
     component: usize,
     num_components: usize,
 ) -> (usize, usize) {
-    if num_components > 0 {
+    if let Some(component_size) = base_rows.checked_div(num_components) {
         // Equal split (e.g. QKV fused: each is base_rows / 3)
-        let component_size = base_rows / num_components;
         (component * component_size, component_size)
     } else {
         // Single-block linear1: [Q, K, V, MLP]

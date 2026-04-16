@@ -109,7 +109,7 @@ fn collect_model_stats(config: &Config) -> (Vec<ModelStats>, u64) {
     }
 
     // Sort by size descending
-    models.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    models.sort_by_key(|m| std::cmp::Reverse(m.bytes));
 
     (models, shared_bytes)
 }

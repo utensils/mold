@@ -70,13 +70,11 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
         // Add indicator for dropdown/toggle fields
         let suffix = match field {
             ParamField::Model => " \u{25bc}", // down triangle
-            ParamField::Format | ParamField::Mode | ParamField::Expand | ParamField::Offload => {
-                if is_selected {
-                    " \u{25c0}\u{25b6}"
-                } else {
-                    ""
-                } // left/right arrows
-            }
+            ParamField::Format | ParamField::Mode | ParamField::Expand | ParamField::Offload
+                if is_selected =>
+            {
+                " \u{25c0}\u{25b6}"
+            } // left/right arrows
             ParamField::Width
             | ParamField::Height
             | ParamField::Steps
@@ -85,12 +83,10 @@ pub fn render(frame: &mut Frame, theme: &Theme, state: &GenerateState, area: Rec
             | ParamField::Frames
             | ParamField::Fps
             | ParamField::Strength
-            | ParamField::ControlScale => {
-                if is_selected {
-                    " \u{25c0}\u{25b6}"
-                } else {
-                    ""
-                }
+            | ParamField::ControlScale
+                if is_selected =>
+            {
+                " \u{25c0}\u{25b6}"
             }
             _ => "",
         };
