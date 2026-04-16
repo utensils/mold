@@ -532,3 +532,21 @@ services.mold.discord = {
   tokenFile = config.age.secrets.discord-token.path;
 };
 ```
+
+## Updating This Skill
+
+This skill is maintained in the mold repository on GitHub. To pull the latest version:
+
+```bash
+# Source repository
+https://github.com/utensils/mold
+
+# Skill file location within the repo
+.claude/skills/mold/SKILL.md
+
+# Fetch the latest skill directly
+curl -sL https://raw.githubusercontent.com/utensils/mold/main/.claude/skills/mold/SKILL.md \
+  -o ~/.claude/skills/mold/SKILL.md
+```
+
+When copying this skill to other workspaces or agents, always pull from `main` to get the latest model support, CLI flags, and environment variables.
