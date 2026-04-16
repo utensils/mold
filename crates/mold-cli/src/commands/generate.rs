@@ -551,11 +551,15 @@ pub async fn run(
                 );
             }
             if preview {
-                // Show first frame preview (viuer doesn't support animation)
+                // Show first frame preview (viuer doesn't support animation).
+                // Fallback to the video data itself for GIF/APNG/WebP (decodable
+                // as images) when thumbnail/gif_preview are absent (non-SSE path).
                 if !video.gif_preview.is_empty() {
                     preview_image(&video.gif_preview);
                 } else if !video.thumbnail.is_empty() {
                     preview_image(&video.thumbnail);
+                } else {
+                    preview_image(&video.data);
                 }
             }
         }

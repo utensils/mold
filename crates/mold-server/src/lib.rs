@@ -231,6 +231,15 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static("x-mold-seed-used"),
                     axum::http::header::HeaderName::from_static("x-request-id"),
                     axum::http::header::HeaderName::from_static("retry-after"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-frames"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-fps"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-width"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-height"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-has-audio"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-duration-ms"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-audio-sample-rate"),
+                    axum::http::header::HeaderName::from_static("x-mold-video-audio-channels"),
+                    axum::http::header::HeaderName::from_static("x-mold-dimension-warning"),
                 ])
         }
         _ => CorsLayer::permissive(),
