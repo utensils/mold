@@ -27,7 +27,12 @@ echo "  MOLD_HOME:       ${MOLD_HOME:-/root/.mold}"
 echo "  MOLD_MODELS_DIR: ${MOLD_MODELS_DIR:-/root/.mold/models}"
 echo "  MOLD_PORT:       ${MOLD_PORT:-7680}"
 echo "  MOLD_LOG:        ${MOLD_LOG:-info}"
+echo "  MOLD_WEB_DIR:    ${MOLD_WEB_DIR:-/opt/mold/web}"
 echo "  GPU:             $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'not detected')"
+if [ -n "${RUNPOD_POD_ID:-}" ]; then
+    echo "  Gallery:         https://${RUNPOD_POD_ID}-${MOLD_PORT:-7680}.proxy.runpod.net/"
+    echo "  API docs:        https://${RUNPOD_POD_ID}-${MOLD_PORT:-7680}.proxy.runpod.net/api/docs"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Run pre_start hook if it exists (RunPod convention)

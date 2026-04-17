@@ -137,7 +137,18 @@ curl "$MOLD_HOST/api/status" | jq
 
 # Generate
 mold run "a cinematic portrait"
+
+# Open the bundled web gallery
+open "$MOLD_HOST/"   # macOS; use `xdg-open` on Linux
 ```
+
+::: tip Web gallery is bundled
+The image includes a Vue 3 gallery SPA at `/opt/mold/web` — visiting
+`https://${POD}-7680.proxy.runpod.net/` in a browser lists every output
+in the server's output directory with real thumbnails (MP4 first frames
+included), metadata panels, and download / copy-prompt actions. Set
+`MOLD_GALLERY_ALLOW_DELETE=1` in the pod env to enable the delete button.
+:::
 
 ::: warning Proxy Timeout
 RunPod's Cloudflare proxy has a **100-second timeout**. Use the SSE streaming
@@ -180,6 +191,8 @@ pod on a different GPU without re-downloading 10+ GB of weights.
 | `MOLD_RATE_LIMIT`       | —       | Per-IP rate limit (e.g., `10/min`)                                |
 | `MOLD_RATE_LIMIT_BURST` | —       | Burst allowance override (defaults to 2x rate)                    |
 | `HF_TOKEN`              | —       | HuggingFace token for gated model repos                           |
+| `MOLD_WEB_DIR`          | `/opt/mold/web` | Path to the bundled web gallery SPA                       |
+| `MOLD_GALLERY_ALLOW_DELETE` | —   | `1` to enable `DELETE /api/gallery/image/:name`                   |
 
 ### HuggingFace Token (`HF_TOKEN`)
 

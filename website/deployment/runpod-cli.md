@@ -50,9 +50,35 @@ What this does:
    (model pull, weight load, denoise steps).
 5. Saves the output to `./mold-outputs/runpod-<pod-id>-<timestamp>.png`
    (directory auto-created, `.gitignore`'d by default).
-6. Leaves the pod **warm** for reuse on the next `run`. Pass `--keep` to
+6. Prints the proxy URL so you can open the pod's
+   [web gallery](#web-gallery) and browse past generations in a browser.
+7. Leaves the pod **warm** for reuse on the next `run`. Pass `--keep` to
    leave it running explicitly, or set `runpod.auto_teardown = true` in
    config to delete after each generation.
+
+## Web gallery
+
+Every `ghcr.io/utensils/mold` image ships the Vue 3 gallery SPA at
+`/opt/mold/web`, and the server exposes it as the root route. Opening the
+pod's proxy URL in a browser gives you:
+
+- Feed / grid toggle over the server's `output` directory.
+- Real thumbnails for PNG, JPEG, GIF, APNG, WebP, and **MP4** (first frame).
+- Full `OutputMetadata` per item (prompt, seed, model, steps, LoRA stack).
+- Mobile-friendly swipe-through detail viewer, keyboard nav on desktop.
+
+```bash
+# Print the browsable URL for an existing pod
+mold runpod connect <pod-id>
+# → export MOLD_HOST=https://<pod-id>-7680.proxy.runpod.net
+# → gallery: https://<pod-id>-7680.proxy.runpod.net
+```
+
+The delete button is hidden unless the server advertises
+`gallery.can_delete: true` via `/api/capabilities` — set
+`MOLD_GALLERY_ALLOW_DELETE=1` on the pod (env var) if you want to prune
+from the browser. Pair that with `MOLD_API_KEY` so the endpoint isn't
+open to the public proxy.
 
 ### Common flags
 
