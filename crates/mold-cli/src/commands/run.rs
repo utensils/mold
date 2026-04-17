@@ -97,6 +97,7 @@ struct FileArgRefs<'a> {
     video: Option<&'a str>,
     camera_control: Option<&'a str>,
     output: Option<&'a str>,
+    model: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -211,18 +212,26 @@ fn validate_file_args_full(args: FileArgRefs<'_>) -> Result<()> {
         }
     }
 
-    if let Some(camera_control_path) = args
-        .camera_control
-        .filter(|value| value.ends_with(".safetensors"))
-    {
-        let p = Path::new(camera_control_path);
-        if p.is_dir() {
-            anyhow::bail!(
-                "--camera-control path is a directory, not a .safetensors file: {camera_control_path}"
-            );
-        }
-        if !p.exists() {
-            anyhow::bail!("--camera-control file not found: {camera_control_path}");
+    if let Some(camera_control_value) = args.camera_control {
+        if camera_control_value.ends_with(".safetensors") {
+            let p = Path::new(camera_control_value);
+            if p.is_dir() {
+                anyhow::bail!(
+                    "--camera-control path is a directory, not a .safetensors file: {camera_control_value}"
+                );
+            }
+            if !p.exists() {
+                anyhow::bail!("--camera-control file not found: {camera_control_value}");
+            }
+        } else if let Some(model) = args.model {
+            if model.contains("ltx-2.3") {
+                anyhow::bail!(
+                    "--camera-control preset '{camera_control_value}' is published only for LTX-2 19B; \
+                     Lightricks has not released camera-control LoRAs for LTX-2.3 yet. \
+                     Pass an explicit .safetensors path with --camera-control /path/to/lora.safetensors, \
+                     or switch to an LTX-2 19B model."
+                );
+            }
         }
     }
 
@@ -393,6 +402,7 @@ pub async fn run(
         video: video.as_deref(),
         camera_control: camera_control.as_deref(),
         output: output.as_deref(),
+        model: Some(model.as_str()),
     })?;
     for lora_path in &lora {
         validate_file_args_full(FileArgRefs {
@@ -1011,6 +1021,44 @@ mod tests {
     #[test]
     fn validate_lora_camera_control_alias() {
         assert!(validate_file_args(Some("camera-control:static"), None, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn camera_control_preset_rejected_on_ltx_2_3() {
+        let err = validate_file_args_full(FileArgRefs {
+            camera_control: Some("dolly-in"),
+            model: Some("ltx-2.3-22b-distilled:fp8"),
+            ..FileArgRefs::default()
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LTX-2 19B") && msg.contains("LTX-2.3"),
+            "expected LTX-2.3 publishing gap message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn camera_control_preset_accepted_on_ltx_2_19b() {
+        assert!(validate_file_args_full(FileArgRefs {
+            camera_control: Some("dolly-in"),
+            model: Some("ltx-2-19b-distilled:fp8"),
+            ..FileArgRefs::default()
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn camera_control_explicit_path_accepted_on_ltx_2_3() {
+        let path = std::env::temp_dir().join("mold-test-ltx23-camera.safetensors");
+        std::fs::write(&path, b"dummy").unwrap();
+        let result = validate_file_args_full(FileArgRefs {
+            camera_control: Some(path.to_str().unwrap()),
+            model: Some("ltx-2.3-22b-distilled:fp8"),
+            ..FileArgRefs::default()
+        });
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_ok(), "explicit .safetensors should bypass gate");
     }
 
     // -- --image tests --

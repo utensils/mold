@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LTX-2.3 camera-control preset validation**: `--camera-control` preset aliases (`dolly-in`, `dolly-left`, `dolly-out`, `dolly-right`, `jib-down`, `jib-up`, `static`) now fail locally at the CLI layer with an explicit "Lightricks has not released camera-control LoRAs for LTX-2.3 yet" message when paired with an LTX-2.3 model, instead of failing server-side after the HTTP round-trip. Explicit `.safetensors` paths still work for LTX-2.3. `--camera-control` help text now documents the 19B-only preset limitation ([#227](https://github.com/utensils/mold/issues/227)).
 - **Remote pull progress bars dropped file names on completion**: completed download progress bars showed `done` as the prefix instead of the file name (e.g. `[1/20] config.json`), so only the in-flight file was identifiable. Completed bars now keep their `[i/N] <filename>` label both during and after download ([#223](https://github.com/utensils/mold/issues/223)).
 - **LTX-2 / LTX-2.3 frame count overflowed temporal RoPE**: requests with `frames > 153` silently overran the transformer's `positional_embedding_max_pos[0] = 20` temporal budget (max 20 latent frames = `(153 - 1) / 8 + 1`), causing the denoiser to sample out-of-distribution RoPE positions and emit rainbow/static noise instead of prompt-relevant video (audio track fell out as a downstream consequence). The request validator now caps LTX-2 and LTX-2.3 at 153 frames with an explicit "temporal RoPE budget" error that fires at the CLI layer before inference starts. `--temporal-upscale x2` halves the stage-1 frame count, so the cap applies to the post-halving value and the effective ceiling doubles for those runs. Other LTX families keep the existing 257-frame ceiling ([#226](https://github.com/utensils/mold/issues/226)).
+
 
 ## [0.7.1] - 2026-04-16
 
