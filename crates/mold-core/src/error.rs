@@ -31,6 +31,22 @@ pub enum MoldError {
     #[error("{0}")]
     Inference(String),
 
+    /// Generic RunPod API error (non-auth, non-not-found)
+    #[error("{0}")]
+    RunPod(String),
+
+    /// RunPod authentication failure (401/403 or missing/invalid API key)
+    #[error("{0}")]
+    RunPodAuth(String),
+
+    /// RunPod resource not found (404)
+    #[error("{0}")]
+    RunPodNotFound(String),
+
+    /// RunPod could not schedule the pod (no machines available)
+    #[error("{0}")]
+    RunPodNoStock(String),
+
     /// Catch-all for everything else
     #[error(transparent)]
     Other(#[from] anyhow::Error),

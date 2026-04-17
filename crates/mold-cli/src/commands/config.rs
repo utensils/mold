@@ -169,6 +169,55 @@ const ALL_KEYS: &[ConfigKeyInfo] = &[
         env_var: None,
         section: "Logging",
     },
+    // RunPod
+    ConfigKeyInfo {
+        key: "runpod.api_key",
+        value_type: ValueType::OptionalString,
+        env_var: Some("RUNPOD_API_KEY"),
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.default_gpu",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.default_datacenter",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.default_network_volume_id",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.auto_teardown",
+        value_type: ValueType::Bool,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.auto_teardown_idle_mins",
+        value_type: ValueType::U32,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.cost_alert_usd",
+        value_type: ValueType::F64,
+        env_var: None,
+        section: "RunPod",
+    },
+    ConfigKeyInfo {
+        key: "runpod.endpoint",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "RunPod",
+    },
 ];
 
 /// Per-model field names and their value types.
@@ -324,6 +373,32 @@ fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
             None => ConfigValue::None,
         },
         "logging.max_days" => ConfigValue::U32(config.logging.max_days),
+        // RunPod
+        "runpod.api_key" => match &config.runpod.api_key {
+            Some(_) => ConfigValue::String("<set>".to_string()),
+            None => ConfigValue::None,
+        },
+        "runpod.default_gpu" => match &config.runpod.default_gpu {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "runpod.default_datacenter" => match &config.runpod.default_datacenter {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "runpod.default_network_volume_id" => match &config.runpod.default_network_volume_id {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "runpod.auto_teardown" => ConfigValue::Bool(config.runpod.auto_teardown),
+        "runpod.auto_teardown_idle_mins" => {
+            ConfigValue::U32(config.runpod.auto_teardown_idle_mins)
+        }
+        "runpod.cost_alert_usd" => ConfigValue::F64(config.runpod.cost_alert_usd),
+        "runpod.endpoint" => match &config.runpod.endpoint {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
         _ => return Err(unknown_key_error(key)),
     })
 }
@@ -435,6 +510,23 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
         "logging.file" => config.logging.file = parse_bool(raw, key)?,
         "logging.dir" => config.logging.dir = parse_optional_string(raw),
         "logging.max_days" => config.logging.max_days = parse_u32(raw, 1, 3650, key)?,
+        // RunPod
+        "runpod.api_key" => config.runpod.api_key = parse_optional_string(raw),
+        "runpod.default_gpu" => config.runpod.default_gpu = parse_optional_string(raw),
+        "runpod.default_datacenter" => {
+            config.runpod.default_datacenter = parse_optional_string(raw)
+        }
+        "runpod.default_network_volume_id" => {
+            config.runpod.default_network_volume_id = parse_optional_string(raw)
+        }
+        "runpod.auto_teardown" => config.runpod.auto_teardown = parse_bool(raw, key)?,
+        "runpod.auto_teardown_idle_mins" => {
+            config.runpod.auto_teardown_idle_mins = parse_u32(raw, 0, 10_080, key)?
+        }
+        "runpod.cost_alert_usd" => {
+            config.runpod.cost_alert_usd = parse_f64(raw, 0.0, 1000.0, key)?
+        }
+        "runpod.endpoint" => config.runpod.endpoint = parse_optional_string(raw),
         _ => return Err(unknown_key_error(key)),
     }
     Ok(())
