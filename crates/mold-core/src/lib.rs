@@ -8,6 +8,7 @@ pub mod error;
 pub mod expand;
 pub mod expand_prompts;
 pub mod manifest;
+pub mod runpod;
 pub mod types;
 pub mod validation;
 

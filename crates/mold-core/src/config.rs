@@ -384,6 +384,10 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    /// RunPod integration settings (api key, defaults, auto-teardown behaviour).
+    #[serde(default)]
+    pub runpod: crate::runpod::RunPodSettings,
+
     /// Per-model configurations, keyed by model name.
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -472,6 +476,7 @@ impl Default for Config {
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
             logging: LoggingConfig::default(),
+            runpod: crate::runpod::RunPodSettings::default(),
             models: HashMap::new(),
         }
     }

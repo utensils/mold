@@ -12,6 +12,7 @@ pub mod ps;
 pub mod pull;
 pub mod rm;
 pub mod run;
+pub mod runpod;
 pub mod serve;
 pub mod server;
 pub mod stats;

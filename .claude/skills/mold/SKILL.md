@@ -27,7 +27,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -398,6 +398,117 @@ mold update --force               # Reinstall even if already up-to-date
 ```
 
 Downloads the correct platform-specific binary from GitHub releases, verifies SHA-256 checksum, and replaces the running binary in-place. Detects Nix/Homebrew installations and suggests using the package manager instead. Respects `GITHUB_TOKEN` for API rate limits and `MOLD_CUDA_ARCH` for GPU architecture override on Linux.
+
+## RunPod Cloud GPUs
+
+Manage RunPod pods end-to-end from `mold`. All subcommands use the REST API at
+`https://rest.runpod.io/v1/` plus GraphQL for account info and GPU/datacenter
+discovery (those aren't exposed via REST).
+
+### One-time setup
+
+```bash
+# Get an API key at https://www.runpod.io/console/user/settings (Read/Write scope)
+mold config set runpod.api_key <key>             # persist to config.toml
+# or
+export RUNPOD_API_KEY=<key>                      # env var (overrides config)
+
+mold runpod doctor                               # verify auth + balance
+```
+
+### Killer feature — `mold runpod run`
+
+Creates a pod if needed, waits for the mold server inside to boot, generates
+via SSE (so it survives RunPod's 100s Cloudflare proxy timeout), saves the
+output, and leaves the pod warm for reuse.
+
+```bash
+mold runpod run "a cat on a skateboard"          # smart defaults
+mold runpod run "a sunset" --model flux-dev:q4   # preload a model
+mold runpod run "a cat" --gpu 5090               # force GPU family
+mold runpod run "a cat" --dc US-IL-1             # pin datacenter
+mold runpod run "a cat" --keep                   # don't park — leave running
+mold runpod run "a cat" --steps 28 --seed 42     # forward standard flags
+mold runpod run "a cat" --output-dir ./renders   # custom save path
+```
+
+Outputs save to `./mold-outputs/runpod-<pod-id>-<ts>.png` (directory
+auto-created, `.gitignore`'d by default).
+
+### Full subcommand reference
+
+```bash
+# Discovery
+mold runpod gpus                                 # table view, aggregate stock
+mold runpod gpus --json                          # machine-readable
+mold runpod gpus --all                           # include uncommon GPU families
+mold runpod datacenters --gpu "RTX 5090"         # per-DC availability
+
+# Lifecycle
+mold runpod create --gpu 5090                    # smart defaults fill the rest
+mold runpod create --dry-run                     # print plan, don't create
+mold runpod create --cloud community             # secure is default
+mold runpod create --hf-token                    # wire HF_TOKEN secret into pod env
+mold runpod create --network-volume nv-abc123    # attach pre-created volume
+mold runpod list
+mold runpod list --json
+mold runpod get <pod-id>
+mold runpod stop <pod-id>                        # pause billing, keep storage
+mold runpod start <pod-id>                       # resume
+mold runpod delete <pod-id>                      # tear down (-f to skip confirm)
+
+# Connecting
+mold runpod connect <pod-id>                     # print export MOLD_HOST=…
+eval "$(mold runpod connect <pod-id>)"           # exec the export in your shell
+mold runpod connect <pod-id> --check             # also probe the pod first
+
+# Observability
+mold runpod logs <pod-id>                        # one-shot pull
+mold runpod logs <pod-id> --follow               # tail (2s poll)
+mold runpod usage                                # balance + active pods
+mold runpod usage --since 7d                     # with historical spend window
+mold runpod usage --json                         # machine-readable
+```
+
+### Config keys under `[runpod]`
+
+| Key | Description |
+| --- | --- |
+| `api_key` | API key (env `RUNPOD_API_KEY` wins). Redacted in `config list`. |
+| `default_gpu` | Pin a GPU family (e.g. `RTX 5090`). Overrides smart-pick. |
+| `default_datacenter` | Pin a datacenter (e.g. `EUR-IS-2`). Overrides smart-pick. |
+| `default_network_volume_id` | Attach a network volume to every new pod. |
+| `auto_teardown` | If true, delete pods after `run` instead of parking. |
+| `auto_teardown_idle_mins` | Idle reap window (default 20). `0` disables. |
+| `cost_alert_usd` | Abort a session that exceeds this many USD. `0` disables. |
+| `endpoint` | Override REST base URL (mostly for testing). |
+
+All settable via `mold config set runpod.<key> <value>`. Clear with `none`.
+
+### Smart defaults
+
+When `--gpu`/`--dc` aren't pinned:
+
+1. Aggregate stock across datacenters per GPU family.
+2. Pick cheapest family with **High** or **Medium** stock from: 4090 > 5090 > L40S > A100.
+3. Image tag derived from GPU: Ada (4090/L40S) → `:latest`, Ampere (A100/3090) → `:latest-sm80`, Blackwell (5090) → `:latest-sm120`.
+4. No datacenter pin — let RunPod's scheduler pick any machine.
+5. If scheduling stalls (runtime still null + machine unassigned after 90s), delete the stuck pod and try the next stock-ranked DC.
+
+### Common failure modes
+
+- **"pod didn't schedule within 90s"** — RunPod capacity signal (stockStatus) is optimistic. The scheduler couldn't actually place a machine. Retry fallback handles this; if all candidates fail, capacity genuinely isn't there.
+- **"value must be one of …" on `/pods`** — you pinned a datacenter that isn't in RunPod's REST enum whitelist. GraphQL exposes more DCs than REST accepts. Omit `--dc` or pick from the REST-accepted list in the error message.
+- **Cloudflare 404 during boot** — the mold server inside the pod hasn't started yet. `wait_for_mold` polls `/api/status` for valid JSON with a `version` field to distinguish proxy-404 from real readiness.
+
+### State persistence
+
+`$MOLD_HOME/` (default `~/.mold/`) holds:
+
+- `runpod-state.json` — warm-pod pointer used by `run` for reuse.
+- `runpod-history.jsonl` — append-only log used by `usage --since`.
+
+Safe to delete; they're caches, not sources of truth.
 
 ## Server Mode
 

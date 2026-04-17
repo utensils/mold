@@ -117,6 +117,7 @@ impl TestEnv {
 
     /// Create stub files on disk for a manifest-backed model so it appears
     /// as "installed" to `mold list`, `mold rm`, etc.
+    #[allow(dead_code)]
     pub fn populate_manifest_model(&self, name: &str) {
         let manifest = mold_core::manifest::find_manifest(name)
             .unwrap_or_else(|| panic!("unknown manifest model: {name}"));

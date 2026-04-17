@@ -118,6 +118,22 @@ mold serve
 MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 ```
 
+### Cloud GPU via `mold runpod`
+
+Generate on a cloud GPU without managing pods yourself:
+
+```bash
+mold config set runpod.api_key <key>         # one-time setup
+mold runpod run "a cat on a skateboard"       # creates pod → generates → saves to ./mold-outputs/
+```
+
+`mold runpod run` picks the cheapest available GPU, falls back across
+datacenters if scheduling stalls, streams SSE progress over RunPod's
+Cloudflare proxy, and leaves the pod warm for reuse on the next call.
+See the [RunPod CLI guide](https://utensils.github.io/mold/deployment/runpod-cli)
+for full subcommand reference (`doctor`, `gpus`, `list`, `create`, `stop`,
+`delete`, `logs`, `usage`, …).
+
 See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference), [configuration guide](https://utensils.github.io/mold/guide/configuration), and [model catalog](https://utensils.github.io/mold/models/) in the documentation.
 
 ## Models
@@ -209,11 +225,12 @@ requests without changing server config.
 
 ## Deployment
 
-| Method              | Guide                                                                   |
-| ------------------- | ----------------------------------------------------------------------- |
-| **NixOS module**    | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos)   |
-| **Docker / RunPod** | [Deployment: Docker](https://utensils.github.io/mold/deployment/docker) |
-| **Systemd**         | [Deployment: Overview](https://utensils.github.io/mold/deployment/)     |
+| Method              | Guide                                                                          |
+| ------------------- | ------------------------------------------------------------------------------ |
+| **NixOS module**    | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos)          |
+| **Docker / RunPod** | [Deployment: Docker](https://utensils.github.io/mold/deployment/docker)        |
+| **mold runpod CLI** | [Deployment: RunPod CLI](https://utensils.github.io/mold/deployment/runpod-cli) |
+| **Systemd**         | [Deployment: Overview](https://utensils.github.io/mold/deployment/)            |
 
 ## How it works
 

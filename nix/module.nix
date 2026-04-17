@@ -131,6 +131,12 @@ in
       description = "Path to a file containing the HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile.";
     };
 
+    runpodApiKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Path to a file containing the RunPod API key (e.g. an agenix secret). Used by `mold runpod` subcommands. Loaded at service start via EnvironmentFile.";
+    };
+
     outputDir = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -273,19 +279,24 @@ in
         User = "mold";
         Group = "mold";
         UMask = "0002";
-        ExecStartPre = lib.optionals (cfg.hfTokenFile != null || cfg.apiKeyFile != null) [
-          "+${pkgs.writeShellScript "mold-env" ''
-            : > /run/mold/env
-            ${lib.optionalString (cfg.hfTokenFile != null) ''
-              echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" >> /run/mold/env
-            ''}
-            ${lib.optionalString (cfg.apiKeyFile != null) ''
-              echo "MOLD_API_KEY=@${cfg.apiKeyFile}" >> /run/mold/env
-            ''}
-            chown mold:mold /run/mold/env
-            chmod 600 /run/mold/env
-          ''}"
-        ];
+        ExecStartPre =
+          lib.optionals (cfg.hfTokenFile != null || cfg.apiKeyFile != null || cfg.runpodApiKeyFile != null)
+            [
+              "+${pkgs.writeShellScript "mold-env" ''
+                : > /run/mold/env
+                ${lib.optionalString (cfg.hfTokenFile != null) ''
+                  echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" >> /run/mold/env
+                ''}
+                ${lib.optionalString (cfg.apiKeyFile != null) ''
+                  echo "MOLD_API_KEY=@${cfg.apiKeyFile}" >> /run/mold/env
+                ''}
+                ${lib.optionalString (cfg.runpodApiKeyFile != null) ''
+                  echo "RUNPOD_API_KEY=$(cat ${cfg.runpodApiKeyFile})" >> /run/mold/env
+                ''}
+                chown mold:mold /run/mold/env
+                chmod 600 /run/mold/env
+              ''}"
+            ];
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}${lib.optionalString cfg.logToFile " --log-file"}";
         Restart = "on-failure";
         RestartSec = 5;
@@ -294,9 +305,12 @@ in
         # StateDirectory and CacheDirectory omitted — homeDir is created
         # by tmpfiles.rules and may not be under /var/lib/.
       }
-      // lib.optionalAttrs (cfg.hfTokenFile != null || cfg.apiKeyFile != null) {
-        EnvironmentFile = "-/run/mold/env";
-      }
+      //
+        lib.optionalAttrs
+          (cfg.hfTokenFile != null || cfg.apiKeyFile != null || cfg.runpodApiKeyFile != null)
+          {
+            EnvironmentFile = "-/run/mold/env";
+          }
       // {
 
         # Hardening

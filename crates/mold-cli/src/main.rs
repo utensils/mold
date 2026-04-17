@@ -104,6 +104,186 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum RunpodAction {
+    /// Check RunPod auth, endpoint, and account info
+    Doctor,
+    /// List available GPU types
+    Gpus {
+        /// Show all GPUs (not just commonly-used ones)
+        #[arg(long)]
+        all: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List datacenters; `--gpu <name>` filters by GPU stock
+    Datacenters {
+        /// Filter by GPU display name (e.g. "RTX 4090")
+        #[arg(long, add = ArgValueCandidates::new(commands::runpod::complete_gpu_id))]
+        gpu: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List pods in your account
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details for a single pod
+    Get {
+        /// Pod id
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new pod (with smart defaults if fields are omitted)
+    #[command(after_long_help = "\
+Examples:
+  mold runpod create                         # smart defaults, first available stock
+  mold runpod create --gpu 5090              # specific GPU
+  mold runpod create --gpu 4090 --dc US-IL-1 # pin to a datacenter
+  mold runpod create --model flux-dev:q4     # preload a model via MOLD_DEFAULT_MODEL
+  mold runpod create --dry-run               # print plan without creating")]
+    Create {
+        /// Pod name (auto-generated if omitted)
+        #[arg(long)]
+        name: Option<String>,
+        /// GPU (e.g. 4090, 5090, a100, l40s, h100, or full NVIDIA name)
+        #[arg(long, add = ArgValueCandidates::new(commands::runpod::complete_gpu_id))]
+        gpu: Option<String>,
+        /// Datacenter id (e.g. EUR-IS-2, US-IL-1)
+        #[arg(long = "dc", add = ArgValueCandidates::new(commands::runpod::complete_dc_id))]
+        datacenter: Option<String>,
+        /// Cloud tier: secure or community
+        #[arg(long, default_value = "secure", add = ArgValueCandidates::new(commands::runpod::complete_cloud_type))]
+        cloud: String,
+        /// Container disk size in GB
+        #[arg(long, default_value_t = 20)]
+        disk: u32,
+        /// Volume size in GB (mounted at /workspace)
+        #[arg(long, default_value_t = 50)]
+        volume: u32,
+        /// Override the image tag (e.g. latest, latest-sm120)
+        #[arg(long)]
+        image_tag: Option<String>,
+        /// Preload this model via MOLD_DEFAULT_MODEL
+        #[arg(long)]
+        model: Option<String>,
+        /// Wire HF_TOKEN={{ RUNPOD_SECRET_HF_TOKEN }} into the pod env
+        #[arg(long)]
+        hf_token: bool,
+        /// Attach this network volume id
+        #[arg(long)]
+        network_volume: Option<String>,
+        /// Print the request plan and exit without creating
+        #[arg(long)]
+        dry_run: bool,
+        /// Output created pod as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a pod (billing paused, storage retained)
+    Stop {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a stopped pod
+    Start {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a pod (irreversible, no confirmation)
+    Delete {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        /// No-op retained for backward compatibility — delete is always non-interactive.
+        #[arg(long, short = 'f', hide = true)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print `export MOLD_HOST=…` for the given pod (shell-evalable)
+    #[command(after_long_help = "\
+Example:
+  eval \"$(mold runpod connect <pod-id>)\"")]
+    Connect {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        /// Also verify the pod is reachable before printing
+        #[arg(long)]
+        check: bool,
+    },
+    /// Stream pod logs
+    Logs {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
+        pod_id: String,
+        /// Follow logs (poll every 2s)
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
+    /// Show spend summary: balance, active pods, historical spend
+    Usage {
+        /// Historical window (e.g. 7d, 24h, 2w)
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate on a fresh or warm RunPod pod, save to ./mold-outputs/
+    #[command(after_long_help = "\
+Examples:
+  mold runpod run \"a cat on a skateboard\"
+  mold runpod run \"a sunset\" --model flux2-klein:q8
+  mold runpod run \"a robot\" --keep            # leave pod running after
+  mold runpod run \"a sunset\" --gpu 5090       # force a GPU choice")]
+    Run {
+        /// Text prompt
+        prompt: String,
+        /// Target model (e.g. flux2-klein:q8); defaults to config.default_model
+        #[arg(short, long, add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+        /// Output directory (default ./mold-outputs)
+        #[arg(short, long, default_value = "./mold-outputs", value_hint = ValueHint::DirPath)]
+        output_dir: std::path::PathBuf,
+        /// Keep the pod running after generation (otherwise left warm)
+        #[arg(long)]
+        keep: bool,
+        /// Seed
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Steps
+        #[arg(long)]
+        steps: Option<u32>,
+        /// Image width
+        #[arg(long)]
+        width: Option<u32>,
+        /// Image height
+        #[arg(long)]
+        height: Option<u32>,
+        /// GPU override (4090, 5090, a100, …)
+        #[arg(long, add = ArgValueCandidates::new(commands::runpod::complete_gpu_id))]
+        gpu: Option<String>,
+        /// Datacenter override
+        #[arg(long = "dc", add = ArgValueCandidates::new(commands::runpod::complete_dc_id))]
+        datacenter: Option<String>,
+        /// Pod-ready timeout in seconds
+        #[arg(long, default_value_t = 600)]
+        wait_timeout: u64,
+        /// Force HF_TOKEN passthrough even for non-gated models (auto-enabled
+        /// for gated models). Uses local `HF_TOKEN` env if set, else the
+        /// RunPod secret `HF_TOKEN`.
+        #[arg(long)]
+        hf_token: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServerAction {
     /// Start the server as a background daemon
     #[command(after_long_help = "\
@@ -553,6 +733,28 @@ Examples:
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+
+    /// Manage RunPod cloud GPU pods end-to-end
+    #[command(after_long_help = "\
+Set up once:
+  mold config set runpod.api_key <key>              Save key to config
+  export RUNPOD_API_KEY=<key>                       Or use env var
+  mold runpod doctor                                Verify auth
+
+Generate on a fresh pod (the killer feature):
+  mold runpod run \"a cat on a skateboard\"           Creates pod → generates → saves
+  mold runpod run \"a sunset\" --keep                Leave pod up for reuse
+
+Manage pods manually:
+  mold runpod gpus                                  List GPU stock
+  mold runpod create --gpu 5090                     Create a pod
+  mold runpod list                                  List active pods
+  mold runpod connect <pod-id>                      Print export MOLD_HOST=…
+  mold runpod delete <pod-id>                       Tear down")]
+    Runpod {
+        #[command(subcommand)]
+        action: RunpodAction,
     },
 
     /// Preview LLM prompt expansion without generating images
@@ -1068,6 +1270,105 @@ async fn run() -> anyhow::Result<()> {
             ConfigAction::Set { key, value } => commands::config::run_set(&key, &value)?,
             ConfigAction::Path => commands::config::run_path()?,
             ConfigAction::Edit => commands::config::run_edit()?,
+        },
+        Commands::Runpod { action } => match action {
+            RunpodAction::Doctor => commands::runpod::run_doctor().await?,
+            RunpodAction::Gpus { all, json } => commands::runpod::run_gpus(json, all).await?,
+            RunpodAction::Datacenters { gpu, json } => {
+                commands::runpod::run_datacenters(gpu, json).await?
+            }
+            RunpodAction::List { json } => commands::runpod::run_list(json).await?,
+            RunpodAction::Get { pod_id, json } => commands::runpod::run_get(pod_id, json).await?,
+            RunpodAction::Create {
+                name,
+                gpu,
+                datacenter,
+                cloud,
+                disk,
+                volume,
+                image_tag,
+                model,
+                hf_token,
+                network_volume,
+                dry_run,
+                json,
+            } => {
+                use std::str::FromStr;
+                let cloud_type = commands::runpod::CloudType::from_str(&cloud)?;
+                let opts = commands::runpod::CreateOptions {
+                    name,
+                    gpu,
+                    datacenter,
+                    cloud: cloud_type,
+                    volume_gb: volume,
+                    disk_gb: disk,
+                    image_tag,
+                    model,
+                    hf_token,
+                    network_volume_id: network_volume,
+                    dry_run,
+                    json,
+                };
+                commands::runpod::run_create(opts).await?
+            }
+            RunpodAction::Stop { pod_id, json } => commands::runpod::run_stop(pod_id, json).await?,
+            RunpodAction::Start { pod_id, json } => {
+                commands::runpod::run_start(pod_id, json).await?
+            }
+            RunpodAction::Delete {
+                pod_id,
+                force,
+                json,
+            } => commands::runpod::run_delete(pod_id, force, json).await?,
+            RunpodAction::Connect { pod_id, check } => {
+                commands::runpod::run_connect(pod_id, check).await?
+            }
+            RunpodAction::Logs { pod_id, follow } => {
+                commands::runpod::run_logs(pod_id, follow).await?
+            }
+            RunpodAction::Usage { since, json } => commands::runpod::run_usage(since, json).await?,
+            RunpodAction::Run {
+                prompt,
+                model,
+                output_dir,
+                keep,
+                seed,
+                steps,
+                width,
+                height,
+                gpu,
+                datacenter,
+                wait_timeout,
+                hf_token,
+            } => {
+                let create = commands::runpod::CreateOptions {
+                    name: None,
+                    gpu,
+                    datacenter,
+                    cloud: commands::runpod::CloudType::Secure,
+                    volume_gb: 50,
+                    disk_gb: 20,
+                    image_tag: None,
+                    model: model.clone(),
+                    hf_token,
+                    network_volume_id: None,
+                    dry_run: false,
+                    json: false,
+                };
+                let opts = commands::runpod::RunOptions {
+                    prompt,
+                    model,
+                    output_dir,
+                    keep,
+                    seed,
+                    steps,
+                    width,
+                    height,
+                    create,
+                    wait_ready_timeout_secs: wait_timeout,
+                };
+                commands::runpod::run_run(opts).await?
+            }
         },
         Commands::Unload => {
             commands::unload::run().await?;

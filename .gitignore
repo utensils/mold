@@ -23,6 +23,8 @@ website/.vitepress/dist/
 result
 *.swo
 *.swp
+# mold runpod run default output dir
+mold-outputs/
 **/target
 /target
 /target/coverage/
