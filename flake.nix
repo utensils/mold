@@ -244,6 +244,7 @@
               pkgs.bun
               pkgs.nodePackages.prettier
               pkgs.tmux
+              pkgs.runpodctl
             ]
             ++ lib.optionals isDarwin [
               pkgs.libiconv
