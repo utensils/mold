@@ -814,24 +814,39 @@ async fn resolve_gpu(
 
 async fn resolve_datacenter(
     opts: &CreateOptions,
-    _client: &RunPodClient,
+    client: &RunPodClient,
     config: &Config,
     _gpu_display: &str,
 ) -> Result<Option<String>> {
-    // Only honor explicit pins — user-supplied --dc or config default.
-    //
-    // Why not auto-pick: RunPod's REST /pods endpoint enforces an enum of
-    // acceptable `dataCenterIds` that is narrower than what GraphQL's
-    // `dataCenters` query exposes. Auto-picking based on GraphQL stockStatus
-    // would hit 400 schema errors for many DCs. When no DC is pinned, we
-    // leave `dataCenterIds` unset and let RunPod's scheduler choose — it
-    // knows which DCs are currently schedulable. Retry logic in
-    // `ensure_pod` handles the fallback loop if that fails.
+    // Priority:
+    //   1. Explicit --dc wins.
+    //   2. config.runpod.default_datacenter.
+    //   3. If a network volume is attached (via --network-volume or
+    //      config.runpod.default_network_volume_id), look up the
+    //      volume's datacenter and pin to it. Network volumes are
+    //      datacenter-scoped — RunPod will reject the pod if we try to
+    //      mount one from a different region.
+    //   4. Otherwise leave `dataCenterIds` unset and let RunPod pick.
+    //      Retry logic in `ensure_pod` handles DC fallback if the
+    //      scheduler can't place the pod.
     if let Some(dc) = opts.datacenter.clone() {
         return Ok(Some(dc));
     }
     if let Some(dc) = config.runpod.default_datacenter.clone() {
         return Ok(Some(dc));
+    }
+    let volume_id = opts
+        .network_volume_id
+        .clone()
+        .or_else(|| config.runpod.default_network_volume_id.clone());
+    if let Some(vid) = volume_id {
+        if let Ok(volumes) = client.network_volumes().await {
+            if let Some(v) = volumes.iter().find(|v| v.id == vid) {
+                if !v.data_center_id.is_empty() {
+                    return Ok(Some(v.data_center_id.clone()));
+                }
+            }
+        }
     }
     Ok(None)
 }
@@ -1288,8 +1303,6 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     std::env::set_var("MOLD_HOST", &mold_host);
     std::fs::create_dir_all(&opts.output_dir)
         .with_context(|| format!("create output dir {}", opts.output_dir.display()))?;
-    let filename = format!("runpod-{}-{}.png", pod.id, short_timestamp());
-    let output_path = opts.output_dir.join(&filename);
 
     // Build a request using per-model defaults from config. This mirrors
     // the behaviour of `commands::run` so `mold runpod run` and local
@@ -1299,6 +1312,19 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         .clone()
         .or_else(|| Some(config.default_model.clone()))
         .unwrap_or_else(|| "flux2-klein:q8".into());
+    // Pick a sensible output format: video families always need video
+    // containers. PNG is the fallback for image models.
+    let is_video_model =
+        mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
+            .is_some_and(|m| matches!(m.family.as_str(), "ltx-video" | "ltx2"));
+    let output_format = if is_video_model {
+        mold_core::OutputFormat::Mp4
+    } else {
+        mold_core::OutputFormat::Png
+    };
+    let ext = if is_video_model { "mp4" } else { "png" };
+    let filename = format!("runpod-{}-{}.{ext}", pod.id, short_timestamp());
+    let output_path = opts.output_dir.join(&filename);
     let model_cfg = config.models.get(&model).cloned().unwrap_or_default();
     let effective_guidance = model_cfg.effective_guidance();
     let effective_width = opts
@@ -1324,7 +1350,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         guidance: effective_guidance,
         seed: opts.seed,
         batch_size: 1,
-        output_format: mold_core::OutputFormat::Png,
+        output_format,
         embed_metadata: None,
         scheduler: None,
         source_image: None,
@@ -1649,22 +1675,39 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     let state = load_state();
     if let Some(id) = state.last_pod_id.clone() {
         match client.get_pod(&id).await {
-            Ok(pod) => {
-                let scheduled = pod.runtime.is_some()
-                    && pod
-                        .machine
-                        .as_ref()
-                        .and_then(|m| m.gpu_display_name.as_deref())
-                        .is_some_and(|s| !s.is_empty());
-                if pod.desired_status == "RUNNING" && scheduled {
+            Ok(pod) if pod.desired_status == "RUNNING" => {
+                // REST v1 can leave `runtime` / `machine.gpu_display_name`
+                // unpopulated on fully-booted pods (same reason we had to
+                // rework `wait_for_schedule`). Don't use those as a
+                // usability test — instead probe the proxy directly. If
+                // the proxy answers at all, the pod is scheduled and
+                // routable, which is all we need.
+                let proxy_url = format!("https://{id}-7680.proxy.runpod.net/api/status");
+                let http = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                if http.get(&proxy_url).send().await.is_ok() {
                     return Ok(pod);
                 }
-                // Unusable stale pod — kill it so we don't leak billing.
+                // Running according to RunPod but the proxy isn't
+                // answering — treat as stale, kill it to avoid leaked
+                // billing.
                 eprintln!(
-                    "{} stale pod {} in state (never scheduled) — deleting",
+                    "{} stale pod {} (not reachable via proxy) — deleting",
                     theme::icon_warn(),
                     id
                 );
+                let _ = client.delete_pod(&id).await;
+                mark_history_deleted(&id);
+                let mut state = load_state();
+                state.last_pod_id = None;
+                state.last_pod_last_used_at = None;
+                let _ = save_state(&state);
+            }
+            Ok(_) => {
+                // Non-RUNNING state (STOPPED, EXITED, TERMINATED…) — kill
+                // it and clear state.
                 let _ = client.delete_pod(&id).await;
                 mark_history_deleted(&id);
                 let mut state = load_state();

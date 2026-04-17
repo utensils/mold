@@ -232,6 +232,7 @@ pub struct NetworkVolume {
 #[derive(Clone)]
 pub struct RunPodClient {
     endpoint: String,
+    graphql_endpoint: String,
     api_key: String,
     http: Client,
 }
@@ -246,14 +247,33 @@ impl fmt::Debug for RunPodClient {
 }
 
 impl RunPodClient {
-    /// Construct with explicit endpoint + key.
+    /// Construct with explicit endpoint + key. The GraphQL endpoint
+    /// defaults to `GRAPHQL_ENDPOINT` when the REST endpoint is production,
+    /// and falls back to the same URL when the REST endpoint is overridden
+    /// (so tests pointing at a mock server route GraphQL calls there too).
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let rest = endpoint.into();
+        let graphql = if rest.starts_with(DEFAULT_ENDPOINT) {
+            GRAPHQL_ENDPOINT.to_string()
+        } else {
+            rest.clone()
+        };
+        Self::new_with_graphql(rest, graphql, api_key)
+    }
+
+    /// Construct with explicit REST + GraphQL endpoints.
+    pub fn new_with_graphql(
+        endpoint: impl Into<String>,
+        graphql_endpoint: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         Self {
             endpoint: endpoint.into(),
+            graphql_endpoint: graphql_endpoint.into(),
             api_key: api_key.into(),
             http,
         }
@@ -401,7 +421,7 @@ impl RunPodClient {
         });
         let resp = self
             .http
-            .post(GRAPHQL_ENDPOINT)
+            .post(&self.graphql_endpoint)
             .bearer_auth(&self.api_key)
             .json(&query)
             .send()
@@ -534,7 +554,7 @@ impl RunPodClient {
     async fn graphql(&self, query: &serde_json::Value) -> Result<serde_json::Value> {
         let resp = self
             .http
-            .post(GRAPHQL_ENDPOINT)
+            .post(&self.graphql_endpoint)
             .bearer_auth(&self.api_key)
             .json(query)
             .send()

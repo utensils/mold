@@ -210,3 +210,21 @@ async fn pod_logs_returns_raw_text() {
     let text = client.pod_logs("abc").await.unwrap();
     assert_eq!(text, "line1\nline2\n");
 }
+
+#[tokio::test]
+async fn graphql_endpoint_override_routes_to_mock() {
+    // The endpoint override in RunPodSettings should also redirect
+    // GraphQL calls (user/, gpu_types/, datacenters) to the mock server,
+    // not to production. Verify by watching for a POST on root-ish path.
+    let (client, server) = client_with_mock().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"data":{"myself":{"id":"u1","email":"x@y.com","clientBalance":10.0,"currentSpendPerHr":0.5,"spendLimit":null}}}"#,
+        ))
+        .mount(&server)
+        .await;
+    let info = client.user().await.expect("user info via mocked graphql");
+    assert_eq!(info.id, "u1");
+    assert_eq!(info.email, "x@y.com");
+}
