@@ -32,17 +32,26 @@ ARG CUDA_COMPUTE_CAP=89
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies for building
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        pkg-config \
-        libssl-dev \
-        libwebp-dev \
-        nasm \
-        git \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# System dependencies for building.
+# apt-get is retried with backoff because archive.ubuntu.com has flaked
+# on GHA builders before (run 24552477974 failed fetching tini); a
+# handful of retries is enough to ride out transient DNS / mirror
+# outages without masking real failures.
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebp-dev \
+            nasm \
+            git \
+            ca-certificates \
+            curl \
+        && break \
+        || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Rust (stable)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -99,11 +108,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 # cuBLAS and cuRAND are already in the runtime image.
 # libcuda.so.1 (the NVIDIA driver) is injected at runtime by the NVIDIA
 # Container Toolkit on GPU hosts like RunPod — it is never in the image.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libwebp7 \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
+# Same apt retry wrapper as the builder stage — the tini fetch in particular
+# has timed out on GHA before.
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            libwebp7 \
+            tini \
+        && break \
+        || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary
 COPY --from=builder /build/target/release/mold /usr/local/bin/mold

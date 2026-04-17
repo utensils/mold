@@ -7,10 +7,13 @@ result
 .cache/
 result
 
-# Generated images
+# Generated images (keep web/public/* so the SPA's logo/favicon survive
+# the build context)
 *.png
 *.jpeg
 *.jpg
+!web/public/**
+!web/src/**
 
 # IDE / editor
 .DS_Store
