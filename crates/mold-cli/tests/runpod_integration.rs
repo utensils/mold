@@ -168,5 +168,10 @@ fn runpod_connect_prints_export_line() {
         .success()
         .stdout(predicate::str::contains(
             "export MOLD_HOST=https://abc123-7680.proxy.runpod.net",
+        ))
+        // Gallery URL hint is on stderr so `eval $(mold runpod connect …)`
+        // stays clean for the shell.
+        .stderr(predicate::str::contains(
+            "https://abc123-7680.proxy.runpod.net",
         ));
 }

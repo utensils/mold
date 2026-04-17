@@ -1005,11 +1005,13 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
         println!("{} pod created", theme::icon_ok());
         print_pod_detail(&pod);
         println!();
+        let proxy = format!("https://{}-7680.proxy.runpod.net", pod.id);
         println!(
             "  {} {}",
             theme::prefix_hint(),
-            format!("export MOLD_HOST=https://{}-7680.proxy.runpod.net", pod.id).bold()
+            format!("export MOLD_HOST={proxy}").bold()
         );
+        println!("  {} gallery: {}", theme::prefix_hint(), proxy.cyan());
     }
     Ok(())
 }
@@ -1185,7 +1187,9 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
             }
         }
     }
-    println!("export MOLD_HOST=https://{pod_id}-7680.proxy.runpod.net");
+    let proxy = format!("https://{pod_id}-7680.proxy.runpod.net");
+    println!("export MOLD_HOST={proxy}");
+    eprintln!("{} gallery: {}", theme::prefix_hint(), proxy.cyan());
     Ok(())
 }
 
@@ -1462,6 +1466,10 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     state.last_pod_id = Some(pod.id.clone());
     state.last_pod_last_used_at = Some(now_epoch());
     let _ = save_state(&state);
+
+    // Surface the web gallery URL — the container bundles the SPA now,
+    // so every generation lands on a browsable page.
+    println!("  {} browse at {}", theme::prefix_hint(), mold_host.cyan());
 
     if !opts.keep && config.runpod.auto_teardown {
         println!(

@@ -13,24 +13,45 @@
 #   89 = Ada Lovelace (RTX 4090, L40S)   90 = Hopper (H100)
 #   120 = Blackwell (RTX 5090, B200)
 
-# ── Stage 1: Build ──────────────────────────────────────────────────
+# ── Stage 1a: Build web gallery SPA ─────────────────────────────────
+# The gallery is served by `mold serve` as a SPA fallback. Building it
+# in a dedicated stage keeps the Rust builder free of Node/bun tooling
+# and avoids re-running `bun install` on every cargo cache invalidation.
+FROM oven/bun:1.1-alpine AS web-builder
+WORKDIR /web
+COPY web/package.json web/bun.lock web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts web/index.html ./
+RUN bun install --frozen-lockfile
+COPY web/src ./src
+COPY web/public ./public
+RUN bun run build
+
+# ── Stage 1b: Build mold binary ─────────────────────────────────────
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_COMPUTE_CAP=89
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies for building
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        pkg-config \
-        libssl-dev \
-        libwebp-dev \
-        nasm \
-        git \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
+# System dependencies for building.
+# apt-get is retried with backoff because archive.ubuntu.com has flaked
+# on GHA builders before (run 24552477974 failed fetching tini); a
+# handful of retries is enough to ride out transient DNS / mirror
+# outages without masking real failures.
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebp-dev \
+            nasm \
+            git \
+            ca-certificates \
+            curl \
+        && break \
+        || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Rust (stable)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -87,14 +108,25 @@ ENV DEBIAN_FRONTEND=noninteractive
 # cuBLAS and cuRAND are already in the runtime image.
 # libcuda.so.1 (the NVIDIA driver) is injected at runtime by the NVIDIA
 # Container Toolkit on GPU hosts like RunPod — it is never in the image.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libwebp7 \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
+# Same apt retry wrapper as the builder stage — the tini fetch in particular
+# has timed out on GHA before.
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            libwebp7 \
+            tini \
+        && break \
+        || (echo "apt attempt $attempt failed, retrying in $((attempt * 5))s" && sleep $((attempt * 5))); \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary
 COPY --from=builder /build/target/release/mold /usr/local/bin/mold
+
+# Copy the built web gallery SPA. `mold serve` picks this up via
+# MOLD_WEB_DIR and serves it as the SPA fallback alongside /api/*.
+COPY --from=web-builder /web/dist /opt/mold/web
 
 # Copy the entrypoint script
 COPY docker/start.sh /start.sh
@@ -104,7 +136,8 @@ COPY docker/start.sh /start.sh
 ENV MOLD_LOG=info \
     MOLD_PORT=7680 \
     MOLD_DEFAULT_MODEL=flux2-klein:q8 \
-    MOLD_EMBED_METADATA=1
+    MOLD_EMBED_METADATA=1 \
+    MOLD_WEB_DIR=/opt/mold/web
 # Server
 # MOLD_HOST=               (clients: remote server URL)
 # MOLD_HOME=               (override base mold directory)
@@ -113,6 +146,8 @@ ENV MOLD_LOG=info \
 # MOLD_API_KEY=            (API key for server auth)
 # MOLD_RATE_LIMIT=         (per-IP rate limit, e.g. "10/min")
 # MOLD_CORS_ORIGIN=        (restrict CORS origin)
+# MOLD_GALLERY_ALLOW_DELETE= (1 to enable DELETE /api/gallery/image/:name)
+# MOLD_WEB_DIR=/opt/mold/web (override bundled web SPA location)
 # Inference
 # MOLD_EAGER=              (1 to keep all model components loaded)
 # MOLD_OFFLOAD=            (1 to force CPU↔GPU block streaming)
