@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Animated video playback in TUI gallery detail and CLI `--preview`**: GIF/APNG/animated-WebP previews now play their full frame sequence instead of freezing on the first frame. The TUI gallery detail view, generation viewport, and CLI `--preview` all decode every frame up front, advance on each frame's recorded delay (clamped to ≥20 ms / ≤50 fps), and loop. The CLI replays short clips (<1.5 s gets 3 plays, <3 s gets 2, longer plays once) using ANSI cursor save/restore so each frame overwrites the previous in place. Decoder lives in `crates/mold-tui/src/animation.rs` and is shared by the gallery preview path and the post-generation video preview ([#179](https://github.com/utensils/mold/issues/179)).
+
 ## [0.8.1] - 2026-04-17
 
 *Single-binary web gallery: SPA is now embedded at compile time.*

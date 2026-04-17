@@ -1382,18 +1382,127 @@ pub(crate) fn preview_image(data: &[u8]) {
         return;
     }
 
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let term = std::env::var("TERM").ok();
+    let backend = preview_backend(term_program.as_deref(), term.as_deref());
+
+    // Try to decode as an animated container first (GIF/APNG/animated WebP).
+    if let Some(frames) = decode_preview_animation(data) {
+        if frames.len() >= 2 {
+            animate_preview(&frames, backend);
+            return;
+        }
+    }
+
     let Ok(img) = image::load_from_memory(data) else {
         return;
     };
-    let term_program = std::env::var("TERM_PROGRAM").ok();
-    let term = std::env::var("TERM").ok();
-    match preview_backend(term_program.as_deref(), term.as_deref()) {
+    render_preview_frame(&img, backend);
+}
+
+#[cfg(feature = "preview")]
+fn render_preview_frame(img: &image::DynamicImage, backend: PreviewBackend) {
+    match backend {
         PreviewBackend::GhosttyKitty => {
-            let _ = print_ghostty_kitty_preview(&img);
+            let _ = print_ghostty_kitty_preview(img);
         }
         PreviewBackend::ViuerAuto => {
             let conf = preview_config();
-            let _ = viuer::print(&img, &conf);
+            let _ = viuer::print(img, &conf);
+        }
+    }
+}
+
+/// Decoded frame for CLI preview animation.
+#[cfg(feature = "preview")]
+struct CliAnimatedFrame {
+    image: image::DynamicImage,
+    delay: Duration,
+}
+
+#[cfg(feature = "preview")]
+fn decode_preview_animation(data: &[u8]) -> Option<Vec<CliAnimatedFrame>> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    // Sniff the container before paying for a full decode.
+    let is_gif = data.len() >= 6 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"));
+    let is_png_sig =
+        data.len() >= 8 && data[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let is_webp = data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP";
+
+    let frames: Vec<_> = if is_gif {
+        image::codecs::gif::GifDecoder::new(Cursor::new(data))
+            .ok()?
+            .into_frames()
+            .collect_frames()
+            .ok()?
+    } else if is_png_sig {
+        let decoder = image::codecs::png::PngDecoder::new(Cursor::new(data)).ok()?;
+        decoder.apng().ok()?.into_frames().collect_frames().ok()?
+    } else if is_webp {
+        image::codecs::webp::WebPDecoder::new(Cursor::new(data))
+            .ok()?
+            .into_frames()
+            .collect_frames()
+            .ok()?
+    } else {
+        return None;
+    };
+
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let (num, den) = frame.delay().numer_denom_ms();
+        // `numer_denom_ms()` is the delay in ms as the ratio num/den.
+        let micros = if den == 0 {
+            100_000
+        } else {
+            (u64::from(num) * 1000) / u64::from(den.max(1))
+        };
+        let delay = Duration::from_micros(micros).max(Duration::from_millis(20));
+        let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
+        out.push(CliAnimatedFrame { image, delay });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Decide how many times to loop the animation for the CLI preview. A short
+/// clip gets looped a couple of times so the motion is easy to see; longer
+/// clips play once. Pure function for testability.
+#[cfg(any(feature = "preview", test))]
+fn preview_loop_count(total: Duration) -> u32 {
+    if total < Duration::from_millis(1500) {
+        3
+    } else if total < Duration::from_secs(3) {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(feature = "preview")]
+fn animate_preview(frames: &[CliAnimatedFrame], backend: PreviewBackend) {
+    let total: Duration = frames.iter().map(|f| f.delay).sum();
+    let loops = preview_loop_count(total);
+
+    // Save the cursor position once; restore before each frame so every
+    // render lands at the same spot and overwrites the previous frame.
+    // After the final frame, the backend naturally leaves the cursor
+    // below the image — no further restore needed.
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(b"\x1b[s");
+    let _ = stdout.flush();
+
+    for _ in 0..loops {
+        for frame in frames {
+            let _ = stdout.write_all(b"\x1b[u");
+            let _ = stdout.flush();
+            render_preview_frame(&frame.image, backend);
+            std::thread::sleep(frame.delay);
         }
     }
 }
@@ -1788,5 +1897,16 @@ mod tests {
             build_ghostty_kitty_preview_payload(&img, 80, 24).expect("payload should build");
         assert_eq!((cell_w, cell_h), (80, 23));
         assert!(payload.starts_with("\u{1b}_Gf=100,a=T,t=d,c=80,r=23,"));
+    }
+
+    #[test]
+    fn preview_loop_count_replays_short_clips() {
+        // ≤1.5s gets 3 plays, ≤3s gets 2, longer plays once.
+        assert_eq!(preview_loop_count(Duration::from_millis(500)), 3);
+        assert_eq!(preview_loop_count(Duration::from_millis(1499)), 3);
+        assert_eq!(preview_loop_count(Duration::from_millis(1500)), 2);
+        assert_eq!(preview_loop_count(Duration::from_millis(2999)), 2);
+        assert_eq!(preview_loop_count(Duration::from_millis(3000)), 1);
+        assert_eq!(preview_loop_count(Duration::from_secs(30)), 1);
     }
 }
