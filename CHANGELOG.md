@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Remote pull progress bars dropped file names on completion**: completed download progress bars showed `done` as the prefix instead of the file name (e.g. `[1/20] config.json`), so only the in-flight file was identifiable. Completed bars now keep their `[i/N] <filename>` label both during and after download ([#223](https://github.com/utensils/mold/issues/223)).
+
 ## [0.7.1] - 2026-04-16
 
 ### Fixed
