@@ -456,6 +456,36 @@
                 command = "cargo run -p mold-ai --features ${devFeatures} -- discord \"$@\"";
               }
               {
+                category = "runpod";
+                name = "runpod-doctor";
+                help = "mold runpod doctor — verify RunPod auth";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- runpod doctor \"$@\"";
+              }
+              {
+                category = "runpod";
+                name = "runpod-list";
+                help = "mold runpod list — list your RunPod pods";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- runpod list \"$@\"";
+              }
+              {
+                category = "runpod";
+                name = "runpod-create";
+                help = "mold runpod create — create a new pod";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- runpod create \"$@\"";
+              }
+              {
+                category = "runpod";
+                name = "runpod-run";
+                help = "mold runpod run <prompt> — generate on a RunPod pod end-to-end";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- runpod run \"$@\"";
+              }
+              {
+                category = "runpod";
+                name = "runpod-usage";
+                help = "mold runpod usage — balance and spend summary";
+                command = "cargo run -p mold-ai --features ${devFeatures} -- runpod usage \"$@\"";
+              }
+              {
                 category = "run";
                 name = "build-ltx2";
                 help = "build mold with the full feature set for LTX-2 work";

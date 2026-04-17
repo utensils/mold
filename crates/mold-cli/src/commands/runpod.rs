@@ -711,37 +711,26 @@ async fn resolve_gpu(
 
 async fn resolve_datacenter(
     opts: &CreateOptions,
-    client: &RunPodClient,
+    _client: &RunPodClient,
     config: &Config,
-    gpu_display: &str,
+    _gpu_display: &str,
 ) -> Result<Option<String>> {
+    // Only honor explicit pins — user-supplied --dc or config default.
+    //
+    // Why not auto-pick: RunPod's REST /pods endpoint enforces an enum of
+    // acceptable `dataCenterIds` that is narrower than what GraphQL's
+    // `dataCenters` query exposes. Auto-picking based on GraphQL stockStatus
+    // would hit 400 schema errors for many DCs. When no DC is pinned, we
+    // leave `dataCenterIds` unset and let RunPod's scheduler choose — it
+    // knows which DCs are currently schedulable. Retry logic in
+    // `ensure_pod` handles the fallback loop if that fails.
     if let Some(dc) = opts.datacenter.clone() {
         return Ok(Some(dc));
     }
     if let Some(dc) = config.runpod.default_datacenter.clone() {
         return Ok(Some(dc));
     }
-    // Smart default — pick a DC where this GPU has High/Medium stock.
-    let dcs = client.datacenters().await.unwrap_or_default();
-    let mut with_stock: Vec<(String, String)> = dcs
-        .iter()
-        .filter_map(|dc| {
-            let stock = dc
-                .gpu_availability
-                .iter()
-                .find(|g| g.display_name.eq_ignore_ascii_case(gpu_display))
-                .and_then(|g| g.stock_status.clone())
-                .unwrap_or_default();
-            if matches!(stock.as_str(), "High" | "Medium") {
-                Some((dc.id.clone(), stock))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Prefer High over Medium.
-    with_stock.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(with_stock.into_iter().next().map(|(id, _)| id))
+    Ok(None)
 }
 
 /// Convert RunPod's `displayName` (e.g. `"RTX 5090"`) to the `gpuId` the REST
@@ -1411,15 +1400,26 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     }
     let mut base_req = build_create_request(&create_opts, client, config).await?;
 
-    // Candidate DC list: user-pinned → resolved default → any DC with stock.
+    // Candidate DC list strategy:
+    //   1. If user pinned --dc, use only that.
+    //   2. Otherwise, prepend "" (let RunPod pick any schedulable DC).
+    //   3. Then append DCs sorted by stock so we have a fallback chain.
+    //
+    // The "any DC" attempt is critical because:
+    //   - RunPod's REST /pods enum only accepts a specific subset of DCs even
+    //     though GraphQL exposes more. Pinning a DC that isn't in the REST
+    //     enum yields a 400 schema error.
+    //   - GraphQL stockStatus is a rough indicator and doesn't always match
+    //     what the scheduler can actually place. Letting RunPod pick is the
+    //     most reliable first attempt.
     let mut candidates: Vec<String> = Vec::new();
+    let user_pinned = create_opts.datacenter.is_some();
     if let Some(dc) = &create_opts.datacenter {
         candidates.push(dc.clone());
-    } else if let Some(dcs) = &base_req.data_center_ids {
-        candidates.extend(dcs.iter().cloned());
-    }
-    // Add remaining DCs by stock for this GPU, highest → lowest.
-    if candidates.len() < 3 {
+    } else {
+        // Try "any DC" first.
+        candidates.push(String::new());
+        // Then add DCs sorted by stock for this GPU, highest → lowest.
         let gpu_display = friendly_gpu_name(&base_req.gpu_type_ids[0]);
         if let Ok(dcs) = client.datacenters().await {
             let mut ranked: Vec<(String, u8)> = dcs
@@ -1452,9 +1452,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
             }
         }
     }
-    if candidates.is_empty() {
-        candidates.push(String::new());
-    }
+    let _ = user_pinned;
 
     print_create_plan(&base_req);
     let mut last_err: Option<anyhow::Error> = None;

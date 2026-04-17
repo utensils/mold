@@ -225,7 +225,7 @@ Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 
 ## CLI Quick Reference
 
-Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `mold tui`, `mold upscale`, `mold expand`, `mold config`, `mold update`. Run `mold --help` or `mold <command> --help` for full flag details.
+Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `mold tui`, `mold upscale`, `mold expand`, `mold config`, `mold update`, `mold runpod`. Run `mold --help` or `mold <command> --help` for full flag details. `mold runpod run "<prompt>"` creates a RunPod pod, generates, and saves to `./mold-outputs/` in one command — see `website/deployment/runpod-cli.md`.
 
 **Key behaviors:**
 - `mold run [MODEL] [PROMPT]` — first positional arg is MODEL if it matches a known name, otherwise it's prompt

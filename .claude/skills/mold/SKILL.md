@@ -27,7 +27,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -398,6 +398,32 @@ mold update --force               # Reinstall even if already up-to-date
 ```
 
 Downloads the correct platform-specific binary from GitHub releases, verifies SHA-256 checksum, and replaces the running binary in-place. Detects Nix/Homebrew installations and suggests using the package manager instead. Respects `GITHUB_TOKEN` for API rate limits and `MOLD_CUDA_ARCH` for GPU architecture override on Linux.
+
+## RunPod Cloud GPUs
+
+```bash
+# One-time setup
+mold config set runpod.api_key <key>   # or: export RUNPOD_API_KEY=<key>
+mold runpod doctor                     # verify auth + balance
+
+# The killer feature — create pod, generate, save to ./mold-outputs/
+mold runpod run "a cat"                # reuses warm pod if one exists
+mold runpod run "a cat" --gpu 5090     # force a GPU family
+mold runpod run "a cat" --keep         # leave pod up after
+
+# Manual lifecycle
+mold runpod gpus                       # stock per GPU family
+mold runpod create --gpu 4090          # smart defaults fill the rest
+mold runpod list
+mold runpod get <pod-id>
+mold runpod connect <pod-id>           # prints export MOLD_HOST=…
+mold runpod logs <pod-id> --follow
+mold runpod usage --since 7d           # balance + spend history
+mold runpod delete <pod-id>
+```
+
+`RUNPOD_API_KEY` env var takes precedence over `config.runpod.api_key`.
+Outputs go to `./mold-outputs/runpod-<pod-id>-<ts>.png` by default.
 
 ## Server Mode
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native RunPod support via `mold runpod` subcommand tree**: manage RunPod cloud GPU pods end-to-end from the same `mold` binary. `mold runpod run "<prompt>"` creates a pod with smart defaults (cheapest GPU with real stock, matching GHCR image tag, automatic DC fallback when scheduling stalls), waits for the mold server to boot, streams generation progress over SSE, and saves the result to `./mold-outputs/`. Full subcommand surface: `doctor`, `gpus`, `datacenters`, `list`, `get`, `create`, `stop`, `start`, `delete`, `connect`, `logs`, `usage`, `run`. Adds a `[runpod]` config section (`api_key`, `default_gpu`, `default_datacenter`, `default_network_volume_id`, `auto_teardown`, `auto_teardown_idle_mins`, `cost_alert_usd`, `endpoint`), `RUNPOD_API_KEY` env precedence, dynamic shell completion for pod/gpu/datacenter/cloud-type arguments, and spend history in `~/.mold/runpod-history.jsonl`. NixOS module gains a `runpodApiKeyFile` option that mirrors the existing `hfTokenFile`/`apiKeyFile` secret-loader pattern.
+- **`runpodctl` in Nix devshell**: contributors get the official RunPod CLI on their `PATH` without manual install.
+
 ### Fixed
 
 - **LTX-2.3 camera-control preset validation**: `--camera-control` preset aliases (`dolly-in`, `dolly-left`, `dolly-out`, `dolly-right`, `jib-down`, `jib-up`, `static`) now fail locally at the CLI layer with an explicit "Lightricks has not released camera-control LoRAs for LTX-2.3 yet" message when paired with an LTX-2.3 model, instead of failing server-side after the HTTP round-trip. Explicit `.safetensors` paths still work for LTX-2.3. `--camera-control` help text now documents the 19B-only preset limitation ([#227](https://github.com/utensils/mold/issues/227)).
