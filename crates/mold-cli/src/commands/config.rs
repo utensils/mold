@@ -391,9 +391,7 @@ fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
             None => ConfigValue::None,
         },
         "runpod.auto_teardown" => ConfigValue::Bool(config.runpod.auto_teardown),
-        "runpod.auto_teardown_idle_mins" => {
-            ConfigValue::U32(config.runpod.auto_teardown_idle_mins)
-        }
+        "runpod.auto_teardown_idle_mins" => ConfigValue::U32(config.runpod.auto_teardown_idle_mins),
         "runpod.cost_alert_usd" => ConfigValue::F64(config.runpod.cost_alert_usd),
         "runpod.endpoint" => match &config.runpod.endpoint {
             Some(s) => ConfigValue::String(s.clone()),
@@ -523,9 +521,7 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
         "runpod.auto_teardown_idle_mins" => {
             config.runpod.auto_teardown_idle_mins = parse_u32(raw, 0, 10_080, key)?
         }
-        "runpod.cost_alert_usd" => {
-            config.runpod.cost_alert_usd = parse_f64(raw, 0.0, 1000.0, key)?
-        }
+        "runpod.cost_alert_usd" => config.runpod.cost_alert_usd = parse_f64(raw, 0.0, 1000.0, key)?,
         "runpod.endpoint" => config.runpod.endpoint = parse_optional_string(raw),
         _ => return Err(unknown_key_error(key)),
     }
@@ -929,6 +925,7 @@ mod tests {
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
             logging: mold_core::LoggingConfig::default(),
+            runpod: mold_core::runpod::RunPodSettings::default(),
             models: HashMap::new(),
         }
     }
@@ -986,8 +983,57 @@ mod tests {
 
     #[test]
     fn all_keys_count() {
-        // 11 General + 8 Expand + 4 Logging = 23 static keys
-        assert_eq!(ALL_KEYS.len(), 23);
+        // 11 General + 8 Expand + 4 Logging + 8 RunPod = 31 static keys
+        assert_eq!(ALL_KEYS.len(), 31);
+    }
+
+    #[test]
+    fn runpod_keys_registered() {
+        for key in [
+            "runpod.api_key",
+            "runpod.default_gpu",
+            "runpod.default_datacenter",
+            "runpod.default_network_volume_id",
+            "runpod.auto_teardown",
+            "runpod.auto_teardown_idle_mins",
+            "runpod.cost_alert_usd",
+            "runpod.endpoint",
+        ] {
+            assert!(
+                find_static_key(key).is_some(),
+                "key {key} not registered in ALL_KEYS",
+            );
+        }
+    }
+
+    #[test]
+    fn runpod_api_key_roundtrip() {
+        let mut config = test_config();
+        set_value(&mut config, "runpod.api_key", "my-secret-key").unwrap();
+        assert_eq!(config.runpod.api_key.as_deref(), Some("my-secret-key"));
+        // Getter redacts the actual value.
+        let v = get_value(&config, "runpod.api_key").unwrap();
+        assert_eq!(v.raw(), "<set>");
+        // "none" clears it.
+        set_value(&mut config, "runpod.api_key", "none").unwrap();
+        assert!(config.runpod.api_key.is_none());
+    }
+
+    #[test]
+    fn runpod_auto_teardown_bool() {
+        let mut config = test_config();
+        set_value(&mut config, "runpod.auto_teardown", "true").unwrap();
+        assert!(config.runpod.auto_teardown);
+        set_value(&mut config, "runpod.auto_teardown", "off").unwrap();
+        assert!(!config.runpod.auto_teardown);
+    }
+
+    #[test]
+    fn runpod_cost_alert_bounds() {
+        let mut config = test_config();
+        set_value(&mut config, "runpod.cost_alert_usd", "2.5").unwrap();
+        assert_eq!(config.runpod.cost_alert_usd, 2.5);
+        assert!(set_value(&mut config, "runpod.cost_alert_usd", "-1").is_err());
     }
 
     // ── Value get tests ─────────────────────────────────

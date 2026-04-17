@@ -14,6 +14,9 @@ use std::time::Duration;
 /// Default REST base URL.
 pub const DEFAULT_ENDPOINT: &str = "https://rest.runpod.io/v1";
 
+/// GraphQL endpoint (used for /user since REST doesn't expose it).
+pub const GRAPHQL_ENDPOINT: &str = "https://api.runpod.io/graphql";
+
 /// Environment variable that holds the RunPod API key.
 pub const API_KEY_ENV: &str = "RUNPOD_API_KEY";
 
@@ -390,16 +393,168 @@ impl RunPodClient {
 
     // ─── Typed endpoints ────────────────────────────────────────────
 
+    /// User/account info isn't exposed by the REST API, so we fall back to
+    /// the GraphQL endpoint (same API key works for both).
     pub async fn user(&self) -> Result<UserInfo> {
-        self.get_json("/user").await
+        let query = serde_json::json!({
+            "query": "query { myself { id email clientBalance currentSpendPerHr spendLimit } }"
+        });
+        let resp = self
+            .http
+            .post(GRAPHQL_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .json(&query)
+            .send()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("RunPod graphql /user: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(http_error("graphql /user", status, resp).await.into());
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("RunPod graphql /user json: {e}")))?;
+        if let Some(errs) = body.get("errors") {
+            return Err(MoldError::RunPod(format!("RunPod graphql errors: {errs}")).into());
+        }
+        let myself = body
+            .get("data")
+            .and_then(|d| d.get("myself"))
+            .ok_or_else(|| MoldError::RunPod("graphql: missing data.myself".into()))?;
+        let info = UserInfo {
+            id: myself
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            email: myself
+                .get("email")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            client_balance: myself
+                .get("clientBalance")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            current_spend_per_hr: myself
+                .get("currentSpendPerHr")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            spend_limit: myself.get("spendLimit").and_then(|v| v.as_f64()),
+        };
+        Ok(info)
     }
 
+    /// Query GPU types via GraphQL (not exposed in REST v1).
+    /// Stock status is aggregated: the highest stock level across all DCs.
     pub async fn gpu_types(&self) -> Result<Vec<GpuType>> {
-        self.get_json("/gputypes").await
+        let query = serde_json::json!({
+            "query": "query { gpuTypes { id displayName memoryInGb secureCloud communityCloud } dataCenters { gpuAvailability { displayName stockStatus } } }"
+        });
+        let body = self.graphql(&query).await?;
+        let data = body
+            .get("data")
+            .ok_or_else(|| MoldError::RunPod("graphql: missing data".into()))?;
+        let types: Vec<GpuType> = serde_json::from_value(
+            data.get("gpuTypes")
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![])),
+        )
+        .map_err(|e| MoldError::RunPod(format!("parse gpuTypes: {e}")))?;
+        // Aggregate stock across datacenters.
+        let mut best_stock: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        if let Some(dcs) = data.get("dataCenters").and_then(|v| v.as_array()) {
+            for dc in dcs {
+                if let Some(avail) = dc.get("gpuAvailability").and_then(|v| v.as_array()) {
+                    for a in avail {
+                        if let (Some(name), Some(stock)) = (
+                            a.get("displayName").and_then(|v| v.as_str()),
+                            a.get("stockStatus").and_then(|v| v.as_str()),
+                        ) {
+                            let current = best_stock.get(name).cloned().unwrap_or_default();
+                            if stock_rank(stock) > stock_rank(&current) {
+                                best_stock.insert(name.to_string(), stock.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = types;
+        for g in out.iter_mut() {
+            if let Some(s) = best_stock.get(&g.display_name) {
+                if !s.is_empty() {
+                    g.stock_status = Some(s.clone());
+                }
+            }
+            g.available = g.stock_status.as_deref().is_some_and(|s| s != "None");
+        }
+        Ok(out)
     }
 
+    /// Query datacenters with per-GPU availability via GraphQL.
     pub async fn datacenters(&self) -> Result<Vec<Datacenter>> {
-        self.get_json("/datacenters").await
+        let query = serde_json::json!({
+            "query": "query { dataCenters { id name listed gpuAvailability { id displayName stockStatus } } }"
+        });
+        let body = self.graphql(&query).await?;
+        let arr = body
+            .get("data")
+            .and_then(|d| d.get("dataCenters"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        // Map GraphQL `id` → `gpuId` so we can reuse the same Datacenter type.
+        let arr = match arr {
+            serde_json::Value::Array(mut dcs) => {
+                for dc in dcs.iter_mut() {
+                    if let Some(avail) =
+                        dc.get_mut("gpuAvailability").and_then(|v| v.as_array_mut())
+                    {
+                        for a in avail.iter_mut() {
+                            if let Some(id) = a.get("id").and_then(|v| v.as_str()) {
+                                let id = id.to_string();
+                                if let Some(obj) = a.as_object_mut() {
+                                    obj.insert("gpuId".into(), serde_json::Value::String(id));
+                                }
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Array(dcs)
+            }
+            other => other,
+        };
+        let dcs: Vec<Datacenter> = serde_json::from_value(arr)
+            .map_err(|e| MoldError::RunPod(format!("parse dataCenters: {e}")))?;
+        Ok(dcs)
+    }
+
+    async fn graphql(&self, query: &serde_json::Value) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(GRAPHQL_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .json(query)
+            .send()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("RunPod graphql: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(http_error("graphql", status, resp).await.into());
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("graphql body: {e}")))?;
+        if let Some(errs) = body
+            .get("errors")
+            .filter(|e| !e.as_array().map(|a| a.is_empty()).unwrap_or(true))
+        {
+            return Err(MoldError::RunPod(format!("graphql errors: {errs}")).into());
+        }
+        Ok(body)
     }
 
     pub async fn list_pods(&self) -> Result<Vec<Pod>> {
@@ -453,6 +608,15 @@ async fn http_error(path: &str, status: StatusCode, resp: reqwest::Response) -> 
             MoldError::RunPodNoStock(format!("RunPod {path} {status}: {msg}"))
         }
         _ => MoldError::RunPod(format!("RunPod {path} {status}: {msg}")),
+    }
+}
+
+fn stock_rank(s: &str) -> u8 {
+    match s {
+        "High" => 3,
+        "Medium" => 2,
+        "Low" => 1,
+        _ => 0,
     }
 }
 
@@ -557,7 +721,10 @@ mod tests {
             original.default_network_volume_id
         );
         assert_eq!(round.auto_teardown, original.auto_teardown);
-        assert_eq!(round.auto_teardown_idle_mins, original.auto_teardown_idle_mins);
+        assert_eq!(
+            round.auto_teardown_idle_mins,
+            original.auto_teardown_idle_mins
+        );
         assert_eq!(round.cost_alert_usd, original.cost_alert_usd);
     }
 
