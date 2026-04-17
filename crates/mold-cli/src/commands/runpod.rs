@@ -652,6 +652,46 @@ impl std::str::FromStr for CloudType {
     }
 }
 
+/// Resolve the `HF_TOKEN` value to ship to the pod.
+///
+/// Priorities, in order:
+///   1. Model is gated per its manifest → we NEED a token. Prefer the local
+///      `HF_TOKEN` env var (guaranteed to work) and fall back to the RunPod
+///      secret template `{{ RUNPOD_SECRET_HF_TOKEN }}` if the user has set
+///      `--hf-token` but no local var.
+///   2. Model is not gated AND `--hf-token` was passed → pass the RunPod
+///      secret template (user explicitly opted in).
+///   3. Otherwise → no `HF_TOKEN` in the pod env (don't leak credentials for
+///      models that don't need them).
+///
+/// The local-env branch is the "smart" fallback the user asked for: if the
+/// RunPod account doesn't have an `HF_TOKEN` secret configured, we still
+/// make gated-model downloads work using the shell-exported token.
+pub fn resolve_hf_token(opts: &CreateOptions) -> Option<String> {
+    let manifest_gated = opts
+        .model
+        .as_deref()
+        .map(mold_core::manifest::resolve_model_name)
+        .and_then(|n| mold_core::manifest::find_manifest(&n))
+        .is_some_and(|m| m.files.iter().any(|f| f.gated));
+
+    let want_token = manifest_gated || opts.hf_token;
+    if !want_token {
+        return None;
+    }
+
+    // Local env wins — always works, no dependency on RunPod secret config.
+    if let Ok(tok) = std::env::var("HF_TOKEN") {
+        if !tok.is_empty() {
+            return Some(tok);
+        }
+    }
+    // No local env: fall back to the RunPod secret template. If the
+    // account doesn't have this secret configured, the pod's model pull
+    // will fail with 401 — caller should warn the user at plan time.
+    Some("{{ RUNPOD_SECRET_HF_TOKEN }}".to_string())
+}
+
 /// Build a `CreatePodRequest` from resolved defaults.
 pub async fn build_create_request(
     opts: &CreateOptions,
@@ -683,8 +723,8 @@ pub async fn build_create_request(
         env.insert("MOLD_DEFAULT_MODEL".into(), model.into());
     }
     env.insert("MOLD_LOG".into(), "info".into());
-    if opts.hf_token {
-        env.insert("HF_TOKEN".into(), "{{ RUNPOD_SECRET_HF_TOKEN }}".into());
+    if let Some(tok) = resolve_hf_token(opts) {
+        env.insert("HF_TOKEN".into(), tok.into());
     }
 
     let name = opts
@@ -988,6 +1028,15 @@ fn print_create_plan(req: &CreatePodRequest) {
                 .collect::<Vec<_>>()
                 .join(",")
         );
+        // Show HF_TOKEN source so users can tell template vs local env.
+        if let Some(v) = req.env.get("HF_TOKEN").and_then(|v| v.as_str()) {
+            let source = if v.contains("RUNPOD_SECRET") {
+                "(RunPod secret)"
+            } else {
+                "(local HF_TOKEN env)"
+            };
+            println!("  hf_token: {source}");
+        }
     }
     if let Some(nv) = &req.network_volume_id {
         println!("  network volume: {nv}");
@@ -1199,6 +1248,26 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     };
     let config = Config::load_or_default();
 
+    // Warn up front if this model is gated but we have no HF_TOKEN source
+    // at all — the user is about to burn pod startup time for nothing.
+    if let Some(model) = opts.model.as_deref().or(opts.create.model.as_deref()) {
+        let resolved = mold_core::manifest::resolve_model_name(model);
+        let gated = mold_core::manifest::find_manifest(&resolved)
+            .is_some_and(|m| m.files.iter().any(|f| f.gated));
+        let local_token = std::env::var("HF_TOKEN").ok().filter(|v| !v.is_empty());
+        if gated && local_token.is_none() {
+            eprintln!(
+                "{} {} is gated on Hugging Face. No local HF_TOKEN detected — \
+                 falling back to the RunPod secret named {}. If that secret \
+                 isn't configured in your RunPod account, the model pull will \
+                 fail inside the pod.",
+                theme::icon_warn(),
+                resolved,
+                "HF_TOKEN".bold(),
+            );
+        }
+    }
+
     // Pick or create a pod.
     let pod = ensure_pod(&client, &config, &opts).await?;
     println!(
@@ -1318,10 +1387,31 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
 
     let resp = match maybe_resp {
         Some(r) => r,
-        None => http
-            .generate(req)
-            .await
-            .with_context(|| "generation failed (non-stream fallback)")?,
+        None => match http.generate(req).await {
+            Ok(r) => r,
+            Err(e) => {
+                // Translate common Cloudflare-proxy failures into actionable
+                // hints. A 404 on /api/generate when /api/status succeeded
+                // usually means the container's binary doesn't match the
+                // host GPU (e.g. :latest built for sm_89 running on H100).
+                let msg = e.to_string();
+                let gpu = pod
+                    .machine
+                    .as_ref()
+                    .and_then(|m| m.gpu_display_name.clone())
+                    .unwrap_or_default();
+                if msg.contains("404") {
+                    bail!(
+                        "generation failed: proxy returned 404 on /api/generate. \
+                         The mold binary in the container may not match the host \
+                         GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
+                         or check pod logs via `mold runpod logs {}`.",
+                        pod.id
+                    );
+                }
+                return Err(e).context("generation failed (non-stream fallback)");
+            }
+        },
     };
 
     if let Some(video) = resp.video {
@@ -1993,6 +2083,103 @@ mod tests {
         assert!(!complete_gpu_id().is_empty());
         assert!(!complete_dc_id().is_empty());
         assert!(complete_cloud_type().len() == 2);
+    }
+
+    #[test]
+    fn gpu_vram_lookup_covers_all_known_families() {
+        assert_eq!(gpu_vram_gb("RTX 3090"), Some(24));
+        assert_eq!(gpu_vram_gb("RTX 4090"), Some(24));
+        assert_eq!(gpu_vram_gb("RTX 5090"), Some(32));
+        assert_eq!(gpu_vram_gb("L40"), Some(48));
+        assert_eq!(gpu_vram_gb("L40S"), Some(48));
+        assert_eq!(gpu_vram_gb("RTX A6000"), Some(48));
+        assert_eq!(gpu_vram_gb("NVIDIA A100 80GB PCIe"), Some(80));
+        assert_eq!(gpu_vram_gb("NVIDIA A100-SXM4-80GB"), Some(80));
+        assert_eq!(gpu_vram_gb("NVIDIA H100 80GB HBM3"), Some(80));
+        assert_eq!(gpu_vram_gb("NVIDIA H100 NVL"), Some(80));
+        // Case-insensitive
+        assert_eq!(gpu_vram_gb("rtx 4090"), Some(24));
+        // Unknown GPU → None
+        assert_eq!(gpu_vram_gb("T4"), None);
+    }
+
+    #[test]
+    fn estimated_vram_sizes_scale_with_model() {
+        // Unknown model: None.
+        assert!(estimated_vram_need_gb("nonexistent-model:fp16").is_none());
+        // Tiny floor: small models still estimate at least 12GB for
+        // encoder + activations + latents.
+        if let Some(need) = estimated_vram_need_gb("flux2-klein:q4") {
+            assert!(
+                need >= 12,
+                "small FLUX q4 should floor at 12GB, got {need}"
+            );
+        }
+        // LTX-2.3 22B fp8 is ~29GB weights → should land in mid-40s GB
+        // range once we multiply by 1.8×. Definitely > 24 (so 4090 fails).
+        if let Some(need) = estimated_vram_need_gb("ltx-2.3-22b-dev:fp8") {
+            assert!(
+                need > 24,
+                "LTX-2.3 22B must not fit on a 24GB card, got {need}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_hf_token_respects_priority() {
+        // Clean slate.
+        let prev = std::env::var("HF_TOKEN").ok();
+        std::env::remove_var("HF_TOKEN");
+
+        // Non-gated model, no flag → no token.
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: None,
+            model: Some("sd15:fp16".into()),
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: false,
+            json: false,
+        };
+        assert!(resolve_hf_token(&opts).is_none());
+
+        // Explicit --hf-token with no local env → RunPod secret template.
+        let mut opts_flag = opts.clone();
+        opts_flag.hf_token = true;
+        assert_eq!(
+            resolve_hf_token(&opts_flag),
+            Some("{{ RUNPOD_SECRET_HF_TOKEN }}".into())
+        );
+
+        // Local env wins when set, even with the flag on.
+        std::env::set_var("HF_TOKEN", "hf_localvalue");
+        assert_eq!(resolve_hf_token(&opts_flag), Some("hf_localvalue".into()));
+
+        // Gated model auto-enables token even without the flag.
+        let mut gated_opts = opts.clone();
+        gated_opts.model = Some("flux-dev:q4".into());
+        assert_eq!(resolve_hf_token(&gated_opts), Some("hf_localvalue".into()));
+
+        // Clean up.
+        std::env::remove_var("HF_TOKEN");
+        if let Some(v) = prev {
+            std::env::set_var("HF_TOKEN", v);
+        }
+    }
+
+    #[test]
+    fn wait_outcome_variants_are_exhaustive() {
+        // Compile-time sanity: enum must cover Scheduled / Cancelled / Failed.
+        let _ = |o: WaitOutcome| match o {
+            WaitOutcome::Scheduled(_) => {}
+            WaitOutcome::Cancelled => {}
+            WaitOutcome::Failed(_) => {}
+        };
     }
 
     // Silence unused-import warnings when tests compile but don't use every import.

@@ -275,6 +275,11 @@ Examples:
         /// Pod-ready timeout in seconds
         #[arg(long, default_value_t = 600)]
         wait_timeout: u64,
+        /// Force HF_TOKEN passthrough even for non-gated models (auto-enabled
+        /// for gated models). Uses local `HF_TOKEN` env if set, else the
+        /// RunPod secret `HF_TOKEN`.
+        #[arg(long)]
+        hf_token: bool,
     },
 }
 
@@ -1334,6 +1339,7 @@ async fn run() -> anyhow::Result<()> {
                 gpu,
                 datacenter,
                 wait_timeout,
+                hf_token,
             } => {
                 let create = commands::runpod::CreateOptions {
                     name: None,
@@ -1344,7 +1350,7 @@ async fn run() -> anyhow::Result<()> {
                     disk_gb: 20,
                     image_tag: None,
                     model: model.clone(),
-                    hf_token: false,
+                    hf_token,
                     network_volume_id: None,
                     dry_run: false,
                     json: false,
