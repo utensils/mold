@@ -16,7 +16,7 @@ async fn client_with_mock() -> (RunPodClient, MockServer) {
     let server = MockServer::start().await;
     let settings = RunPodSettings {
         api_key: Some("test-key".into()),
-        endpoint: Some(format!("{}", server.uri())),
+        endpoint: Some(server.uri()),
         ..Default::default()
     };
     let client = RunPodClient::from_settings(&settings).expect("client");
