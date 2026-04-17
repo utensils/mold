@@ -1235,10 +1235,41 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         theme::icon_info(),
         output_path.display().to_string().cyan()
     );
-    let resp = http
-        .generate(req)
+
+    // Stream progress via SSE so RunPod's 100s Cloudflare proxy timeout
+    // doesn't kill the model-pull phase.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
+    let progress_task = tokio::spawn(async move {
+        let pb = indicatif::ProgressBar::new_spinner();
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(&format!(
+                "{{spinner:.{}}} {{msg}}",
+                theme::SPINNER_STYLE
+            ))
+            .unwrap(),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        while let Some(ev) = rx.recv().await {
+            let line = format_progress_event(&ev);
+            pb.set_message(line);
+        }
+        pb.finish_and_clear();
+    });
+
+    let maybe_resp = http
+        .generate_stream(&req, tx)
         .await
         .with_context(|| "generation failed")?;
+    let _ = progress_task.await;
+
+    let resp = match maybe_resp {
+        Some(r) => r,
+        None => http
+            .generate(req)
+            .await
+            .with_context(|| "generation failed (non-stream fallback)")?,
+    };
+
     if let Some(video) = resp.video {
         let vid_path = opts.output_dir.join(format!(
             "runpod-{}-{}.{}",
@@ -1250,7 +1281,13 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         println!("{} saved {}", theme::icon_done(), vid_path.display());
     } else if let Some(img) = resp.images.first() {
         std::fs::write(&output_path, &img.data)?;
-        println!("{} saved {}", theme::icon_done(), output_path.display());
+        println!(
+            "{} saved {} ({:.1}s on seed {})",
+            theme::icon_done(),
+            output_path.display(),
+            resp.generation_time_ms as f64 / 1000.0,
+            resp.seed_used,
+        );
     }
 
     // Update state + history.
@@ -1287,6 +1324,60 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     Ok(())
 }
 
+fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
+    use mold_core::types::SseProgressEvent as E;
+    match ev {
+        E::StageStart { name } => format!("stage: {name}"),
+        E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
+        E::Info { message } => message.clone(),
+        E::CacheHit { resource } => format!("cached: {resource}"),
+        E::DenoiseStep { step, total, .. } => format!("denoise {step}/{total}"),
+        E::DownloadProgress {
+            filename,
+            file_index,
+            total_files,
+            bytes_downloaded,
+            bytes_total,
+            ..
+        } => format!(
+            "pull [{file_index}/{total_files}] {filename} {}/{}",
+            human_bytes(*bytes_downloaded),
+            human_bytes(*bytes_total)
+        ),
+        E::DownloadDone {
+            filename,
+            file_index,
+            total_files,
+            ..
+        } => format!("✓ [{file_index}/{total_files}] {filename}"),
+        E::PullComplete { model } => format!("pull complete: {model}"),
+        E::Queued { position } => format!("queued (#{position})"),
+        E::WeightLoad {
+            component,
+            bytes_loaded,
+            bytes_total,
+        } => format!(
+            "loading {component} {}/{}",
+            human_bytes(*bytes_loaded),
+            human_bytes(*bytes_total)
+        ),
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    const K: f64 = 1024.0;
+    let f = b as f64;
+    if f < K {
+        format!("{b}B")
+    } else if f < K * K {
+        format!("{:.1}K", f / K)
+    } else if f < K * K * K {
+        format!("{:.1}M", f / (K * K))
+    } else {
+        format!("{:.1}G", f / (K * K * K))
+    }
+}
+
 fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
     match fmt {
         mold_core::OutputFormat::Mp4 => "mp4",
@@ -1298,54 +1389,203 @@ fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
 }
 
 async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
-    // 1. Warm pod?
+    // 1. Warm pod? Only reuse if actually scheduled on a machine.
     let state = load_state();
     if let Some(id) = state.last_pod_id.clone() {
         if let Ok(pod) = client.get_pod(&id).await {
-            if pod.desired_status == "RUNNING" {
+            let scheduled = pod.runtime.is_some()
+                && pod
+                    .machine
+                    .as_ref()
+                    .and_then(|m| m.gpu_display_name.as_deref())
+                    .is_some_and(|s| !s.is_empty());
+            if pod.desired_status == "RUNNING" && scheduled {
                 return Ok(pod);
             }
         }
     }
-    // 2. Create new.
+    // 2. Create new with scheduling guard + DC fallback.
     let mut create_opts = opts.create.clone();
     if create_opts.model.is_none() {
         create_opts.model = opts.model.clone();
     }
-    let req = build_create_request(&create_opts, client, config).await?;
-    print_create_plan(&req);
-    let pod = match with_spinner("creating pod…", client.create_pod(&req)).await {
-        Ok(p) => p,
-        Err(e) => {
-            explain_runpod_error(&e);
-            return Err(AlreadyReported.into());
+    let mut base_req = build_create_request(&create_opts, client, config).await?;
+
+    // Candidate DC list: user-pinned → resolved default → any DC with stock.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(dc) = &create_opts.datacenter {
+        candidates.push(dc.clone());
+    } else if let Some(dcs) = &base_req.data_center_ids {
+        candidates.extend(dcs.iter().cloned());
+    }
+    // Add remaining DCs by stock for this GPU, highest → lowest.
+    if candidates.len() < 3 {
+        let gpu_display = friendly_gpu_name(&base_req.gpu_type_ids[0]);
+        if let Ok(dcs) = client.datacenters().await {
+            let mut ranked: Vec<(String, u8)> = dcs
+                .into_iter()
+                .filter_map(|dc| {
+                    let stock = dc
+                        .gpu_availability
+                        .iter()
+                        .find(|g| g.display_name.eq_ignore_ascii_case(&gpu_display))
+                        .and_then(|g| g.stock_status.clone())
+                        .unwrap_or_default();
+                    let rank = match stock.as_str() {
+                        "High" => 3,
+                        "Medium" => 2,
+                        "Low" => 1,
+                        _ => 0,
+                    };
+                    if rank > 0 {
+                        Some((dc.id, rank))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            for (id, _) in ranked {
+                if !candidates.contains(&id) {
+                    candidates.push(id);
+                }
+            }
         }
-    };
-    // Persist state.
-    let mut state = load_state();
-    state.last_pod_id = Some(pod.id.clone());
-    state.last_pod_created_at = Some(now_epoch());
-    state.last_pod_last_used_at = Some(now_epoch());
-    state.last_pod_gpu = pod
-        .machine
-        .as_ref()
-        .and_then(|m| m.gpu_display_name.clone());
-    state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
-    let _ = save_state(&state);
-    let _ = append_history(&HistoryEntry {
-        pod_id: pod.id.clone(),
-        created_at: now_epoch(),
-        deleted_at: None,
-        cost_per_hr: pod.cost_per_hr,
-        gpu: pod
-            .machine
-            .as_ref()
-            .and_then(|m| m.gpu_display_name.clone())
-            .unwrap_or_default(),
-        model: opts.model.clone(),
-        prompt: Some(opts.prompt.clone()),
-    });
-    Ok(pod)
+    }
+    if candidates.is_empty() {
+        candidates.push(String::new());
+    }
+
+    print_create_plan(&base_req);
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, dc) in candidates.iter().enumerate() {
+        if !dc.is_empty() {
+            base_req.data_center_ids = Some(vec![dc.clone()]);
+        } else {
+            base_req.data_center_ids = None;
+        }
+        let label = if dc.is_empty() { "any DC" } else { dc };
+        println!(
+            "{} attempt {}/{} — {}",
+            theme::icon_info(),
+            idx + 1,
+            candidates.len(),
+            label.bold()
+        );
+        let pod = match with_spinner(
+            &format!("creating pod in {label}…"),
+            client.create_pod(&base_req),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{} create failed: {e}", theme::icon_warn());
+                last_err = Some(e);
+                continue;
+            }
+        };
+
+        // Persist *before* waiting so Ctrl-C during wait doesn't orphan the pod.
+        let mut state = load_state();
+        state.last_pod_id = Some(pod.id.clone());
+        state.last_pod_created_at = Some(now_epoch());
+        state.last_pod_last_used_at = Some(now_epoch());
+        state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
+        let _ = save_state(&state);
+        let _ = append_history(&HistoryEntry {
+            pod_id: pod.id.clone(),
+            created_at: now_epoch(),
+            deleted_at: None,
+            cost_per_hr: pod.cost_per_hr,
+            gpu: friendly_gpu_name(&base_req.gpu_type_ids[0]),
+            model: opts.model.clone(),
+            prompt: Some(opts.prompt.clone()),
+        });
+
+        match wait_for_schedule(client, &pod.id, 90).await {
+            Ok(scheduled) => {
+                println!(
+                    "{} scheduled on {} ({})",
+                    theme::icon_ok(),
+                    scheduled
+                        .machine
+                        .as_ref()
+                        .and_then(|m| m.gpu_display_name.clone())
+                        .unwrap_or_default(),
+                    scheduled
+                        .machine
+                        .as_ref()
+                        .and_then(|m| m.location.clone())
+                        .unwrap_or_default(),
+                );
+                return Ok(scheduled);
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} {} didn't schedule — deleting and trying next",
+                    theme::icon_warn(),
+                    pod.id
+                );
+                let _ = client.delete_pod(&pod.id).await;
+                mark_history_deleted(&pod.id);
+                let mut state = load_state();
+                state.last_pod_id = None;
+                let _ = save_state(&state);
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("no datacenters with schedulable capacity — try explicit --dc or --gpu")
+    }))
+}
+
+/// Poll the pod until it has been scheduled on a real machine.
+/// "Scheduled" means `runtime` is non-null AND `machine.gpuDisplayName` is set.
+async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u64) -> Result<Pod> {
+    use std::time::{Duration, Instant};
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(&format!(
+            "{{spinner:.{}}} waiting for machine assignment… {{elapsed_precise}} {{msg}}",
+            theme::SPINNER_STYLE
+        ))
+        .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+    let start = Instant::now();
+    loop {
+        match client.get_pod(pod_id).await {
+            Ok(pod) => {
+                let scheduled = pod.runtime.is_some()
+                    && pod
+                        .machine
+                        .as_ref()
+                        .and_then(|m| m.gpu_display_name.as_deref())
+                        .is_some_and(|s| !s.is_empty());
+                if scheduled {
+                    pb.finish_and_clear();
+                    return Ok(pod);
+                }
+                pb.set_message(format!(
+                    "status={} uptime={}s",
+                    pod.desired_status, pod.uptime_seconds
+                ));
+            }
+            Err(e) => {
+                pb.set_message(format!("probe error: {e}"));
+            }
+        }
+        if start.elapsed().as_secs() > timeout_secs {
+            pb.finish_and_clear();
+            bail!(
+                "pod {pod_id} did not schedule on a machine within {timeout_secs}s \
+                 (RunPod DC likely has no real capacity despite stock signal)"
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
@@ -1354,30 +1594,52 @@ async fn wait_for_mold(mold_host: &str, timeout_secs: u64) -> Result<()> {
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_default();
-    let url = format!("{mold_host}/api/status");
+    let status_url = format!("{mold_host}/api/status");
     let start = Instant::now();
     let pb = indicatif::ProgressBar::new_spinner();
     pb.set_style(
         indicatif::ProgressStyle::with_template(&format!(
-            "{{spinner:.{}}} waiting for mold server to boot… {{elapsed_precise}}",
+            "{{spinner:.{}}} waiting for mold server to boot… {{elapsed_precise}} {{msg}}",
             theme::SPINNER_STYLE
         ))
         .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
     loop {
-        if let Ok(r) = http.get(&url).send().await {
-            if r.status().is_success() {
-                pb.finish_and_clear();
-                println!("{} mold server ready", theme::icon_ok());
-                return Ok(());
+        // The real readiness test is whether `/api/status` returns JSON with
+        // a `version` field. Before the mold process is up, the RunPod
+        // Cloudflare proxy returns an empty 404 or 502. We need to see the
+        // actual mold server response, not the proxy's.
+        let progress = match http.get(&status_url).send().await {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) if v.get("version").is_some() => {
+                    pb.finish_and_clear();
+                    println!(
+                        "{} mold server {} ready",
+                        theme::icon_ok(),
+                        v.get("version").and_then(|x| x.as_str()).unwrap_or("?"),
+                    );
+                    return Ok(());
+                }
+                Ok(_) => "response missing version field".to_string(),
+                Err(_) => "non-JSON response".to_string(),
+            },
+            Ok(r) => format!("HTTP {}", r.status().as_u16()),
+            Err(e) => {
+                let s = e.to_string();
+                if s.len() > 40 {
+                    format!("{}…", &s[..40])
+                } else {
+                    s
+                }
             }
-        }
+        };
+        pb.set_message(format!("({progress})"));
         if start.elapsed().as_secs() > timeout_secs {
             pb.finish_and_clear();
             bail!(
-                "pod didn't become reachable after {timeout_secs}s — check {}",
-                url
+                "pod didn't become reachable after {timeout_secs}s — last probe: {progress} — check {}",
+                status_url
             );
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
