@@ -2018,11 +2018,52 @@ mod tests {
 }
 
 /// A gallery image entry returned by the server API.
+///
+/// Covers still images (png/jpg) and animated/video outputs (gif/apng/webp/mp4).
+/// `metadata` is synthesized from the filename when a file has no embedded
+/// `mold:parameters` chunk — callers should treat zero-valued fields
+/// (seed/steps/width/height) as "unknown" for those entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryImage {
     pub filename: String,
     pub metadata: OutputMetadata,
     pub timestamp: u64,
+    /// File format inferred from extension. Omitted for backwards compat when
+    /// the server doesn't populate it (older servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<OutputFormat>,
+    /// On-disk size in bytes, for UI display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// True when `metadata` was synthesized (no mold:parameters chunk found).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub metadata_synthetic: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Server-reported capabilities the SPA uses to decide which UI affordances
+/// to surface. Additive — clients that deserialize older responses simply
+/// see `None` for fields they don't know about. Opt-in destructive
+/// operations (like gallery delete) default to `false` so a client that
+/// forgets to check gets the safe behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GalleryCapabilities {
+    /// Whether `DELETE /api/gallery/image/:filename` is allowed by the
+    /// server configuration. Operators opt in via
+    /// `MOLD_GALLERY_ALLOW_DELETE=1` (combined with the existing API-key
+    /// middleware when the server is exposed beyond localhost).
+    pub can_delete: bool,
+}
+
+/// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
+/// the shape extensible — future areas (inpainting, upscaling modes, etc.)
+/// can add their own sub-structs without churning existing fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerCapabilities {
+    pub gallery: GalleryCapabilities,
 }
 
 /// Build a default output filename, sanitizing colons from model names.

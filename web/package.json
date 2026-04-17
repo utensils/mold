@@ -1,0 +1,26 @@
+{
+  "name": "mold-web",
+  "version": "0.7.1",
+  "private": true,
+  "type": "module",
+  "description": "Web gallery for the mold AI image/video generation server.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "fmt": "prettier --write .",
+    "fmt:check": "prettier --check ."
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "prettier": "^3.3.3",
+    "tailwindcss": "^4.2.0",
+    "typescript": "^5.6.3",
+    "vite": "^7.1.11",
+    "vue-tsc": "^3.0.4"
+  }
+}

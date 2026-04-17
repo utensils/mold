@@ -1,0 +1,98 @@
+# mold web gallery
+
+A small Vue 3 + Vite + Tailwind v4.2 SPA that serves as the browser-facing
+gallery for [mold](../). It talks to a running `mold serve` via the existing
+`/api/gallery`, `/api/gallery/image/:name`, `/api/gallery/thumbnail/:name`,
+and `DELETE /api/gallery/image/:name` endpoints.
+
+## Quick start
+
+```bash
+cd web
+bun install
+bun run dev          # http://localhost:5174 (proxies /api to :7680)
+```
+
+For remote GPU hosts:
+
+```bash
+MOLD_API_ORIGIN=http://hal9000:7680 bun run dev
+```
+
+## Production build
+
+```bash
+bun run build        # outputs to web/dist
+```
+
+Then either:
+
+- set `MOLD_WEB_DIR=$(pwd)/dist` on the server, or
+- copy `dist/` into `~/.mold/web` (or the installer-specific
+  `$XDG_DATA_HOME/mold/web`).
+
+The mold server resolves the bundle at startup and serves it as the SPA
+fallback — API routes (`/api/*`, `/health`, `/metrics`) take precedence
+because they are matched first by the axum router.
+
+## What you get
+
+- **Feed ↔ Grid toggle** in the header, persisted in `localStorage`.
+  **Feed** (default) is a Tumblr-style single-column stream — full-bleed
+  edge-to-edge cards on mobile, constrained reading width on desktop,
+  media rendered at its natural aspect ratio via `object-contain`. Full
+  resolution is loaded directly (no thumbnail stage) so HiDPI phones
+  show sharp images. **Grid** is a dense masonry (2 → 6 columns) with a
+  hover-reveal caption and `object-cover` tiles — good for scanning
+  thousands of items.
+- **Chunked rendering** — 40 items/page in feed mode, 150 in grid
+  (feed cards are taller). Loads more via an IntersectionObserver
+  sentinel 800 px from the bottom. Searching or switching modes
+  resets the window.
+- **Fallback chain** `thumbnail → full image → broken-file tile` means
+  truly unreadable files show a subtle red "can't render" card instead
+  of the browser's default broken-icon.
+- **Videos autoplay** while on-screen (loop + playsinline) and pause
+  automatically when you scroll past them. No hover required. A speaker
+  toggle in the header flips the global mute preference (persisted in
+  `localStorage`) — browsers require a user gesture before the first
+  unmuted autoplay, and clicking the toggle satisfies that, so every
+  subsequent in-view video plays with sound.
+- `<video>` uses the full-file URL as `src` and the thumbnail URL as
+  the static `poster` — `src` must be a video file, never a PNG.
+- **Search bar** (180 ms debounce) matches prompts, model names, and
+  filenames. All / Images / Video filter pills compose with it.
+- **Detail drawer** adapts to screen size:
+  - **Mobile** (< lg) — fullscreen media viewer. Swipe **down** for
+    the next (older) item, **up** for the previous. The top bar shows
+    close / `N / total` counter / details toggle. Metadata tucks away
+    behind the details toggle and pops up from the bottom as a sheet;
+    dismissible via backdrop tap, Esc, or re-tap.
+  - **Desktop** (lg+) — media pane + always-visible right sidebar with
+    the full metadata panel.
+  - Keyboard: Esc closes, ← / → or ↑ / ↓ or k / j to step through the
+    filtered list, `i` toggles the mobile sheet.
+  - Full `OutputMetadata` panel, prompt + seed copy-to-clipboard,
+    download. Delete is hidden unless the server advertises
+    `gallery.can_delete: true` via `/api/capabilities`.
+- **Supports every `OutputFormat`** the server can emit: PNG, JPEG,
+  GIF, APNG, WebP, MP4. MP4 thumbnails are real first-frame PNGs.
+- **Transparent mold logo** mirrored from the docs site at
+  `web/public/logo.png` — also used as the favicon / apple-touch-icon.
+
+## Server-side feature gates
+
+- `MOLD_GALLERY_ALLOW_DELETE=1` — required on the host to enable the
+  `DELETE /api/gallery/image/:filename` endpoint. Off by default. Pair
+  with `MOLD_API_KEY` when the server is reachable from outside
+  localhost. The SPA fetches `/api/capabilities` at mount and hides
+  the delete button when this isn't set.
+
+## Stack
+
+- Vue 3 composition API + TypeScript
+- Vite 7
+- Tailwind CSS v4.2 via `@tailwindcss/vite`
+
+No router, no state library — the feature is small enough that component
+refs and `watch` are plenty.

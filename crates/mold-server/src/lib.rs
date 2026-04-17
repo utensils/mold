@@ -9,6 +9,7 @@ pub mod rate_limit;
 pub mod request_id;
 pub mod routes;
 pub mod state;
+pub mod web_ui;
 
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_test;
@@ -159,6 +160,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     // is always accessible for monitoring scrapers (Prometheus, Grafana Agent, etc.).
     #[allow(unused_mut)]
     let mut app = routes::create_router(state)
+        .merge(web_ui::router())
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn_with_state(
