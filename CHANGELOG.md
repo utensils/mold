@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LTX-2.3 camera-control preset validation**: `--camera-control` preset aliases (`dolly-in`, `dolly-left`, `dolly-out`, `dolly-right`, `jib-down`, `jib-up`, `static`) now fail locally at the CLI layer with an explicit "Lightricks has not released camera-control LoRAs for LTX-2.3 yet" message when paired with an LTX-2.3 model, instead of failing server-side after the HTTP round-trip. Explicit `.safetensors` paths still work for LTX-2.3. `--camera-control` help text now documents the 19B-only preset limitation ([#227](https://github.com/utensils/mold/issues/227)).
 - **Remote pull progress bars dropped file names on completion**: completed download progress bars showed `done` as the prefix instead of the file name (e.g. `[1/20] config.json`), so only the in-flight file was identifiable. Completed bars now keep their `[i/N] <filename>` label both during and after download ([#223](https://github.com/utensils/mold/issues/223)).
+
 
 ## [0.7.1] - 2026-04-16
 
