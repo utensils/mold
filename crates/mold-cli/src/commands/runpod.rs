@@ -1444,7 +1444,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     }
                 })
                 .collect();
-            ranked.sort_by(|a, b| b.1.cmp(&a.1));
+            ranked.sort_by_key(|entry| std::cmp::Reverse(entry.1));
             for (id, _) in ranked {
                 if !candidates.contains(&id) {
                     candidates.push(id);
