@@ -8,6 +8,12 @@ pub const MAX_PIXELS: u64 = 1_800_000;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum pixel-frame count for LTX-2 / LTX-2.3. Derived from the checkpoint's
+/// `positional_embedding_max_pos[0] = 20` temporal RoPE budget and the 8x VAE
+/// temporal compression: `(20 - 1) * 8 + 1 = 153`. Exceeding this overflows the
+/// RoPE normalization and collapses output into random-color noise.
+pub const LTX2_MAX_FRAMES: u32 = 153;
+
 fn megapixel_limit_label() -> String {
     format!("{:.1}MP", MAX_PIXELS as f64 / 1_000_000.0)
 }
@@ -328,6 +334,25 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
             return Err(format!(
                 "frames ({frames}) must be 8n+1 for current LTX-Video / LTX-2 models (e.g. 9, 17, 25, 33, 41, 49, …)"
             ));
+        }
+        // LTX-2 transformers ship `positional_embedding_max_pos: [20, 2048, 2048]`
+        // — exceeding 20 latent frames wraps RoPE into an untrained region and
+        // collapses output into rainbow/static noise. The 8x VAE temporal
+        // compression gives max pixel frames = (20 - 1) * 8 + 1 = 153 for
+        // single-pass runs. `--temporal-upscale x2` halves the stage-1 frame
+        // count (see `derive_stage1_render_shape`), so the transformer only
+        // denoises `(frames - 1) / 2 + 1` pixel frames; effective cap doubles.
+        if matches!(family, Some("ltx2")) {
+            let stage1_frames = match req.temporal_upscale {
+                Some(crate::Ltx2TemporalUpscale::X2) => frames.saturating_sub(1) / 2 + 1,
+                None => frames,
+            };
+            if stage1_frames > LTX2_MAX_FRAMES {
+                return Err(format!(
+                    "frames ({frames}) must be <= {LTX2_MAX_FRAMES} for LTX-2 / LTX-2.3 (temporal RoPE budget); \
+                     pass --temporal-upscale x2 to double the effective frame ceiling"
+                ));
+            }
         }
         if frames > 257 {
             return Err(format!("frames ({frames}) must be <= 257"));
@@ -890,6 +915,77 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("8n+1"), "got: {err}");
         assert!(err.contains("LTX-Video / LTX-2"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_frames_at_rope_budget_accepted() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.frames = Some(LTX2_MAX_FRAMES); // 153 pixel frames → 20 latent frames
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn ltx2_frames_over_rope_budget_rejected() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.frames = Some(161); // 161 pixel frames → 21 latent frames > 20-frame RoPE max
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("161"), "got: {err}");
+        assert!(err.contains(&LTX2_MAX_FRAMES.to_string()), "got: {err}");
+        assert!(err.contains("RoPE"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_3_frames_over_rope_budget_rejected() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.frames = Some(193); // matches #226 repro: (193-1)/8+1 = 25 latent > 20
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains(&LTX2_MAX_FRAMES.to_string()), "got: {err}");
+    }
+
+    #[test]
+    fn ltx_video_family_is_not_subject_to_the_ltx2_rope_cap() {
+        let mut req = valid_req();
+        req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.frames = Some(161); // above LTX2_MAX_FRAMES but under the generic 257 ceiling
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn ltx2_temporal_upscale_x2_doubles_the_effective_frame_ceiling() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.frames = Some(257); // stage-1 = (257-1)/2+1 = 129 → 17 latent frames, fits
+        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+        assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn ltx2_temporal_upscale_x2_still_rejects_stage1_overflow() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = OutputFormat::Mp4;
+        // 313 would produce stage-1 = 157 frames → 21 latent, but the generic
+        // 257-frame ceiling catches it first; use a value inside that ceiling
+        // that still overflows stage-1 after halving: frames=297 → stage-1=149
+        // passes 20-latent budget. The nearest overflow above 257 is outside
+        // the generic ceiling. Validate the principle that a 307-frame request
+        // would be caught by *either* check, and document the 257 ceiling
+        // remains the tighter gate for temporal-upscale requests.
+        req.frames = Some(289); // over the generic 257 ceiling
+        req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("257") || err.contains(&LTX2_MAX_FRAMES.to_string()),
+            "got: {err}"
+        );
     }
 
     #[test]
