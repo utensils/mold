@@ -244,6 +244,11 @@ Examples:
         temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
 
         /// Camera-control LoRA preset name or .safetensors path.
+        ///
+        /// Preset aliases (dolly-in, dolly-left, dolly-out, dolly-right,
+        /// jib-down, jib-up, static) currently resolve only Lightricks' LTX-2
+        /// 19B LoRAs; LTX-2.3 has no published presets yet, so use an explicit
+        /// .safetensors path for LTX-2.3.
         #[arg(long, help_heading = "Video")]
         camera_control: Option<String>,
 
