@@ -371,6 +371,7 @@ pub async fn run_datacenters(gpu_filter: Option<String>, json: bool) -> Result<(
 
 /// `mold runpod list [--json]` — list pods.
 pub async fn run_list(json: bool) -> Result<()> {
+    reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -473,6 +474,7 @@ fn print_pod_detail(pod: &Pod) {
 
 /// `mold runpod usage [--since 7d] [--json]` — show spend summary.
 pub async fn run_usage(since: Option<String>, json: bool) -> Result<()> {
+    reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -823,6 +825,7 @@ fn short_timestamp() -> String {
 
 /// `mold runpod create` — create a new pod.
 pub async fn run_create(opts: CreateOptions) -> Result<()> {
+    reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -832,6 +835,9 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
     };
     let config = Config::load_or_default();
     let req = build_create_request(&opts, &client, &config).await?;
+    if !opts.dry_run {
+        enforce_cost_alert(&client, &config).await?;
+    }
 
     if opts.dry_run {
         if opts.json {
@@ -1142,6 +1148,7 @@ pub struct RunOptions {
 /// `mold runpod run "<prompt>"` — end-to-end: reuse warm pod or create one,
 /// generate, save to local repo, park (or delete with --keep).
 pub async fn run_run(opts: RunOptions) -> Result<()> {
+    reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -1174,20 +1181,37 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     let filename = format!("runpod-{}-{}.png", pod.id, short_timestamp());
     let output_path = opts.output_dir.join(&filename);
 
-    // Build a minimal request and stream.
+    // Build a request using per-model defaults from config. This mirrors
+    // the behaviour of `commands::run` so `mold runpod run` and local
+    // `mold run` produce the same image for the same inputs.
     let model = opts
         .model
         .clone()
         .or_else(|| Some(config.default_model.clone()))
         .unwrap_or_else(|| "flux2-klein:q8".into());
+    let model_cfg = config.models.get(&model).cloned().unwrap_or_default();
+    let effective_guidance = model_cfg.effective_guidance();
+    let effective_width = opts
+        .width
+        .unwrap_or_else(|| model_cfg.effective_width(&config));
+    let effective_height = opts
+        .height
+        .unwrap_or_else(|| model_cfg.effective_height(&config));
+    let effective_steps = opts
+        .steps
+        .unwrap_or_else(|| model_cfg.default_steps.unwrap_or(config.default_steps));
+    let negative_prompt = model_cfg
+        .negative_prompt
+        .clone()
+        .or_else(|| config.default_negative_prompt.clone());
     let req = mold_core::GenerateRequest {
         prompt: opts.prompt.clone(),
-        negative_prompt: None,
+        negative_prompt,
         model,
-        width: opts.width.unwrap_or(config.default_width),
-        height: opts.height.unwrap_or(config.default_height),
-        steps: opts.steps.unwrap_or(config.default_steps),
-        guidance: 0.0,
+        width: effective_width,
+        height: effective_height,
+        steps: effective_steps,
+        guidance: effective_guidance,
         seed: opts.seed,
         batch_size: 1,
         output_format: mold_core::OutputFormat::Png,
@@ -1303,14 +1327,114 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
             format!("mold runpod delete {}", pod.id).bold()
         );
     } else {
-        println!(
-            "{} pod {} left warm for reuse. Idle reap in {} min.",
-            theme::icon_info(),
-            pod.id,
-            config.runpod.auto_teardown_idle_mins
-        );
+        let idle = config.runpod.auto_teardown_idle_mins;
+        if idle > 0 {
+            println!(
+                "{} pod {} parked for reuse — auto-deleted on next {} invocation \
+                 if idle > {} min",
+                theme::icon_info(),
+                pod.id,
+                "mold runpod".bold(),
+                idle,
+            );
+        } else {
+            println!(
+                "{} pod {} parked for reuse — delete with {}",
+                theme::icon_info(),
+                pod.id,
+                format!("mold runpod delete {}", pod.id).bold()
+            );
+        }
     }
     Ok(())
+}
+
+/// Check the session spend against `runpod.cost_alert_usd` and abort with a
+/// clear error if exceeded. `0.0` (the default) disables the guard. Uses the
+/// same "active pods × hourly rate × uptime" calculation as `mold runpod usage`.
+pub async fn enforce_cost_alert(client: &RunPodClient, config: &Config) -> Result<()> {
+    let threshold = config.runpod.cost_alert_usd;
+    if threshold <= 0.0 {
+        return Ok(());
+    }
+    let Ok(pods) = client.list_pods().await else {
+        return Ok(());
+    };
+    let session_spend: f64 = pods
+        .iter()
+        .map(|p| p.cost_per_hr * (p.uptime_seconds as f64 / 3600.0))
+        .sum();
+    if session_spend >= threshold {
+        eprintln!(
+            "{} cost alert: session spend ${:.2} reached threshold ${:.2} \
+             ({} active pods). Aborting.",
+            theme::prefix_error(),
+            session_spend,
+            threshold,
+            pods.len()
+        );
+        eprintln!(
+            "       {} increase with {} or delete pods with {}",
+            theme::prefix_hint(),
+            "mold config set runpod.cost_alert_usd <N>".bold(),
+            "mold runpod list".bold(),
+        );
+        return Err(AlreadyReported.into());
+    }
+    Ok(())
+}
+
+/// Lazy idle-reap: if the warm pod has been idle longer than
+/// `runpod.auto_teardown_idle_mins`, delete it. Called by every
+/// mutating runpod subcommand so users don't pay for abandoned pods.
+///
+/// Returns `true` if a pod was reaped.
+pub async fn reap_idle_warm_pod_if_needed() -> bool {
+    let config = Config::load_or_default();
+    let idle_mins = config.runpod.auto_teardown_idle_mins;
+    if idle_mins == 0 {
+        return false;
+    }
+    let state = load_state();
+    let Some(pod_id) = state.last_pod_id.clone() else {
+        return false;
+    };
+    let Some(last_used) = state.last_pod_last_used_at else {
+        return false;
+    };
+    let idle_secs = now_epoch().saturating_sub(last_used);
+    if idle_secs < (idle_mins as u64) * 60 {
+        return false;
+    }
+    // Idle window exceeded — delete.
+    let Ok(client) = build_client() else {
+        return false;
+    };
+    // Verify the pod still exists + is running (not already gone).
+    let Ok(pod) = client.get_pod(&pod_id).await else {
+        // Already gone — clear stale state.
+        let mut state = state;
+        state.last_pod_id = None;
+        state.last_pod_last_used_at = None;
+        let _ = save_state(&state);
+        return false;
+    };
+    if pod.desired_status != "RUNNING" {
+        return false;
+    }
+    eprintln!(
+        "{} reaping idle warm pod {} (unused for {}m)",
+        theme::icon_info(),
+        pod_id,
+        idle_secs / 60,
+    );
+    let _ = client.delete_pod(&pod_id).await;
+    mark_history_deleted(&pod_id);
+    let mut state = state;
+    state.last_pod_id = None;
+    state.last_pod_last_used_at = None;
+    let _ = save_state(&state);
+    true
 }
 
 fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
@@ -1378,6 +1502,8 @@ fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
 }
 
 async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
+    // Abort before any billable action if session spend exceeds the guard.
+    enforce_cost_alert(client, config).await?;
     // 1. Warm pod? Only reuse if actually scheduled on a machine.
     let state = load_state();
     if let Some(id) = state.last_pod_id.clone() {
@@ -1413,8 +1539,13 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     //     what the scheduler can actually place. Letting RunPod pick is the
     //     most reliable first attempt.
     let mut candidates: Vec<String> = Vec::new();
-    let user_pinned = create_opts.datacenter.is_some();
+    let user_pinned =
+        create_opts.datacenter.is_some() || config.runpod.default_datacenter.is_some();
     if let Some(dc) = &create_opts.datacenter {
+        candidates.push(dc.clone());
+    } else if let Some(dc) = &config.runpod.default_datacenter {
+        // Config-pinned DC is honored — ensures pods land in the region
+        // where the attached network volume lives.
         candidates.push(dc.clone());
     } else {
         // Try "any DC" first.
@@ -1653,23 +1784,13 @@ pub fn complete_pod_id() -> Vec<CompletionCandidate> {
     if let Some(id) = state.last_pod_id {
         out.push(CompletionCandidate::new(id));
     }
-    // Live query (synchronous via tokio::runtime::Handle::block_on is
-    // problematic in async contexts — skip if we can't)
-    if let Ok(client) = build_client() {
-        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            if let Ok(pods) = rt.block_on(client.list_pods()) {
-                for p in pods {
-                    if !out.iter().any(|c| c.get_value().to_string_lossy() == p.id) {
-                        let display = format!("{} ({})", p.id, p.name.clone().unwrap_or_default());
-                        out.push(CompletionCandidate::new(p.id).help(Some(display.into())));
-                    }
-                }
-            }
-        }
-    }
+    // A live API call would be nicer, but completions run inside the
+    // #[tokio::main] runtime (CompleteEnv::complete() is called early in
+    // main), and block_on from there deadlocks. Running list_pods on a
+    // fresh std::thread + mini-runtime works but makes every tab-press
+    // hit the network. For now we stick with the persisted warm pod id,
+    // which is populated whenever the user `create`s or `run`s a pod.
+    // Users can always see live pods with `mold runpod list` and copy-paste.
     out
 }
 
