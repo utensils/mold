@@ -38,7 +38,7 @@ path = "src/bin/ltx2_vae_probe.rs"
 required-features = ["dev-bins", "mp4"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.7.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.10" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.10" }

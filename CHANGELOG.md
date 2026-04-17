@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-17
+
+*Native RunPod CLI, web gallery UI, and hardening across the board.*
+
 ### Added
 
 - **Native RunPod support via `mold runpod` subcommand tree**: manage RunPod cloud GPU pods end-to-end from the same `mold` binary. `mold runpod run "<prompt>"` creates a pod with smart defaults (cheapest GPU with enough VRAM for the requested model, matching GHCR image tag, automatic DC fallback when scheduling stalls), waits for the mold server to boot, streams generation progress over SSE, and saves the result to `./mold-outputs/`. Full subcommand surface: `doctor`, `gpus`, `datacenters`, `list`, `get`, `create`, `stop`, `start`, `delete`, `connect`, `logs`, `usage`, `run`. Adds a `[runpod]` config section (`api_key`, `default_gpu`, `default_datacenter`, `default_network_volume_id`, `auto_teardown`, `auto_teardown_idle_mins`, `cost_alert_usd`, `endpoint`), `RUNPOD_API_KEY` env precedence, dynamic shell completion for pod/gpu/datacenter/cloud-type arguments, and spend history in `~/.mold/runpod-history.jsonl`. NixOS module gains a `runpodApiKeyFile` option that mirrors the existing `hfTokenFile`/`apiKeyFile` secret-loader pattern.
@@ -421,7 +425,9 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/utensils/mold/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/utensils/mold/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/utensils/mold/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/utensils/mold/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/utensils/mold/compare/v0.6.1...v0.6.2
