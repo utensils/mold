@@ -198,12 +198,12 @@ Examples:
         #[arg(long)]
         json: bool,
     },
-    /// Delete a pod (irreversible)
+    /// Delete a pod (irreversible, no confirmation)
     Delete {
         #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
         pod_id: String,
-        /// Skip interactive confirmation
-        #[arg(long, short = 'f')]
+        /// No-op retained for backward compatibility — delete is always non-interactive.
+        #[arg(long, short = 'f', hide = true)]
         force: bool,
         #[arg(long)]
         json: bool,

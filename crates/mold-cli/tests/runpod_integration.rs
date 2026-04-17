@@ -146,15 +146,16 @@ fn runpod_config_list_includes_runpod_section() {
 }
 
 #[test]
-fn runpod_delete_rejects_interactive_no_stdin() {
-    // When stdin isn't a TTY, confirmation defaults to no.
+fn runpod_delete_runs_without_confirmation() {
+    // Delete takes no confirmation — passing an explicit pod id is enough
+    // signal. With a fake API key + unreachable host this will fail the
+    // network call, but the CLI should NOT bail out at the confirm step.
     let env = TestEnv::new();
     env.cmd()
         .env("RUNPOD_API_KEY", "fake-test-key")
         .args(["runpod", "delete", "fake-pod-id"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("cancelled"));
+        .stdout(predicate::str::contains("cancelled").not());
 }
 
 #[test]

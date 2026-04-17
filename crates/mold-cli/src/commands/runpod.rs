@@ -309,6 +309,35 @@ fn is_interesting_gpu(display: &str) -> bool {
         || d.contains("3090")
 }
 
+/// VRAM capacity (GB) for GPUs we care about. Used when picking a default
+/// GPU that has enough headroom for the requested model.
+fn gpu_vram_gb(display: &str) -> Option<u32> {
+    let d = display.to_lowercase();
+    if d.contains("h100") || d.contains("a100") {
+        Some(80)
+    } else if d.contains("l40") || d.contains("a6000") {
+        Some(48)
+    } else if d.contains("5090") {
+        Some(32)
+    } else if d.contains("4090") || d.contains("3090") {
+        Some(24)
+    } else {
+        None
+    }
+}
+
+/// Estimated peak VRAM requirement for a model, in GB. Combines manifest
+/// weight size with a multiplier for activations + KV cache + image latents.
+/// Returns `None` for unknown models — falls back to the legacy preference.
+fn estimated_vram_need_gb(model_name: &str) -> Option<u32> {
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    let manifest = mold_core::manifest::find_manifest(&resolved)?;
+    // Headroom: weights ≈ 55% of peak VRAM during inference once text
+    // encoder + latents + workspace are co-resident, so scale by ~1.8.
+    let need = (manifest.total_size_gb() * 1.8).ceil() as u32;
+    Some(need.max(12))
+}
+
 fn color_stock(stock: &str) -> String {
     match stock.to_lowercase().as_str() {
         "high" => stock.green().to_string(),
@@ -691,24 +720,56 @@ async fn resolve_gpu(
         let resolved = normalize_gpu_id(&gpu);
         return Ok((resolved.clone(), friendly_gpu_name(&resolved)));
     }
-    // Smart default — query stock and pick the best available.
     let gpus = client.gpu_types().await?;
-    // Preference order: 4090 > 5090 > L40S > A100 (cheapest → most headroom)
-    for preferred in ["RTX 4090", "RTX 5090", "L40S", "A100 PCIe", "A100 SXM"] {
-        if let Some(g) = gpus.iter().find(|g| g.display_name == preferred) {
+
+    // If a model is requested, size the GPU to its VRAM need. LTX-2 22B fp8
+    // doesn't fit on a 24GB 4090 once the encoder + latents + image are
+    // resident, so we bump up to a 5090/L40S automatically.
+    let need = opts
+        .model
+        .as_deref()
+        .and_then(estimated_vram_need_gb)
+        .unwrap_or(18); // FLUX/SDXL-size default
+
+    // Preference: cheapest GPU that (a) has enough VRAM and (b) has stock.
+    // Ordering is by ascending VRAM so we don't overshoot on small models.
+    let ranked: &[&str] = &[
+        "RTX 4090",
+        "RTX 3090",
+        "RTX 5090",
+        "L40",
+        "L40S",
+        "RTX A6000",
+        "A100 PCIe",
+        "A100 SXM",
+        "H100 NVL",
+        "H100 SXM",
+    ];
+    for preferred in ranked {
+        let vram = gpu_vram_gb(preferred).unwrap_or(0);
+        if vram < need {
+            continue;
+        }
+        if let Some(g) = gpus.iter().find(|g| g.display_name == *preferred) {
             let stock = g.stock_status.as_deref().unwrap_or("");
             if matches!(stock, "High" | "Medium") {
                 return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
             }
         }
     }
-    // Fallback: anything with High stock.
+    // Fallback: any interesting GPU with High stock + enough VRAM.
     for g in &gpus {
-        if g.stock_status.as_deref() == Some("High") && is_interesting_gpu(&g.display_name) {
+        if g.stock_status.as_deref() == Some("High")
+            && is_interesting_gpu(&g.display_name)
+            && gpu_vram_gb(&g.display_name).unwrap_or(0) >= need
+        {
             return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
         }
     }
-    bail!("no GPUs with High or Medium stock available — try explicit --gpu")
+    bail!(
+        "no GPUs with ≥{need}GB VRAM and High/Medium stock — try explicit --gpu \
+         (model estimated to need {need}GB)"
+    )
 }
 
 async fn resolve_datacenter(
@@ -984,11 +1045,10 @@ pub async fn run_start(pod_id: String, json: bool) -> Result<()> {
 }
 
 /// `mold runpod delete <pod-id> [--force]` — delete a pod.
-pub async fn run_delete(pod_id: String, force: bool, json: bool) -> Result<()> {
-    if !force && !confirm(&format!("Delete pod {pod_id}? (billing stops)"))? {
-        println!("{} cancelled", theme::icon_neutral());
-        return Ok(());
-    }
+///
+/// No interactive confirmation: passing an explicit pod id is enough signal
+/// of intent. `--force` is retained as a no-op alias for backward compat.
+pub async fn run_delete(pod_id: String, _force: bool, json: bool) -> Result<()> {
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -1047,25 +1107,6 @@ fn mark_history_deleted(pod_id: &str) {
     }
     let _ = std::fs::write(&path, buf);
 }
-
-fn confirm(msg: &str) -> Result<bool> {
-    use std::io::{self, BufRead as _, Write as _};
-    // If stdin isn't a TTY, default to no.
-    if !std::io::stdin().is_terminal() {
-        eprintln!(
-            "{} {msg} (non-interactive stdin — refusing)",
-            theme::prefix_warning()
-        );
-        return Ok(false);
-    }
-    eprint!("{msg} [y/N] ");
-    io::stderr().flush().ok();
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
-}
-
-use std::io::IsTerminal as _;
 
 /// `mold runpod connect <pod-id>` — print an `export MOLD_HOST=…` snippet.
 pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
@@ -1501,21 +1542,53 @@ fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
     }
 }
 
+/// Outcome of racing `wait_for_schedule` against Ctrl-C.
+enum WaitOutcome {
+    Scheduled(Box<Pod>),
+    Cancelled,
+    Failed(anyhow::Error),
+}
+
 async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -> Result<Pod> {
     // Abort before any billable action if session spend exceeds the guard.
     enforce_cost_alert(client, config).await?;
-    // 1. Warm pod? Only reuse if actually scheduled on a machine.
+    // 1. Warm pod? Only reuse if actually scheduled on a machine. If a
+    //    previous run saved a pod id that never scheduled (e.g. Ctrl-C
+    //    during wait) delete it before we create a new one — otherwise it
+    //    keeps billing as an orphan.
     let state = load_state();
     if let Some(id) = state.last_pod_id.clone() {
-        if let Ok(pod) = client.get_pod(&id).await {
-            let scheduled = pod.runtime.is_some()
-                && pod
-                    .machine
-                    .as_ref()
-                    .and_then(|m| m.gpu_display_name.as_deref())
-                    .is_some_and(|s| !s.is_empty());
-            if pod.desired_status == "RUNNING" && scheduled {
-                return Ok(pod);
+        match client.get_pod(&id).await {
+            Ok(pod) => {
+                let scheduled = pod.runtime.is_some()
+                    && pod
+                        .machine
+                        .as_ref()
+                        .and_then(|m| m.gpu_display_name.as_deref())
+                        .is_some_and(|s| !s.is_empty());
+                if pod.desired_status == "RUNNING" && scheduled {
+                    return Ok(pod);
+                }
+                // Unusable stale pod — kill it so we don't leak billing.
+                eprintln!(
+                    "{} stale pod {} in state (never scheduled) — deleting",
+                    theme::icon_warn(),
+                    id
+                );
+                let _ = client.delete_pod(&id).await;
+                mark_history_deleted(&id);
+                let mut state = load_state();
+                state.last_pod_id = None;
+                state.last_pod_last_used_at = None;
+                let _ = save_state(&state);
+            }
+            Err(_) => {
+                // API lookup failed — clear the state entry so we don't
+                // keep trying the same missing id.
+                let mut state = load_state();
+                state.last_pod_id = None;
+                state.last_pod_last_used_at = None;
+                let _ = save_state(&state);
             }
         }
     }
@@ -1632,8 +1705,16 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
             prompt: Some(opts.prompt.clone()),
         });
 
-        match wait_for_schedule(client, &pod.id, 90).await {
-            Ok(scheduled) => {
+        let outcome = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => WaitOutcome::Cancelled,
+            res = wait_for_schedule(client, &pod.id, 90) => match res {
+                Ok(scheduled) => WaitOutcome::Scheduled(Box::new(scheduled)),
+                Err(e) => WaitOutcome::Failed(e),
+            },
+        };
+        match outcome {
+            WaitOutcome::Scheduled(scheduled) => {
                 println!(
                     "{} scheduled on {} ({})",
                     theme::icon_ok(),
@@ -1648,9 +1729,22 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                         .and_then(|m| m.location.clone())
                         .unwrap_or_default(),
                 );
-                return Ok(scheduled);
+                return Ok(*scheduled);
             }
-            Err(e) => {
+            WaitOutcome::Cancelled => {
+                eprintln!(
+                    "\n{} cancelled — deleting {} to stop billing",
+                    theme::icon_warn(),
+                    pod.id
+                );
+                let _ = client.delete_pod(&pod.id).await;
+                mark_history_deleted(&pod.id);
+                let mut state = load_state();
+                state.last_pod_id = None;
+                let _ = save_state(&state);
+                bail!("interrupted by user");
+            }
+            WaitOutcome::Failed(e) => {
                 eprintln!(
                     "{} {} didn't schedule — deleting and trying next",
                     theme::icon_warn(),
@@ -1670,8 +1764,14 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     }))
 }
 
-/// Poll the pod until it has been scheduled on a real machine.
-/// "Scheduled" means `runtime` is non-null AND `machine.gpuDisplayName` is set.
+/// Poll the pod until it's actually scheduled on a machine. Because RunPod
+/// REST v1 doesn't reliably populate `runtime` / `machine.gpuDisplayName`
+/// (we've seen `status=RUNNING uptime=0` persist on a fully booted pod),
+/// we treat any of these as "scheduled":
+///   * `uptime_seconds > 0`
+///   * `runtime` is non-null with a populated `gpuDisplayName`
+///   * the public proxy `https://<id>-7680.proxy.runpod.net/api/status`
+///     responds at all (DNS + edge routing only land once scheduled)
 async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u64) -> Result<Pod> {
     use std::time::{Duration, Instant};
     let pb = indicatif::ProgressBar::new_spinner();
@@ -1683,17 +1783,28 @@ async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u6
         .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
+    let probe_url = format!("https://{pod_id}-7680.proxy.runpod.net/api/status");
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
     let start = Instant::now();
     loop {
-        match client.get_pod(pod_id).await {
+        // Racing both signals makes us robust to either source going silent.
+        let (rest, proxy) = tokio::join!(
+            client.get_pod(pod_id),
+            http.get(&probe_url).send(),
+        );
+        let proxy_reached = proxy.is_ok();
+        match rest {
             Ok(pod) => {
-                let scheduled = pod.runtime.is_some()
-                    && pod
+                let rest_scheduled = pod.uptime_seconds > 0
+                    || pod
                         .machine
                         .as_ref()
                         .and_then(|m| m.gpu_display_name.as_deref())
                         .is_some_and(|s| !s.is_empty());
-                if scheduled {
+                if rest_scheduled || proxy_reached {
                     pb.finish_and_clear();
                     return Ok(pod);
                 }
@@ -1703,6 +1814,13 @@ async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u6
                 ));
             }
             Err(e) => {
+                if proxy_reached {
+                    // Proxy can see it — trust that.
+                    pb.finish_and_clear();
+                    if let Ok(pod) = client.get_pod(pod_id).await {
+                        return Ok(pod);
+                    }
+                }
                 pb.set_message(format!("probe error: {e}"));
             }
         }
