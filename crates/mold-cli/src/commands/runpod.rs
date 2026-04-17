@@ -978,19 +978,16 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
         }
     };
 
-    // Persist warm-pod state + history entry.
+    // Manually-created pods are tracked in history for spend reporting,
+    // but NOT enrolled as the warm `last_pod_id`. The idle reaper only
+    // cleans up pods that `mold runpod run` parked for reuse — pods the
+    // user explicitly created should only be deleted when the user says
+    // so (`mold runpod delete <id>`).
     let gpu_display = pod
         .machine
         .as_ref()
         .and_then(|m| m.gpu_display_name.clone())
         .unwrap_or_else(|| friendly_gpu_name(&req.gpu_type_ids[0]));
-    let mut state = load_state();
-    state.last_pod_id = Some(pod.id.clone());
-    state.last_pod_created_at = Some(now_epoch());
-    state.last_pod_last_used_at = Some(now_epoch());
-    state.last_pod_gpu = Some(gpu_display.clone());
-    state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
-    let _ = save_state(&state);
     let _ = append_history(&HistoryEntry {
         pod_id: pod.id.clone(),
         created_at: now_epoch(),
@@ -1676,34 +1673,99 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     if let Some(id) = state.last_pod_id.clone() {
         match client.get_pod(&id).await {
             Ok(pod) if pod.desired_status == "RUNNING" => {
-                // REST v1 can leave `runtime` / `machine.gpu_display_name`
-                // unpopulated on fully-booted pods (same reason we had to
-                // rework `wait_for_schedule`). Don't use those as a
-                // usability test — instead probe the proxy directly. If
-                // the proxy answers at all, the pod is scheduled and
-                // routable, which is all we need.
-                let proxy_url = format!("https://{id}-7680.proxy.runpod.net/api/status");
-                let http = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()
+                // Respect explicit overrides before reuse. If the user
+                // passed --gpu or --dc (or pinned one via config), the
+                // warm pod has to match, otherwise a fresh provision is
+                // strictly what was asked for.
+                let warm_gpu = pod
+                    .machine
+                    .as_ref()
+                    .and_then(|m| m.gpu_display_name.clone())
+                    .or_else(|| state.last_pod_gpu.clone())
                     .unwrap_or_default();
-                if http.get(&proxy_url).send().await.is_ok() {
-                    return Ok(pod);
+                let warm_dc = pod
+                    .machine
+                    .as_ref()
+                    .and_then(|m| m.location.clone())
+                    .unwrap_or_default();
+                let want_gpu = opts
+                    .create
+                    .gpu
+                    .clone()
+                    .or_else(|| config.runpod.default_gpu.clone());
+                let want_dc = opts
+                    .create
+                    .datacenter
+                    .clone()
+                    .or_else(|| config.runpod.default_datacenter.clone());
+                let gpu_mismatch = want_gpu
+                    .as_deref()
+                    .map(normalize_gpu_id)
+                    .map(|want| {
+                        let warm_id = normalize_gpu_id(&warm_gpu);
+                        !warm_id.is_empty()
+                            && !warm_id.eq_ignore_ascii_case(&want)
+                            && !warm_gpu.eq_ignore_ascii_case(want.as_str())
+                    })
+                    .unwrap_or(false);
+                let dc_mismatch = want_dc
+                    .as_deref()
+                    .map(|want| !warm_dc.is_empty() && !warm_dc.eq_ignore_ascii_case(want))
+                    .unwrap_or(false);
+                if gpu_mismatch || dc_mismatch {
+                    eprintln!(
+                        "{} warm pod {} is {}{} but --gpu/--dc asks for {}{} — \
+                         deleting warm pod and provisioning fresh",
+                        theme::icon_warn(),
+                        id,
+                        warm_gpu,
+                        if warm_dc.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({warm_dc})")
+                        },
+                        want_gpu.clone().unwrap_or_else(|| "(any)".into()),
+                        want_dc
+                            .clone()
+                            .map(|d| format!(" ({d})"))
+                            .unwrap_or_default(),
+                    );
+                    let _ = client.delete_pod(&id).await;
+                    mark_history_deleted(&id);
+                    let mut state = load_state();
+                    state.last_pod_id = None;
+                    state.last_pod_last_used_at = None;
+                    let _ = save_state(&state);
+                } else {
+                    // REST v1 can leave `runtime` / `machine.gpu_display_name`
+                    // unpopulated on fully-booted pods (same reason we had
+                    // to rework `wait_for_schedule`). Don't use those as a
+                    // usability test — instead probe the proxy directly.
+                    // If the proxy answers at all, the pod is scheduled
+                    // and routable, which is all we need.
+                    let proxy_url = format!("https://{id}-7680.proxy.runpod.net/api/status");
+                    let http = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()
+                        .unwrap_or_default();
+                    if http.get(&proxy_url).send().await.is_ok() {
+                        return Ok(pod);
+                    }
+                    // Running according to RunPod but the proxy isn't
+                    // answering — treat as stale, kill it to avoid leaked
+                    // billing.
+                    eprintln!(
+                        "{} stale pod {} (not reachable via proxy) — deleting",
+                        theme::icon_warn(),
+                        id
+                    );
+                    let _ = client.delete_pod(&id).await;
+                    mark_history_deleted(&id);
+                    let mut state = load_state();
+                    state.last_pod_id = None;
+                    state.last_pod_last_used_at = None;
+                    let _ = save_state(&state);
                 }
-                // Running according to RunPod but the proxy isn't
-                // answering — treat as stale, kill it to avoid leaked
-                // billing.
-                eprintln!(
-                    "{} stale pod {} (not reachable via proxy) — deleting",
-                    theme::icon_warn(),
-                    id
-                );
-                let _ = client.delete_pod(&id).await;
-                mark_history_deleted(&id);
-                let mut state = load_state();
-                state.last_pod_id = None;
-                state.last_pod_last_used_at = None;
-                let _ = save_state(&state);
             }
             Ok(_) => {
                 // Non-RUNNING state (STOPPED, EXITED, TERMINATED…) — kill
@@ -1745,14 +1807,25 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
     //     what the scheduler can actually place. Letting RunPod pick is the
     //     most reliable first attempt.
     let mut candidates: Vec<String> = Vec::new();
-    let user_pinned =
-        create_opts.datacenter.is_some() || config.runpod.default_datacenter.is_some();
+    // Any DC baked into the request by `build_create_request` (e.g. from
+    // an attached network volume) is authoritative — we MUST pin to it
+    // or the pod create will fail with a volume/DC mismatch.
+    let volume_pinned_dc: Option<String> = base_req
+        .data_center_ids
+        .as_ref()
+        .and_then(|v| v.first().cloned());
+    let user_pinned = create_opts.datacenter.is_some()
+        || config.runpod.default_datacenter.is_some()
+        || volume_pinned_dc.is_some();
     if let Some(dc) = &create_opts.datacenter {
         candidates.push(dc.clone());
     } else if let Some(dc) = &config.runpod.default_datacenter {
         // Config-pinned DC is honored — ensures pods land in the region
         // where the attached network volume lives.
         candidates.push(dc.clone());
+    } else if let Some(dc) = volume_pinned_dc {
+        // Network-volume-derived DC pin.
+        candidates.push(dc);
     } else {
         // Try "any DC" first.
         candidates.push(String::new());
@@ -1924,10 +1997,7 @@ async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u6
     let start = Instant::now();
     loop {
         // Racing both signals makes us robust to either source going silent.
-        let (rest, proxy) = tokio::join!(
-            client.get_pod(pod_id),
-            http.get(&probe_url).send(),
-        );
+        let (rest, proxy) = tokio::join!(client.get_pod(pod_id), http.get(&probe_url).send(),);
         let proxy_reached = proxy.is_ok();
         match rest {
             Ok(pod) => {
@@ -2153,10 +2223,7 @@ mod tests {
         // Tiny floor: small models still estimate at least 12GB for
         // encoder + activations + latents.
         if let Some(need) = estimated_vram_need_gb("flux2-klein:q4") {
-            assert!(
-                need >= 12,
-                "small FLUX q4 should floor at 12GB, got {need}"
-            );
+            assert!(need >= 12, "small FLUX q4 should floor at 12GB, got {need}");
         }
         // LTX-2.3 22B fp8 is ~29GB weights → should land in mid-40s GB
         // range once we multiply by 1.8×. Definitely > 24 (so 4090 fails).
