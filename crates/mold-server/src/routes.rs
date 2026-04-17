@@ -79,6 +79,14 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
+
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "FORBIDDEN".to_string(),
+            status: StatusCode::FORBIDDEN,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -148,6 +156,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/status", get(server_status))
+        .route("/api/capabilities", get(server_capabilities))
         .route("/api/shutdown", post(shutdown_server))
         .route("/health", get(health))
         .with_state(state)
@@ -1138,6 +1147,19 @@ async fn health() -> impl IntoResponse {
     StatusCode::OK
 }
 
+// ── /api/capabilities ────────────────────────────────────────────────────────
+
+/// Report the feature toggles a client needs to render correctly (hide the
+/// delete button when delete isn't allowed, etc.). No auth required — this
+/// is a read-only introspection endpoint.
+async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
+    Json(mold_core::ServerCapabilities {
+        gallery: mold_core::GalleryCapabilities {
+            can_delete: gallery_delete_allowed(),
+        },
+    })
+}
+
 // ── /api/shutdown ─────────────────────────────────────────────────────────────
 
 /// Trigger graceful server shutdown.
@@ -1208,11 +1230,20 @@ async fn list_gallery(
     Ok(Json(images))
 }
 
-/// Serve a gallery image file by filename.
+/// Serve a gallery file by filename.
+///
+/// Supports HTTP `Range` requests so `<video>` elements can scrub MP4
+/// outputs without downloading the whole clip up front. Partial responses
+/// stream straight from disk via `tokio_util::io::ReaderStream` — nothing
+/// buffers the full file in server RAM, which matters once a gallery
+/// contains multi-GB LTX-2 outputs. Non-range requests still return the
+/// whole file (streamed) with `Accept-Ranges: bytes` so the client knows
+/// it can seek on subsequent requests.
 async fn get_gallery_image(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -1231,35 +1262,167 @@ async fn get_gallery_image(
     }
 
     let path = output_dir.join(&clean_name);
-    if !path.is_file() {
-        return Err(ApiError::not_found(format!(
-            "image not found: {clean_name}"
-        )));
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) if m.is_file() => m,
+        _ => {
+            return Err(ApiError::not_found(format!(
+                "image not found: {clean_name}"
+            )));
+        }
+    };
+    let total_len = meta.len();
+    let content_type = content_type_for_filename(&clean_name);
+
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to open file: {e}")))?;
+
+    if let Some(raw) = range_header {
+        if let Some((start, end)) = parse_byte_range(&raw, total_len) {
+            return serve_range(file, start, end, total_len, content_type).await;
+        } else {
+            // A `Range` header we can't satisfy ⇒ 416 per RFC 9110 §15.6.2.
+            return Ok(axum::response::Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{total_len}"))
+                .body(axum::body::Body::empty())
+                .unwrap());
+        }
     }
 
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to read image: {e}")))?;
+    // Full response: stream the file rather than buffer it in RAM.
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, total_len)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(body)
+        .unwrap())
+}
 
-    let content_type = if clean_name.ends_with(".png") {
+/// Parse a `Range: bytes=start-end` header into a concrete (start, end)
+/// byte range inclusive on both ends. Returns `None` for unsatisfiable or
+/// malformed ranges — the caller translates that into a 416 response.
+///
+/// Only the single-range form is supported (multipart ranges are vanishingly
+/// rare in practice and substantially more complex to implement correctly;
+/// browsers for `<video>` always send single ranges).
+fn parse_byte_range(header: &str, total_len: u64) -> Option<(u64, u64)> {
+    let spec = header.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start_s, end_s) = spec.split_once('-')?;
+    let start_s = start_s.trim();
+    let end_s = end_s.trim();
+
+    if total_len == 0 {
+        return None;
+    }
+
+    if start_s.is_empty() {
+        // Suffix range: `bytes=-N` means "the last N bytes".
+        let suffix: u64 = end_s.parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        let start = total_len.saturating_sub(suffix);
+        return Some((start, total_len - 1));
+    }
+
+    let start: u64 = start_s.parse().ok()?;
+    if start >= total_len {
+        return None;
+    }
+    let end: u64 = if end_s.is_empty() {
+        total_len - 1
+    } else {
+        end_s.parse().ok()?
+    };
+    let end = end.min(total_len - 1);
+    if end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Emit a `206 Partial Content` response streaming `[start, end]` inclusive
+/// from the already-open file handle. `take(len)` bounds the reader so the
+/// body terminates exactly at `end + 1` instead of reading the tail.
+async fn serve_range(
+    mut file: tokio::fs::File,
+    start: u64,
+    end: u64,
+    total_len: u64,
+    content_type: &'static str,
+) -> Result<axum::response::Response, ApiError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|e| ApiError::internal(format!("seek failed: {e}")))?;
+    let len = end - start + 1;
+    let stream = tokio_util::io::ReaderStream::new(file.take(len));
+    let body = axum::body::Body::from_stream(stream);
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, len)
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total_len}"),
+        )
+        // Partial content is less cacheable at intermediaries than a plain
+        // 200; keep a short TTL so the client's own cache still helps.
+        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .body(body)
+        .unwrap())
+}
+
+/// Pick an HTTP Content-Type for a gallery filename. Covers every format
+/// `OutputFormat` can emit plus a safe default.
+fn content_type_for_filename(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
         "image/png"
-    } else if clean_name.ends_with(".jpg") || clean_name.ends_with(".jpeg") {
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".apng") {
+        "image/apng"
+    } else if lower.ends_with(".mp4") {
+        "video/mp4"
     } else {
         "application/octet-stream"
-    };
-
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-
-    Ok((headers, data))
+    }
 }
 
 /// Delete a gallery image and its server-side thumbnail.
+///
+/// Opt-in: the endpoint returns `403 Forbidden` unless
+/// `MOLD_GALLERY_ALLOW_DELETE=1` is set on the server. Destructive writes
+/// should not be reachable by default — operators explicitly allow them,
+/// ideally in combination with the existing API-key middleware.
 async fn delete_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !gallery_delete_allowed() {
+        return Err(ApiError::forbidden(
+            "gallery delete is disabled; set MOLD_GALLERY_ALLOW_DELETE=1 to enable",
+        ));
+    }
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -1282,11 +1445,22 @@ async fn delete_gallery_image(
             .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
     }
 
-    // Also remove server-side thumbnail
-    let thumb_path = server_thumbnail_dir().join(&clean_name);
-    let _ = std::fs::remove_file(&thumb_path);
+    // Also remove server-side thumbnail (both legacy no-suffix and current
+    // `.png`-suffixed cache layouts).
+    let thumb_dir = server_thumbnail_dir();
+    let _ = std::fs::remove_file(thumb_dir.join(&clean_name));
+    let _ = std::fs::remove_file(thumb_dir.join(format!("{clean_name}.png")));
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether the destructive `DELETE /api/gallery/image/:filename` route
+/// is enabled. Off by default — operators opt in with
+/// `MOLD_GALLERY_ALLOW_DELETE=1` (accepts `1` / `true` / `yes`, any case).
+fn gallery_delete_allowed() -> bool {
+    std::env::var("MOLD_GALLERY_ALLOW_DELETE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 /// Serve a thumbnail for a gallery image. Generated on-demand and cached
@@ -1318,18 +1492,68 @@ async fn get_gallery_thumbnail(
         )));
     }
 
-    // Check if server-side thumbnail already exists
+    // Thumbnail cache path: always `.png` regardless of the source extension,
+    // so mp4 / gif / apng / webp / jpg all coexist cleanly in the same cache
+    // dir and `image.save()` doesn't pick the wrong format from the path.
     let thumb_dir = server_thumbnail_dir();
-    let thumb_path = thumb_dir.join(&clean_name);
+    let thumb_path = thumb_dir.join(format!("{clean_name}.png"));
+    let lower = clean_name.to_ascii_lowercase();
+    let is_video = lower.ends_with(".mp4");
 
     if !thumb_path.is_file() {
-        // Generate thumbnail on-demand
+        // Generate thumbnail on-demand. Videos go through openh264 for a real
+        // first-frame extract; everything else decodes via the `image` crate.
+        // If either path fails, we fall back to serving the source bytes
+        // directly — browsers are more lenient about partial / checksum-
+        // mismatched images than either decoder, and the SPA would rather
+        // show something than a 500.
         let source = source_path.clone();
         let dest = thumb_path.clone();
-        tokio::task::spawn_blocking(move || generate_server_thumbnail(&source, &dest))
-            .await
-            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?
-            .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?;
+        let gen_result = tokio::task::spawn_blocking(move || {
+            if is_video {
+                generate_video_thumbnail(&source, &dest)
+            } else {
+                generate_server_thumbnail(&source, &dest)
+            }
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?;
+
+        if let Err(err) = gen_result {
+            tracing::warn!(
+                file = %clean_name,
+                error = %err,
+                "thumbnail decode failed; falling back to source bytes"
+            );
+            // For videos, the browser can't render the raw mp4 as an <img>
+            // either, so serving the source doesn't help — fall back to the
+            // SVG play-icon placeholder instead.
+            if is_video {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("image/svg+xml"),
+                );
+                headers.insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=300"),
+                );
+                return Ok((headers, VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec()));
+            }
+            let raw = tokio::fs::read(&source_path)
+                .await
+                .map_err(|e| ApiError::internal(format!("failed to read source: {e}")))?;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(content_type_for_filename(&clean_name)),
+            );
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300"),
+            );
+            return Ok((headers, raw));
+        }
     }
 
     let data = tokio::fs::read(&thumb_path)
@@ -1338,9 +1562,15 @@ async fn get_gallery_thumbnail(
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
 
     Ok((headers, data))
 }
+
+const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 
 /// Server-side thumbnail cache directory.
 fn server_thumbnail_dir() -> std::path::PathBuf {
@@ -1350,7 +1580,9 @@ fn server_thumbnail_dir() -> std::path::PathBuf {
         .join("thumbnails")
 }
 
-/// Generate a 256x256 max thumbnail from source image.
+/// Generate a 256x256 max thumbnail from source image. The result is always
+/// written as a PNG regardless of the source format, so callers should pass
+/// a `.png`-suffixed `dest` to keep the on-disk cache unambiguous.
 fn generate_server_thumbnail(
     source: &std::path::Path,
     dest: &std::path::Path,
@@ -1360,8 +1592,38 @@ fn generate_server_thumbnail(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    thumb.save(dest)?;
+    thumb.save_with_format(dest, image::ImageFormat::Png)?;
     Ok(())
+}
+
+/// Extract the first frame of an MP4 as a PNG thumbnail and downscale to
+/// 256px max via the `image` crate. Uses the openh264 pipeline that
+/// `mold_inference::ltx2::media` already ships for video probes.
+///
+/// The full-frame PNG is written to a sibling temp path first, then decoded
+/// and resized — this keeps `mold_inference`'s existing helper surface stable
+/// while still producing a compact thumbnail.
+fn generate_video_thumbnail(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Decode the first frame to a temporary full-resolution PNG, then
+    // thumbnail-resize via the `image` crate. We stage through a temp file
+    // rather than through memory to reuse `extract_thumbnail`'s existing
+    // I/O-based API.
+    let tmp = dest.with_extension("firstframe.png");
+    mold_inference::ltx2::media::extract_thumbnail(source, &tmp)?;
+    let decode_result = (|| -> anyhow::Result<()> {
+        let img = image::open(&tmp)?;
+        let thumb = img.thumbnail(256, 256);
+        thumb.save_with_format(dest, image::ImageFormat::Png)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    decode_result
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.
@@ -1387,18 +1649,29 @@ pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase());
-            if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+            let is_raster = matches!(
+                ext.as_deref(),
+                Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
+            );
+            let is_video = matches!(ext.as_deref(), Some("mp4"));
+            if !is_raster && !is_video {
                 continue;
             }
             let filename = path
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let thumb_path = thumb_dir.join(&filename);
-            if !thumb_path.is_file() {
-                if let Err(e) = generate_server_thumbnail(path, &thumb_path) {
-                    tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
-                }
+            let thumb_path = thumb_dir.join(format!("{filename}.png"));
+            if thumb_path.is_file() {
+                continue;
+            }
+            let result = if is_video {
+                generate_video_thumbnail(path, &thumb_path)
+            } else {
+                generate_server_thumbnail(path, &thumb_path)
+            };
+            if let Err(e) = result {
+                tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
             }
         }
         tracing::info!("thumbnail warmup complete");
@@ -1411,7 +1684,24 @@ fn thumbnail_warmup_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Scan a directory for image files with mold metadata.
+/// Scan a directory for gallery outputs (images + videos).
+///
+/// Picks up every format `OutputFormat` can emit: png / jpg / jpeg / gif /
+/// apng / webp / mp4. For files with no embedded `mold:parameters` chunk
+/// (notably gif / webp / mp4), we synthesize a stub `OutputMetadata` from
+/// the filename so the UI can still display them alongside annotated items.
+///
+/// Invalid files are filtered out at scan time rather than surfaced as
+/// broken tiles in the UI. "Invalid" here means any of:
+/// - below a format-specific size floor (tiny stubs left by abandoned
+///   writes, aborted generations, or test harnesses)
+/// - no decodable image header (raster formats)
+/// - no `ftyp` box at the start of the file (mp4)
+///
+/// This is a header-only validation, not a full pixel decode, so a file
+/// that passes the check can still be corrupt mid-stream (e.g. broken
+/// IDAT CRC). Those fall through to the thumbnail endpoint which serves
+/// the raw bytes as a last resort.
 fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
     let mut images = Vec::new();
 
@@ -1426,40 +1716,243 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
-            continue;
-        }
+        let format = match ext.as_deref() {
+            Some("png") => Some(mold_core::OutputFormat::Png),
+            Some("jpg") | Some("jpeg") => Some(mold_core::OutputFormat::Jpeg),
+            Some("gif") => Some(mold_core::OutputFormat::Gif),
+            Some("apng") => Some(mold_core::OutputFormat::Apng),
+            Some("webp") => Some(mold_core::OutputFormat::Webp),
+            Some("mp4") => Some(mold_core::OutputFormat::Mp4),
+            _ => None,
+        };
+        let Some(format) = format else { continue };
 
-        let timestamp = entry
-            .metadata()
-            .ok()
+        let fs_meta = entry.metadata().ok();
+        let timestamp = fs_meta
+            .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+        // Size floor: anything below this is guaranteed not a real output.
+        if size_bytes < min_valid_size(format) {
+            continue;
+        }
+
+        // Header-level validation (fast, O(1) bytes per file).
+        let header_ok = match format {
+            mold_core::OutputFormat::Mp4 => has_ftyp_box(path),
+            _ => image_header_dims(path).is_some(),
+        };
+        if !header_ok {
+            continue;
+        }
+
+        // Solid-black detection. Only inspect small files where a solid-color
+        // image is plausible (real renderings at any meaningful resolution
+        // weigh tens of KB or more). For those, we decode and sample a 16×16
+        // thumbnail so a failed / empty generation doesn't pollute the feed.
+        if !matches!(format, mold_core::OutputFormat::Mp4)
+            && is_probably_solid_black(path, format, size_bytes)
+        {
+            continue;
+        }
 
         let filename = path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let meta = if ext.as_deref() == Some("png") {
-            read_png_metadata(path)
-        } else {
-            read_jpeg_metadata(path)
+        // Try embedded metadata first — PNG text chunks (also covers APNG
+        // since APNG files are valid PNGs) and JPEG COM markers.
+        let embedded = match ext.as_deref() {
+            Some("png") | Some("apng") => read_png_metadata(path),
+            Some("jpg") | Some("jpeg") => read_jpeg_metadata(path),
+            _ => None,
         };
 
-        if let Some(meta) = meta {
-            images.push(mold_core::GalleryImage {
-                filename,
-                metadata: meta,
-                timestamp,
-            });
-        }
+        let (metadata, synthetic) = match embedded {
+            Some(m) => (m, false),
+            None => {
+                // Synthesize. If the file is a raster whose header decodes,
+                // use its real dimensions so the UI can render the card at
+                // the correct aspect ratio even without mold metadata.
+                let mut meta = synthesize_metadata_from_filename(&filename, timestamp);
+                if !matches!(format, mold_core::OutputFormat::Mp4) {
+                    if let Some((w, h)) = image_header_dims(path) {
+                        meta.width = w;
+                        meta.height = h;
+                    }
+                }
+                (meta, true)
+            }
+        };
+
+        images.push(mold_core::GalleryImage {
+            filename,
+            metadata,
+            timestamp,
+            format: Some(format),
+            size_bytes: Some(size_bytes),
+            metadata_synthetic: synthetic,
+        });
     }
 
     images.sort_by_key(|img| std::cmp::Reverse(img.timestamp));
     images
+}
+
+/// Minimum on-disk size (in bytes) below which a file is treated as a
+/// corrupt / aborted output and hidden from the gallery listing. The
+/// thresholds are well below any real mold-generated output but above any
+/// parseable-but-empty stub — a 1×1 pixel PNG is ~67 bytes, a real 512×512
+/// PNG is at least tens of KB.
+fn min_valid_size(format: mold_core::OutputFormat) -> u64 {
+    match format {
+        // Raster images: any real mold output is multi-KB. The 256-byte
+        // floor comfortably filters truncated PNG stubs (signature + IHDR
+        // only, ~45 bytes) and similar degenerate cases without touching
+        // legitimate tiny gifs (e.g. a few hundred bytes for a 1-frame GIF).
+        mold_core::OutputFormat::Png
+        | mold_core::OutputFormat::Apng
+        | mold_core::OutputFormat::Jpeg
+        | mold_core::OutputFormat::Webp => 256,
+        mold_core::OutputFormat::Gif => 128,
+        // An mp4 with a single frame and no audio is still many KB.
+        mold_core::OutputFormat::Mp4 => 4096,
+    }
+}
+
+/// Fast "does this decode as an image?" check. Returns the image's
+/// pixel dimensions (width, height) on success. Only reads the header —
+/// typically under 1 KB — so it's safe to call for every file on every
+/// `/api/gallery` request.
+fn image_header_dims(path: &std::path::Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Heuristic detector for "solid black" (or near-black) raster images —
+/// typically the artefact of an aborted / NaN-poisoned generation that
+/// wrote an all-zero image tensor. We only even consider images below a
+/// format-specific suspect size (any real content at meaningful resolution
+/// compresses to tens of KB at minimum; a solid-color PNG fits in a few
+/// hundred bytes), then decode and sample a 16×16 thumbnail to check
+/// whether any pixel's max channel exceeds a small threshold.
+fn is_probably_solid_black(
+    path: &std::path::Path,
+    format: mold_core::OutputFormat,
+    size_bytes: u64,
+) -> bool {
+    const SAMPLE_DIM: u32 = 16;
+    // Allow any single channel up to this intensity before we conclude the
+    // file is "real" content. 16 out of 255 is ~6%: enough to accept dark
+    // images that aren't literal black, but tight enough to reject the
+    // artefacts we actually want to filter.
+    const CHANNEL_CEILING: u8 = 16;
+
+    let suspect_threshold: u64 = match format {
+        // PNG / APNG: zlib-compressed raw pixels; 8 KB is comfortably above
+        // any solid-color encoding at 1k-ish resolution.
+        mold_core::OutputFormat::Png | mold_core::OutputFormat::Apng => 8 * 1024,
+        // JPEG compresses solid color to a few hundred bytes; generous ceiling.
+        mold_core::OutputFormat::Jpeg => 4 * 1024,
+        mold_core::OutputFormat::Gif | mold_core::OutputFormat::Webp => 4 * 1024,
+        mold_core::OutputFormat::Mp4 => return false,
+    };
+    if size_bytes > suspect_threshold {
+        return false;
+    }
+
+    let Ok(img) = image::open(path) else {
+        return false;
+    };
+    let thumb = img.thumbnail(SAMPLE_DIM, SAMPLE_DIM).to_rgb8();
+    let mut max_channel: u8 = 0;
+    for pixel in thumb.pixels() {
+        let m = pixel.0[0].max(pixel.0[1]).max(pixel.0[2]);
+        if m > max_channel {
+            max_channel = m;
+        }
+        if max_channel > CHANNEL_CEILING {
+            return false;
+        }
+    }
+    max_channel <= CHANNEL_CEILING
+}
+
+/// Check for the ISO BMFF `ftyp` box at offset 4 of the file. A real mp4
+/// always starts with a top-level `ftyp` box; files that fail this check
+/// are typically truncated writes or wrong-extension text files.
+fn has_ftyp_box(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 12];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    &buf[4..8] == b"ftyp"
+}
+
+/// Build a best-effort `OutputMetadata` from a filename like
+/// `mold-<model>-<unix>[-<idx>].<ext>`. Fields we can't recover (seed, steps,
+/// guidance, resolution, prompt) are left at zero / empty so the UI can
+/// render them as "unknown". The client reads `metadata_synthetic=true`
+/// from the enclosing `GalleryImage` to treat these as placeholders.
+fn synthesize_metadata_from_filename(filename: &str, timestamp: u64) -> mold_core::OutputMetadata {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let model = stem
+        .strip_prefix("mold-")
+        .and_then(|rest| {
+            // Trim trailing `-<unix>` and optional `-<idx>` suffixes by
+            // walking back across numeric segments.
+            let mut parts: Vec<&str> = rest.split('-').collect();
+            while parts
+                .last()
+                .map(|p| p.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+                && parts.len() > 1
+            {
+                parts.pop();
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("-"))
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    mold_core::OutputMetadata {
+        prompt: String::new(),
+        negative_prompt: None,
+        original_prompt: None,
+        model,
+        seed: 0,
+        steps: 0,
+        guidance: 0.0,
+        width: 0,
+        height: 0,
+        strength: None,
+        scheduler: None,
+        lora: None,
+        lora_scale: None,
+        frames: None,
+        fps: None,
+        version: format!("synthesized@{timestamp}"),
+    }
 }
 
 /// Read OutputMetadata from a PNG file's text chunks.
@@ -1796,5 +2289,332 @@ mod tests {
         unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }
+    }
+
+    #[test]
+    fn content_type_covers_every_output_format() {
+        assert_eq!(content_type_for_filename("a.png"), "image/png");
+        assert_eq!(content_type_for_filename("a.PNG"), "image/png");
+        assert_eq!(content_type_for_filename("a.jpg"), "image/jpeg");
+        assert_eq!(content_type_for_filename("a.jpeg"), "image/jpeg");
+        assert_eq!(content_type_for_filename("a.gif"), "image/gif");
+        assert_eq!(content_type_for_filename("a.webp"), "image/webp");
+        assert_eq!(content_type_for_filename("a.apng"), "image/apng");
+        assert_eq!(content_type_for_filename("a.mp4"), "video/mp4");
+        assert_eq!(
+            content_type_for_filename("a.unknown"),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn synthesized_metadata_parses_model_from_filename() {
+        let meta = synthesize_metadata_from_filename("mold-flux-dev-q8-1710000000.mp4", 1710000000);
+        // Trailing unix timestamp should be stripped; model tag preserved.
+        assert_eq!(meta.model, "flux-dev-q8");
+        assert_eq!(meta.prompt, "");
+        assert_eq!(meta.seed, 0);
+        assert!(meta.version.starts_with("synthesized@"));
+
+        // Batch suffix (trailing `-<idx>`) also stripped along with timestamp.
+        let meta =
+            synthesize_metadata_from_filename("mold-ltx-video-bf16-1710000030-2.gif", 1710000030);
+        assert_eq!(meta.model, "ltx-video-bf16");
+
+        // Non-mold filename falls back to "unknown".
+        let meta = synthesize_metadata_from_filename("unrelated.png", 0);
+        assert_eq!(meta.model, "unknown");
+    }
+
+    // ── Gallery validation ───────────────────────────────────────────────
+
+    /// Create a scratch directory unique to this test and delete it on drop.
+    /// Using `std::env::temp_dir()` rather than pulling in a `tempfile`
+    /// dev-dep for three tests' worth of fixtures.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("mold-gallery-test-{tag}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&p).expect("create tempdir");
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Encode a noisy PNG in-memory via the `image` crate. The checkerboard
+    /// pattern resists zlib compression so the encoded bytes exceed the
+    /// gallery size floor — a solid-color PNG of the same dimensions would
+    /// compress to ~80 bytes and be filtered out by `min_valid_size`.
+    fn make_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |x, y| {
+            let n = (x.wrapping_mul(37) ^ y.wrapping_mul(131)) as u8;
+            image::Rgb([n, n.wrapping_add(85), n.wrapping_sub(17)])
+        });
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        buf
+    }
+
+    #[test]
+    fn min_valid_size_thresholds_are_sensible() {
+        // Raster formats: high enough to catch every truncated / stub file
+        // we've seen in dev harnesses (largest known bad fixture was ~200 B).
+        assert!(min_valid_size(mold_core::OutputFormat::Png) >= 128);
+        assert!(min_valid_size(mold_core::OutputFormat::Jpeg) >= 128);
+        assert!(min_valid_size(mold_core::OutputFormat::Apng) >= 128);
+        assert!(min_valid_size(mold_core::OutputFormat::Webp) >= 128);
+        // But not so high we filter out legitimate tiny GIFs.
+        assert!(min_valid_size(mold_core::OutputFormat::Gif) <= 512);
+        // MP4: no real rendering is < 1 KB; 4 KB is a comfortable floor.
+        assert!(min_valid_size(mold_core::OutputFormat::Mp4) >= 1024);
+    }
+
+    #[test]
+    fn has_ftyp_box_accepts_real_header_and_rejects_garbage() {
+        let td = TempDir::new("ftyp");
+
+        // Real-ish mp4 header: `\0\0\0\x20 ftypisom ...`
+        let mut real = Vec::new();
+        real.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        real.extend_from_slice(b"ftyp");
+        real.extend_from_slice(b"isom\x00\x00\x02\x00isomiso2mp41");
+        let real_path = td.path().join("real.mp4");
+        std::fs::write(&real_path, &real).unwrap();
+        assert!(has_ftyp_box(&real_path));
+
+        // Wrong magic — random text with an mp4 extension.
+        let fake_path = td.path().join("fake.mp4");
+        std::fs::write(&fake_path, b"this is not an mp4 file at all").unwrap();
+        assert!(!has_ftyp_box(&fake_path));
+
+        // Too short (fewer than 12 bytes) — can't contain an ftyp box.
+        let trunc_path = td.path().join("truncated.mp4");
+        std::fs::write(&trunc_path, b"\x00\x00\x00\x20").unwrap();
+        assert!(!has_ftyp_box(&trunc_path));
+
+        // Missing entirely.
+        assert!(!has_ftyp_box(&td.path().join("nope.mp4")));
+    }
+
+    #[test]
+    fn image_header_dims_returns_real_dimensions() {
+        let td = TempDir::new("header");
+        let p = td.path().join("valid.png");
+        std::fs::write(&p, make_png_bytes(42, 24)).unwrap();
+        assert_eq!(image_header_dims(&p), Some((42, 24)));
+
+        // Truncated: PNG signature only, no IHDR.
+        let stub = td.path().join("stub.png");
+        std::fs::write(&stub, b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(image_header_dims(&stub).is_none());
+
+        // Non-image bytes entirely.
+        let text = td.path().join("text.png");
+        std::fs::write(&text, b"hello world, not a png").unwrap();
+        assert!(image_header_dims(&text).is_none());
+    }
+
+    #[test]
+    fn scan_gallery_dir_filters_invalid_and_keeps_valid() {
+        let td = TempDir::new("scan");
+        let dir = td.path();
+
+        // A valid PNG large enough to exceed the 256-byte raster size floor.
+        std::fs::write(dir.join("mold-model-1000.png"), make_png_bytes(32, 32)).unwrap();
+
+        // Truncated raster that passes size floor but has no valid header.
+        let mut junk = vec![0u8; 512];
+        junk[..4].copy_from_slice(b"JUNK");
+        std::fs::write(dir.join("mold-broken-2000.png"), &junk).unwrap();
+
+        // Tiny raster under the size floor (sub-IHDR).
+        std::fs::write(
+            dir.join("mold-tiny-3000.png"),
+            b"\x89PNG\r\n\x1a\n", // 8 bytes: signature only
+        )
+        .unwrap();
+
+        // Valid-enough mp4 (ftyp at offset 4) — should survive.
+        let mut mp4 = Vec::new();
+        mp4.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        mp4.extend_from_slice(b"ftyp");
+        mp4.extend_from_slice(b"isom\x00\x00\x02\x00");
+        // Pad above the 4096-byte mp4 size floor so it isn't filtered on
+        // size alone — the scan still checks ftyp either way.
+        mp4.resize(8192, 0);
+        std::fs::write(dir.join("mold-ltx-4000.mp4"), &mp4).unwrap();
+
+        // Mp4 extension but no ftyp.
+        let bad_mp4 = vec![0u8; 8192];
+        std::fs::write(dir.join("mold-no-ftyp-5000.mp4"), &bad_mp4).unwrap();
+
+        // Unsupported extension — ignored entirely.
+        std::fs::write(dir.join("random.txt"), b"not an output").unwrap();
+
+        let results = scan_gallery_dir(dir);
+        let names: Vec<&str> = results.iter().map(|i| i.filename.as_str()).collect();
+        assert!(
+            names.contains(&"mold-model-1000.png"),
+            "valid PNG should survive: {names:?}"
+        );
+        assert!(
+            names.contains(&"mold-ltx-4000.mp4"),
+            "valid MP4 with ftyp should survive: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mold-broken-2000.png"),
+            "PNG with no valid header should be filtered: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mold-tiny-3000.png"),
+            "under-size PNG stub should be filtered: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mold-no-ftyp-5000.mp4"),
+            "MP4 without ftyp should be filtered: {names:?}"
+        );
+        assert_eq!(names.len(), 2, "only the 2 valid fixtures remain");
+    }
+
+    #[test]
+    fn solid_black_png_is_filtered_at_scan_time() {
+        let td = TempDir::new("black");
+        let dir = td.path();
+
+        // A 256×256 solid-black PNG — definitely below the suspect-size
+        // threshold (compresses to a few hundred bytes) and every pixel is
+        // below the channel ceiling.
+        let black = image::RgbImage::from_pixel(256, 256, image::Rgb([0, 0, 0]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(black)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(dir.join("mold-noisy-1000.png"), &buf).unwrap();
+
+        // A normal noisy PNG with the same dimensions — should survive.
+        std::fs::write(dir.join("mold-valid-2000.png"), make_png_bytes(256, 256)).unwrap();
+
+        let results = scan_gallery_dir(dir);
+        let names: Vec<&str> = results.iter().map(|i| i.filename.as_str()).collect();
+        assert!(
+            !names.contains(&"mold-noisy-1000.png"),
+            "solid-black PNG should be filtered: {names:?}"
+        );
+        assert!(
+            names.contains(&"mold-valid-2000.png"),
+            "noisy PNG should survive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn probably_solid_black_ignores_large_files() {
+        // Files above the per-format suspect size are trusted without a full
+        // decode (the check is purely a cheap heuristic to catch NaN /
+        // abort-flavored dev outputs). Verify we bail out on size alone.
+        let td = TempDir::new("bigblack");
+        let big_path = td.path().join("big.png");
+        // Write arbitrary bytes — we never decode because of the size guard.
+        std::fs::write(&big_path, vec![0u8; 20 * 1024]).unwrap();
+        assert!(!is_probably_solid_black(
+            &big_path,
+            mold_core::OutputFormat::Png,
+            20 * 1024,
+        ));
+    }
+
+    #[test]
+    fn parse_byte_range_handles_common_forms() {
+        // `bytes=0-499` — first 500 bytes
+        assert_eq!(parse_byte_range("bytes=0-499", 2000), Some((0, 499)));
+        // open-ended `bytes=100-` — from byte 100 to EOF
+        assert_eq!(parse_byte_range("bytes=100-", 2000), Some((100, 1999)));
+        // suffix `bytes=-500` — last 500 bytes
+        assert_eq!(parse_byte_range("bytes=-500", 2000), Some((1500, 1999)));
+        // end past EOF — clamped to last byte
+        assert_eq!(parse_byte_range("bytes=0-9999", 2000), Some((0, 1999)));
+        // whole file
+        assert_eq!(parse_byte_range("bytes=0-1999", 2000), Some((0, 1999)));
+    }
+
+    #[test]
+    fn parse_byte_range_rejects_malformed_and_unsatisfiable() {
+        assert_eq!(parse_byte_range("bytes=", 1000), None);
+        assert_eq!(parse_byte_range("bytes=abc-100", 1000), None);
+        // start past EOF
+        assert_eq!(parse_byte_range("bytes=2000-", 1000), None);
+        // end before start
+        assert_eq!(parse_byte_range("bytes=500-100", 1000), None);
+        // multi-range not supported
+        assert_eq!(parse_byte_range("bytes=0-10,20-30", 1000), None);
+        // suffix of 0 bytes is meaningless
+        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
+        // empty file can't satisfy any range
+        assert_eq!(parse_byte_range("bytes=0-10", 0), None);
+        // wrong unit prefix
+        assert_eq!(parse_byte_range("items=0-10", 1000), None);
+    }
+
+    #[test]
+    fn gallery_delete_toggle_reads_env_var() {
+        // Use a plausible-but-unique key so we don't clobber a caller's env.
+        let key = "MOLD_GALLERY_ALLOW_DELETE";
+        // Safety: env mutation is test-global; we restore the pre-test value
+        // below regardless of assertion outcomes.
+        let prev = std::env::var(key).ok();
+        for val in ["1", "true", "YES"] {
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            assert!(
+                gallery_delete_allowed(),
+                "delete should be allowed for env {val:?}"
+            );
+        }
+        for val in ["0", "false", "no", ""] {
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            assert!(
+                !gallery_delete_allowed(),
+                "delete should be blocked for env {val:?}"
+            );
+        }
+        unsafe {
+            std::env::remove_var(key);
+        }
+        assert!(!gallery_delete_allowed(), "default is off");
+        // Restore.
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var(key, v);
+            }
+        }
+    }
+
+    #[test]
+    fn scan_populates_real_dimensions_for_synthesized_metadata() {
+        // Files without an embedded mold:parameters chunk still get their
+        // actual width/height filled in from the header decode — useful for
+        // the SPA's aspect-ratio-preserving layout.
+        let td = TempDir::new("dims");
+        let dir = td.path();
+        std::fs::write(dir.join("mold-nometa-1000.png"), make_png_bytes(128, 96)).unwrap();
+
+        let results = scan_gallery_dir(dir);
+        assert_eq!(results.len(), 1);
+        let entry = &results[0];
+        assert!(entry.metadata_synthetic);
+        assert_eq!(entry.metadata.width, 128);
+        assert_eq!(entry.metadata.height, 96);
     }
 }

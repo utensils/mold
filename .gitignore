@@ -12,6 +12,14 @@
 website/node_modules/
 website/.vitepress/cache/
 website/.vitepress/dist/
+
+# Web gallery SPA (crates/mold-server serves it from web/dist/)
+# Note: web/bun.lock (text lockfile) is committed for reproducible builds,
+# matching the pattern used by website/.
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
 .DS_Store
 .env
 *.jpeg
@@ -20,6 +28,7 @@ website/.vitepress/dist/
 # Allow committed images in docs and website
 !docs/**/*.png
 !website/public/**/*.png
+!web/public/**/*.png
 result
 *.swo
 *.swp
