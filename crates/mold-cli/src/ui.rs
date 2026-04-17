@@ -332,25 +332,16 @@ pub(crate) async fn render_progress(
                 });
                 let (bar, rate) = download_bars.entry(file_index).or_insert_with(|| {
                     let b = multi.add(ProgressBar::new(bytes_total));
-                    let msg_width = 45usize;
                     b.set_style(
                         ProgressStyle::with_template(&format!(
-                            "  {{msg:<{msg_width}}} [{{bar:30.{c}/dim}}] {{bytes}}/{{total_bytes}} ({{prefix}})",
+                            "  {{msg:<{w}}} [{{bar:30.{c}/dim}}] {{bytes}}/{{total_bytes}} ({{prefix}})",
+                            w = DOWNLOAD_MSG_WIDTH,
                             c = theme::SPINNER_STYLE,
                         ))
                         .unwrap()
                         .progress_chars("━╸─"),
                     );
-                    if total_files > 0 {
-                        b.set_message(format!(
-                            "[{}/{}] {}",
-                            file_index + 1,
-                            total_files,
-                            truncate_name(&filename, msg_width - 8)
-                        ));
-                    } else {
-                        b.set_message(truncate_name(&filename, msg_width));
-                    }
+                    b.set_message(download_label(&filename, file_index, total_files));
                     b.enable_steady_tick(Duration::from_millis(100));
                     (b, SmoothedRate::new(8))
                 });
@@ -362,9 +353,14 @@ pub(crate) async fn render_progress(
                 ));
                 bar.set_position(bytes_downloaded.max(bar.position()));
             }
-            SseProgressEvent::DownloadDone { file_index, .. } => {
+            SseProgressEvent::DownloadDone {
+                file_index,
+                filename,
+                total_files,
+                ..
+            } => {
                 if let Some((bar, _)) = download_bars.get(&file_index) {
-                    bar.finish_with_message("done");
+                    bar.finish_with_message(download_label(&filename, file_index, total_files));
                 }
             }
             SseProgressEvent::Queued { position } => {
@@ -432,6 +428,26 @@ pub(crate) async fn render_progress(
         multi.clear().ok();
     }
     pb.finish_and_clear();
+}
+
+/// Fixed width reserved for the filename/label column of download progress bars.
+const DOWNLOAD_MSG_WIDTH: usize = 45;
+
+/// Builds the filename label that sits at the left of a download progress bar.
+/// Used both when creating the bar (during `DownloadProgress`) and when it
+/// finishes (during `DownloadDone`) so the filename stays visible after
+/// completion instead of being replaced by a generic "done" marker.
+fn download_label(filename: &str, file_index: usize, total_files: usize) -> String {
+    if total_files > 0 {
+        format!(
+            "[{}/{}] {}",
+            file_index + 1,
+            total_files,
+            truncate_name(filename, DOWNLOAD_MSG_WIDTH - 8)
+        )
+    } else {
+        truncate_name(filename, DOWNLOAD_MSG_WIDTH)
+    }
 }
 
 fn truncate_name(name: &str, max_len: usize) -> String {
@@ -663,5 +679,47 @@ mod tests {
     #[test]
     fn format_eta_nan() {
         assert_eq!(format_eta(f64::NAN), "--");
+    }
+
+    // ── download_label tests ─────────────────────────────────────────────
+    //
+    // Regression coverage for issue #223: completed download progress bars
+    // must continue to show the actual filename (e.g. "[1/20] config.json")
+    // rather than being replaced by a generic "done" string.
+
+    #[test]
+    fn download_label_includes_index_and_filename_when_total_known() {
+        let label = download_label("config.json", 0, 20);
+        assert_eq!(label, "[1/20] config.json");
+    }
+
+    #[test]
+    fn download_label_uses_one_based_indexing() {
+        let label = download_label("model.safetensors", 16, 20);
+        assert!(label.starts_with("[17/20] "));
+        assert!(label.contains("model.safetensors"));
+    }
+
+    #[test]
+    fn download_label_without_total_shows_bare_filename() {
+        let label = download_label("config.json", 0, 0);
+        assert_eq!(label, "config.json");
+    }
+
+    #[test]
+    fn download_label_never_says_done() {
+        let label = download_label("generation_config.json", 1, 20);
+        assert!(
+            !label.contains("done"),
+            "completed progress label must keep the filename, not the word 'done' — got {label:?}"
+        );
+    }
+
+    #[test]
+    fn download_label_truncates_long_names_but_keeps_extension() {
+        let long_name = "a".repeat(200) + ".safetensors";
+        let label = download_label(&long_name, 0, 20);
+        assert!(label.contains(".safetensors"));
+        assert!(label.contains("[1/20]"));
     }
 }
