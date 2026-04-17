@@ -17,7 +17,11 @@
 # The gallery is served by `mold serve` as a SPA fallback. Building it
 # in a dedicated stage keeps the Rust builder free of Node/bun tooling
 # and avoids re-running `bun install` on every cargo cache invalidation.
-FROM oven/bun:1.1-alpine AS web-builder
+#
+# Pinned to bun 1.3 — `web/bun.lock` is a v1 text lockfile written by
+# bun 1.2+; older bun versions (e.g. 1.1.x) reject it with
+# "Unknown lockfile version".
+FROM oven/bun:1.3-alpine AS web-builder
 WORKDIR /web
 COPY web/package.json web/bun.lock web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts web/index.html ./
 RUN bun install --frozen-lockfile
