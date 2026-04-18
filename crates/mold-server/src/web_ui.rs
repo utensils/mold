@@ -253,32 +253,30 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     /// `MOLD_WEB_DIR` is process-global, so tests that read or mutate it
-    /// must serialize. Cargo runs tests in parallel by default and a
-    /// concurrent `set_var` in `filesystem_override_beats_embed` would
-    /// otherwise leak into the other `router()` tests and make them flake.
-    fn env_lock() -> MutexGuard<'static, ()> {
+    /// must serialize across their *entire* bodies — not just the env
+    /// mutation — because the mutation stays visible until the test's
+    /// cleanup runs. A `std::sync::Mutex` can't be held across `.await`
+    /// (clippy::await_holding_lock), so we use `tokio::sync::Mutex` which
+    /// is async-aware and lint-clean.
+    fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// With nothing staged at build time, the binary should still serve the
     /// inline "mold is running" placeholder — confirms the stub plumbing.
     #[tokio::test]
     async fn router_handles_root_request() {
-        // Build the router under the env lock so a concurrent env-mutating
-        // test can't bleed into our `resolve_web_dir()` read. Drop the
-        // guard before `.await` — holding a sync Mutex across an await
-        // would trigger clippy::await_holding_lock.
-        let app = {
-            let _guard = env_lock();
-            router()
-        };
+        // Hold the env lock for the whole test so a concurrent
+        // `filesystem_override_beats_embed` can't leave MOLD_WEB_DIR set
+        // while our `router()` reads it.
+        let _guard = env_lock().lock().await;
+        let app = router();
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
@@ -320,26 +318,24 @@ mod tests {
     /// hot-reload the SPA without recompiling Rust.
     #[tokio::test]
     async fn filesystem_override_beats_embed() {
+        // Hold the env lock for the entire test — across the env
+        // mutation, router build, request/response await, and cleanup —
+        // so no other test observes MOLD_WEB_DIR during our override
+        // window.
+        let _guard = env_lock().lock().await;
+
         let tmp = tempdir();
         std::fs::write(tmp.join("index.html"), b"<html>override</html>").unwrap();
 
-        // Hold the env lock across the env mutation + `router()` call so no
-        // concurrent test reads `MOLD_WEB_DIR` while we're overriding it.
-        // Drop before the `.await` to satisfy `clippy::await_holding_lock`.
-        // After `router()` returns, the env var is no longer consulted —
-        // the built router holds its own `ServeDir` handle.
-        let (app, prev) = {
-            let _guard = env_lock();
-            let prev = std::env::var_os("MOLD_WEB_DIR");
-            // SAFETY: set_var is unsafe in Rust 2024; the env lock above
-            // guarantees no other test is reading/writing MOLD_WEB_DIR
-            // concurrently.
-            unsafe {
-                std::env::set_var("MOLD_WEB_DIR", &tmp);
-            }
-            (router(), prev)
-        };
+        let prev = std::env::var_os("MOLD_WEB_DIR");
+        // SAFETY: set_var is unsafe in Rust 2024; the env lock above
+        // guarantees no other test is reading/writing MOLD_WEB_DIR
+        // concurrently.
+        unsafe {
+            std::env::set_var("MOLD_WEB_DIR", &tmp);
+        }
 
+        let app = router();
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
@@ -348,8 +344,6 @@ mod tests {
         let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         assert_eq!(&body[..], b"<html>override</html>");
 
-        // Restore under the same lock.
-        let _guard = env_lock();
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("MOLD_WEB_DIR", v),
@@ -384,14 +378,12 @@ mod tests {
     /// stub path serves an inline placeholder for all methods by design).
     #[tokio::test]
     async fn embedded_rejects_non_get_head() {
-        let app = {
-            let _guard = env_lock();
-            if resolve_web_dir().is_some() || is_embed_stub() {
-                eprintln!("skipping: embedded bundle not active in this test build");
-                return;
-            }
-            router()
-        };
+        let _guard = env_lock().lock().await;
+        if resolve_web_dir().is_some() || is_embed_stub() {
+            eprintln!("skipping: embedded bundle not active in this test build");
+            return;
+        }
+        let app = router();
         let resp = app
             .oneshot(
                 Request::builder()
@@ -419,14 +411,12 @@ mod tests {
     /// the active path (filesystem override / stub).
     #[tokio::test]
     async fn embedded_conditional_get_returns_304() {
-        let app = {
-            let _guard = env_lock();
-            if resolve_web_dir().is_some() || is_embed_stub() {
-                eprintln!("skipping: embedded bundle not active in this test build");
-                return;
-            }
-            router()
-        };
+        let _guard = env_lock().lock().await;
+        if resolve_web_dir().is_some() || is_embed_stub() {
+            eprintln!("skipping: embedded bundle not active in this test build");
+            return;
+        }
+        let app = router();
         let first = app
             .clone()
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())

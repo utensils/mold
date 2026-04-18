@@ -424,20 +424,33 @@
               {
                 category = "check";
                 name = "check";
-                help = "cargo check";
-                command = "cargo check \"$@\"";
+                help = "cargo check --workspace (matches CI)";
+                command = "cargo check --workspace \"$@\"";
               }
               {
                 category = "check";
                 name = "clippy";
-                help = "cargo clippy";
-                command = "cargo clippy \"$@\"";
+                help = "cargo clippy --workspace -- -D warnings (matches CI)";
+                command = "cargo clippy --workspace \"$@\" -- -D warnings";
               }
               {
                 category = "check";
                 name = "run-tests";
-                help = "cargo test";
-                command = "cargo test \"$@\"";
+                help = "cargo test --workspace (matches CI)";
+                command = "cargo test --workspace \"$@\"";
+              }
+              {
+                category = "check";
+                name = "ci-local";
+                help = "run the same sequence CI runs: fmt-check, check, clippy, test";
+                command = ''
+                  set -euo pipefail
+                  cargo fmt --all -- --check
+                  cargo check --workspace
+                  cargo clippy --workspace -- -D warnings
+                  cargo test --workspace
+                  cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
+                '';
               }
               {
                 category = "check";
