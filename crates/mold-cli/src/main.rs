@@ -1,5 +1,6 @@
 mod commands;
 mod control;
+mod metadata_db;
 mod output;
 mod procinfo;
 #[cfg(test)]

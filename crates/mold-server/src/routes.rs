@@ -1208,7 +1208,12 @@ async fn shutdown_server(State(state): State<AppState>, request: Request) -> imp
 // ── /api/gallery ──────────────────────────────────────────────────────────────
 
 /// List gallery images from the server's output directory.
-/// Returns metadata from PNG `mold:parameters` chunks, sorted newest-first.
+///
+/// Prefers the SQLite metadata DB when available so listings stay fast on
+/// large galleries (no per-request directory walk). Falls back to the
+/// filesystem scan when the DB is disabled, can't be opened, or — as a
+/// safety net — has no rows for this directory yet (e.g. the reconciliation
+/// background task has not finished on first startup).
 async fn list_gallery(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
@@ -1221,6 +1226,27 @@ async fn list_gallery(
 
     if !output_dir.is_dir() {
         return Ok(Json(Vec::new()));
+    }
+
+    if state.metadata_db.is_some() {
+        let db_arc = state.metadata_db.clone();
+        let dir = output_dir.clone();
+        let listed = tokio::task::spawn_blocking(move || {
+            db_arc
+                .as_ref()
+                .as_ref()
+                .map(|db| db.list(Some(&dir)))
+                .transpose()
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
+        .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
+        if let Some(rows) = listed {
+            if !rows.is_empty() {
+                let images = rows.iter().map(|r| r.to_gallery_image()).collect();
+                return Ok(Json(images));
+            }
+        }
     }
 
     let images = tokio::task::spawn_blocking(move || scan_gallery_dir(&output_dir))
@@ -1450,6 +1476,23 @@ async fn delete_gallery_image(
     let thumb_dir = server_thumbnail_dir();
     let _ = std::fs::remove_file(thumb_dir.join(&clean_name));
     let _ = std::fs::remove_file(thumb_dir.join(format!("{clean_name}.png")));
+
+    // Drop the matching metadata row if the DB is enabled. Errors here are
+    // logged — they don't roll back the disk delete since the file is the
+    // source of truth and reconciliation will re-sync on the next restart.
+    if let Some(db) = state.metadata_db.as_ref().as_ref() {
+        match db.delete(&output_dir, &clean_name) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                "delete: no metadata row for {}",
+                output_dir.join(&clean_name).display()
+            ),
+            Err(e) => tracing::warn!(
+                "metadata DB delete failed for {}: {e:#}",
+                output_dir.join(&clean_name).display()
+            ),
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

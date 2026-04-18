@@ -41,7 +41,7 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(16);
     let queue_handle = QueueHandle::new(job_tx);
 
-    let state = match ModelPaths::resolve(&model_name, &config) {
+    let mut state = match ModelPaths::resolve(&model_name, &config) {
         Some(paths) => {
             info!(model = %model_name, "configured model");
             info!(transformer = %paths.transformer.display());
@@ -97,6 +97,22 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
         }
     };
 
+    // Open the gallery metadata DB (best-effort — server still runs without it).
+    match mold_db::open_default() {
+        Ok(Some(db)) => {
+            info!(db = %db.path().display(), "metadata DB opened");
+            state.metadata_db = std::sync::Arc::new(Some(db));
+        }
+        Ok(None) => {
+            tracing::info!("metadata DB disabled (MOLD_DB_DISABLE set or MOLD_HOME unresolved)");
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to open metadata DB: {e:#} — gallery falls back to filesystem scan"
+            );
+        }
+    }
+
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
     let worker_state = state.clone();
     tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
@@ -114,6 +130,35 @@ pub async fn run_server(bind: &str, port: u16, models_dir: PathBuf) -> Result<()
             let _ = std::fs::create_dir_all(&output_dir);
             info!(output_dir = %output_dir.display(), "gallery output directory");
             routes::spawn_thumbnail_warmup(&config);
+
+            // Async reconcile: import any existing files into the DB and
+            // drop rows whose backing files are missing. Runs on a blocking
+            // worker so it never stalls the request path even on large dirs.
+            if state.metadata_db.is_some() {
+                let db_arc = state.metadata_db.clone();
+                let dir = output_dir.clone();
+                tokio::spawn(async move {
+                    let join = tokio::task::spawn_blocking(move || {
+                        if let Some(db) = db_arc.as_ref() {
+                            db.reconcile(&dir)
+                        } else {
+                            Ok(mold_db::ReconcileStats::default())
+                        }
+                    })
+                    .await;
+                    match join {
+                        Ok(Ok(stats)) => tracing::info!(
+                            imported = stats.imported,
+                            updated = stats.updated,
+                            removed = stats.removed,
+                            kept = stats.kept,
+                            "metadata DB reconciled with gallery directory"
+                        ),
+                        Ok(Err(e)) => tracing::warn!("metadata DB reconcile failed: {e:#}"),
+                        Err(e) => tracing::warn!("metadata DB reconcile task join error: {e}"),
+                    }
+                });
+            }
         }
     }
 

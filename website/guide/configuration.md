@@ -103,16 +103,18 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable                    | Default          | Description                                                                                                                                                       |
-| --------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MOLD_OUTPUT_DIR`           | `~/.mold/output` | Image output directory (set empty to disable)                                                                                                                     |
-| `MOLD_THUMBNAIL_WARMUP`     | —                | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
-| `MOLD_WEB_DIR`              | —                | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |
-| `MOLD_GALLERY_ALLOW_DELETE` | —                | `1` to allow `DELETE /api/gallery/image/:filename` (default: off — returns 403). Pair with `MOLD_API_KEY` when public-facing                                      |
-| `MOLD_CORS_ORIGIN`          | —                | Restrict CORS to specific origin                                                                                                                                  |
-| `MOLD_API_KEY`              | —                | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                 |
-| `MOLD_RATE_LIMIT`           | —                | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                  |
-| `MOLD_RATE_LIMIT_BURST`     | —                | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                     |
+| Variable                    | Default             | Description                                                                                                                                                       |
+| --------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_OUTPUT_DIR`           | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                     |
+| `MOLD_THUMBNAIL_WARMUP`     | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
+| `MOLD_WEB_DIR`              | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |
+| `MOLD_GALLERY_ALLOW_DELETE` | —                   | `1` to allow `DELETE /api/gallery/image/:filename` (default: off — returns 403). Pair with `MOLD_API_KEY` when public-facing                                      |
+| `MOLD_DB_PATH`              | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                  |
+| `MOLD_DB_DISABLE`           | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                     |
+| `MOLD_CORS_ORIGIN`          | —                   | Restrict CORS to specific origin                                                                                                                                  |
+| `MOLD_API_KEY`              | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                 |
+| `MOLD_RATE_LIMIT`           | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                  |
+| `MOLD_RATE_LIMIT_BURST`     | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                     |
 
 ### Upscaling
 
@@ -126,6 +128,40 @@ Environment variables take precedence over config file values.
 | Variable   | Default | Description                        |
 | ---------- | ------- | ---------------------------------- |
 | `HF_TOKEN` | —       | HuggingFace token for gated models |
+
+### Gallery Metadata Database
+
+mold persists generation metadata in a SQLite database at `MOLD_HOME/mold.db`
+(override with `MOLD_DB_PATH`). Both surfaces — the CLI's local generation
+path and the HTTP server — write a row per saved file: prompt, negative
+prompt, model, seed, steps, guidance, dimensions, LoRA, scheduler, the
+file's mtime/size, the generation duration, and a `source` column
+(`server` / `cli` / `backfill`).
+
+The DB powers `/api/gallery` so listings stay fast on large directories
+(no per-request file walk) and surface metadata for formats that don't
+embed it (mp4, gif, webp). PNG / JPEG outputs still get the existing
+embedded `mold:parameters` chunk in addition to the row.
+
+On server startup the DB runs an asynchronous reconciliation pass:
+
+- new files in `MOLD_OUTPUT_DIR` get rows added (synthesizing metadata
+  from the filename when no embedded chunk is present)
+- rows whose backing files have been removed (manual `rm`, file manager,
+  etc.) get pruned
+- size/mtime changes trigger a row refresh
+
+Set `MOLD_DB_DISABLE=1` to opt out — both surfaces fall back to the
+filesystem walk + embedded-metadata behavior from before. The NixOS
+module exposes the same toggle:
+
+```nix
+services.mold = {
+  enable = true;
+  metadataDb.enable = false;          # opt out
+  # metadataDb.path = "/var/lib/mold/custom.db";   # override location
+};
+```
 
 ## Advanced
 

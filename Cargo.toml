@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/mold-core",
+    "crates/mold-db",
     "crates/mold-inference",
     "crates/mold-server",
     "crates/mold-cli",

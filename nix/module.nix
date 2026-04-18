@@ -143,6 +143,30 @@ in
       description = "Optional directory to persist copies of server-generated images. Null means disabled (default).";
     };
 
+    metadataDb = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Enable the SQLite gallery metadata DB at MOLD_HOME/mold.db. The
+          server writes a row per saved generation, queries the DB for
+          /api/gallery (falling back to a filesystem walk when empty), and
+          runs an async reconciliation pass on startup so deletes performed
+          outside the server are reflected. Set to false to opt out
+          entirely (sets MOLD_DB_DISABLE=1).
+        '';
+      };
+
+      path = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Override the metadata DB file path. When null, falls back to
+          MOLD_HOME/mold.db. Sets MOLD_DB_PATH when non-null.
+        '';
+      };
+    };
+
     defaultModel = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -263,6 +287,12 @@ in
       // lib.optionalAttrs (cfg.outputDir != null) {
         MOLD_OUTPUT_DIR = cfg.outputDir;
       }
+      // lib.optionalAttrs (!cfg.metadataDb.enable) {
+        MOLD_DB_DISABLE = "1";
+      }
+      // lib.optionalAttrs (cfg.metadataDb.path != null) {
+        MOLD_DB_PATH = cfg.metadataDb.path;
+      }
       // lib.optionalAttrs (cfg.defaultModel != null) {
         MOLD_DEFAULT_MODEL = cfg.defaultModel;
       }
@@ -324,7 +354,10 @@ in
           cfg.modelsDir
         ]
         ++ lib.optionals (cfg.outputDir != null) [ cfg.outputDir ]
-        ++ lib.optionals cfg.logToFile [ cfg.logDir ];
+        ++ lib.optionals cfg.logToFile [ cfg.logDir ]
+        ++ lib.optionals (cfg.metadataDb.enable && cfg.metadataDb.path != null) [
+          (builtins.dirOf cfg.metadataDb.path)
+        ];
 
         # GPU access
         SupplementaryGroups = [
