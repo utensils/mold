@@ -646,6 +646,10 @@ pub struct GenerateState {
     pub progress: ProgressState,
     pub preview_image: Option<image::DynamicImage>,
     pub image_state: Option<StatefulProtocol>,
+    /// When the preview is an animated GIF/APNG/WebP, holds the decoded
+    /// frame list and current playback cursor. `image_state` always shows
+    /// the frame at `animation.current`.
+    pub animation: Option<crate::animation::AnimationState>,
     pub generating: bool,
     /// Number of images remaining in the current batch (0 when not batching).
     pub batch_remaining: u32,
@@ -669,6 +673,8 @@ pub struct GalleryState {
     pub selected: usize,
     pub preview_image: Option<image::DynamicImage>,
     pub image_state: Option<StatefulProtocol>,
+    /// Frame loop for animated previews (GIF/APNG/WebP).
+    pub animation: Option<crate::animation::AnimationState>,
     pub scanning: bool,
     pub view_mode: GalleryViewMode,
     /// Thumbnail StatefulProtocol instances, lazily populated during render.
@@ -1113,6 +1119,7 @@ impl App {
                 progress: ProgressState::default(),
                 preview_image: None,
                 image_state: None,
+                animation: None,
                 generating: false,
                 batch_remaining: 0,
                 last_seed: None,
@@ -1125,6 +1132,7 @@ impl App {
                 selected: 0,
                 preview_image: None,
                 image_state: None,
+                animation: None,
                 scanning: false,
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
@@ -1263,6 +1271,7 @@ impl App {
             self.gallery.view_mode = GalleryViewMode::Grid;
             self.gallery.preview_image = None;
             self.gallery.image_state = None;
+            self.gallery.animation = None;
         }
 
         let tx = self.bg_tx.clone();
@@ -2444,6 +2453,7 @@ impl App {
                     self.gallery.view_mode = GalleryViewMode::Grid;
                     self.gallery.preview_image = None;
                     self.gallery.image_state = None;
+                    self.gallery.animation = None;
                 } else {
                     self.generate.error_message = None;
                 }
@@ -2645,10 +2655,14 @@ impl App {
                 let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
                 if cache_path.is_file() {
                     // Cached locally — load synchronously
+                    if self.try_install_gallery_animation(&cache_path) {
+                        return;
+                    }
                     if let Ok(img) = image::open(&cache_path) {
                         let protocol = self.picker.new_resize_protocol(img.clone());
                         self.gallery.preview_image = Some(img);
                         self.gallery.image_state = Some(protocol);
+                        self.gallery.animation = None;
                         return;
                     }
                 }
@@ -2664,24 +2678,69 @@ impl App {
                 });
                 self.gallery.preview_image = None;
                 self.gallery.image_state = None;
+                self.gallery.animation = None;
             } else if entry.path.exists() && entry.path.is_file() {
                 // For video files, prefer the cached GIF preview (animated)
                 let gif_path = crate::thumbnails::preview_gif_path(&entry.path);
                 let load_path = if gif_path.is_file() {
-                    &gif_path
+                    gif_path.clone()
                 } else {
-                    &entry.path
+                    entry.path.clone()
                 };
-                if let Ok(img) = image::open(load_path) {
+                if self.try_install_gallery_animation(&load_path) {
+                    return;
+                }
+                if let Ok(img) = image::open(&load_path) {
                     let protocol = self.picker.new_resize_protocol(img.clone());
                     self.gallery.preview_image = Some(img);
                     self.gallery.image_state = Some(protocol);
+                    self.gallery.animation = None;
                     return;
                 }
             }
         }
         self.gallery.preview_image = None;
         self.gallery.image_state = None;
+        self.gallery.animation = None;
+    }
+
+    /// Try to decode `path` as an animated container and install it as the
+    /// active gallery preview. Returns `true` when animation was installed.
+    fn try_install_gallery_animation(&mut self, path: &std::path::Path) -> bool {
+        let frames = match crate::animation::decode_animation_path(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let state = match crate::animation::AnimationState::new(frames) {
+            Some(s) => s,
+            None => return false,
+        };
+        let first = state.current_image().clone();
+        let protocol = self.picker.new_resize_protocol(first.clone());
+        self.gallery.preview_image = Some(first);
+        self.gallery.image_state = Some(protocol);
+        self.gallery.animation = Some(state);
+        true
+    }
+
+    /// Advance any active animations in the gallery/generate previews and
+    /// rebuild their image protocols so the next render shows the new
+    /// frame. Called once per event-loop tick.
+    pub fn tick_animations(&mut self) {
+        if let Some(anim) = self.gallery.animation.as_mut() {
+            if anim.tick() {
+                let img = anim.current_image().clone();
+                self.gallery.preview_image = Some(img.clone());
+                self.gallery.image_state = Some(self.picker.new_resize_protocol(img));
+            }
+        }
+        if let Some(anim) = self.generate.animation.as_mut() {
+            if anim.tick() {
+                let img = anim.current_image().clone();
+                self.generate.preview_image = Some(img.clone());
+                self.generate.image_state = Some(self.picker.new_resize_protocol(img));
+            }
+        }
     }
 
     /// Load the selected gallery entry's metadata into the Generate view.
@@ -2783,6 +2842,7 @@ impl App {
 
         self.gallery.preview_image = None;
         self.gallery.image_state = None;
+        self.gallery.animation = None;
     }
 
     /// Open the selected gallery image in the system viewer.
@@ -3764,6 +3824,7 @@ impl App {
         self.generate.progress.clear();
         self.generate.preview_image = None;
         self.generate.image_state = None;
+        self.generate.animation = None;
 
         let neg = self
             .generate
@@ -3862,6 +3923,7 @@ impl App {
                                 let protocol = self.picker.new_resize_protocol(img.clone());
                                 self.generate.preview_image = Some(img);
                                 self.generate.image_state = Some(protocol);
+                                self.generate.animation = None;
                             }
                         }
                     }
@@ -3892,10 +3954,28 @@ impl App {
                         }
                         // Show GIF preview in the generate viewport (animated)
                         if !video.gif_preview.is_empty() {
-                            if let Ok(img) = image::load_from_memory(&video.gif_preview) {
+                            if let Ok(frames) = crate::animation::decode_animation_bytes(
+                                &video.gif_preview,
+                                Some("gif"),
+                            ) {
+                                if let Some(state) = crate::animation::AnimationState::new(frames) {
+                                    let first = state.current_image().clone();
+                                    let protocol = self.picker.new_resize_protocol(first.clone());
+                                    self.generate.preview_image = Some(first);
+                                    self.generate.image_state = Some(protocol);
+                                    self.generate.animation = Some(state);
+                                } else if let Ok(img) = image::load_from_memory(&video.gif_preview)
+                                {
+                                    let protocol = self.picker.new_resize_protocol(img.clone());
+                                    self.generate.preview_image = Some(img);
+                                    self.generate.image_state = Some(protocol);
+                                    self.generate.animation = None;
+                                }
+                            } else if let Ok(img) = image::load_from_memory(&video.gif_preview) {
                                 let protocol = self.picker.new_resize_protocol(img.clone());
                                 self.generate.preview_image = Some(img);
                                 self.generate.image_state = Some(protocol);
+                                self.generate.animation = None;
                             }
                         }
                     }
@@ -4098,10 +4178,26 @@ impl App {
                     });
                 }
                 BackgroundEvent::GalleryPreviewReady(data) => {
-                    if let Ok(img) = image::load_from_memory(&data) {
-                        let protocol = self.picker.new_resize_protocol(img.clone());
-                        self.gallery.preview_image = Some(img);
-                        self.gallery.image_state = Some(protocol);
+                    let mut installed_animation = false;
+                    if crate::animation::is_animated_bytes(&data) {
+                        if let Ok(frames) = crate::animation::decode_animation_bytes(&data, None) {
+                            if let Some(state) = crate::animation::AnimationState::new(frames) {
+                                let first = state.current_image().clone();
+                                let protocol = self.picker.new_resize_protocol(first.clone());
+                                self.gallery.preview_image = Some(first);
+                                self.gallery.image_state = Some(protocol);
+                                self.gallery.animation = Some(state);
+                                installed_animation = true;
+                            }
+                        }
+                    }
+                    if !installed_animation {
+                        if let Ok(img) = image::load_from_memory(&data) {
+                            let protocol = self.picker.new_resize_protocol(img.clone());
+                            self.gallery.preview_image = Some(img);
+                            self.gallery.image_state = Some(protocol);
+                            self.gallery.animation = None;
+                        }
                     }
                 }
                 BackgroundEvent::ThumbnailsReady => {
@@ -5343,6 +5439,7 @@ mod tests {
             selected: 0,
             preview_image: None,
             image_state: None,
+            animation: None,
             scanning: false,
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
@@ -5433,6 +5530,7 @@ mod tests {
                 progress: ProgressState::default(),
                 preview_image: None,
                 image_state: None,
+                animation: None,
                 generating: false,
                 batch_remaining: 0,
                 last_seed: None,
@@ -5445,6 +5543,7 @@ mod tests {
                 selected: 0,
                 preview_image: None,
                 image_state: None,
+                animation: None,
                 scanning: false,
                 view_mode: GalleryViewMode::Grid,
                 thumbnail_states: Vec::new(),
@@ -6198,6 +6297,7 @@ mod tests {
             progress: ProgressState::default(),
             preview_image: None,
             image_state: None,
+            animation: None,
             generating: true,
             batch_remaining: 3,
             last_seed: None,
@@ -6253,6 +6353,7 @@ mod tests {
             progress: ProgressState::default(),
             preview_image: None,
             image_state: None,
+            animation: None,
             generating: true,
             batch_remaining: 4,
             last_seed: None,
@@ -6289,6 +6390,7 @@ mod tests {
             progress: ProgressState::default(),
             preview_image: None,
             image_state: None,
+            animation: None,
             generating: false,
             batch_remaining: 0,
             last_seed: None,

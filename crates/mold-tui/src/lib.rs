@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 mod action;
+mod animation;
 mod app;
 mod backend;
 mod event;
@@ -94,6 +95,10 @@ async fn run_event_loop(
 
         // Process any background task results
         app.process_background_events();
+
+        // Advance any animated previews so the next draw shows the next frame
+        // when its delay has elapsed.
+        app.tick_animations();
 
         // Refresh resource info every 2 seconds
         if last_resource_refresh.elapsed() >= std::time::Duration::from_secs(2) {
