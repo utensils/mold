@@ -89,6 +89,7 @@ CI runs on every push and PR (`.github/workflows/ci.yml`). All jobs must pass:
 ```
 crates/
 ├── mold-core/                # Shared types, API protocol, HTTP client, config, model manifests
+├── mold-db/                  # SQLite gallery metadata store (rusqlite, bundled), used by CLI + server
 ├── mold-inference/           # Candle-based inference engine (FLUX, SD1.5, SDXL, SD3, Z-Image, Flux.2, Qwen-Image, Wuerstchen)
 ├── mold-server/              # Axum HTTP inference server (library, consumed by mold-cli)
 ├── mold-cli/                 # Main binary — CLI (clap), single `mold` binary with feature flags
@@ -102,6 +103,7 @@ crates/
 |-----------|---------------|------------|
 | `mold-cli/` | `mold-ai` | binary: `mold` |
 | `mold-core/` | `mold-ai-core` | lib: `mold_core` |
+| `mold-db/` | `mold-ai-db` | lib: `mold_db` |
 | `mold-inference/` | `mold-ai-inference` | lib: `mold_inference` |
 | `mold-server/` | `mold-ai-server` | lib: `mold_server` |
 | `mold-discord/` | `mold-ai-discord` | lib: `mold_discord` |
@@ -265,6 +267,14 @@ Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy �
 **Documentation site**: VitePress 1.6 + Tailwind CSS v4 + bun in `website/`. Dev server: `cd website && bun install && bun run dev -- --host 0.0.0.0`. Build: `bun run build`. Deployed to GitHub Pages via `.github/workflows/pages.yml` on push to `main` (website/** paths). Base path is `/mold/` (served at `utensils.github.io/mold/`).
 
 **Web gallery UI** (separate from the docs site): Vue 3 + Vite 7 + Tailwind CSS v4.2 SPA in `web/`. The SPA is **embedded directly into the `mold` binary at compile time** via [`rust-embed`](https://crates.io/crates/rust-embed), so `nix build` (or `cargo build` after running `cd web && bun run build`) produces a single-file server that serves the gallery with zero runtime filesystem dependency. `crates/mold-server/build.rs` resolves the bundle from one of three sources, in order: `$MOLD_WEB_DIST` (set by the Nix flake's `mold-web` derivation — built reproducibly via [bun2nix](https://github.com/nix-community/bun2nix) from `web/bun.lock` → `web/bun.nix`), `<repo>/web/dist`, or a generated placeholder stub (`$OUT_DIR/web-stub/__mold_placeholder`). The stub is detected at runtime and swapped for the inline "mold is running" page so a bare `cargo build` still produces a working binary. For SPA hot-iteration without Rust recompiles, `MOLD_WEB_DIR` (and the legacy `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, `./web/dist` candidates) still take precedence over the embedded bundle — so `bun run dev` or a local `web/dist` can be swapped in without rebuilding Rust. Dev server: `bun run dev` (proxies `/api` + `/health` to `http://localhost:7680`; override with `MOLD_API_ORIGIN`). See `crates/mold-server/src/web_ui.rs` for the resolver + embed wiring and `web/README.md` for the frontend stack.
+
+**Gallery metadata DB at `MOLD_HOME/mold.db`** (override with `MOLD_DB_PATH`, disable with `MOLD_DB_DISABLE=1`). The `mold-db` crate (rusqlite + bundled SQLite, WAL mode) holds one row per saved file with the full `OutputMetadata` plus `file_mtime_ms`, `file_size_bytes`, `generation_time_ms`, `backend` (`cuda`/`metal`/`cpu`), `hostname`, `format`, and a `source` column (`server` / `cli` / `backfill`). Both surfaces write rows after a successful save:
+
+- **Server**: `crates/mold-server/src/queue.rs` `save_image_to_dir` / `save_video_to_dir` upserts after writing the file. `crates/mold-server/src/lib.rs` opens the DB in `AppState.metadata_db` (typed `Arc<Option<MetadataDb>>`) and spawns a background `MetadataDb::reconcile(output_dir)` on startup that imports new files, refreshes mtime/size on changed files, and prunes rows whose backing files have disappeared. `/api/gallery` (`routes.rs::list_gallery`) prefers the DB and only falls back to `scan_gallery_dir` when the DB is `None` or returns no rows for the dir. `DELETE /api/gallery/image/:filename` also calls `db.delete()`.
+- **CLI**: `crates/mold-cli/src/metadata_db.rs` exposes a process-wide `OnceLock<Option<MetadataDb>>` plus `record_local_save`, called from `save_and_preview_image` and the video save path in `crates/mold-cli/src/commands/generate.rs` so `mold run --local` and the local-fallback path persist rows just like the server.
+- **TUI**: `crates/mold-tui/src/gallery_scan.rs::scan_images_local` queries the DB first when present, falling back to the existing on-disk walk + embedded-metadata parser. Server-mode TUI gallery already goes through `/api/gallery`.
+
+The DB is opt-out, additive (PNG/JPEG embedded `mold:parameters` chunks still get written), and fail-safe — if open or upsert fails the surface logs a warning and keeps working without persistence.
 
 **Gallery scan validates files at list time.** `/api/gallery` filters out corrupt/stub outputs before returning — files below a format-specific size floor (128 B for GIF, 256 B for other raster formats, 4 KB for MP4), files with invalid headers (image crate `into_dimensions()` fails, or MP4 missing the `ftyp` atom), and **solid-black raster outputs** (suspect-size file whose 16×16 sample stays under the intensity ceiling) are skipped entirely rather than shown as broken tiles in the UI. Header validation is cheap; the solid-black check only decodes files under a per-format "suspect size" so it never spends time on real multi-KB outputs. Helpers live in `routes.rs`: `min_valid_size`, `image_header_dims`, `has_ftyp_box`, `is_probably_solid_black`, `scan_gallery_dir`.
 

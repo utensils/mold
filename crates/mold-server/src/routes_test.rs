@@ -1181,6 +1181,7 @@ mod tests {
             )),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1227,6 +1228,7 @@ mod tests {
             )),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1476,6 +1478,7 @@ mod tests {
             )),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1796,5 +1799,194 @@ mod tests {
         // Map should be small again (just the one new entry)
         let map = state.generation_limiters.lock().unwrap();
         assert!(map.len() <= 1, "map should be evicted, got {}", map.len());
+    }
+
+    /// `/api/gallery` should serve from the SQLite metadata DB when one is
+    /// attached to AppState — bypassing the on-disk walk that fires when
+    /// the DB is `None`.
+    #[tokio::test]
+    async fn gallery_list_prefers_metadata_db_when_populated() {
+        use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("real.png"), b"fake-bytes").unwrap();
+
+        // Pre-populate the DB with a row that wouldn't otherwise survive
+        // the on-disk validator (size below the 256-byte floor) — proves
+        // the response came from the DB and not the filesystem walk.
+        let db_path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&db_path).unwrap();
+        let metadata = mold_core::OutputMetadata {
+            prompt: "from db".into(),
+            negative_prompt: None,
+            original_prompt: None,
+            model: "mock-model".into(),
+            seed: 7,
+            steps: 4,
+            guidance: 1.0,
+            width: 64,
+            height: 64,
+            strength: None,
+            scheduler: None,
+            lora: None,
+            lora_scale: None,
+            frames: None,
+            fps: None,
+            version: "test".into(),
+        };
+        let mut rec = GenerationRecord::from_save(
+            dir.path(),
+            "real.png",
+            mold_core::OutputFormat::Png,
+            metadata,
+            RecordSource::Server,
+            1_700_000_000_000,
+        );
+        rec.file_mtime_ms = Some(1_700_000_000_000);
+        rec.file_size_bytes = Some(10);
+        db.upsert(&rec).unwrap();
+
+        // Build state with the DB attached and a config that points at our
+        // gallery dir.
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let mut state = AppState::empty(config, queue);
+        state.metadata_db = std::sync::Arc::new(Some(db));
+        let app = app_with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let arr = body.as_array().expect("array response");
+        assert_eq!(arr.len(), 1, "DB-backed listing should return our row");
+        assert_eq!(arr[0]["filename"], "real.png");
+        assert_eq!(arr[0]["metadata"]["prompt"], "from db");
+        assert_eq!(arr[0]["metadata"]["seed"], 7);
+    }
+
+    /// Without a DB attached, the gallery list falls back to the on-disk
+    /// walk + header validation. Files below the size floor / with bad
+    /// headers should be filtered out, just like the historical behavior.
+    #[tokio::test]
+    async fn gallery_list_falls_back_to_filesystem_when_db_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Below the 256 B floor → filtered.
+        std::fs::write(dir.path().join("tiny.png"), b"x").unwrap();
+
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let state = AppState::empty(config, queue);
+        let app = app_with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(
+            body.as_array().unwrap().len(),
+            0,
+            "filesystem fallback must still apply size/header validation"
+        );
+    }
+
+    /// `DELETE /api/gallery/image/:filename` must remove the matching DB
+    /// row in addition to the file on disk so the next list call doesn't
+    /// resurrect a stale entry from cache.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn gallery_delete_drops_metadata_row() {
+        use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("doomed.png");
+        std::fs::write(&target, vec![0u8; 1024]).unwrap();
+
+        let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
+        let metadata = mold_core::OutputMetadata {
+            prompt: "doomed".into(),
+            negative_prompt: None,
+            original_prompt: None,
+            model: "m".into(),
+            seed: 0,
+            steps: 0,
+            guidance: 0.0,
+            width: 1,
+            height: 1,
+            strength: None,
+            scheduler: None,
+            lora: None,
+            lora_scale: None,
+            frames: None,
+            fps: None,
+            version: "t".into(),
+        };
+        let rec = GenerationRecord::from_save(
+            dir.path(),
+            "doomed.png",
+            mold_core::OutputFormat::Png,
+            metadata,
+            RecordSource::Server,
+            0,
+        );
+        db.upsert(&rec).unwrap();
+        assert_eq!(db.count().unwrap(), 1);
+
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let mut state = AppState::empty(config, queue);
+        state.metadata_db = std::sync::Arc::new(Some(db));
+        let db_handle_for_assert = state.metadata_db.clone();
+        let app = app_with_state(state);
+
+        // Delete is opt-in via env var. The handler reads it on each request
+        // so we must keep the env set while the request is in flight — and
+        // hold the env_lock to serialize against any other test that pokes
+        // process env. The function-level
+        // `#[allow(clippy::await_holding_lock)]` covers the await below.
+        let _lock = env_lock().lock().unwrap();
+        std::env::set_var("MOLD_GALLERY_ALLOW_DELETE", "1");
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/gallery/image/doomed.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("MOLD_GALLERY_ALLOW_DELETE");
+        drop(_lock);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!target.exists(), "file should be removed from disk");
+        let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();
+        assert_eq!(db_after.count().unwrap(), 0, "DB row should be gone");
     }
 }

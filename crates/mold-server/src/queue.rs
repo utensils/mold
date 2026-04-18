@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use mold_core::{ImageData, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent};
+use mold_core::{
+    ImageData, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+};
+use mold_db::{GenerationRecord, MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -74,27 +77,115 @@ fn clear_active_generation(state: &AppState) {
     *active = None;
 }
 
+/// Save an image to disk and (best-effort) record a row in the metadata DB.
+///
+/// Errors writing to disk are logged and skipped. DB errors are also logged
+/// but do not fail the save — the file is the source of truth.
 fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
     model: &str,
     batch_size: u32,
+    metadata: Option<&OutputMetadata>,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
 ) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let timestamp_ms = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+        .unwrap_or_default();
+    let timestamp_ms = now.as_millis() as u64;
     let ext = img.format.to_string();
     let filename =
         mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
     let path = dir.join(&filename);
     match std::fs::write(&path, &img.data) {
         Ok(()) => tracing::info!("saved image to {}", path.display()),
-        Err(e) => tracing::warn!("failed to save image to {}: {e}", path.display()),
+        Err(e) => {
+            tracing::warn!("failed to save image to {}: {e}", path.display());
+            return;
+        }
+    }
+    if let (Some(db), Some(meta)) = (db, metadata) {
+        let mut rec = GenerationRecord::from_save(
+            dir,
+            filename,
+            img.format,
+            meta.clone(),
+            RecordSource::Server,
+            now.as_millis() as i64,
+        );
+        rec.stat_from_disk(&path);
+        rec.generation_time_ms = generation_time_ms;
+        rec.hostname = hostname_string();
+        rec.backend = current_backend_label();
+        if let Err(e) = db.upsert(&rec) {
+            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
+        }
+    }
+}
+
+/// Save a video file to disk and (best-effort) record its metadata row.
+/// Mirrors `save_image_to_dir` for the video-output path.
+fn save_video_to_dir(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    format: OutputFormat,
+    model: &str,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("failed to create output dir {}: {e}", dir.display());
+        return;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let ts = now.as_millis() as u64;
+    let ext = format.extension();
+    let filename = mold_core::default_output_filename(model, ts, ext, 1, 0);
+    let path = dir.join(&filename);
+    if let Err(e) = std::fs::write(&path, bytes) {
+        tracing::error!("failed to save video to {}: {e}", path.display());
+        return;
+    }
+    if let Some(db) = db {
+        let mut rec = GenerationRecord::from_save(
+            dir,
+            filename,
+            format,
+            metadata.clone(),
+            RecordSource::Server,
+            now.as_millis() as i64,
+        );
+        rec.stat_from_disk(&path);
+        rec.generation_time_ms = generation_time_ms;
+        rec.hostname = hostname_string();
+        rec.backend = current_backend_label();
+        if let Err(e) = db.upsert(&rec) {
+            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
+        }
+    }
+}
+
+/// Best-effort hostname for the `hostname` DB column. Falls back to `None`.
+fn hostname_string() -> Option<String> {
+    hostname::get().ok().and_then(|s| s.into_string().ok())
+}
+
+/// Compile-time backend label so DB rows say where the work happened.
+fn current_backend_label() -> Option<String> {
+    if cfg!(feature = "cuda") {
+        Some("cuda".into())
+    } else if cfg!(feature = "metal") {
+        Some("metal".into())
+    } else {
+        Some("cpu".into())
     }
 }
 
@@ -234,30 +325,49 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 unreachable!("checked above");
             };
 
-            // Save to output directory if configured
+            // Save to output directory if configured.
+            // Builds OutputMetadata from the request + the engine's actual
+            // seed_used so the DB and embedded chunks agree.
             if let Some(ref dir) = job.output_dir {
                 let dir = dir.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
-                // For video responses, save the actual video data (not just the thumbnail)
+                let generation_time_ms = response.generation_time_ms as i64;
+                let metadata = OutputMetadata::from_generate_request(
+                    &job.request,
+                    response.seed_used,
+                    None,
+                    mold_core::build_info::version_string(),
+                );
+                let db = state.metadata_db.clone();
                 if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
-                    let ext = video.format.extension().to_string();
+                    let video_format = video.format;
+                    let video_metadata = metadata.clone();
                     tokio::task::spawn_blocking(move || {
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        let filename = mold_core::default_output_filename(&model, ts, &ext, 1, 0);
-                        let path = std::path::Path::new(&dir).join(filename);
-                        if let Err(e) = std::fs::write(&path, &video_data) {
-                            tracing::error!("failed to save video to {}: {e}", path.display());
-                        }
+                        save_video_to_dir(
+                            &dir,
+                            &video_data,
+                            video_format,
+                            &model,
+                            &video_metadata,
+                            Some(generation_time_ms),
+                            db.as_ref().as_ref(),
+                        );
                     });
                 } else {
                     let img_clone = img.clone();
+                    let metadata_clone = metadata.clone();
                     tokio::task::spawn_blocking(move || {
-                        save_image_to_dir(&dir, &img_clone, &model, batch_size);
+                        save_image_to_dir(
+                            &dir,
+                            &img_clone,
+                            &model,
+                            batch_size,
+                            Some(&metadata_clone),
+                            Some(generation_time_ms),
+                            db.as_ref().as_ref(),
+                        );
                     });
                 }
             }

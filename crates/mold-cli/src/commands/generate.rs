@@ -490,7 +490,19 @@ pub async fn run(
                 // Save and preview each image immediately during batch generation
                 // (single-image mode is handled in the post-loop section)
                 if batch > 1 {
-                    save_and_preview_image(&img, &output, model, batch, output_format, preview)?;
+                    save_and_preview_image(
+                        &img,
+                        &output,
+                        model,
+                        batch,
+                        output_format,
+                        preview,
+                        Some(PersistArgs {
+                            request: &iter_req,
+                            seed_used: response.seed_used,
+                            generation_time_ms: response.generation_time_ms,
+                        }),
+                    )?;
                 }
                 all_images.push(img);
             }
@@ -549,6 +561,13 @@ pub async fn run(
                     video.height,
                     video.fps,
                 );
+                crate::metadata_db::record_local_save(
+                    std::path::Path::new(filename),
+                    &req,
+                    response.seed_used,
+                    response.generation_time_ms,
+                    video.format,
+                );
             }
             if preview {
                 // Show first frame preview (viuer doesn't support animation).
@@ -574,7 +593,19 @@ pub async fn run(
             stdout.flush()?;
         } else if batch == 1 {
             for img in &response.images {
-                save_and_preview_image(img, &output, model, batch, output_format, preview)?;
+                save_and_preview_image(
+                    img,
+                    &output,
+                    model,
+                    batch,
+                    output_format,
+                    preview,
+                    Some(PersistArgs {
+                        request: &req,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
             }
         }
         // batch > 1: already saved+previewed inside the batch loop
@@ -1135,7 +1166,19 @@ async fn generate_local_batch(
             // Save and preview each image immediately during batch generation
             // (single-image mode is handled by the caller's post-loop section)
             if batch > 1 {
-                save_and_preview_image(&img, output, &req.model, batch, output_format, preview)?;
+                save_and_preview_image(
+                    &img,
+                    output,
+                    &req.model,
+                    batch,
+                    output_format,
+                    preview,
+                    Some(PersistArgs {
+                        request: req,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
             }
             all_images.push(img);
         }
@@ -1200,11 +1243,21 @@ async fn generate_local_batch(
     )
 }
 
+/// Optional metadata used by [`save_and_preview_image`] to persist a row
+/// in the SQLite gallery DB after a successful save. Skipped silently when
+/// `None` (e.g. tests, stdout output, when the DB is disabled).
+struct PersistArgs<'a> {
+    request: &'a GenerateRequest,
+    seed_used: u64,
+    generation_time_ms: u64,
+}
+
 /// Save a single image to disk and optionally preview it inline.
 ///
 /// Resolves the output filename from the `--output` flag, batch index,
 /// model name, and output format. Used both inside batch loops (for
-/// immediate save+preview) and for single-image output.
+/// immediate save+preview) and for single-image output. When `persist`
+/// is `Some`, also records a metadata row in the SQLite gallery DB.
 fn save_and_preview_image(
     img: &ImageData,
     output: &Option<String>,
@@ -1212,6 +1265,7 @@ fn save_and_preview_image(
     batch: u32,
     output_format: OutputFormat,
     preview: bool,
+    persist: Option<PersistArgs<'_>>,
 ) -> anyhow::Result<()> {
     let filename = match output {
         Some(path) if path == "-" => {
@@ -1248,6 +1302,15 @@ fn save_and_preview_image(
     }
     std::fs::write(&filename, &img.data)?;
     status!("{} Saved: {}", theme::icon_done(), filename.bold());
+    if let Some(p) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(&filename),
+            p.request,
+            p.seed_used,
+            p.generation_time_ms,
+            output_format,
+        );
+    }
     if preview {
         preview_image(&img.data);
     }

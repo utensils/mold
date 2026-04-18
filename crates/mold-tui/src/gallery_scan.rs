@@ -57,14 +57,41 @@ pub async fn fetch_and_cache_image(server_url: &str, filename: &str) -> Option<P
     Some(cached_path)
 }
 
-/// Scan for mold-generated PNG images in the local output directory.
-/// Only includes PNGs with valid `mold:parameters` metadata.
-/// Returns entries sorted newest-first by modification time.
+/// Scan for mold-generated images in the local output directory.
+///
+/// Prefers the SQLite metadata DB (populated by both the CLI and server
+/// when they save a file) — falls back to the on-disk walk that reads
+/// embedded `mold:parameters` chunks when the DB is disabled, empty, or
+/// unreadable. The DB path keeps the gallery accurate for formats with no
+/// embedded metadata (gif/webp/mp4) without requiring per-file parsing on
+/// every refresh.
 pub fn scan_images_local() -> Vec<GalleryEntry> {
     let output_dir = default_gallery_dir();
 
     if !output_dir.is_dir() {
         return Vec::new();
+    }
+
+    if let Ok(Some(db)) = mold_db::open_default() {
+        if let Ok(rows) = db.list(Some(&output_dir)) {
+            if !rows.is_empty() {
+                let entries: Vec<GalleryEntry> = rows
+                    .into_iter()
+                    .map(|r| GalleryEntry {
+                        path: PathBuf::from(&r.output_dir).join(&r.filename),
+                        metadata: r.metadata,
+                        generation_time_ms: r.generation_time_ms.map(|n| n as u64),
+                        timestamp: r
+                            .file_mtime_ms
+                            .or(Some(r.created_at_ms))
+                            .map(|ms| (ms / 1000) as u64)
+                            .unwrap_or(0),
+                        server_url: None,
+                    })
+                    .collect();
+                return entries;
+            }
+        }
     }
 
     let mut entries = Vec::new();

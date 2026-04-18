@@ -30,6 +30,7 @@ metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.1" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.8.1" }
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.8.1" }
 anyhow = "1"
 axum = "0.7"
@@ -59,3 +60,6 @@ metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
 mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"

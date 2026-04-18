@@ -116,6 +116,10 @@ pub struct AppState {
     pub shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// Cached upscaler engine to avoid recreating per request. Small models (2-64MB), single slot.
     pub upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn mold_inference::UpscaleEngine>>>>,
+    /// SQLite-backed gallery metadata store. `None` when MOLD_DB_DISABLE=1 or
+    /// when MOLD_HOME could not be resolved — callers must fall back to the
+    /// filesystem walk in `routes::scan_gallery_dir`.
+    pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -145,6 +149,7 @@ impl AppState {
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         }
     }
 
@@ -162,6 +167,7 @@ impl AppState {
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         }
     }
 
@@ -190,6 +196,7 @@ impl AppState {
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         }
     }
 
@@ -221,6 +228,7 @@ impl AppState {
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
         };
         (state, rx)
     }
