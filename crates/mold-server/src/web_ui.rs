@@ -253,12 +253,25 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tower::ServiceExt;
+
+    /// `MOLD_WEB_DIR` is process-global, so tests that read or mutate it
+    /// must serialize. Cargo runs tests in parallel by default and a
+    /// concurrent `set_var` in `filesystem_override_beats_embed` would
+    /// otherwise leak into the other `router()` tests and make them flake.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// With nothing staged at build time, the binary should still serve the
     /// inline "mold is running" placeholder — confirms the stub plumbing.
     #[tokio::test]
     async fn router_handles_root_request() {
+        let _guard = env_lock();
         let app = router();
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -301,6 +314,7 @@ mod tests {
     /// hot-reload the SPA without recompiling Rust.
     #[tokio::test]
     async fn filesystem_override_beats_embed() {
+        let _guard = env_lock();
         let tmp = tempdir();
         std::fs::write(tmp.join("index.html"), b"<html>override</html>").unwrap();
 
@@ -354,6 +368,7 @@ mod tests {
     /// stub path serves an inline placeholder for all methods by design).
     #[tokio::test]
     async fn embedded_rejects_non_get_head() {
+        let _guard = env_lock();
         if resolve_web_dir().is_some() || is_embed_stub() {
             eprintln!("skipping: embedded bundle not active in this test build");
             return;
@@ -386,6 +401,7 @@ mod tests {
     /// the active path (filesystem override / stub).
     #[tokio::test]
     async fn embedded_conditional_get_returns_304() {
+        let _guard = env_lock();
         if resolve_web_dir().is_some() || is_embed_stub() {
             eprintln!("skipping: embedded bundle not active in this test build");
             return;
