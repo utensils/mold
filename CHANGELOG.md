@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-04-17
+
+*Single-binary web gallery: SPA is now embedded at compile time.*
+
+### Fixed
+
+- **`nix build github:utensils/mold` now delivers a single binary that serves the web gallery UI** ([#239](https://github.com/utensils/mold/issues/239)). Previously the flake produced a binary that always fell through to the inline "web gallery UI isn't installed" placeholder because the flake never built `web/dist/` or staged it anywhere the runtime resolver looked. Fixed by:
+  - Adding a `mold-web` derivation built via [`bun2nix`](https://github.com/nix-community/bun2nix) that reproducibly compiles the Vue 3 SPA from `web/bun.lock` → `web/bun.nix` (committed).
+  - Adding `crates/mold-server/build.rs` that stages the built `dist/` (from `$MOLD_WEB_DIST`, a repo-relative `web/dist`, or a generated stub) and stamps `MOLD_EMBED_WEB_DIR` so `rust-embed` bakes the assets into the final binary.
+  - Rewriting `crates/mold-server/src/web_ui.rs` to serve the embedded bundle as the axum fallback, with content-type / ETag / immutable-cache headers for hashed assets and SPA deep-link fallback to `index.html`. `$MOLD_WEB_DIR` (and the other legacy filesystem candidates) still take precedence so developers can hot-reload the SPA without recompiling Rust.
+  - Dropping the never-wired `share/mold/web` copy path from `mkMold`'s `postInstall` — `$out/bin/mold` is now truly self-contained.
+
 ## [0.8.0] - 2026-04-17
 
 *Native RunPod CLI, web gallery UI, and hardening across the board.*
@@ -425,7 +437,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/utensils/mold/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/utensils/mold/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/utensils/mold/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/utensils/mold/compare/v0.6.3...v0.7.0

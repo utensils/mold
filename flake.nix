@@ -17,6 +17,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
+    bun2nix = {
+      url = "github:nix-community/bun2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -67,7 +71,10 @@
 
           pkgs = import inputs.nixpkgs {
             localSystem = system;
-            overlays = [ inputs.rust-overlay.overlays.default ];
+            overlays = [
+              inputs.rust-overlay.overlays.default
+              inputs.bun2nix.overlays.default
+            ];
             config.allowUnfree = true;
           };
 
@@ -163,13 +170,47 @@
             maintainers = [ ];
           };
 
+          # Web gallery SPA (Vue 3 + Vite + Tailwind v4). Built via bun2nix so
+          # the `node_modules` cache is reproducibly derived from `web/bun.lock`.
+          # Output layout: `$out/index.html` + `$out/assets/...` — consumed at
+          # Rust compile time via `MOLD_WEB_DIST`, then embedded into the
+          # `mold` binary by `rust-embed` (see `crates/mold-server/build.rs`).
+          mold-web = pkgs.stdenv.mkDerivation {
+            pname = "mold-web";
+            version = "0.8.1";
+            src = ./web;
+            nativeBuildInputs = [ pkgs.bun2nix.hook ];
+            bunDeps = pkgs.bun2nix.fetchBunDeps {
+              bunNix = ./web/bun.nix;
+            };
+            # vue-tsc + vite resolve peer deps via hoisted lookups.
+            bunInstallFlags = [ "--linker=hoisted" ];
+            buildPhase = ''
+              runHook preBuild
+              bun run build
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -R dist/. $out/
+              runHook postInstall
+            '';
+          };
+
           # Build a mold package for a given CUDA compute capability.
+          # `MOLD_WEB_DIST` is read by `crates/mold-server/build.rs`, which
+          # stages the SPA into a directory that `rust-embed` bakes into the
+          # binary at compile time. The result is a true single-file install:
+          # `$out/bin/mold` serves the gallery UI with no runtime dependency
+          # on `share/mold/web` or any external assets.
           mkMold =
             computeCap:
             craneLib.buildPackage (
               commonArgs
               // {
                 inherit cargoArtifacts meta;
+                MOLD_WEB_DIST = "${mold-web}";
                 cargoExtraArgs =
                   "-p mold-ai --features preview,discord,expand,tui,webp,mp4,metrics"
                   + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
@@ -208,7 +249,7 @@
           _module.args.pkgs = pkgs;
 
           packages = {
-            inherit mold;
+            inherit mold mold-web;
             mold-discord = moldDiscord;
             default = mold;
           }

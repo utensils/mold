@@ -36,6 +36,16 @@ Add mold to your flake inputs and import the module:
 This starts `mold serve` on port 7680 with sensible defaults, creates a `mold`
 system user, and manages the data directory at `/var/lib/mold`.
 
+::: tip Web gallery is bundled
+
+Since v0.8.1 the Vue 3 gallery SPA is embedded directly into the `mold` binary
+at compile time — visiting `http://<host>:7680/` opens the gallery with no
+extra configuration. Earlier versions required staging `web/dist/` into
+`~/.mold/web` or pointing `MOLD_WEB_DIR` at a built SPA. That override still
+works for SPA hot-iteration without recompiling Rust.
+
+:::
+
 ## Full Configuration Example
 
 ```nix{37-43}
