@@ -103,18 +103,18 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable                    | Default          | Description                                                                                                                                                       |
-| --------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MOLD_OUTPUT_DIR`           | `~/.mold/output` | Image output directory (set empty to disable)                                                                                                                     |
-| `MOLD_THUMBNAIL_WARMUP`     | —                | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
-| `MOLD_WEB_DIR`              | —                | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |
-| `MOLD_GALLERY_ALLOW_DELETE` | —                | `1` to allow `DELETE /api/gallery/image/:filename` (default: off — returns 403). Pair with `MOLD_API_KEY` when public-facing                                      |
-| `MOLD_DB_PATH`              | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                              |
-| `MOLD_DB_DISABLE`           | —                | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                     |
-| `MOLD_CORS_ORIGIN`          | —                | Restrict CORS to specific origin                                                                                                                                  |
-| `MOLD_API_KEY`              | —                | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                 |
-| `MOLD_RATE_LIMIT`           | —                | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                  |
-| `MOLD_RATE_LIMIT_BURST`     | —                | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                     |
+| Variable                    | Default             | Description                                                                                                                                                       |
+| --------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_OUTPUT_DIR`           | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                     |
+| `MOLD_THUMBNAIL_WARMUP`     | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
+| `MOLD_WEB_DIR`              | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |
+| `MOLD_GALLERY_ALLOW_DELETE` | —                   | `1` to allow `DELETE /api/gallery/image/:filename` (default: off — returns 403). Pair with `MOLD_API_KEY` when public-facing                                      |
+| `MOLD_DB_PATH`              | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                  |
+| `MOLD_DB_DISABLE`           | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                     |
+| `MOLD_CORS_ORIGIN`          | —                   | Restrict CORS to specific origin                                                                                                                                  |
+| `MOLD_API_KEY`              | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                 |
+| `MOLD_RATE_LIMIT`           | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                  |
+| `MOLD_RATE_LIMIT_BURST`     | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                     |
 
 ### Upscaling
 
