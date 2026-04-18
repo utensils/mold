@@ -21,19 +21,37 @@ MOLD_API_ORIGIN=http://hal9000:7680 bun run dev
 
 ## Production build
 
+The SPA is **embedded into the `mold` binary at compile time** — the
+Nix flake builds it reproducibly via [`bun2nix`](https://github.com/nix-community/bun2nix)
+(see `web/bun.nix`) and passes the output to `crates/mold-server/build.rs`
+through `MOLD_WEB_DIST`, which stamps `MOLD_EMBED_WEB_DIR` for
+[`rust-embed`](https://crates.io/crates/rust-embed). Result: `nix build`
+produces a single-file server that serves this gallery with no runtime
+dependency on `~/.mold/web`, `share/mold/web`, or any external `dist/`.
+
 ```bash
 bun run build        # outputs to web/dist
 ```
 
-Then either:
+For **plain cargo builds** outside Nix, `build.rs` picks up a
+`web/dist/` next to the crate automatically. Run the SPA build before
+`cargo build` if you want the real gallery baked in; skip it and the
+binary falls back to an inline "mold is running" placeholder page.
 
-- set `MOLD_WEB_DIR=$(pwd)/dist` on the server, or
-- copy `dist/` into `~/.mold/web` (or the installer-specific
-  `$XDG_DATA_HOME/mold/web`).
+For **SPA hot-iteration without recompiling Rust**, point a running
+server at a local `dist/`:
 
-The mold server resolves the bundle at startup and serves it as the SPA
-fallback — API routes (`/api/*`, `/health`, `/metrics`) take precedence
-because they are matched first by the axum router.
+```bash
+MOLD_WEB_DIR=$(pwd)/dist mold serve
+```
+
+`MOLD_WEB_DIR` (plus the legacy `$XDG_DATA_HOME/mold/web`,
+`~/.mold/web`, `<binary dir>/web`, and `./web/dist` candidates) is
+resolved at request time and takes precedence over the embedded bundle,
+so you can swap in new builds without restarting — no recompile. API
+routes (`/api/*`, `/health`, `/metrics`) are matched first by the axum
+router; the SPA fallback handles everything else and reuses
+`index.html` for SPA deep-link routes.
 
 ## What you get
 

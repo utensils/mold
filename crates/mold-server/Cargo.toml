@@ -8,6 +8,10 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "HTTP inference server for mold"
+# build.rs stages the web SPA bundle into a directory that `rust-embed` picks
+# up at compile time, so the final `mold` binary serves the gallery UI with no
+# filesystem dependency. See `MOLD_WEB_DIST` / `MOLD_EMBED_WEB_DIR` in build.rs.
+build = "build.rs"
 
 [lib]
 name = "mold_server"
@@ -25,8 +29,8 @@ metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.0" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.8.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.1" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.8.1" }
 anyhow = "1"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }
@@ -53,3 +57,5 @@ subtle = "2"
 hostname = "0.4"
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
+rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
+mime_guess = "2"

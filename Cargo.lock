@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-discord"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "mold-ai-core",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "candle-core-mold",
@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-server"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3011,9 +3011,11 @@ dependencies = [
  "image",
  "metrics",
  "metrics-exporter-prometheus",
+ "mime_guess",
  "mold-ai-core",
  "mold-ai-inference",
  "png",
+ "rust-embed",
  "serde",
  "serde_json",
  "sha2",
@@ -3033,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-tui"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "crossterm 0.28.1",
@@ -4146,6 +4148,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-embed"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04113cb9355a377d83f06ef1f0a45b8ab8cd7d8b1288160717d66df5c7988d27"
+dependencies = [
+ "rust-embed-impl",
+ "rust-embed-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-impl"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0902e4c7c8e997159ab384e6d0fc91c221375f6894346ae107f47dd0f3ccaa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rust-embed-utils",
+ "shellexpand",
+ "syn 2.0.117",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-utils"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bcdef0be6fe7f6fa333b1073c949729274b05f123a0ad7efcb8efd878e5c3b1"
+dependencies = [
+ "mime_guess",
+ "sha2",
+ "walkdir",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4502,6 +4540,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
