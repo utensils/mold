@@ -73,6 +73,14 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
     }
 
     if let Ok(Some(db)) = mold_db::open_default() {
+        // Local-only workflows (TUI without `mold serve`) don't get the
+        // server's startup reconciliation pass — sync the DB to disk on
+        // every refresh so files added/removed outside the CLI are
+        // reflected. The walk is bounded by the gallery directory size
+        // and matches what the legacy filesystem scan paid per call.
+        if let Err(e) = db.reconcile(&output_dir) {
+            tracing::warn!("local TUI gallery reconcile failed: {e:#}");
+        }
         if let Ok(rows) = db.list(Some(&output_dir)) {
             if !rows.is_empty() {
                 let entries: Vec<GalleryEntry> = rows

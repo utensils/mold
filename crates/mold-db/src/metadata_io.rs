@@ -85,6 +85,97 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
     }
 }
 
+/// Minimum on-disk size below which a file is treated as a corrupt/aborted
+/// output. Mirrors the thresholds in `crates/mold-server/src/routes.rs` so
+/// reconcile and the legacy filesystem walk filter the same set of files.
+pub fn min_valid_size(format: OutputFormat) -> u64 {
+    match format {
+        OutputFormat::Png | OutputFormat::Apng | OutputFormat::Jpeg | OutputFormat::Webp => 256,
+        OutputFormat::Gif => 128,
+        OutputFormat::Mp4 => 4096,
+    }
+}
+
+/// Header-only "does this decode as an image?" probe. Returns `(width, height)`
+/// on success — used both to validate and to fill aspect-ratio metadata for
+/// synthetic backfill rows.
+pub fn image_header_dims(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// ISO-BMFF `ftyp` box check at offset 4 — same MP4 sniff used by the
+/// server's gallery scan.
+pub fn has_ftyp_box(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 12];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    &buf[4..8] == b"ftyp"
+}
+
+/// Heuristic "this is a solid black image" detector — the same NaN/aborted
+/// generation guard the server already uses. Only inspects raster files
+/// below a per-format suspect-size ceiling so we never decode real outputs.
+pub fn is_probably_solid_black(path: &Path, format: OutputFormat, size_bytes: u64) -> bool {
+    const SAMPLE_DIM: u32 = 16;
+    const CHANNEL_CEILING: u8 = 16;
+
+    let suspect_threshold: u64 = match format {
+        OutputFormat::Png | OutputFormat::Apng => 8 * 1024,
+        OutputFormat::Jpeg => 4 * 1024,
+        OutputFormat::Gif | OutputFormat::Webp => 4 * 1024,
+        OutputFormat::Mp4 => return false,
+    };
+    if size_bytes > suspect_threshold {
+        return false;
+    }
+
+    let Ok(img) = image::open(path) else {
+        return false;
+    };
+    let thumb = img.thumbnail(SAMPLE_DIM, SAMPLE_DIM).to_rgb8();
+    let mut max_channel: u8 = 0;
+    for pixel in thumb.pixels() {
+        let m = pixel.0[0].max(pixel.0[1]).max(pixel.0[2]);
+        if m > max_channel {
+            max_channel = m;
+        }
+        if max_channel > CHANNEL_CEILING {
+            return false;
+        }
+    }
+    max_channel <= CHANNEL_CEILING
+}
+
+/// Combined gallery-validity check used by reconcile to skip files the
+/// existing server-side scanner would have hidden. Returns `false` for
+/// truncated/aborted/solid-black outputs.
+pub fn is_valid_gallery_file(path: &Path, format: OutputFormat, size_bytes: u64) -> bool {
+    if size_bytes < min_valid_size(format) {
+        return false;
+    }
+    let header_ok = match format {
+        OutputFormat::Mp4 => has_ftyp_box(path),
+        _ => image_header_dims(path).is_some(),
+    };
+    if !header_ok {
+        return false;
+    }
+    if !matches!(format, OutputFormat::Mp4) && is_probably_solid_black(path, format, size_bytes) {
+        return false;
+    }
+    true
+}
+
 fn read_png_metadata(path: &Path) -> Option<OutputMetadata> {
     let file = std::fs::File::open(path).ok()?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));

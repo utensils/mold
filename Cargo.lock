@@ -2996,6 +2996,7 @@ name = "mold-ai-db"
 version = "0.8.1"
 dependencies = [
  "anyhow",
+ "image",
  "mold-ai-core",
  "png 0.17.16",
  "rusqlite",
