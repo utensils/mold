@@ -4,7 +4,7 @@ use crate::queue::clean_error_message;
 use crate::state::{GenerationJobResult, SseMessage};
 use base64::Engine as _;
 use mold_core::{
-    ImageData, ModelPaths, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    Config, ImageData, ModelPaths, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
 use mold_inference::device;
 use std::sync::atomic::Ordering;
@@ -66,13 +66,25 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
 
+    // Release the global queue slot when this job finishes, regardless of
+    // which exit path runs. The dispatcher only decrements when it *fails* to
+    // dispatch — once we own the GpuJob, we own the slot.
+    struct QueueSlot(crate::state::QueueHandle);
+    impl Drop for QueueSlot {
+        fn drop(&mut self) {
+            self.0.decrement();
+        }
+    }
+    let _slot = QueueSlot(job.queue.clone());
+
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
 
     // Acquire per-GPU load lock — ensures only one model load at a time per GPU.
     let _load_lock = worker.model_load_lock.lock().unwrap();
 
     // Ensure model is loaded on this GPU.
-    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &job) {
+    let config_snapshot = job.config.blocking_read().clone();
+    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot) {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         let err_msg = format!("model load error: {}", clean_error_message(&e));
         if let Some(ref tx) = job.progress_tx {
@@ -244,10 +256,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     }
 }
 
-fn ensure_model_ready_sync(
+/// Ensure a model is loaded on this worker's GPU.
+///
+/// Holds `worker.model_load_lock` implicitly via the caller for generation
+/// jobs; the admin API path acquires it explicitly via `load_blocking`.
+pub fn ensure_model_ready_sync(
     worker: &GpuWorker,
     model_name: &str,
-    job: &GpuJob,
+    config: &Config,
 ) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
@@ -300,8 +316,7 @@ fn ensure_model_ready_sync(
     device::reclaim_gpu_memory(worker.gpu.ordinal);
 
     // Resolve model paths.
-    let config = job.config.blocking_read();
-    let paths = ModelPaths::resolve(model_name, &config).ok_or_else(|| {
+    let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
         anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
     })?;
 
@@ -309,13 +324,12 @@ fn ensure_model_ready_sync(
     let mut engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
-        &config,
+        config,
         mold_inference::LoadStrategy::Eager,
         worker.gpu.ordinal,
         offload,
         Some(worker.shared_pool.clone()),
     )?;
-    drop(config);
 
     tracing::info!(
         gpu = worker.gpu.ordinal,
@@ -329,6 +343,31 @@ fn ensure_model_ready_sync(
     cache.insert_loaded(model_name.to_string(), engine, vram);
 
     Ok(())
+}
+
+/// Synchronously load a model on this GPU worker for the admin API.
+///
+/// Acquires the per-GPU load lock, then delegates to `ensure_model_ready_sync`.
+/// Intended to be called inside `tokio::task::spawn_blocking`.
+pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
+    let _lock = worker.model_load_lock.lock().unwrap();
+    ensure_model_ready_sync(worker, model_name, config)
+}
+
+/// Synchronously unload the currently active model on this GPU worker.
+///
+/// Returns the name of the model that was unloaded, or `None` if the GPU was
+/// already idle.
+pub fn unload_blocking(worker: &GpuWorker) -> Option<String> {
+    let _lock = worker.model_load_lock.lock().unwrap();
+    let unloaded = {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.unload_active()
+    };
+    if unloaded.is_some() {
+        device::reclaim_gpu_memory(worker.gpu.ordinal);
+    }
+    unloaded
 }
 
 fn record_failure(worker: &GpuWorker) {

@@ -88,10 +88,49 @@ pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
 }
 
 pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
-    let snapshot = state.engine_snapshot.read().await.clone();
-
     let config = refresh_config(state).await;
+
+    // Multi-GPU mode: derive "loaded" state from the worker pool so /api/models
+    // reflects the actual engine cache, not the legacy single-GPU snapshot.
+    if state.gpu_pool.worker_count() > 0 {
+        let loaded_models = loaded_models_across_pool(state);
+        let primary = loaded_models.first().cloned();
+        let mut catalog =
+            build_model_catalog(&config, primary.as_deref(), primary.is_some());
+        // Mark every GPU-resident model as loaded (not just the primary).
+        for entry in catalog.iter_mut() {
+            if loaded_models.contains(&entry.info.name) {
+                entry.info.is_loaded = true;
+            }
+        }
+        return catalog;
+    }
+
+    let snapshot = state.engine_snapshot.read().await.clone();
     build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded)
+}
+
+fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
+    let mut names = Vec::new();
+    for worker in &state.gpu_pool.workers {
+        // Prefer the active-generation model (cache entry is taken out during
+        // inflight generation), else whatever is GPU-resident.
+        let active = worker
+            .active_generation
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|g| g.model.clone()));
+        let loaded = active.or_else(|| {
+            let cache = worker.model_cache.lock().ok()?;
+            cache.active_model().map(|s| s.to_string())
+        });
+        if let Some(name) = loaded {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 /// Check whether a model is available — either already in the cache or

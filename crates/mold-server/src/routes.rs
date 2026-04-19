@@ -958,10 +958,52 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // TODO: when GPU-targeted loading is wired through model_manager,
-    // pass body.gpu to route the load to a specific GPU worker.
+    // Multi-GPU path: route through the pool.
+    if state.gpu_pool.worker_count() > 0 {
+        let worker = match body.gpu {
+            Some(ordinal) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .find(|w| w.gpu.ordinal == ordinal)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("no GPU worker with ordinal {ordinal}"))
+                })?,
+            None => {
+                let est = crate::queue::estimate_model_vram(&body.model);
+                state
+                    .gpu_pool
+                    .select_worker(&body.model, est)
+                    .ok_or_else(|| {
+                        ApiError::internal(format!(
+                            "no GPU available to load model '{}'",
+                            body.model
+                        ))
+                    })?
+            }
+        };
+        let config_snapshot = state.config.read().await.clone();
+        let model_name = body.model.clone();
+        let worker_clone = worker.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::gpu_worker::load_blocking(&worker_clone, &model_name, &config_snapshot)
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?
+        .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
+
+        tracing::info!(
+            model = %body.model,
+            gpu = worker.gpu.ordinal,
+            "model loaded via API"
+        );
+        return Ok(StatusCode::OK);
+    }
+
+    // Legacy single-GPU path (no workers discovered).
     model_manager::ensure_model_ready(&state, &body.model, None).await?;
-    tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API");
+    tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API (legacy)");
     Ok(StatusCode::OK)
 }
 
@@ -1157,9 +1199,65 @@ async fn unload_model(
     body: Option<Json<UnloadRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
-    // TODO: when GPU-targeted unloading is wired through model_manager,
-    // use req.model and req.gpu to target specific GPU workers.
     tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
+
+    // Multi-GPU path: target specific GPU or model across the pool.
+    if state.gpu_pool.worker_count() > 0 {
+        // Select the workers to unload from.
+        let targets: Vec<_> = match (req.gpu, req.model.as_deref()) {
+            (Some(ordinal), _) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .filter(|w| w.gpu.ordinal == ordinal)
+                .cloned()
+                .collect(),
+            (None, Some(model)) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .filter(|w| {
+                    let cache = w.model_cache.lock().unwrap();
+                    cache
+                        .get(model)
+                        .map(|e| e.residency == crate::model_cache::ModelResidency::Gpu)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect(),
+            (None, None) => state.gpu_pool.workers.clone(),
+        };
+
+        if targets.is_empty() {
+            return Ok((StatusCode::OK, "no model loaded".to_string()));
+        }
+
+        let mut unloaded_pairs: Vec<(usize, String)> = Vec::new();
+        for worker in targets {
+            let worker_clone = worker.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::gpu_worker::unload_blocking(&worker_clone)
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?;
+            if let Some(name) = result {
+                unloaded_pairs.push((worker.gpu.ordinal, name));
+            }
+        }
+
+        let msg = if unloaded_pairs.is_empty() {
+            "no model loaded".to_string()
+        } else {
+            let joined: Vec<String> = unloaded_pairs
+                .iter()
+                .map(|(o, m)| format!("gpu{o}:{m}"))
+                .collect();
+            format!("unloaded {}", joined.join(", "))
+        };
+        return Ok((StatusCode::OK, msg));
+    }
+
+    // Legacy single-GPU path.
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -1187,9 +1285,28 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         .iter()
         .any(|g| g.state == GpuWorkerState::Generating);
 
+    // Pull current_generation from the first busy worker (multi-GPU) or
+    // from the legacy snapshot.
+    let multi_gpu_current_gen = if has_gpus {
+        state.gpu_pool.workers.iter().find_map(|w| {
+            let gen = w.active_generation.read().ok()?;
+            gen.as_ref().map(|g| ActiveGenerationStatus {
+                model: g.model.clone(),
+                // The per-worker ActiveGeneration doesn't carry the prompt hash,
+                // so expose the model-only summary. Callers that need the hash
+                // can subscribe to SSE progress events.
+                prompt_sha256: String::new(),
+                started_at_unix_ms: 0,
+                elapsed_ms: g.started_at.elapsed().as_millis() as u64,
+            })
+        })
+    } else {
+        None
+    };
+
     // Fall back to legacy single-GPU snapshot for backwards compat.
     let (models_loaded, busy, current_generation) = if has_gpus {
-        (gpu_models_loaded, gpu_busy, None)
+        (gpu_models_loaded, gpu_busy, multi_gpu_current_gen)
     } else {
         let snapshot = state.engine_snapshot.read().await.clone();
         let models = match (snapshot.model_name, snapshot.is_loaded) {

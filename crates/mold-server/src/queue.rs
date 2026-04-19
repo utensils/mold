@@ -496,68 +496,76 @@ pub async fn run_queue_dispatcher(
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
 
-        let model_name = &job.request.model;
+        let model_name = job.request.model.clone();
+        let estimated_vram = estimate_model_vram(&model_name);
 
-        // Estimate VRAM for placement — use a conservative default.
-        let estimated_vram = estimate_model_vram(model_name);
-
-        // Select worker via placement strategy.
-        let worker = match state.gpu_pool.select_worker(model_name, estimated_vram) {
-            Some(w) => w,
-            None => {
-                tracing::error!(model = %model_name, "No GPU available for model");
-                let err_msg = format!("no GPU available for model {model_name}");
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
-                state.queue.decrement();
-                continue;
-            }
-        };
-
-        // Increment in-flight BEFORE sending to worker (prevents TOCTOU race
-        // where burst loads all see the same stale state and route to the same GPU).
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
-
-        // Build GpuJob from the GenerationJob.
-        let gpu_job = GpuJob {
-            model: model_name.to_string(),
+        // Build the GpuJob once; the retry loop moves it between attempts.
+        let mut gpu_job = Some(GpuJob {
+            model: model_name.clone(),
             request: job.request,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             config: state.config.clone(),
-        };
+            queue: state.queue.clone(),
+        });
 
-        // Dispatch to worker's dedicated thread.
-        if let Err(e) = worker.job_tx.try_send(gpu_job) {
-            worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-            tracing::warn!(
-                gpu = worker.gpu.ordinal,
-                "GPU worker channel full — rejecting with queue_full"
-            );
-            // Recover the rejected GpuJob so we can notify the client properly
-            // instead of silently dropping `result_tx` (which surfaced as a
-            // misleading 500 INTERNAL_ERROR on the client).
-            let rejected = match e {
-                std::sync::mpsc::TrySendError::Full(j) | std::sync::mpsc::TrySendError::Disconnected(j) => j,
+        let mut skip: Vec<usize> = Vec::new();
+        let max_attempts = state.gpu_pool.worker_count().max(1);
+        let mut dispatched = false;
+
+        for _ in 0..max_attempts {
+            let worker = match state
+                .gpu_pool
+                .select_worker_excluding(&model_name, estimated_vram, &skip)
+            {
+                Some(w) => w,
+                None => break,
             };
-            let err_msg = format!(
-                "GPU {} worker queue is full — try again shortly",
-                worker.gpu.ordinal,
-            );
+
+            // Increment in-flight BEFORE sending to reserve the slot.
+            worker.in_flight.fetch_add(1, Ordering::SeqCst);
+            let pending = gpu_job.take().expect("gpu_job present in retry loop");
+            match worker.job_tx.try_send(pending) {
+                Ok(()) => {
+                    dispatched = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(j))
+                | Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
+                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    tracing::warn!(
+                        gpu = worker.gpu.ordinal,
+                        "GPU worker channel full — retrying on another worker"
+                    );
+                    skip.push(worker.gpu.ordinal);
+                    gpu_job = Some(j);
+                }
+            }
+        }
+
+        if !dispatched {
+            // Either no workers are eligible or every candidate's channel is full.
+            let rejected = gpu_job.expect("gpu_job retained after failed dispatch");
+            let err_msg = if state.gpu_pool.worker_count() == 0 {
+                format!("no GPU available for model {model_name}")
+            } else {
+                format!(
+                    "all GPU workers are busy for model {model_name} — queue is full"
+                )
+            };
+            tracing::error!(model = %model_name, "{err_msg}");
             if let Some(tx) = rejected.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent {
                     message: err_msg.clone(),
                 }));
             }
             let _ = rejected.result_tx.send(Err(err_msg));
+            // Job was rejected before the worker could observe it, so we must
+            // release the global queue slot here — the worker-side decrement
+            // won't run.
+            state.queue.decrement();
         }
-
-        state.queue.decrement();
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
     }
@@ -565,7 +573,7 @@ pub async fn run_queue_dispatcher(
 }
 
 /// Rough VRAM estimate for a model (used for placement decisions).
-fn estimate_model_vram(model_name: &str) -> u64 {
+pub fn estimate_model_vram(model_name: &str) -> u64 {
     // Use a simple heuristic based on model name patterns.
     // Quantized models are smaller; BF16/FP16 are larger.
     let lower = model_name.to_lowercase();

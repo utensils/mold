@@ -34,6 +34,8 @@ pub struct GpuJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
     pub output_dir: Option<std::path::PathBuf>,
     pub config: Arc<tokio::sync::RwLock<mold_core::Config>>,
+    /// Decrement the global queue counter when the worker finishes this job.
+    pub queue: crate::state::QueueHandle,
 }
 
 /// Pool of GPU workers with placement strategy.
@@ -55,9 +57,18 @@ impl GpuWorker {
 
     /// Build a status snapshot for this worker.
     pub fn status(&self) -> GpuWorkerStatus {
-        let cache = self.model_cache.lock().unwrap();
-        let loaded_model = cache.active_model().map(|s| s.to_string());
         let active_gen = self.active_generation.read().unwrap();
+        // Prefer the active-generation model name — during inflight generation
+        // the cache entry is taken out of the cache (take-and-restore pattern),
+        // so `cache.active_model()` returns None. Falling back to the cache
+        // afterwards handles the idle-but-loaded case.
+        let loaded_model = active_gen
+            .as_ref()
+            .map(|g| g.model.clone())
+            .or_else(|| {
+                let cache = self.model_cache.lock().unwrap();
+                cache.active_model().map(|s| s.to_string())
+            });
 
         let state = if self.is_degraded() {
             GpuWorkerState::Degraded
@@ -79,13 +90,16 @@ impl GpuWorker {
 }
 
 impl GpuPool {
-    /// Find a worker that already has this model loaded on GPU.
+    /// Find a non-degraded worker that already has this model loaded on GPU.
     /// If multiple workers have it, prefer the one with fewer in-flight requests.
     pub fn find_loaded(&self, model_name: &str) -> Option<Arc<GpuWorker>> {
         let mut candidates: Vec<_> = self
             .workers
             .iter()
             .filter(|w| {
+                if w.is_degraded() {
+                    return false;
+                }
                 let cache = w.model_cache.lock().unwrap();
                 cache
                     .get(model_name)
@@ -94,55 +108,99 @@ impl GpuPool {
             })
             .collect();
 
-        // Prefer least in-flight if multiple have it loaded.
         candidates.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
         candidates.into_iter().next().cloned()
     }
 
-    /// Select the best worker for a model, using the placement strategy:
-    /// 1. Already loaded on a GPU
-    /// 2. Idle GPU (no model loaded), smallest that fits
-    /// 3. Busy GPU with most headroom (will evict LRU)
+    /// Select the best worker for a model, using the placement strategy
+    /// (checked in order):
+    /// 1. Loaded and idle (model on GPU, no in-flight requests).
+    /// 2. Idle GPU with no model (spreads hot models across free GPUs).
+    /// 3. Loaded but busy — whichever loaded copy has the fewest in-flight.
+    /// 4. Non-degraded worker with the most headroom (will evict LRU).
     pub fn select_worker(&self, model_name: &str, estimated_vram: u64) -> Option<Arc<GpuWorker>> {
-        // 1. Already loaded on a GPU?
-        if let Some(w) = self.find_loaded(model_name) {
-            return Some(w);
-        }
+        self.select_worker_excluding(model_name, estimated_vram, &[])
+    }
 
-        // 2. Find idle (no GPU-resident model) workers, skip degraded.
-        let mut idle: Vec<_> = self
+    /// Same as [`select_worker`], but skips workers whose ordinal is in `skip`.
+    /// Used by the dispatcher to retry after a `try_send` failure.
+    pub fn select_worker_excluding(
+        &self,
+        model_name: &str,
+        estimated_vram: u64,
+        skip: &[usize],
+    ) -> Option<Arc<GpuWorker>> {
+        let eligible: Vec<&Arc<GpuWorker>> = self
             .workers
             .iter()
-            .filter(|w| {
-                if w.is_degraded() {
-                    return false;
-                }
-                let cache = w.model_cache.lock().unwrap();
-                cache.active_model().is_none()
-            })
+            .filter(|w| !w.is_degraded() && !skip.contains(&w.gpu.ordinal))
             .collect();
 
-        if !idle.is_empty() {
-            // VRAM-fit tiebreaker: smallest GPU that fits.
-            idle.sort_by_key(|w| w.gpu.total_vram_bytes);
-            if let Some(w) = idle
+        if eligible.is_empty() {
+            return None;
+        }
+
+        // Classify each eligible worker.
+        let mut loaded_idle: Vec<&Arc<GpuWorker>> = Vec::new();
+        let mut loaded_busy: Vec<&Arc<GpuWorker>> = Vec::new();
+        let mut idle_empty: Vec<&Arc<GpuWorker>> = Vec::new();
+        let mut other: Vec<&Arc<GpuWorker>> = Vec::new();
+
+        for w in &eligible {
+            let (has_model, has_any_loaded) = {
+                let cache = w.model_cache.lock().unwrap();
+                let has_model = cache
+                    .get(model_name)
+                    .map(|e| e.residency == ModelResidency::Gpu)
+                    .unwrap_or(false);
+                (has_model, cache.active_model().is_some())
+            };
+            let in_flight = w.in_flight.load(Ordering::SeqCst);
+
+            if has_model && in_flight == 0 {
+                loaded_idle.push(w);
+            } else if has_model {
+                loaded_busy.push(w);
+            } else if !has_any_loaded {
+                idle_empty.push(w);
+            } else {
+                other.push(w);
+            }
+        }
+
+        // 1. Loaded and idle — least in-flight first (should all be 0).
+        if !loaded_idle.is_empty() {
+            loaded_idle.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
+            return loaded_idle.first().map(|w| (*w).clone());
+        }
+
+        // 2. Idle GPU with no model — spread! Prefer smallest GPU that fits.
+        if !idle_empty.is_empty() {
+            idle_empty.sort_by_key(|w| w.gpu.total_vram_bytes);
+            if let Some(w) = idle_empty
                 .iter()
                 .find(|w| w.gpu.total_vram_bytes >= estimated_vram)
             {
                 return Some((*w).clone());
             }
-            // No idle GPU fits — pick the largest idle GPU anyway (eviction will help).
-            return idle.last().cloned().cloned();
+            // No idle GPU fits — pick the largest idle GPU.
+            return idle_empty.last().map(|w| (*w).clone());
         }
 
-        // 3. All GPUs busy — evict LRU on the GPU with most headroom.
-        let mut busy: Vec<_> = self.workers.iter().filter(|w| !w.is_degraded()).collect();
+        // 3. Loaded but busy — least in-flight wins.
+        if !loaded_busy.is_empty() {
+            loaded_busy.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
+            return loaded_busy.first().map(|w| (*w).clone());
+        }
+
+        // 4. All GPUs busy with other models — most headroom first (evict LRU there).
+        let mut busy = other;
         busy.sort_by(|a, b| {
             let a_headroom = a.gpu.total_vram_bytes.saturating_sub(estimated_vram);
             let b_headroom = b.gpu.total_vram_bytes.saturating_sub(estimated_vram);
-            b_headroom.cmp(&a_headroom) // most headroom first
+            b_headroom.cmp(&a_headroom)
         });
-        busy.into_iter().next().cloned()
+        busy.first().map(|w| (*w).clone())
     }
 
     /// Collect status from all workers.

@@ -66,8 +66,14 @@ pub async fn run_server(
     let mut workers = Vec::new();
     let mut _gpu_thread_handles = Vec::new();
 
+    // Per-worker channel is a tiny buffer: one in-flight plus one immediate
+    // handoff. The global queue cap is enforced by `QueueHandle` against
+    // `queue_size`; per-worker overflow triggers the dispatcher's cross-worker
+    // retry path in `run_queue_dispatcher`.
+    const PER_WORKER_CHANNEL_SIZE: usize = 2;
+
     for gpu in &selected {
-        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(queue_size);
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(PER_WORKER_CHANNEL_SIZE);
         let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
             gpu: gpu.clone(),
             model_cache: std::sync::Arc::new(std::sync::Mutex::new(model_cache::ModelCache::new(

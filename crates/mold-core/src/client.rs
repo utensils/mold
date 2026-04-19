@@ -87,6 +87,11 @@ impl MoldClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(fallback_seed);
+        let gpu = resp
+            .headers()
+            .get("x-mold-gpu")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
 
         // Detect video response via x-mold-video-frames header
         let video_meta = parse_video_headers(resp.headers());
@@ -128,7 +133,7 @@ impl MoldClient {
             model,
             seed_used,
             video,
-            gpu: None,
+            gpu,
         })
     }
 
@@ -292,7 +297,7 @@ impl MoldClient {
                             model,
                             seed_used: complete.seed_used,
                             video,
-                            gpu: None,
+                            gpu: complete.gpu,
                         }));
                     }
                     "error" => {
