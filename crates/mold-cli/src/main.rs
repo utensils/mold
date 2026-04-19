@@ -1021,8 +1021,19 @@ async fn main() {
         }
 
         // For all other errors, print the stripped message (no candle backtraces).
+        // If the error is wrapped in `RemoteInferenceError`, iterate the inner
+        // error's chain: our wrapper's `Display` forwards to `inner`, so using
+        // `e.chain()` would print the same message twice — once as the top-level
+        // `error:` line and again as the first `cause:` entry.
+        let chain_source = e
+            .downcast_ref::<errors::RemoteInferenceError>()
+            .map(|r| &r.inner);
         eprintln!("{} {display}", theme::prefix_error());
-        for cause in e.chain().skip(1) {
+        let chain = match chain_source {
+            Some(inner) => inner.chain().skip(1),
+            None => e.chain().skip(1),
+        };
+        for cause in chain {
             eprintln!("  {} {cause}", theme::prefix_cause());
         }
         std::process::exit(1);

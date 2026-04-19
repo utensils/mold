@@ -228,6 +228,34 @@ mod tests {
     }
 
     #[test]
+    fn remote_inference_error_inner_chain_does_not_duplicate_top_message() {
+        // Regression for the duplicate `error:` / `cause:` lines on the generic
+        // remote-error path. `main` prints the top-level display and then walks
+        // `chain().skip(1)` for "caused by" lines; when the error came from the
+        // remote path, we must iterate the *inner* chain so the wrapper (which
+        // transparently forwards Display to `inner`) doesn't appear as both the
+        // header and the first cause.
+        let inner = anyhow::anyhow!("server error 500: boom");
+        let wrapped = RemoteInferenceError::wrap("http://server:7680", inner);
+
+        let top = format!("{wrapped}");
+        assert_eq!(top, "server error 500: boom");
+
+        // Simulate what main.rs does: grab the inner from the wrapper and walk
+        // the inner's chain.
+        let inner_ref = &wrapped
+            .downcast_ref::<RemoteInferenceError>()
+            .expect("wrapped")
+            .inner;
+        let causes: Vec<String> = inner_ref.chain().skip(1).map(|c| c.to_string()).collect();
+
+        assert!(
+            !causes.iter().any(|c| c == &top),
+            "top message must not appear as its own cause: causes={causes:?}",
+        );
+    }
+
+    #[test]
     fn remote_inference_error_downcasts_through_context() {
         // Simulate a caller adding `.context()` above our wrapper as the error
         // propagates up through `?`. We must still be able to recover the host.

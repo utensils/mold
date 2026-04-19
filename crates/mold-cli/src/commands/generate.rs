@@ -733,16 +733,18 @@ async fn generate_remote(
                             let _ = render2.await;
                             Ok(response)
                         }
-                        Ok(None) => {
+                        // Either the server has no SSE endpoint (Ok(None)) or
+                        // the SSE stream failed (Err) — some proxies/servers
+                        // close the stream before the final `complete` event
+                        // even though the blocking `/api/generate` path still
+                        // works. Fall back to the blocking endpoint before
+                        // giving up.
+                        _ => {
                             let _ = render2.await;
                             client
                                 .generate(req.clone())
                                 .await
                                 .map_err(|e| tag_remote(client, e))
-                        }
-                        Err(e2) => {
-                            let _ = render2.await;
-                            Err(tag_remote(client, e2))
                         }
                     }
                 }
