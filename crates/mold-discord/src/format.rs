@@ -490,6 +490,7 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
             video: None,
+            gpu: None,
         };
         let embed = format_generation_result(&resp, "a cat on mars");
         assert_eq!(embed.title, "Image Generated");
@@ -529,6 +530,7 @@ mod tests {
             model: "test".to_string(),
             seed_used: 1,
             video: None,
+            gpu: None,
         };
         let embed = format_generation_result(&resp, &long_prompt);
         assert!(embed.description.chars().count() <= 260);
@@ -551,6 +553,7 @@ mod tests {
             model: "test".to_string(),
             seed_used: 1,
             video: None,
+            gpu: None,
         };
         let embed = format_generation_result(&resp, &long_prompt);
         assert!(embed.description.chars().count() <= 260);
@@ -687,6 +690,9 @@ mod tests {
             uptime_secs: 3661,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -715,6 +721,9 @@ mod tests {
             uptime_secs: 60,
             hostname: None,
             memory_status: None,
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         let embed = format_server_status(&status);
         assert!(embed

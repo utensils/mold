@@ -6251,6 +6251,7 @@ mod tests {
             model: "flux-schnell:q8".to_string(),
             seed_used: 42,
             video: None,
+            gpu: None,
         };
         app.bg_tx
             .send(BackgroundEvent::GenerationComplete(Box::new(response)))
@@ -6915,6 +6916,9 @@ mod tests {
             uptime_secs: 3600,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -6939,6 +6943,9 @@ mod tests {
                 uptime_secs: 0,
                 hostname: Some("remote".to_string()),
                 memory_status: Some("VRAM: 16.0 GB free".to_string()),
+                gpus: None,
+                queue_depth: None,
+                queue_capacity: None,
             }),
             ..Default::default()
         };
@@ -6963,6 +6970,9 @@ mod tests {
             uptime_secs: 0,
             hostname: None,
             memory_status: None,
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
         // None variant for server-unreachable
@@ -7219,6 +7229,9 @@ mod tests {
             uptime_secs: 0,
             hostname: Some("stale-host".to_string()),
             memory_status: None,
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         });
 
         app.sync_resource_info_mode();
@@ -7279,6 +7292,9 @@ mod tests {
             uptime_secs: 3600,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
 
         let _ = app
@@ -7311,6 +7327,9 @@ mod tests {
                 uptime_secs: 0,
                 hostname: Some("stale-host".to_string()),
                 memory_status: Some("VRAM: 16.0 GB free".to_string()),
+                gpus: None,
+                queue_depth: None,
+                queue_capacity: None,
             });
         assert!(app.resource_info.server_status.is_some());
 

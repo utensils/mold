@@ -185,6 +185,7 @@ pub async fn run(
     no_metadata: bool,
     preview: bool,
     local: bool,
+    gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
     qwen2_variant: Option<String>,
@@ -415,6 +416,7 @@ pub async fn run(
         generate_local_batch(
             &req,
             &config,
+            gpus,
             t5_variant.clone(),
             qwen3_variant.clone(),
             qwen2_variant.clone(),
@@ -471,6 +473,7 @@ pub async fn run(
                 effective_width,
                 effective_height,
                 effective_steps,
+                gpus.clone(),
                 t5_variant.clone(),
                 qwen3_variant.clone(),
                 qwen2_variant.clone(),
@@ -522,6 +525,7 @@ pub async fn run(
             generation_time_ms: total_time_ms,
             model: last_model,
             seed_used: last_seed_used,
+            gpu: None,
         }
     };
 
@@ -670,6 +674,7 @@ async fn generate_remote(
     effective_width: u32,
     effective_height: u32,
     effective_steps: u32,
+    gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
     qwen2_variant: Option<String>,
@@ -702,6 +707,7 @@ async fn generate_remote(
                 effective_width,
                 effective_height,
                 effective_steps,
+                gpus,
                 t5_variant,
                 qwen3_variant,
                 qwen2_variant,
@@ -753,6 +759,7 @@ async fn generate_remote(
                     generate_local(
                         req,
                         config,
+                        gpus,
                         t5_variant,
                         qwen3_variant,
                         qwen2_variant,
@@ -783,6 +790,7 @@ async fn generate_remote_blocking(
     effective_width: u32,
     effective_height: u32,
     effective_steps: u32,
+    gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
     qwen2_variant: Option<String>,
@@ -833,6 +841,7 @@ async fn generate_remote_blocking(
                     generate_local(
                         req,
                         config,
+                        gpus,
                         t5_variant,
                         qwen3_variant,
                         qwen2_variant,
@@ -857,6 +866,7 @@ async fn generate_remote_blocking(
 async fn prepare_local_engine(
     req: &GenerateRequest,
     config: &Config,
+    gpus: Option<String>,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
     qwen2_variant_override: Option<String>,
@@ -1025,11 +1035,24 @@ async fn prepare_local_engine(
         std::env::set_var("MOLD_EAGER", "1");
     }
     let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+
+    // Select the best GPU from the allowed set (most free VRAM).
+    let gpu_selection = match &gpus {
+        Some(s) => mold_core::types::GpuSelection::parse(s)?,
+        None => config.gpu_selection(),
+    };
+    let discovered = mold_inference::device::discover_gpus();
+    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
+    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
+        .map(|g| g.ordinal)
+        .unwrap_or(0);
+
     let engine = mold_inference::create_engine(
         model_name,
         paths,
         effective_config,
         load_strategy,
+        gpu_ordinal,
         is_offload,
     )?;
     Ok((req, engine))
@@ -1040,6 +1063,7 @@ async fn prepare_local_engine(
 async fn generate_local(
     req: &GenerateRequest,
     config: &Config,
+    gpus: Option<String>,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
     qwen2_variant_override: Option<String>,
@@ -1054,6 +1078,7 @@ async fn generate_local(
     let (req, mut engine) = prepare_local_engine(
         req,
         config,
+        gpus,
         t5_variant_override,
         qwen3_variant_override,
         qwen2_variant_override,
@@ -1088,6 +1113,7 @@ async fn generate_local(
 async fn generate_local_batch(
     req: &GenerateRequest,
     config: &Config,
+    gpus: Option<String>,
     t5_variant_override: Option<String>,
     qwen3_variant_override: Option<String>,
     qwen2_variant_override: Option<String>,
@@ -1108,6 +1134,7 @@ async fn generate_local_batch(
     let (base_req, mut engine) = prepare_local_engine(
         req,
         config,
+        gpus,
         t5_variant_override,
         qwen3_variant_override,
         qwen2_variant_override,
@@ -1214,6 +1241,7 @@ async fn generate_local_batch(
         generation_time_ms: total_time_ms,
         model: last_model,
         seed_used: last_seed_used,
+        gpu: None,
     })
 }
 
@@ -1222,6 +1250,7 @@ async fn generate_local_batch(
 async fn generate_local(
     _req: &GenerateRequest,
     _config: &Config,
+    _gpus: Option<String>,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
     _qwen2_variant: Option<String>,
@@ -1244,6 +1273,7 @@ async fn generate_local(
 async fn generate_local_batch(
     _req: &GenerateRequest,
     _config: &Config,
+    _gpus: Option<String>,
     _t5_variant: Option<String>,
     _qwen3_variant: Option<String>,
     _qwen2_variant: Option<String>,

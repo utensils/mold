@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, ModelInfoExtended, ServerStatus, SseErrorEvent,
-    SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ServerStatus,
+    SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -19,7 +19,16 @@ use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::model_manager;
-use crate::state::{AppState, GenerationJob, SseMessage};
+use crate::state::{AppState, GenerationJob, SseMessage, SubmitError};
+
+fn submit_error_to_api(e: SubmitError) -> ApiError {
+    match e {
+        SubmitError::Full { pending, capacity } => {
+            ApiError::queue_full(format!("generation queue is full ({pending}/{capacity})"))
+        }
+        SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
+    }
+}
 
 // ── ApiError — structured JSON error response ────────────────────────────────
 
@@ -87,11 +96,25 @@ impl ApiError {
             status: StatusCode::FORBIDDEN,
         }
     }
+
+    pub fn queue_full(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_FULL".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status;
+        // On queue-full (503), hint clients to retry with a short delay.
+        if self.code == "QUEUE_FULL" {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            return (status, headers, Json(self)).into_response();
+        }
         (status, Json(self)).into_response()
     }
 }
@@ -119,6 +142,7 @@ use crate::queue::clean_error_message;
         mold_core::SseErrorEvent,
         ModelInfoExtended,
         LoadModelBody,
+        UnloadRequest,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -225,6 +249,10 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
+    // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
+    // that a burst of concurrent callers can't all slip past an open check
+    // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
+    // return `SubmitError::Full`, which is mapped to `ApiError::queue_full()`.
     apply_default_metadata_setting(state, request).await;
 
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
@@ -265,6 +293,7 @@ async fn prepare_generation(
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
+        (status = 503, description = "Generation queue full"),
     )
 )]
 // The server always produces 1 image per request; batch looping (--batch N)
@@ -298,7 +327,11 @@ async fn generate(
         output_dir,
     };
 
-    let _position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+    let _position = state
+        .queue
+        .submit(job, state.queue_capacity)
+        .await
+        .map_err(submit_error_to_api)?;
 
     // Wait for the queue worker to process the job
     let result = result_rx
@@ -318,6 +351,14 @@ async fn generate(
                     ApiError::internal(format!("failed to serialize seed header: {e}"))
                 })?,
             );
+            if let Some(ordinal) = response.gpu {
+                headers.insert(
+                    "x-mold-gpu",
+                    HeaderValue::from_str(&ordinal.to_string()).map_err(|e| {
+                        ApiError::internal(format!("failed to serialize gpu header: {e}"))
+                    })?,
+                );
+            }
             if let Some(warning) = dim_warning {
                 match HeaderValue::from_str(&warning.replace('\n', " ")) {
                     Ok(val) => {
@@ -369,7 +410,16 @@ async fn generate(
             };
             Ok((headers, output_data))
         }
-        Err(err_msg) => Err(ApiError::inference(err_msg)),
+        Err(err_msg) => {
+            // The multi-GPU dispatcher sends a queue-full error through result_tx
+            // when a per-worker channel is saturated; surface that as a proper 503
+            // instead of the generic INFERENCE_ERROR 500.
+            if err_msg.contains("queue is full") {
+                Err(ApiError::queue_full(err_msg))
+            } else {
+                Err(ApiError::inference(err_msg))
+            }
+        }
     }
 }
 
@@ -805,6 +855,7 @@ async fn upscale_stream(
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
+        (status = 503, description = "Generation queue full"),
     )
 )]
 async fn generate_stream(
@@ -837,7 +888,11 @@ async fn generate_stream(
         output_dir,
     };
 
-    let position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+    let position = state
+        .queue
+        .submit(job, state.queue_capacity)
+        .await
+        .map_err(submit_error_to_api)?;
 
     // Send initial queue position to the client
     let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));
@@ -881,6 +936,10 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
 pub struct LoadModelBody {
     #[schema(example = "flux-schnell:q8")]
     pub model: String,
+    /// Target GPU ordinal (multi-GPU only). If omitted, the server uses its
+    /// default placement strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 #[utoipa::path(
@@ -899,8 +958,52 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Multi-GPU path: route through the pool.
+    if state.gpu_pool.worker_count() > 0 {
+        let worker = match body.gpu {
+            Some(ordinal) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .find(|w| w.gpu.ordinal == ordinal)
+                .cloned()
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("no GPU worker with ordinal {ordinal}"))
+                })?,
+            None => {
+                let est = crate::queue::estimate_model_vram(&body.model);
+                state
+                    .gpu_pool
+                    .select_worker(&body.model, est)
+                    .ok_or_else(|| {
+                        ApiError::internal(format!(
+                            "no GPU available to load model '{}'",
+                            body.model
+                        ))
+                    })?
+            }
+        };
+        let config_snapshot = state.config.read().await.clone();
+        let model_name = body.model.clone();
+        let worker_clone = worker.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::gpu_worker::load_blocking(&worker_clone, &model_name, &config_snapshot)
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?
+        .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
+
+        tracing::info!(
+            model = %body.model,
+            gpu = worker.gpu.ordinal,
+            "model loaded via API"
+        );
+        return Ok(StatusCode::OK);
+    }
+
+    // Legacy single-GPU path (no workers discovered).
     model_manager::ensure_model_ready(&state, &body.model, None).await?;
-    tracing::info!(model = %body.model, "model loaded via API");
+    tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API (legacy)");
     Ok(StatusCode::OK)
 }
 
@@ -1070,15 +1173,91 @@ impl IntoResponse for PullResponse {
 
 // ── /api/models/unload ────────────────────────────────────────────────────────
 
+/// Optional request body for unload — clients may specify a model or GPU target.
+/// An empty body (or no body) unloads the active model on the legacy path.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct UnloadRequest {
+    /// Specific model to unload. If omitted, the active model is unloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Target GPU ordinal (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+}
+
 #[utoipa::path(
     delete,
     path = "/api/models/unload",
     tag = "models",
+    request_body(content = Option<UnloadRequest>, content_type = "application/json"),
     responses(
         (status = 200, description = "Model unloaded or no model was loaded", body = String),
     )
 )]
-async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+async fn unload_model(
+    State(state): State<AppState>,
+    body: Option<Json<UnloadRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
+
+    // Multi-GPU path: target specific GPU or model across the pool.
+    if state.gpu_pool.worker_count() > 0 {
+        // Select the workers to unload from.
+        let targets: Vec<_> = match (req.gpu, req.model.as_deref()) {
+            (Some(ordinal), _) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .filter(|w| w.gpu.ordinal == ordinal)
+                .cloned()
+                .collect(),
+            (None, Some(model)) => state
+                .gpu_pool
+                .workers
+                .iter()
+                .filter(|w| {
+                    let cache = w.model_cache.lock().unwrap();
+                    cache
+                        .get(model)
+                        .map(|e| e.residency == crate::model_cache::ModelResidency::Gpu)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect(),
+            (None, None) => state.gpu_pool.workers.clone(),
+        };
+
+        if targets.is_empty() {
+            return Ok((StatusCode::OK, "no model loaded".to_string()));
+        }
+
+        let mut unloaded_pairs: Vec<(usize, String)> = Vec::new();
+        for worker in targets {
+            let worker_clone = worker.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::gpu_worker::unload_blocking(&worker_clone)
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?;
+            if let Some(name) = result {
+                unloaded_pairs.push((worker.gpu.ordinal, name));
+            }
+        }
+
+        let msg = if unloaded_pairs.is_empty() {
+            "no model loaded".to_string()
+        } else {
+            let joined: Vec<String> = unloaded_pairs
+                .iter()
+                .map(|(o, m)| format!("gpu{o}:{m}"))
+                .collect();
+            format!("unloaded {}", joined.join(", "))
+        };
+        return Ok((StatusCode::OK, msg));
+    }
+
+    // Legacy single-GPU path.
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -1093,23 +1272,61 @@ async fn unload_model(State(state): State<AppState>) -> Result<impl IntoResponse
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
-    let snapshot = state.engine_snapshot.read().await.clone();
-    let models_loaded = match (snapshot.model_name, snapshot.is_loaded) {
-        (Some(model_name), true) => vec![model_name],
-        _ => vec![],
+    // Aggregate GPU status from the pool.
+    let gpu_statuses = state.gpu_pool.gpu_status();
+    let has_gpus = !gpu_statuses.is_empty();
+
+    // Collect loaded models from GPU workers.
+    let gpu_models_loaded: Vec<String> = gpu_statuses
+        .iter()
+        .filter_map(|g| g.loaded_model.clone())
+        .collect();
+    let gpu_busy = gpu_statuses
+        .iter()
+        .any(|g| g.state == GpuWorkerState::Generating);
+
+    // Pull current_generation from the first busy worker (multi-GPU) or
+    // from the legacy snapshot.
+    let multi_gpu_current_gen = if has_gpus {
+        state.gpu_pool.workers.iter().find_map(|w| {
+            let gen = w.active_generation.read().ok()?;
+            gen.as_ref().map(|g| ActiveGenerationStatus {
+                model: g.model.clone(),
+                // The per-worker ActiveGeneration doesn't carry the prompt hash,
+                // so expose the model-only summary. Callers that need the hash
+                // can subscribe to SSE progress events.
+                prompt_sha256: String::new(),
+                started_at_unix_ms: 0,
+                elapsed_ms: g.started_at.elapsed().as_millis() as u64,
+            })
+        })
+    } else {
+        None
     };
-    let current_generation = state
-        .active_generation
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|active| ActiveGenerationStatus {
-            model: active.model.clone(),
-            prompt_sha256: active.prompt_sha256.clone(),
-            started_at_unix_ms: active.started_at_unix_ms,
-            elapsed_ms: active.started_at.elapsed().as_millis() as u64,
-        });
-    let busy = current_generation.is_some();
+
+    // Fall back to legacy single-GPU snapshot for backwards compat.
+    let (models_loaded, busy, current_generation) = if has_gpus {
+        (gpu_models_loaded, gpu_busy, multi_gpu_current_gen)
+    } else {
+        let snapshot = state.engine_snapshot.read().await.clone();
+        let models = match (snapshot.model_name, snapshot.is_loaded) {
+            (Some(model_name), true) => vec![model_name],
+            _ => vec![],
+        };
+        let gen = state
+            .active_generation
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|active| ActiveGenerationStatus {
+                model: active.model.clone(),
+                prompt_sha256: active.prompt_sha256.clone(),
+                started_at_unix_ms: active.started_at_unix_ms,
+                elapsed_ms: active.started_at.elapsed().as_millis() as u64,
+            });
+        let is_busy = gen.is_some();
+        (models, is_busy, gen)
+    };
 
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1130,6 +1347,9 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         memory_status: mold_inference::device::memory_status_string(),
+        gpus: if has_gpus { Some(gpu_statuses) } else { None },
+        queue_depth: Some(state.queue.pending()),
+        queue_capacity: Some(state.queue_capacity),
     })
 }
 

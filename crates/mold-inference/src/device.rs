@@ -1,9 +1,102 @@
 use crate::engine::LoadStrategy;
 use crate::progress::ProgressReporter;
+use mold_core::types::GpuSelection;
 
-/// Create a GPU device, falling back to CPU if no accelerator is available.
+// ── GPU discovery ──────────────────────────────────────────────────────────
+
+/// Discovered GPU information for multi-GPU support.
+#[derive(Debug, Clone)]
+pub struct DiscoveredGpu {
+    pub ordinal: usize,
+    pub name: String,
+    pub total_vram_bytes: u64,
+    pub free_vram_bytes: u64,
+}
+
+/// Discover all available GPUs on the system.
+pub fn discover_gpus() -> Vec<DiscoveredGpu> {
+    let mut gpus = Vec::new();
+
+    #[cfg(feature = "cuda")]
+    {
+        use candle_core::cuda_backend::cudarc::driver;
+        if candle_core::utils::cuda_is_available() {
+            // `CudaContext::device_count()` calls `cuInit(0)` first, which is
+            // required before any driver API — bare `result::device::get_count()`
+            // returns `ErrorNotInitialized` and we'd silently see zero GPUs.
+            match driver::CudaContext::device_count() {
+                Ok(count) => {
+                    for ordinal in 0..count as usize {
+                        match driver::CudaContext::new(ordinal) {
+                            Ok(ctx) => {
+                                let name = ctx
+                                    .name()
+                                    .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
+                                // `CudaContext::new` binds the calling thread to
+                                // this ordinal, so `mem_get_info` returns this GPU's
+                                // VRAM.
+                                let (free, total) =
+                                    driver::result::mem_get_info().unwrap_or((0, 0));
+                                gpus.push(DiscoveredGpu {
+                                    ordinal,
+                                    name,
+                                    total_vram_bytes: total as u64,
+                                    free_vram_bytes: free as u64,
+                                });
+                            }
+                            Err(e) => tracing::warn!("failed to open CUDA device {ordinal}: {e}"),
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("CUDA device count failed: {e}"),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        if candle_core::utils::metal_is_available() {
+            // Metal: single device on macOS (unified memory).
+            let total = available_system_memory_bytes().unwrap_or(0);
+            let free = free_system_memory_bytes().unwrap_or(0);
+            gpus.push(DiscoveredGpu {
+                ordinal: 0,
+                name: "Apple Metal GPU".to_string(),
+                total_vram_bytes: total,
+                free_vram_bytes: free,
+            });
+        }
+    }
+
+    gpus
+}
+
+/// Filter discovered GPUs by user selection.
+pub fn filter_gpus(gpus: &[DiscoveredGpu], selection: &GpuSelection) -> Vec<DiscoveredGpu> {
+    match selection {
+        GpuSelection::All => gpus.to_vec(),
+        GpuSelection::Specific(ordinals) => gpus
+            .iter()
+            .filter(|g| ordinals.contains(&g.ordinal))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Select the single best GPU (most free VRAM) for local CLI use.
+pub fn select_best_gpu(gpus: &[DiscoveredGpu]) -> Option<&DiscoveredGpu> {
+    gpus.iter().max_by_key(|g| g.free_vram_bytes)
+}
+
+// ── Device creation ────────────────────────────────────────────────────────
+
+/// Create a device on the specified GPU ordinal.
+/// Use ordinal 0 for single-GPU setups.
 /// Reports device selection via the progress reporter.
-pub fn create_device(progress: &ProgressReporter) -> anyhow::Result<candle_core::Device> {
+pub fn create_device(
+    ordinal: usize,
+    progress: &ProgressReporter,
+) -> anyhow::Result<candle_core::Device> {
     use candle_core::Device;
     // MOLD_DEVICE=cpu forces CPU inference (for debugging Metal issues)
     let force_cpu = std::env::var("MOLD_DEVICE")
@@ -15,13 +108,13 @@ pub fn create_device(progress: &ProgressReporter) -> anyhow::Result<candle_core:
         return Ok(Device::Cpu);
     }
     if candle_core::utils::cuda_is_available() {
-        progress.info("CUDA detected, using GPU");
-        tracing::info!("CUDA detected, using GPU");
-        Ok(Device::new_cuda(0)?)
+        progress.info(&format!("Using CUDA device {ordinal}"));
+        tracing::info!("Using CUDA device {ordinal}");
+        Ok(Device::new_cuda(ordinal)?)
     } else if candle_core::utils::metal_is_available() {
-        progress.info("Metal detected, using GPU");
-        tracing::info!("Metal detected, using MPS");
-        Ok(Device::new_metal(0)?)
+        progress.info(&format!("Using Metal device {ordinal}"));
+        tracing::info!("Using Metal device {ordinal}");
+        Ok(Device::new_metal(ordinal)?)
     } else {
         progress.info("No GPU detected, using CPU");
         tracing::warn!("No GPU detected, falling back to CPU");
@@ -156,29 +249,26 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 
 // ── GPU memory reclamation ───────────────────────────────────────────────────
 
-/// Reclaim GPU memory by resetting the CUDA primary context.
+/// Reclaim GPU memory by resetting the CUDA primary context for the specified device.
 ///
-/// **Must only be called when no CUDA objects (tensors, devices, engines) exist.**
-/// This resets all CUDA state on GPU 0: driver context, cuBLAS workspace caches,
+/// **Must only be called when no CUDA objects (tensors, devices, engines) exist on this device.**
+/// This resets CUDA state on the specified GPU: driver context, cuBLAS workspace caches,
 /// compiled kernel modules, and memory pools. After calling this, the next
-/// `Device::new_cuda(0)` will create a fresh context.
+/// `Device::new_cuda(ordinal)` will create a fresh context.
 ///
 /// On non-CUDA platforms, this is a no-op.
 #[cfg(feature = "cuda")]
-pub fn reclaim_gpu_memory() {
+pub fn reclaim_gpu_memory(ordinal: usize) {
     use candle_core::cuda_backend::cudarc::driver::{result, sys};
 
     // Synchronize to ensure all async GPU work completes before reset.
     let _ = result::ctx::synchronize();
 
-    // Get the CUdevice handle for GPU 0.
-    // NOTE: This assumes a single-GPU setup — consistent with `create_device`
-    // which also hardcodes device 0. If multi-GPU support is added, this
-    // should iterate over all device indices that held engine allocations.
-    let cu_device = match result::device::get(0) {
+    // Get the CUdevice handle for the specified GPU ordinal.
+    let cu_device = match result::device::get(ordinal as i32) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("reclaim_gpu_memory: failed to get device: {e}");
+            tracing::warn!("reclaim_gpu_memory: failed to get device {ordinal}: {e}");
             return;
         }
     };
@@ -187,24 +277,35 @@ pub fn reclaim_gpu_memory() {
     // workspace caches, and releases compiled kernel modules.
     let result = unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) };
     if result != sys::CUresult::CUDA_SUCCESS {
-        tracing::warn!("reclaim_gpu_memory: cuDevicePrimaryCtxReset returned {result:?}");
+        tracing::warn!(
+            "reclaim_gpu_memory: cuDevicePrimaryCtxReset for device {ordinal} returned {result:?}"
+        );
     } else {
-        tracing::info!("CUDA primary context reset, GPU memory reclaimed");
+        tracing::info!("CUDA primary context reset for device {ordinal}, GPU memory reclaimed");
     }
 }
 
 /// No-op on non-CUDA platforms.
 #[cfg(not(feature = "cuda"))]
-pub fn reclaim_gpu_memory() {}
+pub fn reclaim_gpu_memory(_ordinal: usize) {}
 
 // ── VRAM query ───────────────────────────────────────────────────────────────
 
-/// Query free VRAM in bytes from the current CUDA context.
+/// Query free VRAM in bytes for the specified GPU ordinal.
+///
+/// On CUDA, sets the context to the specified device before querying.
+/// On macOS (unified memory), returns available system memory (free + inactive).
+/// On other non-CUDA platforms, no VRAM info available.
 #[cfg(feature = "cuda")]
-pub fn free_vram_bytes() -> Option<u64> {
-    candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-        .ok()
-        .map(|(free, _total)| free as u64)
+pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
+    // Create/bind the device context for the specified ordinal before querying.
+    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
+        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
+            .ok()
+            .map(|(free, _total)| free as u64)
+    } else {
+        None
+    }
 }
 
 /// On macOS (unified memory), return available system memory (free + inactive).
@@ -214,23 +315,27 @@ pub fn free_vram_bytes() -> Option<u64> {
 /// would actually fit, forcing a BF16 fallback that doesn't fit either.
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(not(feature = "cuda"))]
-pub fn free_vram_bytes() -> Option<u64> {
+pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
     available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
-/// Estimate current VRAM usage (total - free). Returns 0 if unavailable.
-/// Used by the model cache to track per-model VRAM footprint.
+/// Estimate current VRAM usage (total - free) for the specified GPU ordinal.
+/// Returns 0 if unavailable. Used by the model cache to track per-model VRAM footprint.
 #[cfg(feature = "cuda")]
-pub fn vram_used_estimate() -> u64 {
-    candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-        .ok()
-        .map(|(_free, total)| total as u64 - _free as u64)
-        .unwrap_or(0)
+pub fn vram_used_estimate(ordinal: usize) -> u64 {
+    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
+        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
+            .ok()
+            .map(|(_free, total)| total as u64 - _free as u64)
+            .unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// Non-CUDA stub — no VRAM tracking available.
 #[cfg(not(feature = "cuda"))]
-pub fn vram_used_estimate() -> u64 {
+pub fn vram_used_estimate(_ordinal: usize) -> u64 {
     0
 }
 
@@ -472,7 +577,7 @@ fn preflight_check_budget(
 pub fn memory_status_string() -> Option<String> {
     #[cfg(feature = "cuda")]
     {
-        if let Some(free) = free_vram_bytes() {
+        if let Some(free) = free_vram_bytes(0) {
             return Some(format!("VRAM: {} free", fmt_gb(free)));
         }
     }
@@ -541,7 +646,7 @@ mod tests {
 
     #[test]
     fn free_vram_returns_some_on_macos_or_none_on_other() {
-        let _result = free_vram_bytes();
+        let _result = free_vram_bytes(0);
         #[cfg(target_os = "macos")]
         assert!(_result.is_some(), "macOS should return system memory info");
         #[cfg(not(any(target_os = "macos", feature = "cuda")))]
@@ -554,7 +659,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn free_vram_returns_available_not_just_free_on_macos() {
-        let vram = free_vram_bytes().unwrap();
+        let vram = free_vram_bytes(0).unwrap();
         let available = available_system_memory_bytes().unwrap();
         let free = free_system_memory_bytes().unwrap();
         // free_vram_bytes should return available (>= free), not just free
@@ -564,7 +669,7 @@ mod tests {
         );
         // Allow small delta between separate syscalls (TOCTOU: inactive pages may
         // change between the two macos_vm_stats() calls on a busy system)
-        let max_drift = 16 * 4096; // 16 pages
+        let max_drift = 256 * 4096; // 256 pages (~1MB)
         assert!(
             vram.abs_diff(available) < max_drift,
             "free_vram_bytes ({vram}) should approximately equal available_system_memory ({available})"

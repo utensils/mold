@@ -21,7 +21,10 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        let state = AppState::empty(mold_core::Config::default(), queue);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
 
         let start_time = state.start_time;
         let metrics_state = MetricsState { handle, start_time };

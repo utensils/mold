@@ -58,9 +58,10 @@ impl SD15Engine {
         paths: ModelPaths,
         scheduler: Scheduler,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -152,7 +153,7 @@ impl SD15Engine {
 
         tracing::info!(model = %self.base.model_name, "loading SD1.5 model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -573,7 +574,7 @@ impl SD15Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -815,6 +816,7 @@ impl SD15Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -992,6 +994,7 @@ impl InferenceEngine for SD15Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

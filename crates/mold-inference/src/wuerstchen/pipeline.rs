@@ -197,9 +197,14 @@ impl WuerstchenEngine {
         requested_steps
     }
 
-    pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
     }
@@ -452,7 +457,7 @@ impl WuerstchenEngine {
 
         tracing::info!(model = %self.base.model_name, "loading Wuerstchen model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         // Use F16 on GPU for ~2x throughput and ~2x less VRAM.
         // gen_r_embedding computes sincos basis in F32 internally, then casts to
         // model dtype before the matmul — patched in candle-transformers-mold 0.9.4.
@@ -833,7 +838,7 @@ impl WuerstchenEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         // Use F16 on GPU for ~2x throughput on the Prior stage.
         // Decoder and VQ-GAN use F32 explicitly (see their load calls below).
         let dtype = if device.is_cpu() {
@@ -1207,6 +1212,7 @@ impl WuerstchenEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -1429,6 +1435,7 @@ impl InferenceEngine for WuerstchenEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 
@@ -1635,6 +1642,7 @@ mod tests {
                 None,
             ),
             LoadStrategy::Sequential,
+            0,
         );
 
         let (
@@ -1677,6 +1685,7 @@ mod tests {
                 None,
             ),
             LoadStrategy::Sequential,
+            0,
         );
         let err = missing_decoder_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("Decoder (Stage B) path required"));
@@ -1693,6 +1702,7 @@ mod tests {
                 None,
             ),
             LoadStrategy::Sequential,
+            0,
         );
         let err = missing_file_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("decoder (Stage B) file not found"));

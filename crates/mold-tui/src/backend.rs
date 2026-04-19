@@ -339,6 +339,7 @@ async fn run_local_generation(
             model_paths,
             &config,
             LoadStrategy::Sequential,
+            0,
             offload,
         )?;
 

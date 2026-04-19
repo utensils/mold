@@ -365,6 +365,7 @@ pub async fn run(
     no_metadata: bool,
     preview: bool,
     local: bool,
+    gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
     qwen2_variant: Option<String>,
@@ -756,6 +757,7 @@ pub async fn run(
         no_metadata,
         preview,
         local,
+        gpus,
         t5_variant,
         qwen3_variant,
         qwen2_variant,
@@ -804,6 +806,8 @@ mod tests {
             expand: mold_core::ExpandSettings::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
+            gpus: None,
+            queue_size: None,
             models: std::collections::HashMap::new(),
         }
     }

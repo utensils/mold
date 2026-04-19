@@ -74,7 +74,7 @@ pub async fn metrics_endpoint(
 ) -> impl IntoResponse {
     // Update point-in-time gauges right before rendering.
     record_uptime(state.start_time.elapsed().as_secs_f64());
-    record_gpu_memory(mold_inference::device::vram_used_estimate());
+    record_gpu_memory(mold_inference::device::vram_used_estimate(0));
 
     let body = state.handle.render();
     (

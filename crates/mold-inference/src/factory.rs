@@ -37,9 +37,18 @@ pub fn create_engine(
     paths: ModelPaths,
     config: &Config,
     load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
     offload: bool,
 ) -> Result<Box<dyn InferenceEngine>> {
-    create_engine_with_pool(model_name, paths, config, load_strategy, offload, None)
+    create_engine_with_pool(
+        model_name,
+        paths,
+        config,
+        load_strategy,
+        gpu_ordinal,
+        offload,
+        None,
+    )
 }
 
 /// Create an inference engine with an optional shared tokenizer pool.
@@ -51,6 +60,7 @@ pub fn create_engine_with_pool(
     paths: ModelPaths,
     config: &Config,
     load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
@@ -69,6 +79,7 @@ pub fn create_engine_with_pool(
                 is_schnell,
                 t5_variant,
                 load_strategy,
+                gpu_ordinal,
                 offload,
                 shared_pool,
             )))
@@ -80,6 +91,7 @@ pub fn create_engine_with_pool(
                 paths,
                 scheduler,
                 load_strategy,
+                gpu_ordinal,
             )))
         }
         "sdxl" => {
@@ -97,6 +109,7 @@ pub fn create_engine_with_pool(
                 scheduler,
                 is_turbo,
                 load_strategy,
+                gpu_ordinal,
             )))
         }
         "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => {
@@ -114,6 +127,7 @@ pub fn create_engine_with_pool(
                 is_medium,
                 t5_variant,
                 load_strategy,
+                gpu_ordinal,
             )))
         }
         "z-image" => {
@@ -125,6 +139,7 @@ pub fn create_engine_with_pool(
                 paths,
                 qwen3_variant,
                 load_strategy,
+                gpu_ordinal,
             )))
         }
         "flux2" | "flux.2" | "flux2-klein" => {
@@ -136,18 +151,21 @@ pub fn create_engine_with_pool(
                 paths,
                 qwen3_variant,
                 load_strategy,
+                gpu_ordinal,
             )))
         }
         "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new(
             model_name,
             paths,
             load_strategy,
+            gpu_ordinal,
             offload,
         ))),
         "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
             model_name,
             paths,
             load_strategy,
+            gpu_ordinal,
             offload,
         ))),
         "ltx-video" | "ltx_video" => {
@@ -159,6 +177,7 @@ pub fn create_engine_with_pool(
                 paths,
                 t5_variant,
                 load_strategy,
+                gpu_ordinal,
                 shared_pool,
             )))
         }
@@ -167,6 +186,7 @@ pub fn create_engine_with_pool(
             model_name,
             paths,
             load_strategy,
+            gpu_ordinal,
         ))),
         other => bail!(
             "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
@@ -242,6 +262,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -264,6 +285,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -292,6 +314,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -313,6 +336,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .err()
@@ -338,6 +362,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -374,6 +399,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -395,6 +421,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         );
         assert!(result.is_err());
@@ -410,6 +437,7 @@ mod tests {
             dummy_paths(),
             &Config::default(),
             LoadStrategy::Sequential,
+            0,
             false,
         );
         assert!(result.is_ok());
@@ -436,6 +464,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();
@@ -457,6 +486,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .unwrap();

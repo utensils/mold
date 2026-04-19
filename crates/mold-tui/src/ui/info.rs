@@ -283,6 +283,9 @@ mod tests {
             uptime_secs: 3600,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -306,6 +309,9 @@ mod tests {
                 uptime_secs: 0,
                 hostname: None,
                 memory_status: None,
+                gpus: None,
+                queue_depth: None,
+                queue_capacity: None,
             }),
             ..Default::default()
         };

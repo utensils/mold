@@ -60,9 +60,10 @@ impl SD3Engine {
         is_medium: bool,
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             is_turbo,
             is_medium,
             t5_variant,
@@ -246,7 +247,7 @@ impl SD3Engine {
             t5_tokenizer_path,
         ) = self.validate_paths()?;
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -292,7 +293,7 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Decide encoder placement based on remaining VRAM ---
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         if free > 0 {
             self.base
                 .progress
@@ -383,7 +384,7 @@ impl SD3Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let gpu_dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -418,7 +419,7 @@ impl SD3Engine {
             self.base.progress.cache_hit("prompt conditioning");
             (context, y)
         } else {
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -712,6 +713,7 @@ impl SD3Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -992,6 +994,7 @@ impl InferenceEngine for SD3Engine {
                 model: req.model.clone(),
                 seed_used: seed,
                 video: None,
+                gpu: None,
             })
         })()
     }
@@ -1108,6 +1111,7 @@ mod tests {
             false,
             None,
             LoadStrategy::Sequential,
+            0,
         );
         let medium = SD3Engine::new(
             "sd3.5-medium:bf16".to_string(),
@@ -1125,6 +1129,7 @@ mod tests {
             true,
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let large_cfg = large.mmdit_config();
@@ -1170,6 +1175,7 @@ mod tests {
             false,
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let (_, _, _, _, _, resolved_t5_tok) = engine.validate_paths().unwrap();
@@ -1198,6 +1204,7 @@ mod tests {
             false,
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let err = engine.validate_paths().unwrap_err();

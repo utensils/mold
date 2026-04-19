@@ -53,9 +53,10 @@ impl SDXLEngine {
         scheduler: Scheduler,
         is_turbo: bool,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
             is_turbo,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
@@ -180,7 +181,7 @@ impl SDXLEngine {
 
         tracing::info!(model = %self.base.model_name, "loading SDXL model components...");
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -537,7 +538,7 @@ impl SDXLEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = if crate::device::is_gpu(&device) {
             DType::F16
         } else {
@@ -796,6 +797,7 @@ impl SDXLEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -974,6 +976,7 @@ impl InferenceEngine for SDXLEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 

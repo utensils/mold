@@ -66,7 +66,9 @@ async fn main() -> anyhow::Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            mold_server::run_server(&bind, port, models_path).await?;
+            let gpu_selection = config.gpu_selection();
+            let queue_size = config.queue_size();
+            mold_server::run_server(&bind, port, models_path, gpu_selection, queue_size).await?;
         }
     }
 

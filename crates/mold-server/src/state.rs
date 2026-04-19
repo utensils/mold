@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use mold_inference::shared_pool::SharedPool;
 
+use crate::gpu_pool::GpuPool;
 use crate::model_cache::ModelCache;
 
 #[derive(Debug, Clone, Default)]
@@ -60,6 +61,15 @@ pub struct QueueHandle {
     pending_count: Arc<AtomicUsize>,
 }
 
+/// Reason a `QueueHandle::submit` attempt failed.
+#[derive(Debug)]
+pub enum SubmitError {
+    /// Queue is at capacity — caller should return 503 with `Retry-After`.
+    Full { pending: usize, capacity: usize },
+    /// Receiving end is gone (server shutting down).
+    Shutdown,
+}
+
 impl QueueHandle {
     pub fn new(job_tx: tokio::sync::mpsc::Sender<GenerationJob>) -> Self {
         Self {
@@ -68,19 +78,30 @@ impl QueueHandle {
         }
     }
 
-    /// Submit a generation job. Returns the queue position (0-based).
-    pub async fn submit(&self, job: GenerationJob) -> Result<usize, String> {
-        let position = self.pending_count.fetch_add(1, Ordering::SeqCst);
-        if let Err(_e) = self.job_tx.send(job).await {
+    /// Submit a generation job.
+    ///
+    /// Atomically reserves a slot against `capacity` using fetch_add, so a
+    /// burst of concurrent callers cannot all slip past a separate pending()
+    /// pre-check (TOCTOU).  Returns the queue position on success.
+    pub async fn submit(&self, job: GenerationJob, capacity: usize) -> Result<usize, SubmitError> {
+        let prev = self.pending_count.fetch_add(1, Ordering::SeqCst);
+        if prev >= capacity {
             self.pending_count.fetch_sub(1, Ordering::SeqCst);
-            return Err("generation queue shut down".to_string());
+            return Err(SubmitError::Full {
+                pending: prev,
+                capacity,
+            });
+        }
+        if self.job_tx.send(job).await.is_err() {
+            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(SubmitError::Shutdown);
         }
         #[cfg(feature = "metrics")]
         {
             crate::metrics::record_queue_submit();
             crate::metrics::record_queue_depth(self.pending_count.load(Ordering::SeqCst));
         }
-        Ok(position)
+        Ok(prev)
     }
 
     pub fn decrement(&self) {
@@ -96,6 +117,13 @@ impl QueueHandle {
 
 #[derive(Clone)]
 pub struct AppState {
+    // ── Multi-GPU fields ────────────────────────────────────────────────────
+    /// GPU worker pool for multi-GPU dispatch.
+    pub gpu_pool: Arc<GpuPool>,
+    /// Maximum queue capacity (for status reporting and 503 responses).
+    pub queue_capacity: usize,
+
+    // ── Legacy single-GPU fields (retained during migration) ────────────────
     pub model_cache: Arc<Mutex<ModelCache>>,
     pub engine_snapshot: Arc<tokio::sync::RwLock<EngineSnapshot>>,
     /// Uses std::sync::RwLock (not tokio) because it's only accessed from
@@ -127,7 +155,13 @@ const DEFAULT_MAX_CACHED_MODELS: usize = 3;
 
 impl AppState {
     /// Create state with a pre-loaded engine (server starts with a configured model).
-    pub fn new(engine: Box<dyn InferenceEngine>, config: Config, queue: QueueHandle) -> Self {
+    pub fn new(
+        engine: Box<dyn InferenceEngine>,
+        config: Config,
+        queue: QueueHandle,
+        gpu_pool: Arc<GpuPool>,
+        queue_capacity: usize,
+    ) -> Self {
         let name = engine.model_name().to_string();
         let loaded = engine.is_loaded();
         let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
@@ -138,6 +172,8 @@ impl AppState {
             cached_models: cache.cached_model_names(),
         };
         Self {
+            gpu_pool,
+            queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -154,8 +190,15 @@ impl AppState {
     }
 
     /// Create state with no engine (zero-config startup, models pulled on demand).
-    pub fn empty(config: Config, queue: QueueHandle) -> Self {
+    pub fn empty(
+        config: Config,
+        queue: QueueHandle,
+        gpu_pool: Arc<GpuPool>,
+        queue_capacity: usize,
+    ) -> Self {
         Self {
+            gpu_pool,
+            queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(DEFAULT_MAX_CACHED_MODELS))),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
             active_generation: Arc::new(RwLock::new(None)),
@@ -169,6 +212,14 @@ impl AppState {
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
         }
+    }
+
+    /// Create an empty GpuPool for testing (no GPU workers).
+    #[cfg(test)]
+    fn empty_gpu_pool() -> Arc<GpuPool> {
+        Arc::new(GpuPool {
+            workers: Vec::new(),
+        })
     }
 
     #[cfg(test)]
@@ -185,6 +236,8 @@ impl AppState {
             cached_models: cache.cached_model_names(),
         };
         Self {
+            gpu_pool: Self::empty_gpu_pool(),
+            queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -217,6 +270,8 @@ impl AppState {
             cached_models: cache.cached_model_names(),
         };
         let state = Self {
+            gpu_pool: Self::empty_gpu_pool(),
+            queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -268,7 +323,12 @@ mod tests {
     #[test]
     fn upscaler_cache_starts_empty() {
         let config = mold_core::Config::default();
-        let state = AppState::empty(config, QueueHandle::new(tokio::sync::mpsc::channel(1).0));
+        let state = AppState::empty(
+            config,
+            QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool(),
+            200,
+        );
         let cache = state.upscaler_cache.lock().unwrap();
         assert!(cache.is_none());
     }
@@ -276,7 +336,12 @@ mod tests {
     #[test]
     fn upscaler_cache_cleared_by_setting_none() {
         let config = mold_core::Config::default();
-        let state = AppState::empty(config, QueueHandle::new(tokio::sync::mpsc::channel(1).0));
+        let state = AppState::empty(
+            config,
+            QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool(),
+            200,
+        );
         {
             let mut cache = state.upscaler_cache.lock().unwrap();
             *cache = None;

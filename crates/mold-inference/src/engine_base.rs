@@ -21,17 +21,25 @@ pub(crate) struct EngineBase<L> {
     pub paths: ModelPaths,
     pub progress: ProgressReporter,
     pub load_strategy: LoadStrategy,
+    /// GPU ordinal this engine is assigned to. Used by `create_device()` and VRAM queries.
+    pub gpu_ordinal: usize,
 }
 
 impl<L> EngineBase<L> {
     /// Create a new engine base with no loaded state.
-    pub fn new(model_name: String, paths: ModelPaths, load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             loaded: None,
             model_name,
             paths,
             progress: ProgressReporter::default(),
             load_strategy,
+            gpu_ordinal,
         }
     }
 

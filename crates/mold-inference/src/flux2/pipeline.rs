@@ -69,9 +69,10 @@ impl Flux2Engine {
         paths: ModelPaths,
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
@@ -329,7 +330,7 @@ impl Flux2Engine {
         let text_tokenizer_path = self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
@@ -361,7 +362,7 @@ impl Flux2Engine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Resolve and load Qwen3 text encoder ---
-        let free = free_vram_bytes().unwrap_or(0);
+        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         if free > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
@@ -440,7 +441,7 @@ impl Flux2Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(&self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -470,7 +471,7 @@ impl Flux2Engine {
             self.base.progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            let free = free_vram_bytes().unwrap_or(0);
+            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let resolve_start = Instant::now();
             let qwen3_size = self.qwen3_size();
@@ -716,6 +717,7 @@ impl Flux2Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -953,6 +955,7 @@ impl InferenceEngine for Flux2Engine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 
@@ -1053,12 +1056,14 @@ mod tests {
             flux2_model_paths(&base_dir, "transformer.gguf", vec![], None),
             None,
             LoadStrategy::Sequential,
+            0,
         );
         let nine_b = Flux2Engine::new(
             "flux2-klein-9b:q8".to_string(),
             flux2_model_paths(&base_dir, "transformer.gguf", vec![], None),
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let standard_cfg = standard.resolve_config();
@@ -1094,6 +1099,7 @@ mod tests {
             ),
             None,
             LoadStrategy::Sequential,
+            0,
         );
         assert_eq!(sharded.text_encoder_paths(), vec![shard_a, shard_b]);
 
@@ -1102,6 +1108,7 @@ mod tests {
             flux2_model_paths(&dir, "transformer.gguf", vec![], Some(fallback.clone())),
             None,
             LoadStrategy::Sequential,
+            0,
         );
         assert_eq!(fallback_engine.text_encoder_paths(), vec![fallback]);
 
@@ -1137,6 +1144,7 @@ mod tests {
             },
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         assert_eq!(engine.validate_paths().unwrap(), tokenizer);
@@ -1173,6 +1181,7 @@ mod tests {
             },
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let err = engine.validate_paths().unwrap_err();
