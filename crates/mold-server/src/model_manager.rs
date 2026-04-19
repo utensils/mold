@@ -395,6 +395,7 @@ async fn create_and_load_engine(
         paths,
         &config,
         mold_inference::LoadStrategy::Eager,
+        0,
         offload,
         Some(state.shared_pool.clone()),
     )

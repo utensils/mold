@@ -561,9 +561,8 @@ fn estimate_model_vram(model_name: &str) -> u64 {
         24_000_000_000 // ~24GB
     } else if lower.contains("sd15") || lower.contains("sd1.5") {
         4_000_000_000 // ~4GB
-    } else if lower.contains("sdxl") {
-        8_000_000_000 // ~8GB
     } else {
-        8_000_000_000 // 8GB default fallback
+        // SDXL (~8GB) and other models default to 8GB.
+        8_000_000_000
     }
 }

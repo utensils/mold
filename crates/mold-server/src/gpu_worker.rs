@@ -3,7 +3,9 @@ use crate::model_cache::ModelResidency;
 use crate::queue::clean_error_message;
 use crate::state::{GenerationJobResult, SseMessage};
 use base64::Engine as _;
-use mold_core::{ImageData, ModelPaths, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent};
+use mold_core::{
+    ImageData, ModelPaths, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+};
 use mold_inference::device;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -113,11 +115,9 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     // Set progress callback if SSE streaming.
     if let Some(ref progress_tx) = job.progress_tx {
         let tx = progress_tx.clone();
-        cached_engine
-            .engine
-            .set_on_progress(Box::new(move |event| {
-                let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-            }));
+        cached_engine.engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+        }));
     }
 
     // Run inference — cache mutex is FREE during this.
@@ -182,8 +182,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let filename =
-                        mold_core::default_output_filename(&job.model, ts, &ext, 1, 0);
+                    let filename = mold_core::default_output_filename(&job.model, ts, &ext, 1, 0);
                     let path = dir.join(filename);
                     if let Err(e) = std::fs::write(&path, &video.data) {
                         tracing::error!("failed to save video to {}: {e}", path.display());
@@ -300,9 +299,7 @@ fn ensure_model_ready_sync(
     // Resolve model paths.
     let config = job.config.blocking_read();
     let paths = ModelPaths::resolve(model_name, &config).ok_or_else(|| {
-        anyhow::anyhow!(
-            "model '{model_name}' is not downloaded. Run: mold pull {model_name}"
-        )
+        anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
     })?;
 
     let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
@@ -332,10 +329,7 @@ fn ensure_model_ready_sync(
 }
 
 fn record_failure(worker: &GpuWorker) {
-    let failures = worker
-        .consecutive_failures
-        .fetch_add(1, Ordering::SeqCst)
-        + 1;
+    let failures = worker.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
     if failures >= 3 {
         let mut degraded = worker.degraded_until.write().unwrap();
         *degraded = Some(Instant::now() + Duration::from_secs(60));

@@ -103,11 +103,7 @@ impl GpuPool {
     /// 1. Already loaded on a GPU
     /// 2. Idle GPU (no model loaded), smallest that fits
     /// 3. Busy GPU with most headroom (will evict LRU)
-    pub fn select_worker(
-        &self,
-        model_name: &str,
-        estimated_vram: u64,
-    ) -> Option<Arc<GpuWorker>> {
+    pub fn select_worker(&self, model_name: &str, estimated_vram: u64) -> Option<Arc<GpuWorker>> {
         // 1. Already loaded on a GPU?
         if let Some(w) = self.find_loaded(model_name) {
             return Some(w);

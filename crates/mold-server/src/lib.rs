@@ -70,9 +70,9 @@ pub async fn run_server(
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(queue_size);
         let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
             gpu: gpu.clone(),
-            model_cache: std::sync::Arc::new(std::sync::Mutex::new(
-                model_cache::ModelCache::new(3),
-            )),
+            model_cache: std::sync::Arc::new(std::sync::Mutex::new(model_cache::ModelCache::new(
+                3,
+            ))),
             active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
             model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             shared_pool: shared_pool.clone(),
@@ -151,13 +151,8 @@ pub async fn run_server(
                 offload,
                 Some(shared_pool.clone()),
             )?;
-            let mut state = state::AppState::new(
-                engine,
-                config,
-                queue_handle,
-                gpu_pool.clone(),
-                queue_size,
-            );
+            let mut state =
+                state::AppState::new(engine, config, queue_handle, gpu_pool.clone(), queue_size);
             state.shared_pool = shared_pool;
             state
         }

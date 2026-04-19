@@ -631,10 +631,11 @@ impl LtxVideoEngine {
         paths: ModelPaths,
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<SharedPool>>>,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             t5_variant,
             shared_pool,
         }
@@ -1012,7 +1013,7 @@ impl LtxVideoEngine {
         }
 
         // Select device
-        let device = crate::device::create_device(0, progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, progress)?;
         let dtype = gpu_dtype(&device);
 
         progress.info(&format!(

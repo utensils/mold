@@ -134,9 +134,10 @@ impl ZImageEngine {
         paths: ModelPaths,
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
     ) -> Self {
         Self {
-            base: EngineBase::new(model_name, paths, load_strategy),
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
         }
@@ -277,7 +278,7 @@ impl ZImageEngine {
         let is_gguf = self.detect_is_gguf();
         let text_tokenizer_path = self.validate_paths()?;
 
-        let device = crate::device::create_device(0, &self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = Config::z_image_turbo();
 
@@ -302,7 +303,7 @@ impl ZImageEngine {
         tracing::info!(quantized = is_gguf, "Z-Image transformer loaded");
 
         // --- Decide where to place VAE and Qwen3 text encoder based on remaining VRAM ---
-        let free = free_vram_bytes(0).unwrap_or(0);
+        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
         if free > 0 {
@@ -447,7 +448,7 @@ impl ZImageEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(0, &self.base.progress)?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -477,7 +478,7 @@ impl ZImageEngine {
             let cap_mask = Tensor::ones((1, token_count), DType::U8, &device)?;
             (cap_feats, cap_mask)
         } else {
-            let free = free_vram_bytes(0).unwrap_or(0);
+            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let qwen3_resolve_start = Instant::now();
             let qwen3_preference = self.qwen3_variant.as_deref();
@@ -767,7 +768,7 @@ impl ZImageEngine {
             self.base.progress.info(&status);
         }
         // With sequential loading, we can always try GPU for VAE since transformer is freed
-        let free_for_vae = free_vram_bytes(0).unwrap_or(0);
+        let free_for_vae = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -1465,6 +1466,7 @@ mod tests {
             ),
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
@@ -1491,6 +1493,7 @@ mod tests {
             ),
             None,
             LoadStrategy::Sequential,
+            0,
         );
         assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
         assert!(!sharded.detect_is_gguf());
@@ -1500,6 +1503,7 @@ mod tests {
             zimage_model_paths(gguf, vec![], vae, Some(dir.join("tokenizer.json"))),
             None,
             LoadStrategy::Sequential,
+            0,
         );
         assert!(quantized.detect_is_gguf());
 
@@ -1519,6 +1523,7 @@ mod tests {
             ),
             None,
             LoadStrategy::Sequential,
+            0,
         );
 
         let err = engine.validate_paths().unwrap_err();

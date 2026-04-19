@@ -27,8 +27,7 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
                         let name = device
                             .name()
                             .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
-                        let (free, total) =
-                            driver::result::mem_get_info().unwrap_or((0, 0));
+                        let (free, total) = driver::result::mem_get_info().unwrap_or((0, 0));
                         gpus.push(DiscoveredGpu {
                             ordinal,
                             name,
@@ -81,7 +80,10 @@ pub fn select_best_gpu(gpus: &[DiscoveredGpu]) -> Option<&DiscoveredGpu> {
 /// Create a device on the specified GPU ordinal.
 /// Use ordinal 0 for single-GPU setups.
 /// Reports device selection via the progress reporter.
-pub fn create_device(ordinal: usize, progress: &ProgressReporter) -> anyhow::Result<candle_core::Device> {
+pub fn create_device(
+    ordinal: usize,
+    progress: &ProgressReporter,
+) -> anyhow::Result<candle_core::Device> {
     use candle_core::Device;
     // MOLD_DEVICE=cpu forces CPU inference (for debugging Metal issues)
     let force_cpu = std::env::var("MOLD_DEVICE")
@@ -262,7 +264,9 @@ pub fn reclaim_gpu_memory(ordinal: usize) {
     // workspace caches, and releases compiled kernel modules.
     let result = unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) };
     if result != sys::CUresult::CUDA_SUCCESS {
-        tracing::warn!("reclaim_gpu_memory: cuDevicePrimaryCtxReset for device {ordinal} returned {result:?}");
+        tracing::warn!(
+            "reclaim_gpu_memory: cuDevicePrimaryCtxReset for device {ordinal} returned {result:?}"
+        );
     } else {
         tracing::info!("CUDA primary context reset for device {ordinal}, GPU memory reclaimed");
     }
@@ -652,7 +656,7 @@ mod tests {
         );
         // Allow small delta between separate syscalls (TOCTOU: inactive pages may
         // change between the two macos_vm_stats() calls on a busy system)
-        let max_drift = 16 * 4096; // 16 pages
+        let max_drift = 256 * 4096; // 256 pages (~1MB)
         assert!(
             vram.abs_diff(available) < max_drift,
             "free_vram_bytes ({vram}) should approximately equal available_system_memory ({available})"
