@@ -23,10 +23,12 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
         if candle_core::utils::cuda_is_available() {
             if let Ok(count) = driver::result::device::get_count() {
                 for ordinal in 0..count as usize {
-                    if let Ok(device) = driver::CudaDevice::new(ordinal) {
-                        let name = device
+                    if let Ok(ctx) = driver::CudaContext::new(ordinal) {
+                        let name = ctx
                             .name()
                             .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
+                        // `CudaContext::new` binds the calling thread to this ordinal,
+                        // so `mem_get_info` returns this GPU's VRAM.
                         let (free, total) = driver::result::mem_get_info().unwrap_or((0, 0));
                         gpus.push(DiscoveredGpu {
                             ordinal,
@@ -286,7 +288,7 @@ pub fn reclaim_gpu_memory(_ordinal: usize) {}
 #[cfg(feature = "cuda")]
 pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
     // Create/bind the device context for the specified ordinal before querying.
-    if candle_core::cuda_backend::cudarc::driver::CudaDevice::new(ordinal).is_ok() {
+    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
         candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
             .ok()
             .map(|(free, _total)| free as u64)
@@ -310,7 +312,7 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
 /// Returns 0 if unavailable. Used by the model cache to track per-model VRAM footprint.
 #[cfg(feature = "cuda")]
 pub fn vram_used_estimate(ordinal: usize) -> u64 {
-    if candle_core::cuda_backend::cudarc::driver::CudaDevice::new(ordinal).is_ok() {
+    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
         candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
             .ok()
             .map(|(_free, total)| total as u64 - _free as u64)
