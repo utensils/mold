@@ -321,8 +321,11 @@ in
       // lib.optionalAttrs (cfg.defaultModel != null) {
         MOLD_DEFAULT_MODEL = cfg.defaultModel;
       }
-      // lib.optionalAttrs (cfg.gpus != null) {
-        MOLD_GPUS = cfg.gpus;
+      // {
+        # Always pin MOLD_GPUS so the declared value wins over any
+        # persisted `gpus = [...]` entry in $MOLD_HOME/config.toml.
+        # null → "all" (every visible GPU), matching the option's docs.
+        MOLD_GPUS = if cfg.gpus == null then "all" else cfg.gpus;
       }
       // lib.optionalAttrs (cfg.queueSize != null) {
         MOLD_QUEUE_SIZE = toString cfg.queueSize;
