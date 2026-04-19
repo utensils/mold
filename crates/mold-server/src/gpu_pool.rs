@@ -62,13 +62,10 @@ impl GpuWorker {
         // the cache entry is taken out of the cache (take-and-restore pattern),
         // so `cache.active_model()` returns None. Falling back to the cache
         // afterwards handles the idle-but-loaded case.
-        let loaded_model = active_gen
-            .as_ref()
-            .map(|g| g.model.clone())
-            .or_else(|| {
-                let cache = self.model_cache.lock().unwrap();
-                cache.active_model().map(|s| s.to_string())
-            });
+        let loaded_model = active_gen.as_ref().map(|g| g.model.clone()).or_else(|| {
+            let cache = self.model_cache.lock().unwrap();
+            cache.active_model().map(|s| s.to_string())
+        });
 
         let state = if self.is_degraded() {
             GpuWorkerState::Degraded

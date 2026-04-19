@@ -397,7 +397,7 @@ impl Ltx2RuntimeSession {
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
-                crate::device::reclaim_gpu_memory();
+                crate::device::reclaim_gpu_memory(0);
                 self.device = Some(new_native_cuda_device()?);
             } else if let Some(device) = self.device.as_ref() {
                 if device.is_cuda() {
@@ -4213,7 +4213,7 @@ fn ltx_debug_timings_enabled() -> bool {
 }
 
 fn log_debug_vram(label: &str) {
-    if let Some(free) = free_vram_bytes() {
+    if let Some(free) = free_vram_bytes(0) {
         eprintln!("[ltx2-debug] {label} free_vram={}", fmt_gb(free));
     } else {
         eprintln!("[ltx2-debug] {label} free_vram=unavailable");

@@ -23,9 +23,9 @@ use crate::state::{AppState, GenerationJob, SseMessage, SubmitError};
 
 fn submit_error_to_api(e: SubmitError) -> ApiError {
     match e {
-        SubmitError::Full { pending, capacity } => ApiError::queue_full(format!(
-            "generation queue is full ({pending}/{capacity})"
-        )),
+        SubmitError::Full { pending, capacity } => {
+            ApiError::queue_full(format!("generation queue is full ({pending}/{capacity})"))
+        }
         SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
     }
 }

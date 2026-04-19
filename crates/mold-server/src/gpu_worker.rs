@@ -216,6 +216,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     seed_used: response.seed_used,
                     generation_time_ms: response.generation_time_ms,
                     model: response.model.clone(),
+                    video_frames: None,
+                    video_fps: None,
+                    video_thumbnail: None,
+                    video_gif_preview: None,
+                    video_has_audio: false,
+                    video_duration_ms: None,
+                    video_audio_sample_rate: None,
+                    video_audio_channels: None,
                     gpu: response.gpu,
                 }));
             }

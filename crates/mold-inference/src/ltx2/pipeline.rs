@@ -271,7 +271,7 @@ impl Ltx2Engine {
                 self.info(
                     "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
                 );
-                crate::device::reclaim_gpu_memory();
+                crate::device::reclaim_gpu_memory(0);
                 self.load_runtime_session_on_device(plan, Device::Cpu)
             }
             Err(err) => Err(err),
@@ -499,6 +499,7 @@ impl InferenceEngine for Ltx2Engine {
             generation_time_ms: start.elapsed().as_millis() as u64,
             model: self.model_name.clone(),
             seed_used: plan.seed,
+            gpu: None,
         })
     }
 

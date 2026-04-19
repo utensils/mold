@@ -44,9 +44,7 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
                                     free_vram_bytes: free as u64,
                                 });
                             }
-                            Err(e) => tracing::warn!(
-                                "failed to open CUDA device {ordinal}: {e}"
-                            ),
+                            Err(e) => tracing::warn!("failed to open CUDA device {ordinal}: {e}"),
                         }
                     }
                 }

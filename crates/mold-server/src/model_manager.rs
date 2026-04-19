@@ -95,8 +95,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     if state.gpu_pool.worker_count() > 0 {
         let loaded_models = loaded_models_across_pool(state);
         let primary = loaded_models.first().cloned();
-        let mut catalog =
-            build_model_catalog(&config, primary.as_deref(), primary.is_some());
+        let mut catalog = build_model_catalog(&config, primary.as_deref(), primary.is_some());
         // Mark every GPU-resident model as loaded (not just the primary).
         for entry in catalog.iter_mut() {
             if loaded_models.contains(&entry.info.name) {

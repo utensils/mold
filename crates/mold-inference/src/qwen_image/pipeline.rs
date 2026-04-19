@@ -2325,6 +2325,7 @@ impl QwenImageEngine {
             model: req.model.clone(),
             seed_used: seed,
             video: None,
+            gpu: None,
         })
     }
 }
@@ -3232,6 +3233,7 @@ mod tests {
             "qwen-image-edit-2511:q4".to_string(),
             paths,
             LoadStrategy::Sequential,
+            0,
             false,
         );
 

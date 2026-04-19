@@ -83,11 +83,7 @@ impl QueueHandle {
     /// Atomically reserves a slot against `capacity` using fetch_add, so a
     /// burst of concurrent callers cannot all slip past a separate pending()
     /// pre-check (TOCTOU).  Returns the queue position on success.
-    pub async fn submit(
-        &self,
-        job: GenerationJob,
-        capacity: usize,
-    ) -> Result<usize, SubmitError> {
+    pub async fn submit(&self, job: GenerationJob, capacity: usize) -> Result<usize, SubmitError> {
         let prev = self.pending_count.fetch_add(1, Ordering::SeqCst);
         if prev >= capacity {
             self.pending_count.fetch_sub(1, Ordering::SeqCst);

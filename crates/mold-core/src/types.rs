@@ -1884,6 +1884,9 @@ mod tests {
             uptime_secs: 0,
             hostname: Some("bender".to_string()),
             memory_status: Some("Memory: 64.0 GB free, 96.0 GB available".to_string()),
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
@@ -1983,6 +1986,7 @@ mod tests {
             video_duration_ms: Some(2750),
             video_audio_sample_rate: Some(44100),
             video_audio_channels: Some(2),
+            gpu: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("video_frames"));
@@ -2024,6 +2028,7 @@ mod tests {
             video_duration_ms: None,
             video_audio_sample_rate: None,
             video_audio_channels: None,
+            gpu: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         // Audio-related fields should be absent when not set
@@ -2077,6 +2082,7 @@ mod tests {
             video_duration_ms: None,
             video_audio_sample_rate: None,
             video_audio_channels: None,
+            gpu: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("video_"));

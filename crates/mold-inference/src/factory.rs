@@ -165,6 +165,7 @@ pub fn create_engine_with_pool(
             model_name,
             paths,
             load_strategy,
+            gpu_ordinal,
             offload,
         ))),
         "ltx-video" | "ltx_video" => {
@@ -335,6 +336,7 @@ mod tests {
             dummy_paths(),
             &config,
             LoadStrategy::Sequential,
+            0,
             false,
         )
         .err()
@@ -435,6 +437,7 @@ mod tests {
             dummy_paths(),
             &Config::default(),
             LoadStrategy::Sequential,
+            0,
             false,
         );
         assert!(result.is_ok());

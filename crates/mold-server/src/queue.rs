@@ -515,13 +515,14 @@ pub async fn run_queue_dispatcher(
         let mut dispatched = false;
 
         for _ in 0..max_attempts {
-            let worker = match state
-                .gpu_pool
-                .select_worker_excluding(&model_name, estimated_vram, &skip)
-            {
-                Some(w) => w,
-                None => break,
-            };
+            let worker =
+                match state
+                    .gpu_pool
+                    .select_worker_excluding(&model_name, estimated_vram, &skip)
+                {
+                    Some(w) => w,
+                    None => break,
+                };
 
             // Increment in-flight BEFORE sending to reserve the slot.
             worker.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -550,9 +551,7 @@ pub async fn run_queue_dispatcher(
             let err_msg = if state.gpu_pool.worker_count() == 0 {
                 format!("no GPU available for model {model_name}")
             } else {
-                format!(
-                    "all GPU workers are busy for model {model_name} — queue is full"
-                )
+                format!("all GPU workers are busy for model {model_name} — queue is full")
             };
             tracing::error!(model = %model_name, "{err_msg}");
             if let Some(tx) = rejected.progress_tx {

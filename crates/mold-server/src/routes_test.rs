@@ -1883,7 +1883,10 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        let mut state = AppState::empty(config, queue);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
         let app = app_with_state(state);
 
@@ -1920,7 +1923,10 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        let state = AppState::empty(config, queue);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = app_with_state(state);
 
         let resp = app
@@ -1989,7 +1995,10 @@ mod tests {
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
-        let mut state = AppState::empty(config, queue);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
         let db_handle_for_assert = state.metadata_db.clone();
         let app = app_with_state(state);
