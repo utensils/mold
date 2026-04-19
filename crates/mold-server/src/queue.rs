@@ -533,14 +533,28 @@ pub async fn run_queue_dispatcher(
         };
 
         // Dispatch to worker's dedicated thread.
-        if worker.job_tx.try_send(gpu_job).is_err() {
+        if let Err(e) = worker.job_tx.try_send(gpu_job) {
             worker.in_flight.fetch_sub(1, Ordering::SeqCst);
             tracing::warn!(
                 gpu = worker.gpu.ordinal,
-                "GPU worker channel full — job dropped"
+                "GPU worker channel full — rejecting with queue_full"
             );
-            // The result_tx was moved into gpu_job and is now lost.
-            // This shouldn't happen if queue_size is configured properly.
+            // Recover the rejected GpuJob so we can notify the client properly
+            // instead of silently dropping `result_tx` (which surfaced as a
+            // misleading 500 INTERNAL_ERROR on the client).
+            let rejected = match e {
+                std::sync::mpsc::TrySendError::Full(j) | std::sync::mpsc::TrySendError::Disconnected(j) => j,
+            };
+            let err_msg = format!(
+                "GPU {} worker queue is full — try again shortly",
+                worker.gpu.ordinal,
+            );
+            if let Some(tx) = rejected.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = rejected.result_tx.send(Err(err_msg));
         }
 
         state.queue.decrement();

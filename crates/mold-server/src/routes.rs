@@ -19,7 +19,16 @@ use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::model_manager;
-use crate::state::{AppState, GenerationJob, SseMessage};
+use crate::state::{AppState, GenerationJob, SseMessage, SubmitError};
+
+fn submit_error_to_api(e: SubmitError) -> ApiError {
+    match e {
+        SubmitError::Full { pending, capacity } => ApiError::queue_full(format!(
+            "generation queue is full ({pending}/{capacity})"
+        )),
+        SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
+    }
+}
 
 // ── ApiError — structured JSON error response ────────────────────────────────
 
@@ -100,6 +109,12 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status;
+        // On queue-full (503), hint clients to retry with a short delay.
+        if self.code == "QUEUE_FULL" {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            return (status, headers, Json(self)).into_response();
+        }
         (status, Json(self)).into_response()
     }
 }
@@ -234,15 +249,10 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
-    // Reject early if the generation queue is at capacity.
-    if state.queue.pending() >= state.queue_capacity {
-        return Err(ApiError::queue_full(format!(
-            "generation queue is full ({}/{})",
-            state.queue.pending(),
-            state.queue_capacity,
-        )));
-    }
-
+    // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
+    // that a burst of concurrent callers can't all slip past an open check
+    // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
+    // return `SubmitError::Full`, which is mapped to `ApiError::queue_full()`.
     apply_default_metadata_setting(state, request).await;
 
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
@@ -317,7 +327,11 @@ async fn generate(
         output_dir,
     };
 
-    let _position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+    let _position = state
+        .queue
+        .submit(job, state.queue_capacity)
+        .await
+        .map_err(submit_error_to_api)?;
 
     // Wait for the queue worker to process the job
     let result = result_rx
@@ -865,7 +879,11 @@ async fn generate_stream(
         output_dir,
     };
 
-    let position = state.queue.submit(job).await.map_err(ApiError::internal)?;
+    let position = state
+        .queue
+        .submit(job, state.queue_capacity)
+        .await
+        .map_err(submit_error_to_api)?;
 
     // Send initial queue position to the client
     let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));

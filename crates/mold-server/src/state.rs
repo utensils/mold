@@ -61,6 +61,15 @@ pub struct QueueHandle {
     pending_count: Arc<AtomicUsize>,
 }
 
+/// Reason a `QueueHandle::submit` attempt failed.
+#[derive(Debug)]
+pub enum SubmitError {
+    /// Queue is at capacity — caller should return 503 with `Retry-After`.
+    Full { pending: usize, capacity: usize },
+    /// Receiving end is gone (server shutting down).
+    Shutdown,
+}
+
 impl QueueHandle {
     pub fn new(job_tx: tokio::sync::mpsc::Sender<GenerationJob>) -> Self {
         Self {
@@ -69,19 +78,34 @@ impl QueueHandle {
         }
     }
 
-    /// Submit a generation job. Returns the queue position (0-based).
-    pub async fn submit(&self, job: GenerationJob) -> Result<usize, String> {
-        let position = self.pending_count.fetch_add(1, Ordering::SeqCst);
-        if let Err(_e) = self.job_tx.send(job).await {
+    /// Submit a generation job.
+    ///
+    /// Atomically reserves a slot against `capacity` using fetch_add, so a
+    /// burst of concurrent callers cannot all slip past a separate pending()
+    /// pre-check (TOCTOU).  Returns the queue position on success.
+    pub async fn submit(
+        &self,
+        job: GenerationJob,
+        capacity: usize,
+    ) -> Result<usize, SubmitError> {
+        let prev = self.pending_count.fetch_add(1, Ordering::SeqCst);
+        if prev >= capacity {
             self.pending_count.fetch_sub(1, Ordering::SeqCst);
-            return Err("generation queue shut down".to_string());
+            return Err(SubmitError::Full {
+                pending: prev,
+                capacity,
+            });
+        }
+        if self.job_tx.send(job).await.is_err() {
+            self.pending_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(SubmitError::Shutdown);
         }
         #[cfg(feature = "metrics")]
         {
             crate::metrics::record_queue_submit();
             crate::metrics::record_queue_depth(self.pending_count.load(Ordering::SeqCst));
         }
-        Ok(position)
+        Ok(prev)
     }
 
     pub fn decrement(&self) {
