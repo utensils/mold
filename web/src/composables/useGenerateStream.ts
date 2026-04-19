@@ -104,7 +104,7 @@ export function useGenerateStream(
       error: null,
       state: "running",
     }) as Job;
-    jobs.value = [...jobs.value, job];
+    jobs.value = [job, ...jobs.value];
 
     generateStream(
       req,
