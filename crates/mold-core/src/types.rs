@@ -894,6 +894,9 @@ pub struct SseCompleteEvent {
     /// Number of audio channels (when audio is present).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_audio_channels: Option<u32>,
+    /// GPU ordinal that handled this request (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 /// SSE event emitted when an upscale request completes.
@@ -1409,6 +1412,7 @@ mod tests {
             video_duration_ms: None,
             video_audio_sample_rate: None,
             video_audio_channels: None,
+            gpu: Some(1),
         };
         let json = serde_json::to_string(&event).unwrap();
         // Video fields should be absent from the serialized JSON
@@ -1419,6 +1423,7 @@ mod tests {
         assert_eq!(back.seed_used, 42);
         assert_eq!(back.model, "flux-schnell:q8");
         assert!(back.video_frames.is_none());
+        assert_eq!(back.gpu, Some(1));
     }
 
     #[test]

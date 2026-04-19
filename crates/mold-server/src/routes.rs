@@ -337,6 +337,14 @@ async fn generate(
                     ApiError::internal(format!("failed to serialize seed header: {e}"))
                 })?,
             );
+            if let Some(ordinal) = response.gpu {
+                headers.insert(
+                    "x-mold-gpu",
+                    HeaderValue::from_str(&ordinal.to_string()).map_err(|e| {
+                        ApiError::internal(format!("failed to serialize gpu header: {e}"))
+                    })?,
+                );
+            }
             if let Some(warning) = dim_warning {
                 match HeaderValue::from_str(&warning.replace('\n', " ")) {
                     Ok(val) => {

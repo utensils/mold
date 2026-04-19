@@ -399,6 +399,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                         video_duration_ms: video.duration_ms,
                         video_audio_sample_rate: video.audio_sample_rate,
                         video_audio_channels: video.audio_channels,
+                        gpu: response.gpu,
                     }
                 } else {
                     // Image response: same as before
@@ -418,6 +419,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                         video_duration_ms: None,
                         video_audio_sample_rate: None,
                         video_audio_channels: None,
+                        gpu: response.gpu,
                     }
                 };
                 let _ = tx.send(SseMessage::Complete(event));

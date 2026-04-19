@@ -66,6 +66,8 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
 
+    tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
+
     // Acquire per-GPU load lock — ensures only one model load at a time per GPU.
     let _load_lock = worker.model_load_lock.lock().unwrap();
 
@@ -202,6 +204,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     seed_used: response.seed_used,
                     generation_time_ms: response.generation_time_ms,
                     model: response.model.clone(),
+                    gpu: response.gpu,
                 }));
             }
 
