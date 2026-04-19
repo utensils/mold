@@ -1972,8 +1972,14 @@ mod tests {
         let previews = mold_home.path().join("cache").join("previews");
         std::fs::create_dir_all(&previews).unwrap();
         std::fs::write(previews.join("ltx2-has-preview.mp4.preview.gif"), GIF).unwrap();
+        // Also plant an orphaned preview whose source MP4 doesn't exist —
+        // the endpoint must 404 it rather than leak the sidecar bytes.
+        std::fs::write(previews.join("ltx2-orphan.mp4.preview.gif"), GIF).unwrap();
 
         let output_dir = tempfile::tempdir().unwrap();
+        // Source MP4 must exist in the gallery dir for the endpoint to
+        // serve its preview — the cache is tied to the file lifecycle.
+        std::fs::write(output_dir.path().join("ltx2-has-preview.mp4"), b"fake-mp4").unwrap();
         let config = mold_core::Config {
             output_dir: Some(output_dir.path().to_string_lossy().into_owned()),
             ..Default::default()
@@ -1986,7 +1992,7 @@ mod tests {
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
 
-        // Present → 200 with image/gif + the bytes.
+        // Source present + sidecar present → 200 with image/gif + bytes.
         let resp = app
             .clone()
             .oneshot(
@@ -2009,11 +2015,25 @@ mod tests {
             .unwrap();
         assert_eq!(body.as_ref(), GIF);
 
-        // Missing → 404 (does not leak the full path).
+        // Missing entirely → 404.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/gallery/preview/ltx2-missing.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Orphaned sidecar (source MP4 deleted, GIF still on disk) → 404.
+        // Regression guard: previously this returned the stale bytes.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/preview/ltx2-orphan.mp4")
                     .body(Body::empty())
                     .unwrap(),
             )

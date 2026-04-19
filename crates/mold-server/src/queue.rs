@@ -189,7 +189,12 @@ fn save_video_to_dir(
 /// Persist a video's `.preview.gif` sidecar to the server's preview cache
 /// (`$MOLD_HOME/cache/previews/<filename>.preview.gif`). Best-effort —
 /// warnings log and return so a failure here never fails the save path.
-fn save_video_preview_gif(filename: &str, gif_bytes: &[u8]) {
+///
+/// Shared with the multi-GPU worker path (`gpu_worker::process_job`) so
+/// video outputs land a preview regardless of which save flow wrote the
+/// MP4; otherwise `/api/gallery/preview/:filename` would 404 whenever the
+/// server is running with GPU workers enabled.
+pub(crate) fn save_video_preview_gif(filename: &str, gif_bytes: &[u8]) {
     let preview_dir = mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
         .join("cache")

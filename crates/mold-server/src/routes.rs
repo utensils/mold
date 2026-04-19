@@ -1693,10 +1693,14 @@ async fn delete_gallery_image(
     }
 
     // Also remove server-side thumbnail (both legacy no-suffix and current
-    // `.png`-suffixed cache layouts).
+    // `.png`-suffixed cache layouts) and the animated preview sidecar so
+    // `/api/gallery/preview/:filename` doesn't keep serving the GIF after
+    // the source MP4 is gone.
     let thumb_dir = server_thumbnail_dir();
     let _ = std::fs::remove_file(thumb_dir.join(&clean_name));
     let _ = std::fs::remove_file(thumb_dir.join(format!("{clean_name}.png")));
+    let _ =
+        std::fs::remove_file(server_preview_gif_dir().join(format!("{clean_name}.preview.gif")));
 
     // Drop the matching metadata row if the DB is enabled. Errors here are
     // logged — they don't roll back the disk delete since the file is the
@@ -1853,6 +1857,7 @@ async fn get_gallery_preview(
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
     }
+    let output_dir = config.effective_output_dir();
     drop(config);
 
     // Sanitize: prevent directory traversal — the filename must be a bare
@@ -1863,6 +1868,23 @@ async fn get_gallery_preview(
         .unwrap_or_default();
     if clean_name.is_empty() || clean_name != filename {
         return Err(ApiError::validation("invalid filename"));
+    }
+
+    // The preview cache lifecycle is tied to the underlying gallery file:
+    // if the MP4 has been deleted (via `DELETE /api/gallery/image/:filename`
+    // with `MOLD_GALLERY_ALLOW_DELETE=1` set, or an out-of-band `rm`), the
+    // sidecar may still be on disk but is orphaned and must not be served.
+    // Check the source file first and 404 before touching the cache so a
+    // stale `.preview.gif` never leaks deleted content.
+    let source_path = output_dir.join(&clean_name);
+    if !tokio::fs::metadata(&source_path)
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return Err(ApiError::not_found(format!(
+            "image not found: {clean_name}"
+        )));
     }
 
     let preview_path = server_preview_gif_dir().join(format!("{clean_name}.preview.gif"));

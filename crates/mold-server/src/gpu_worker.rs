@@ -197,9 +197,15 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     let filename = mold_core::default_output_filename(&job.model, ts, &ext, 1, 0);
-                    let path = dir.join(filename);
+                    let path = dir.join(&filename);
                     if let Err(e) = std::fs::write(&path, &video.data) {
                         tracing::error!("failed to save video to {}: {e}", path.display());
+                    } else if !video.gif_preview.is_empty() {
+                        // Mirror the single-GPU path: persist the animated
+                        // preview alongside the MP4 so remote TUI clients
+                        // get `/api/gallery/preview/:filename` hits for
+                        // freshly-generated videos on multi-GPU servers.
+                        crate::queue::save_video_preview_gif(&filename, &video.gif_preview);
                     }
                 } else {
                     save_image_to_dir(dir, &img, &job.model, job.request.batch_size);
