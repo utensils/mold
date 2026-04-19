@@ -19,8 +19,10 @@ const pct = computed(() => {
 const thumbSrc = computed(() => {
   const r = props.job.result;
   if (!r) return null;
-  const poster = r.video_thumbnail ?? r.image;
-  return `data:image/*;base64,${poster}`;
+  // Video: thumbnail is always PNG (server-side). Image: use the declared format.
+  if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
+  const mime = r.format === "jpeg" ? "image/jpeg" : `image/${r.format}`;
+  return `data:${mime};base64,${r.image}`;
 });
 </script>
 

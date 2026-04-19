@@ -71,7 +71,7 @@ const statusLine = computed(() => {
         class="relative flex-shrink-0 overflow-hidden rounded-xl"
       >
         <img
-          :src="`data:image/*;base64,${modelValue.sourceImage.base64}`"
+          :src="`data:image/png;base64,${modelValue.sourceImage.base64}`"
           class="h-12 w-12 object-cover"
           alt="Source"
         />
