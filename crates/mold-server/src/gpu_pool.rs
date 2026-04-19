@@ -158,12 +158,24 @@ impl GpuPool {
                 (has_model, cache.active_model().is_some())
             };
             let in_flight = w.in_flight.load(Ordering::SeqCst);
+            // During an in-flight generation the worker thread calls
+            // `cache.take()`, which removes the entry entirely — so
+            // `cache.active_model()` and `cache.get(model).residency == Gpu`
+            // both return None/false for the duration of that generation.
+            // That used to let a busy GPU mid-inference look identical to
+            // a truly empty idle GPU, which meant a new job for a *different*
+            // model could be dispatched to the busy card while a sibling GPU
+            // sat idle. `in_flight > 0` (set by the dispatcher before send)
+            // and `active_generation.is_some()` (set by the worker around
+            // the take-and-restore window) together cover every moment
+            // between "about to pick up a job" and "just finished".
+            let is_busy = in_flight > 0 || w.active_generation.read().unwrap().is_some();
 
-            if has_model && in_flight == 0 {
+            if has_model && !is_busy {
                 loaded_idle.push(w);
             } else if has_model {
                 loaded_busy.push(w);
-            } else if !has_any_loaded {
+            } else if !has_any_loaded && !is_busy {
                 idle_empty.push(w);
             } else {
                 other.push(w);
@@ -213,5 +225,125 @@ impl GpuPool {
     /// Number of GPU workers in the pool.
     pub fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_cache::ModelCache;
+    use mold_inference::shared_pool::SharedPool;
+
+    /// Build a test GpuWorker with a scratch job channel and everything else
+    /// in neutral defaults. Returns the worker plus the receiver so the test
+    /// can verify what was dispatched.
+    fn test_worker(
+        ordinal: usize,
+        total_vram_bytes: u64,
+    ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuJob>) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(2);
+        let worker = Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal,
+                name: format!("test-gpu-{ordinal}"),
+                total_vram_bytes,
+                free_vram_bytes: total_vram_bytes,
+            },
+            model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        (worker, job_rx)
+    }
+
+    /// When GPU 0 is actively generating a different model, the cache
+    /// take-and-restore pattern has already removed its entry — so
+    /// `cache.active_model()` returns None and the worker LOOKS idle
+    /// to the old classifier. The dispatcher must fall back to
+    /// `in_flight > 0` (or `active_generation`) to avoid routing a
+    /// brand-new job to the busy GPU while a sibling sits idle.
+    #[test]
+    fn select_worker_prefers_truly_idle_gpu_over_busy_gpu_with_empty_cache() {
+        let (busy, _busy_rx) = test_worker(0, 24_000_000_000);
+        let (idle, _idle_rx) = test_worker(1, 24_000_000_000);
+
+        // Simulate the dispatcher having incremented in_flight before send,
+        // and the worker thread having called cache.take() → empty cache.
+        busy.in_flight.store(1, Ordering::SeqCst);
+
+        let pool = GpuPool {
+            workers: vec![busy.clone(), idle.clone()],
+        };
+
+        let picked = pool
+            .select_worker("some-small-model:q4", 6_000_000_000)
+            .expect("a worker should be selected");
+        assert_eq!(
+            picked.gpu.ordinal, 1,
+            "new job for an unloaded model must go to the truly idle GPU, \
+             not to the one whose cache momentarily looks empty because \
+             generation is in progress"
+        );
+    }
+
+    /// active_generation is set before take() and cleared after restore(),
+    /// so a worker mid-inference should be treated as busy even if the
+    /// dispatcher hasn't yet bumped in_flight (belt-and-suspenders).
+    #[test]
+    fn select_worker_respects_active_generation_flag() {
+        let (busy, _busy_rx) = test_worker(0, 24_000_000_000);
+        let (idle, _idle_rx) = test_worker(1, 24_000_000_000);
+
+        *busy.active_generation.write().unwrap() = Some(ActiveGeneration {
+            model: "big-model".to_string(),
+            started_at: Instant::now(),
+        });
+
+        let pool = GpuPool {
+            workers: vec![busy.clone(), idle.clone()],
+        };
+
+        let picked = pool.select_worker("small-model:q4", 6_000_000_000).unwrap();
+        assert_eq!(picked.gpu.ordinal, 1);
+    }
+
+    /// Regression guard for the happy path — both GPUs are idle and empty.
+    /// The strategy says "prefer the smallest GPU that fits" to spread
+    /// hot models across free cards.
+    #[test]
+    fn select_worker_spreads_to_smallest_fitting_idle_gpu() {
+        let (big, _big_rx) = test_worker(0, 24_000_000_000);
+        let (small, _small_rx) = test_worker(1, 12_000_000_000);
+
+        let pool = GpuPool {
+            workers: vec![big.clone(), small.clone()],
+        };
+
+        // A 6GB model fits on both — should pick the smaller card.
+        let picked = pool.select_worker("flux-dev:q4", 6_000_000_000).unwrap();
+        assert_eq!(picked.gpu.ordinal, 1);
+    }
+
+    /// If both eligible GPUs are busy with *other* models, fall back to
+    /// the "most headroom" tier instead of deadlocking.
+    #[test]
+    fn select_worker_falls_back_when_all_gpus_busy_with_other_models() {
+        let (a, _a_rx) = test_worker(0, 24_000_000_000);
+        let (b, _b_rx) = test_worker(1, 12_000_000_000);
+        a.in_flight.store(1, Ordering::SeqCst);
+        b.in_flight.store(1, Ordering::SeqCst);
+
+        let pool = GpuPool {
+            workers: vec![a.clone(), b.clone()],
+        };
+
+        let picked = pool.select_worker("new-model", 6_000_000_000).unwrap();
+        // Both busy → "most headroom" — the larger GPU wins.
+        assert_eq!(picked.gpu.ordinal, 0);
     }
 }
