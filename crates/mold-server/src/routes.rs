@@ -410,7 +410,16 @@ async fn generate(
             };
             Ok((headers, output_data))
         }
-        Err(err_msg) => Err(ApiError::inference(err_msg)),
+        Err(err_msg) => {
+            // The multi-GPU dispatcher sends a queue-full error through result_tx
+            // when a per-worker channel is saturated; surface that as a proper 503
+            // instead of the generic INFERENCE_ERROR 500.
+            if err_msg.contains("queue is full") {
+                Err(ApiError::queue_full(err_msg))
+            } else {
+                Err(ApiError::inference(err_msg))
+            }
+        }
     }
 }
 
