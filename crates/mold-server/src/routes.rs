@@ -177,6 +177,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/gallery/thumbnail/:filename",
             get(get_gallery_thumbnail),
         )
+        .route("/api/gallery/preview/:filename", get(get_gallery_preview))
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/status", get(server_status))
@@ -1834,6 +1835,71 @@ async fn get_gallery_thumbnail(
 }
 
 const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
+
+/// Serve a cached animated GIF preview for a gallery video output.
+///
+/// Looks up `<preview_dir>/<filename>.preview.gif` (default:
+/// `~/.mold/cache/previews/`). When present, streams the file back as
+/// `image/gif`; otherwise returns 404. This exists so the TUI's remote
+/// gallery detail pane can animate video entries the same way it animates
+/// local ones — previously it fell through to fetching the raw MP4 over
+/// `/api/gallery/image/:filename`, which `image::open` couldn't decode,
+/// leaving the panel on `Loading…` forever.
+async fn get_gallery_preview(
+    State(state): State<AppState>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    drop(config);
+
+    // Sanitize: prevent directory traversal — the filename must be a bare
+    // basename with no separators.
+    let clean_name = std::path::Path::new(&filename)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if clean_name.is_empty() || clean_name != filename {
+        return Err(ApiError::validation("invalid filename"));
+    }
+
+    let preview_path = server_preview_gif_dir().join(format!("{clean_name}.preview.gif"));
+    let meta = match tokio::fs::metadata(&preview_path).await {
+        Ok(m) if m.is_file() => m,
+        _ => {
+            return Err(ApiError::not_found(format!(
+                "preview not found: {clean_name}"
+            )));
+        }
+    };
+    let total_len = meta.len();
+
+    let file = tokio::fs::File::open(&preview_path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to open preview: {e}")))?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/gif")
+        .header(header::CONTENT_LENGTH, total_len)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(body)
+        .unwrap())
+}
+
+/// Server-side GIF preview cache directory. Mirrors the layout the TUI
+/// writes to (`crates/mold-tui/src/thumbnails.rs::preview_dir`) so a
+/// single preview.gif authored on either side is reachable via this
+/// endpoint.
+fn server_preview_gif_dir() -> std::path::PathBuf {
+    mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("previews")
+}
 
 /// Server-side thumbnail cache directory.
 fn server_thumbnail_dir() -> std::path::PathBuf {

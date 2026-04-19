@@ -2652,6 +2652,48 @@ impl App {
                 // Server-backed: check cache first, then fetch async
                 let url = server_url.clone();
                 let filename = entry.filename();
+                let is_video = crate::gallery_scan::is_video_filename(&filename);
+
+                // For video entries, prefer the cached animated GIF preview
+                // so the detail pane animates instead of sitting on a frozen
+                // first-frame thumbnail. When the preview isn't locally
+                // cached we fetch `/api/gallery/preview/:filename` before
+                // falling back to the raw MP4.
+                if is_video {
+                    let preview_cache = crate::gallery_scan::preview_cache_path(&filename);
+                    if preview_cache.is_file() && self.try_install_gallery_animation(&preview_cache)
+                    {
+                        return;
+                    }
+                    let tx = self.bg_tx.clone();
+                    let fetch_url = url.clone();
+                    let fetch_name = filename.clone();
+                    self.tokio_handle.spawn(async move {
+                        if let Some(data) =
+                            crate::gallery_scan::fetch_and_cache_preview(&fetch_url, &fetch_name)
+                                .await
+                        {
+                            let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
+                            return;
+                        }
+                        // No preview GIF on the server (older server or the
+                        // video was generated without gif_preview). Fall back
+                        // to the PNG thumbnail — the thumbnail endpoint runs
+                        // openh264 first-frame extraction for MP4s, so the
+                        // image pipeline can decode it. Sending the raw MP4
+                        // bytes here would leave the pane blank because
+                        // `image::load_from_memory` can't parse them.
+                        let client = mold_core::MoldClient::new(&fetch_url);
+                        if let Ok(thumb) = client.get_gallery_thumbnail(&fetch_name).await {
+                            let _ = tx.send(BackgroundEvent::GalleryPreviewReady(thumb));
+                        }
+                    });
+                    self.gallery.preview_image = None;
+                    self.gallery.image_state = None;
+                    self.gallery.animation = None;
+                    return;
+                }
+
                 let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
                 if cache_path.is_file() {
                     // Cached locally — load synchronously

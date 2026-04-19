@@ -132,9 +132,17 @@ fn save_image_to_dir(
 
 /// Save a video file to disk and (best-effort) record its metadata row.
 /// Mirrors `save_image_to_dir` for the video-output path.
+///
+/// When `gif_preview` is non-empty, also persists
+/// `$MOLD_HOME/cache/previews/<filename>.preview.gif`. The gallery preview
+/// endpoint (`GET /api/gallery/preview/:filename`) streams from that path
+/// so remote TUI clients can animate the detail pane without re-fetching
+/// the full MP4.
+#[allow(clippy::too_many_arguments)]
 fn save_video_to_dir(
     dir: &std::path::Path,
     bytes: &[u8],
+    gif_preview: &[u8],
     format: OutputFormat,
     model: &str,
     metadata: &OutputMetadata,
@@ -156,6 +164,9 @@ fn save_video_to_dir(
         tracing::error!("failed to save video to {}: {e}", path.display());
         return;
     }
+    if !gif_preview.is_empty() {
+        save_video_preview_gif(&filename, gif_preview);
+    }
     if let Some(db) = db {
         let mut rec = GenerationRecord::from_save(
             dir,
@@ -172,6 +183,37 @@ fn save_video_to_dir(
         if let Err(e) = db.upsert(&rec) {
             tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
         }
+    }
+}
+
+/// Persist a video's `.preview.gif` sidecar to the server's preview cache
+/// (`$MOLD_HOME/cache/previews/<filename>.preview.gif`). Best-effort —
+/// warnings log and return so a failure here never fails the save path.
+fn save_video_preview_gif(filename: &str, gif_bytes: &[u8]) {
+    let preview_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("previews");
+    save_video_preview_gif_to(&preview_dir, filename, gif_bytes);
+}
+
+/// Testable inner of [`save_video_preview_gif`] that accepts an explicit
+/// preview directory (lets unit tests exercise the write path without
+/// racing on the `MOLD_HOME` env var).
+fn save_video_preview_gif_to(preview_dir: &std::path::Path, filename: &str, gif_bytes: &[u8]) {
+    if let Err(e) = std::fs::create_dir_all(preview_dir) {
+        tracing::warn!(
+            "failed to create preview cache dir {}: {e}",
+            preview_dir.display()
+        );
+        return;
+    }
+    let preview_path = preview_dir.join(format!("{filename}.preview.gif"));
+    if let Err(e) = std::fs::write(&preview_path, gif_bytes) {
+        tracing::warn!(
+            "failed to write preview gif {}: {e}",
+            preview_path.display()
+        );
     }
 }
 
@@ -344,12 +386,14 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let db = state.metadata_db.clone();
                 if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
+                    let video_gif_preview = video.gif_preview.clone();
                     let video_format = video.format;
                     let video_metadata = metadata.clone();
                     tokio::task::spawn_blocking(move || {
                         save_video_to_dir(
                             &dir,
                             &video_data,
+                            &video_gif_preview,
                             video_format,
                             &model,
                             &video_metadata,
@@ -587,5 +631,33 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
     } else {
         // SDXL (~8GB) and other models default to 8GB.
         8_000_000_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_video_preview_gif_to;
+
+    /// `save_video_preview_gif_to` must write to
+    /// `<preview_dir>/<filename>.preview.gif` — the exact location
+    /// `GET /api/gallery/preview/:filename` streams from. Without this
+    /// sidecar the preview endpoint would 404 on every real generation
+    /// and the TUI detail pane would only ever see the PNG thumbnail
+    /// fallback.
+    #[test]
+    fn save_video_preview_gif_writes_to_preview_cache() {
+        let td = tempfile::tempdir().unwrap();
+        let preview_dir = td.path().join("cache").join("previews");
+
+        const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3b";
+        save_video_preview_gif_to(&preview_dir, "ltx2-42.mp4", GIF);
+
+        let expected = preview_dir.join("ltx2-42.mp4.preview.gif");
+        assert!(
+            expected.is_file(),
+            "preview gif should land at {}",
+            expected.display()
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), GIF);
     }
 }

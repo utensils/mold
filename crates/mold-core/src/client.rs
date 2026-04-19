@@ -470,6 +470,24 @@ impl MoldClient {
         Ok(())
     }
 
+    /// Download a cached animated GIF preview for a video gallery entry.
+    ///
+    /// Returns `Ok(None)` when the server responds with 404 (no preview
+    /// has been generated for this filename yet). Callers are expected to
+    /// fall back to the full `get_gallery_image` path in that case.
+    pub async fn get_gallery_preview(&self, filename: &str) -> Result<Option<Vec<u8>>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery/preview/{filename}", self.base_url))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let bytes = resp.error_for_status()?.bytes().await?;
+        Ok(Some(bytes.to_vec()))
+    }
+
     /// Download a gallery thumbnail by filename. Smaller/faster than full image.
     pub async fn get_gallery_thumbnail(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
