@@ -15,7 +15,10 @@ import {
   listGallery,
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
-import { useGenerateStream } from "../composables/useGenerateStream";
+import {
+  useGenerateStream,
+  type Job,
+} from "../composables/useGenerateStream";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ExpandFormState,
@@ -158,6 +161,19 @@ function openItem(item: GalleryImage) {
   selectedIndex.value = idx;
   selected.value = item;
 }
+
+// Map a finished Job back to its saved GalleryImage. The SSE complete
+// event doesn't echo the on-disk filename, so we match on seed + model
+// against the freshly-refreshed gallery (sorted newest-first, so the
+// first match is the right one if a seed happens to repeat).
+function openJob(job: Job) {
+  const r = job.result;
+  if (!r) return;
+  const match = galleryEntries.value.find(
+    (e) => e.metadata.seed === r.seed_used && e.metadata.model === r.model,
+  );
+  if (match) openItem(match);
+}
 function closeDrawer() {
   selected.value = null;
   selectedIndex.value = -1;
@@ -243,7 +259,11 @@ onMounted(async () => {
         @clear-source="onClearSource"
       />
 
-      <RunningStrip :jobs="stream.jobs.value" @cancel="stream.cancel" />
+      <RunningStrip
+        :jobs="stream.jobs.value"
+        @cancel="stream.cancel"
+        @open="openJob"
+      />
 
       <div class="mt-6">
         <GalleryFeed

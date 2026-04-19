@@ -3,7 +3,10 @@ import type { Job } from "../composables/useGenerateStream";
 import RunningJobCard from "./RunningJobCard.vue";
 
 defineProps<{ jobs: Job[] }>();
-const emit = defineEmits<{ (e: "cancel", id: string): void }>();
+const emit = defineEmits<{
+  (e: "cancel", id: string): void;
+  (e: "open", job: Job): void;
+}>();
 </script>
 
 <template>
@@ -13,6 +16,7 @@ const emit = defineEmits<{ (e: "cancel", id: string): void }>();
       :key="job.id"
       :job="job"
       @cancel="(id: string) => emit('cancel', id)"
+      @open="(j: Job) => emit('open', j)"
     />
   </div>
 </template>

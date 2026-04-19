@@ -3,7 +3,21 @@ import { computed } from "vue";
 import type { Job } from "../composables/useGenerateStream";
 
 const props = defineProps<{ job: Job }>();
-const emit = defineEmits<{ (e: "cancel", id: string): void }>();
+const emit = defineEmits<{
+  (e: "cancel", id: string): void;
+  (e: "open", job: Job): void;
+}>();
+
+// Done jobs are clickable — they open the gallery detail drawer for the
+// saved file. The parent does the Job→GalleryImage lookup since the SSE
+// complete event doesn't echo the on-disk filename.
+const clickable = computed(
+  () => props.job.state === "done" && props.job.result !== null,
+);
+
+function onClick() {
+  if (clickable.value) emit("open", props.job);
+}
 
 const pct = computed(() => {
   const p = props.job.progress;
@@ -29,6 +43,17 @@ const thumbSrc = computed(() => {
 <template>
   <div
     class="glass flex w-[280px] flex-shrink-0 flex-col gap-2 rounded-2xl p-3"
+    :class="
+      clickable
+        ? 'cursor-zoom-in transition hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-400'
+        : ''
+    "
+    :role="clickable ? 'button' : undefined"
+    :tabindex="clickable ? 0 : undefined"
+    :aria-label="clickable ? 'Open in detail view' : undefined"
+    @click="onClick"
+    @keydown.enter.prevent="onClick"
+    @keydown.space.prevent="onClick"
   >
     <div class="flex items-center justify-between text-xs text-slate-400">
       <span>{{ job.request.model }}</span>
@@ -70,7 +95,7 @@ const thumbSrc = computed(() => {
         v-if="job.state === 'running'"
         type="button"
         class="text-slate-400 hover:text-rose-300"
-        @click="emit('cancel', job.id)"
+        @click.stop="emit('cancel', job.id)"
       >
         ✕
       </button>
