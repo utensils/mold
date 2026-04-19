@@ -1,5 +1,6 @@
 mod commands;
 mod control;
+mod errors;
 mod metadata_db;
 mod output;
 mod procinfo;
@@ -987,36 +988,25 @@ async fn main() {
         // Detect CUDA/Metal OOM and print a friendly message with suggestions.
         // Note: candle wraps Metal allocation failures as CUDA_ERROR_OUT_OF_MEMORY,
         // and Metal buffer creation failures as "Failed to create metal resource".
-        let is_oom = msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
-            || msg.contains("out of memory")
-            || msg.contains("exceeds available VRAM")
-            || msg.contains("Failed to create metal resource");
-        if is_oom {
-            // Show platform-appropriate message instead of raw candle error.
-            // On macOS: candle wraps Metal failures as CUDA_ERROR_OUT_OF_MEMORY.
-            // On Linux/CUDA: show "CUDA out of memory" for actual CUDA OOM.
-            let is_metal_oom = cfg!(target_os = "macos")
-                && (msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
-                    || msg.contains("Failed to create metal resource"));
-            let is_cuda_oom =
-                cfg!(not(target_os = "macos")) && msg.contains("CUDA_ERROR_OUT_OF_MEMORY");
-            if is_metal_oom {
-                eprintln!("{} Metal out of memory", theme::prefix_error());
-            } else if is_cuda_oom {
-                eprintln!("{} CUDA out of memory", theme::prefix_error());
-            } else {
-                eprintln!("{} {display}", theme::prefix_error());
+        // If the error came from a remote server, we must not label it with the
+        // *client* platform's backend — see errors::RemoteInferenceError.
+        if errors::is_oom_message(&msg) {
+            let remote = e.downcast_ref::<errors::RemoteInferenceError>();
+            let ctx = match remote {
+                Some(r) => errors::OomContext::Remote { host: &r.host },
+                None => errors::OomContext::Local,
+            };
+            let (label, hints) =
+                errors::format_oom_message(&msg, ctx, cfg!(target_os = "macos"), display);
+            eprintln!("{} {label}", theme::prefix_error());
+            eprintln!();
+            for line in &hints {
+                if line.is_empty() {
+                    eprintln!();
+                } else {
+                    eprintln!("  {line}");
+                }
             }
-            eprintln!();
-            eprintln!("  GPU ran out of memory during generation.");
-            eprintln!("  Try these fixes:");
-            eprintln!();
-            eprintln!("    Reduce resolution:  --width 512 --height 512");
-            eprintln!("    Use a smaller model: mold run <model>:q4 \"...\"");
-            eprintln!();
-            eprintln!("  For img2img, the source image resolution is used by default.");
-            eprintln!("  Override with --width/--height to reduce VRAM usage.");
-            eprintln!("  Run 'mold list' to see available models and sizes.");
             std::process::exit(1);
         }
 
@@ -1031,8 +1021,19 @@ async fn main() {
         }
 
         // For all other errors, print the stripped message (no candle backtraces).
+        // If the error is wrapped in `RemoteInferenceError`, iterate the inner
+        // error's chain: our wrapper's `Display` forwards to `inner`, so using
+        // `e.chain()` would print the same message twice — once as the top-level
+        // `error:` line and again as the first `cause:` entry.
+        let chain_source = e
+            .downcast_ref::<errors::RemoteInferenceError>()
+            .map(|r| &r.inner);
         eprintln!("{} {display}", theme::prefix_error());
-        for cause in e.chain().skip(1) {
+        let chain = match chain_source {
+            Some(inner) => inner.chain().skip(1),
+            None => e.chain().skip(1),
+        };
+        for cause in chain {
             eprintln!("  {} {cause}", theme::prefix_cause());
         }
         std::process::exit(1);

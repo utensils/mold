@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Remote CUDA OOMs no longer mislabeled as "Metal out of memory" on macOS clients** ([#241](https://github.com/utensils/mold/issues/241)). Previously `mold run --batch N` against a remote CUDA server would report `Metal out of memory` with local-only hints (`--width 512 --height 512`, "source image resolution is used by default") whenever the server's GPU OOM'd, because the error formatter keyed off `cfg!(target_os = "macos")` rather than where the generation actually ran. Errors originating from the remote API path are now tagged with the server host via a new `RemoteInferenceError` wrapper; the top-level handler downcasts to that tag before labeling the error and picks hints that make sense for the remote context (reduce `--batch`, use a smaller model, ask the operator to `mold unload`, fall back to `--local`). Local Metal / CUDA OOM paths keep their existing behavior. (Issue also notes a separate server-side VRAM-growth suspicion on Qwen-Image-Edit between batch iterations; that is tracked independently.)
+
 ### Changed
 
 - **Gallery metadata DB now canonicalizes `output_dir` before keying rows** so the CLI (which canonicalized via `std::fs::canonicalize`) and the server (which used the raw `config.effective_output_dir()` value) can no longer produce two rows for the same underlying file. On macOS `/tmp/foo` and `/private/tmp/foo` collapse to one `UNIQUE(output_dir, filename)` key, so the gallery no longer shows duplicates when both surfaces share a single `MOLD_HOME/mold.db`. A v2 data migration rewrites existing v1 rows to the canonical form on first open so upgrades from unreleased-feature builds don't leave orphaned legacy-keyed rows behind.
