@@ -21,23 +21,36 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
     {
         use candle_core::cuda_backend::cudarc::driver;
         if candle_core::utils::cuda_is_available() {
-            if let Ok(count) = driver::result::device::get_count() {
-                for ordinal in 0..count as usize {
-                    if let Ok(ctx) = driver::CudaContext::new(ordinal) {
-                        let name = ctx
-                            .name()
-                            .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
-                        // `CudaContext::new` binds the calling thread to this ordinal,
-                        // so `mem_get_info` returns this GPU's VRAM.
-                        let (free, total) = driver::result::mem_get_info().unwrap_or((0, 0));
-                        gpus.push(DiscoveredGpu {
-                            ordinal,
-                            name,
-                            total_vram_bytes: total as u64,
-                            free_vram_bytes: free as u64,
-                        });
+            // `CudaContext::device_count()` calls `cuInit(0)` first, which is
+            // required before any driver API — bare `result::device::get_count()`
+            // returns `ErrorNotInitialized` and we'd silently see zero GPUs.
+            match driver::CudaContext::device_count() {
+                Ok(count) => {
+                    for ordinal in 0..count as usize {
+                        match driver::CudaContext::new(ordinal) {
+                            Ok(ctx) => {
+                                let name = ctx
+                                    .name()
+                                    .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
+                                // `CudaContext::new` binds the calling thread to
+                                // this ordinal, so `mem_get_info` returns this GPU's
+                                // VRAM.
+                                let (free, total) =
+                                    driver::result::mem_get_info().unwrap_or((0, 0));
+                                gpus.push(DiscoveredGpu {
+                                    ordinal,
+                                    name,
+                                    total_vram_bytes: total as u64,
+                                    free_vram_bytes: free as u64,
+                                });
+                            }
+                            Err(e) => tracing::warn!(
+                                "failed to open CUDA device {ordinal}: {e}"
+                            ),
+                        }
                     }
                 }
+                Err(e) => tracing::warn!("CUDA device count failed: {e}"),
             }
         }
     }
