@@ -93,7 +93,7 @@
           commonArgs = {
             inherit src;
             pname = "mold";
-            version = "0.5.0";
+            version = "0.9.0";
             strictDeps = true;
 
             # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
@@ -177,7 +177,7 @@
           # `mold` binary by `rust-embed` (see `crates/mold-server/build.rs`).
           mold-web = pkgs.stdenv.mkDerivation {
             pname = "mold-web";
-            version = "0.8.1";
+            version = "0.9.0";
             src = ./web;
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {

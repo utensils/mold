@@ -78,6 +78,10 @@ const ignoredEnvVars = new Set([
   'MOLD_BUILD_DATE',
   'MOLD_GIT_SHA',
   'MOLD_VERSION',
+  // Build-time only — consumed by crates/mold-server/build.rs to stage
+  // the web SPA bundle for rust-embed. Not user-facing runtime config.
+  'MOLD_EMBED_WEB_DIR',
+  'MOLD_WEB_DIST',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))

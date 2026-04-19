@@ -264,3 +264,20 @@ mold run "a cat" --output -
 3. **Local forced** (`--local`) — skip server, run on local GPU directly
 
 Models auto-pull if not downloaded.
+
+## Browser UI
+
+`mold serve` ships with a Vue 3 SPA baked into the binary. Visit
+`http://<host>:7680/` to open the gallery, or `http://<host>:7680/generate` for
+a browser-driven composer:
+
+- Enter submits, Shift+Enter inserts a newline, empty Enter is a no-op.
+- Per-GPU running-job cards stream SSE progress (stage, denoise step N/M, VAE
+  decode) and tag the finished image with the GPU ordinal that produced it.
+- Fire multiple prompts in quick succession; the server queues them and the UI
+  surfaces HTTP 503 / `Retry-After` cleanly when `--queue-size` is reached.
+- img2img works via upload or the From Gallery picker; video-family models are
+  grouped with a 🎬 badge and frames are clamped to 8n+1 automatically.
+- Prompt expansion modal offers live preview + variation picker (requires
+  `qwen3-expand` installed on the server).
+- Prompt, model, size, steps, guidance, and batch persist in `localStorage`.

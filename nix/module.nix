@@ -173,6 +173,31 @@ in
       description = "Default model for generation. Null uses built-in default (flux2-klein) with smart fallback to the only downloaded model.";
     };
 
+    gpus = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Which GPUs the server should use. Accepts a comma-separated list
+        of ordinals (e.g. "0,1") or "all". Null means auto-detect every
+        visible GPU. Sets MOLD_GPUS when non-null. Each GPU gets a
+        dedicated worker thread with its own ModelCache; jobs are routed
+        across workers using idle-first + VRAM-fit placement.
+      '';
+      example = "0,1";
+    };
+
+    queueSize = lib.mkOption {
+      type = lib.types.nullOr lib.types.int;
+      default = null;
+      description = ''
+        Maximum number of queued generation jobs across all GPU workers.
+        Requests over the limit return HTTP 503 with a Retry-After header.
+        Null uses the built-in default (200). Sets MOLD_QUEUE_SIZE when
+        non-null.
+      '';
+      example = 200;
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -295,6 +320,12 @@ in
       }
       // lib.optionalAttrs (cfg.defaultModel != null) {
         MOLD_DEFAULT_MODEL = cfg.defaultModel;
+      }
+      // lib.optionalAttrs (cfg.gpus != null) {
+        MOLD_GPUS = cfg.gpus;
+      }
+      // lib.optionalAttrs (cfg.queueSize != null) {
+        MOLD_QUEUE_SIZE = toString cfg.queueSize;
       }
       // lib.optionalAttrs (cfg.rateLimit != null) {
         MOLD_RATE_LIMIT = cfg.rateLimit;
