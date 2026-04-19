@@ -1,15 +1,16 @@
 use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
-use crate::queue::clean_error_message;
+use crate::queue::{clean_error_message, save_image_to_dir, save_video_to_dir};
 use crate::state::{GenerationJobResult, SseMessage};
 use base64::Engine as _;
 use mold_core::{
-    Config, ImageData, ModelPaths, OutputFormat, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
+    Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent,
 };
 use mold_inference::device;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Spawn the dedicated OS thread for a GPU worker.
 /// Returns the JoinHandle (caller should keep it alive).
@@ -36,30 +37,6 @@ pub fn spawn_gpu_thread(
 /// Convert an inference-crate progress event to an SSE wire event.
 fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
-}
-
-fn save_image_to_dir(
-    dir: &std::path::Path,
-    img: &mold_core::ImageData,
-    model: &str,
-    batch_size: u32,
-) {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        tracing::warn!("failed to create output dir {}: {e}", dir.display());
-        return;
-    }
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let ext = img.format.to_string();
-    let filename =
-        mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
-    let path = dir.join(&filename);
-    match std::fs::write(&path, &img.data) {
-        Ok(()) => tracing::info!("saved image to {}", path.display()),
-        Err(e) => tracing::warn!("failed to save image to {}: {e}", path.display()),
-    }
 }
 
 fn process_job(worker: &GpuWorker, job: GpuJob) {
@@ -188,27 +165,43 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                 unreachable!("checked above");
             };
 
-            // Save to output directory if configured.
+            // Save to output directory if configured. Routes through the
+            // shared queue helpers so the metadata-DB upsert (and embedded
+            // chunks, hostname/backend tagging) cannot drift between the
+            // single-GPU and multi-GPU paths — historically this branch
+            // skipped the DB write, which left freshly-generated files
+            // invisible to /api/gallery until the next reconcile on
+            // server restart.
             if let Some(ref dir) = job.output_dir {
+                let metadata = OutputMetadata::from_generate_request(
+                    &job.request,
+                    response.seed_used,
+                    None,
+                    mold_core::build_info::version_string(),
+                );
+                let generation_time_ms = response.generation_time_ms as i64;
+                let db = job.metadata_db.as_ref().as_ref();
                 if let Some(ref video) = response.video {
-                    let ext = video.format.extension().to_string();
-                    let ts = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let filename = mold_core::default_output_filename(&job.model, ts, &ext, 1, 0);
-                    let path = dir.join(&filename);
-                    if let Err(e) = std::fs::write(&path, &video.data) {
-                        tracing::error!("failed to save video to {}: {e}", path.display());
-                    } else if !video.gif_preview.is_empty() {
-                        // Mirror the single-GPU path: persist the animated
-                        // preview alongside the MP4 so remote TUI clients
-                        // get `/api/gallery/preview/:filename` hits for
-                        // freshly-generated videos on multi-GPU servers.
-                        crate::queue::save_video_preview_gif(&filename, &video.gif_preview);
-                    }
+                    save_video_to_dir(
+                        dir,
+                        &video.data,
+                        &video.gif_preview,
+                        video.format,
+                        &job.model,
+                        &metadata,
+                        Some(generation_time_ms),
+                        db,
+                    );
                 } else {
-                    save_image_to_dir(dir, &img, &job.model, job.request.batch_size);
+                    save_image_to_dir(
+                        dir,
+                        &img,
+                        &job.model,
+                        job.request.batch_size,
+                        Some(&metadata),
+                        Some(generation_time_ms),
+                        db,
+                    );
                 }
             }
 

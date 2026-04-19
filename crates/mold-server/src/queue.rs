@@ -83,7 +83,12 @@ fn clear_active_generation(state: &AppState) {
 ///
 /// Errors writing to disk are logged and skipped. DB errors are also logged
 /// but do not fail the save — the file is the source of truth.
-fn save_image_to_dir(
+///
+/// Shared between the legacy single-GPU `process_job` (this file) and the
+/// per-GPU worker (`gpu_worker.rs`). Keep these on one helper so the DB
+/// upsert can never silently regress on one path while the other keeps
+/// working.
+pub(crate) fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
     model: &str,
@@ -131,7 +136,8 @@ fn save_image_to_dir(
 }
 
 /// Save a video file to disk and (best-effort) record its metadata row.
-/// Mirrors `save_image_to_dir` for the video-output path.
+/// Mirrors `save_image_to_dir` for the video-output path. See that helper
+/// for the multi-path-callers note.
 ///
 /// When `gif_preview` is non-empty, also persists
 /// `$MOLD_HOME/cache/previews/<filename>.preview.gif`. The gallery preview
@@ -139,7 +145,7 @@ fn save_image_to_dir(
 /// so remote TUI clients can animate the detail pane without re-fetching
 /// the full MP4.
 #[allow(clippy::too_many_arguments)]
-fn save_video_to_dir(
+pub(crate) fn save_video_to_dir(
     dir: &std::path::Path,
     bytes: &[u8],
     gif_preview: &[u8],
@@ -556,6 +562,7 @@ pub async fn run_queue_dispatcher(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             config: state.config.clone(),
+            metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
         });
 

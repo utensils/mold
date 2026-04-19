@@ -1,5 +1,6 @@
 use crate::model_cache::{ModelCache, ModelResidency};
 use mold_core::types::{GpuWorkerState, GpuWorkerStatus};
+use mold_db::MetadataDb;
 use mold_inference::device::DiscoveredGpu;
 use mold_inference::shared_pool::SharedPool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +35,10 @@ pub struct GpuJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
     pub output_dir: Option<std::path::PathBuf>,
     pub config: Arc<tokio::sync::RwLock<mold_core::Config>>,
+    /// Metadata DB handle so the worker can record a row alongside the
+    /// on-disk save. `Arc<Option<...>>` mirrors `AppState.metadata_db` —
+    /// `None` when the DB failed to open or is disabled.
+    pub metadata_db: Arc<Option<MetadataDb>>,
     /// Decrement the global queue counter when the worker finishes this job.
     pub queue: crate::state::QueueHandle,
 }
