@@ -74,6 +74,10 @@ works for SPA hot-iteration without recompiling Rust.
     # Models
     defaultModel = "flux2-klein:q8";
 
+    # Multi-GPU — pin the server to specific cards (null = use all visible)
+    # gpus = "0,1";
+    # queueSize = 200; # max queued jobs; overflow returns HTTP 503
+
     # Image persistence — save copies of all server-generated images
     # outputDir = "/srv/mold/gallery";
 
@@ -131,6 +135,8 @@ works for SPA hot-iteration without recompiling Rust.
 | `corsOrigin`       | null/string | `null`              | CORS origin restriction (null = permissive)                          |
 | `openFirewall`     | bool        | `false`             | Open firewall port                                                   |
 | `defaultModel`     | null/string | `null`              | Default model name                                                   |
+| `gpus`             | null/string | `null`              | Which GPUs to use: `"0,1"` or `"all"` (null = every visible GPU)     |
+| `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
 | `outputDir`        | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
 | `hfTokenFile`      | null/path   | `null`              | Path to file with HuggingFace token                                  |
 | `apiKeyFile`       | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |

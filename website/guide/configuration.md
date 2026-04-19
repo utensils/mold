@@ -105,6 +105,8 @@ Environment variables take precedence over config file values.
 
 | Variable                    | Default             | Description                                                                                                                                                       |
 | --------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_GPUS`                 | all visible         | Which GPUs the server uses: comma-separated ordinals (`0,1`) or `all`. See [Multi-GPU](/guide/cli-reference#multi-gpu)                                            |
+| `MOLD_QUEUE_SIZE`           | `200`               | Max queued generation jobs; overflow returns HTTP 503 with `Retry-After`                                                                                          |
 | `MOLD_OUTPUT_DIR`           | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                     |
 | `MOLD_THUMBNAIL_WARMUP`     | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
 | `MOLD_WEB_DIR`              | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |

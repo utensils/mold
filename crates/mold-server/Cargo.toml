@@ -29,9 +29,9 @@ metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.1" }
-mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.8.1" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.8.1" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.9.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.9.0" }
 anyhow = "1"
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }

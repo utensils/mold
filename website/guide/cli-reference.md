@@ -123,21 +123,43 @@ mold expand <PROMPT> [OPTIONS]
 Start the HTTP inference server.
 
 ```bash
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--log-format json|text] [--log-file] [--discord]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord]
 ```
 
-| Flag                  | Description                                                       |
-| --------------------- | ----------------------------------------------------------------- |
-| `--port <N>`          | Port to listen on, defaults to `7680` or `MOLD_PORT`              |
-| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                               |
-| `--models-dir <PATH>` | Override the models directory for this process                    |
-| `--log-format <FMT>`  | `json` or `text`; defaults to `json` for production-friendly logs |
-| `--log-file`          | Enable rotated file logging to `~/.mold/logs/`                    |
-| `--discord`           | Also starts the built-in Discord bot in the same process          |
+| Flag                  | Description                                                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--port <N>`          | Port to listen on, defaults to `7680` or `MOLD_PORT`                                                                             |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                                                              |
+| `--models-dir <PATH>` | Override the models directory for this process                                                                                   |
+| `--gpus <SPEC>`       | Which GPUs to use: comma-separated ordinals (`0,1`) or `all`. Defaults to every visible GPU (see [Multi-GPU](#multi-gpu))        |
+| `--queue-size <N>`    | Max queued generation jobs across all workers; overflow returns HTTP 503 + `Retry-After`. Defaults to `200` or `MOLD_QUEUE_SIZE` |
+| `--log-format <FMT>`  | `json` or `text`; defaults to `json` for production-friendly logs                                                                |
+| `--log-file`          | Enable rotated file logging to `~/.mold/logs/`                                                                                   |
+| `--discord`           | Also starts the built-in Discord bot in the same process                                                                         |
 
 `--discord` is only available when the binary was built with the `discord`
 feature. The bot still talks to the same local server API and reads
 `MOLD_DISCORD_TOKEN` or `DISCORD_TOKEN` from the environment.
+
+### Multi-GPU
+
+Each GPU gets a dedicated worker thread with its own model cache. Jobs are
+routed across workers using idle-first placement with a VRAM-fit fallback, so
+two different models can load onto two different cards and run concurrently.
+Same-model parallel requests serialize on whichever GPU already has that model
+loaded.
+
+- `--gpus all` (default): use every visible CUDA/Metal device.
+- `--gpus 0,1`: pin the server to specific ordinals.
+- `MOLD_GPUS=0` is the env equivalent and is useful inside systemd / container
+  units.
+
+When the queue is full, generation endpoints return HTTP 503 with a
+`Retry-After` header; `mold run` and the web UI handle the backpressure
+transparently. `GET /api/status` returns a `gpus[]` array with per-worker state
+(model, residency, in-flight count, free VRAM), and every `GenerateResponse`
+carries a `"gpu": <ordinal>` field so clients can see which card produced a
+given output.
 
 ## `mold pull`
 
