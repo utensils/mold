@@ -83,7 +83,12 @@ fn clear_active_generation(state: &AppState) {
 ///
 /// Errors writing to disk are logged and skipped. DB errors are also logged
 /// but do not fail the save — the file is the source of truth.
-fn save_image_to_dir(
+///
+/// Shared between the legacy single-GPU `process_job` (this file) and the
+/// per-GPU worker (`gpu_worker.rs`). Keep these on one helper so the DB
+/// upsert can never silently regress on one path while the other keeps
+/// working.
+pub(crate) fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
     model: &str,
@@ -131,7 +136,8 @@ fn save_image_to_dir(
 }
 
 /// Save a video file to disk and (best-effort) record its metadata row.
-/// Mirrors `save_image_to_dir` for the video-output path.
+/// Mirrors `save_image_to_dir` for the video-output path. See that helper
+/// for the multi-path-callers note.
 ///
 /// When `gif_preview` is non-empty, also persists
 /// `$MOLD_HOME/cache/previews/<filename>.preview.gif`. The gallery preview
@@ -139,7 +145,7 @@ fn save_image_to_dir(
 /// so remote TUI clients can animate the detail pane without re-fetching
 /// the full MP4.
 #[allow(clippy::too_many_arguments)]
-fn save_video_to_dir(
+pub(crate) fn save_video_to_dir(
     dir: &std::path::Path,
     bytes: &[u8],
     gif_preview: &[u8],
@@ -556,6 +562,7 @@ pub async fn run_queue_dispatcher(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             config: state.config.clone(),
+            metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
         });
 
@@ -641,7 +648,257 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::save_video_preview_gif_to;
+    use super::*;
+    use mold_core::{GenerateRequest, ImageData, OutputFormat};
+    use mold_db::MetadataDb;
+    use tempfile::TempDir;
+
+    /// A `GenerateRequest` with the bare minimum fields populated — enough to
+    /// hand to `OutputMetadata::from_generate_request` in tests.
+    fn fake_request(model: &str) -> GenerateRequest {
+        GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: model.to_string(),
+            width: 512,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: Some(7),
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+        }
+    }
+
+    fn fake_image() -> ImageData {
+        ImageData {
+            // PNG magic bytes — the helpers don't validate, but this keeps
+            // the on-disk file from being trivially mistaken for empty.
+            data: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            format: OutputFormat::Png,
+            width: 512,
+            height: 512,
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn save_image_to_dir_writes_file_and_creates_missing_dir() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("sub/output");
+        assert!(!nested.exists());
+
+        save_image_to_dir(&nested, &fake_image(), "flux-dev:q4", 1, None, None, None);
+
+        assert!(nested.exists(), "save should mkdir -p");
+        let entries: Vec<_> = std::fs::read_dir(&nested).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0].as_ref().unwrap().file_name();
+        let name_str = name.to_string_lossy();
+        // Filename uses model-with-colon-replaced-by-dash + ms timestamp + .png.
+        assert!(name_str.starts_with("mold-flux-dev-q4-"), "{name_str}");
+        assert!(name_str.ends_with(".png"), "{name_str}");
+    }
+
+    #[test]
+    fn save_image_to_dir_includes_batch_index_when_batch_size_gt_1() {
+        let tmp = TempDir::new().unwrap();
+        let mut img = fake_image();
+        img.index = 3;
+        img.format = OutputFormat::Jpeg;
+        img.data = vec![0xFF, 0xD8, 0xFF, 0xE0]; // JPEG magic
+
+        save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None);
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        let name = entries[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            name.contains("-3.jpeg"),
+            "expected batch index suffix: {name}"
+        );
+    }
+
+    #[test]
+    fn save_image_to_dir_upserts_metadata_row_when_db_provided() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req = fake_request("flux-dev:q4");
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            Some(&meta),
+            Some(1234),
+            Some(&db),
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1, "exactly one DB row for the saved file");
+        let rec = &rows[0];
+        assert_eq!(rec.metadata.prompt, "a cat");
+        assert_eq!(rec.metadata.seed, 42);
+        assert_eq!(rec.metadata.version, "test-version");
+        assert_eq!(rec.format, OutputFormat::Png);
+        assert_eq!(rec.generation_time_ms, Some(1234));
+        // stat_from_disk should have populated the size from the actual file.
+        assert!(rec.file_size_bytes.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn save_image_to_dir_skips_db_when_metadata_is_none() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            None, // ← metadata absent
+            Some(1234),
+            Some(&db),
+        );
+
+        // File still on disk, but no DB row recorded — both gates must hold
+        // for the upsert to fire.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        assert_eq!(db.list(None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn save_image_to_dir_invalid_path_does_not_panic() {
+        // /dev/null is a file, not a directory — create_dir_all should fail
+        // and the helper must log + return cleanly rather than panic.
+        save_image_to_dir(
+            std::path::Path::new("/dev/null/cant-mkdir-here"),
+            &fake_image(),
+            "test",
+            1,
+            None,
+            None,
+            None,
+        );
+    }
+
+    #[test]
+    fn save_video_to_dir_writes_mp4_and_records_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut req = fake_request("ltx-video:fp16");
+        req.frames = Some(25);
+        req.fps = Some(24);
+        let meta = OutputMetadata::from_generate_request(&req, 99, None, "test-version");
+
+        // Minimal MP4-ish bytes: an `ftyp` box header. The helper writes
+        // bytes verbatim — content validation happens at gallery scan time.
+        let bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom".to_vec();
+
+        save_video_to_dir(
+            tmp.path(),
+            &bytes,
+            b"",
+            OutputFormat::Mp4,
+            "ltx-video:fp16",
+            &meta,
+            Some(5000),
+            Some(&db),
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        assert!(name.starts_with("mold-ltx-video-fp16-"), "{name}");
+        assert!(name.ends_with(".mp4"), "{name}");
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].format, OutputFormat::Mp4);
+        assert_eq!(rows[0].metadata.frames, Some(25));
+        assert_eq!(rows[0].metadata.fps, Some(24));
+        assert_eq!(rows[0].generation_time_ms, Some(5000));
+    }
+
+    #[test]
+    fn save_video_to_dir_without_db_still_writes_file() {
+        let tmp = TempDir::new().unwrap();
+        let req = fake_request("ltx-video:fp16");
+        let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+
+        save_video_to_dir(
+            tmp.path(),
+            b"fake gif bytes",
+            b"",
+            OutputFormat::Gif,
+            "ltx-video:fp16",
+            &meta,
+            None,
+            None,
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        assert!(name.ends_with(".gif"), "{name}");
+    }
+
+    #[test]
+    fn save_video_to_dir_invalid_path_does_not_panic() {
+        let req = fake_request("ltx-video:fp16");
+        let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        save_video_to_dir(
+            std::path::Path::new("/dev/null/nope"),
+            b"x",
+            b"",
+            OutputFormat::Mp4,
+            "test",
+            &meta,
+            None,
+            None,
+        );
+    }
 
     /// `save_video_preview_gif_to` must write to
     /// `<preview_dir>/<filename>.preview.gif` — the exact location

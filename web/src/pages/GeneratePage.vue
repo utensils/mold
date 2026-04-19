@@ -1,0 +1,313 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from "vue";
+import Composer from "../components/Composer.vue";
+import SettingsModal from "../components/SettingsModal.vue";
+import ExpandModal from "../components/ExpandModal.vue";
+import ImagePickerModal from "../components/ImagePickerModal.vue";
+import RunningStrip from "../components/RunningStrip.vue";
+import GalleryFeed from "../components/GalleryFeed.vue";
+import DetailDrawer from "../components/DetailDrawer.vue";
+import TopBar from "../components/TopBar.vue";
+import {
+  deleteGalleryImage,
+  fetchCapabilities,
+  fetchModels,
+  listGallery,
+} from "../api";
+import { useGenerateForm } from "../composables/useGenerateForm";
+import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { useStatusPoll } from "../composables/useStatusPoll";
+import type {
+  ExpandFormState,
+  GalleryImage,
+  ModelInfoExtended,
+  ServerCapabilities,
+  SourceImageState,
+} from "../types";
+
+type ViewMode = "feed" | "grid";
+
+function loadViewMode(): ViewMode {
+  try {
+    const v = localStorage.getItem("mold.gallery.view");
+    return v === "grid" ? "grid" : "feed";
+  } catch {
+    return "feed";
+  }
+}
+function loadMuted(): boolean {
+  try {
+    return localStorage.getItem("mold.gallery.muted") !== "false";
+  } catch {
+    return true;
+  }
+}
+function persistViewMode(v: ViewMode) {
+  try {
+    localStorage.setItem("mold.gallery.view", v);
+  } catch {
+    /* ignore */
+  }
+}
+function persistMuted(v: boolean) {
+  try {
+    localStorage.setItem("mold.gallery.muted", String(v));
+  } catch {
+    /* ignore */
+  }
+}
+
+const form = useGenerateForm();
+const { status } = useStatusPoll();
+const models = ref<ModelInfoExtended[]>([]);
+const galleryEntries = ref<GalleryImage[]>([]);
+const view = ref<ViewMode>(loadViewMode());
+const muted = ref(loadMuted());
+const capabilities = ref<ServerCapabilities>({
+  gallery: { can_delete: false },
+});
+
+const showSettings = ref(false);
+const showExpand = ref(false);
+const showPicker = ref(false);
+
+// Drawer state (mirrors GalleryPage).
+const selected = ref<GalleryImage | null>(null);
+const selectedIndex = ref<number>(-1);
+
+const stream = useGenerateStream(async () => {
+  try {
+    galleryEntries.value = await listGallery();
+  } catch {
+    /* leave previous */
+  }
+});
+
+async function refreshModels() {
+  try {
+    models.value = await fetchModels();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function refreshGallery() {
+  try {
+    galleryEntries.value = await listGallery();
+  } catch {
+    /* ignore */
+  }
+}
+
+const currentModel = computed(
+  () => models.value.find((m) => m.name === form.state.value.model) ?? null,
+);
+
+const gpus = computed(
+  () =>
+    status.value?.gpus?.map((g) => ({ ordinal: g.ordinal, state: g.state })) ??
+    null,
+);
+
+const settingsDirty = computed(() => {
+  const s = form.state.value;
+  const m = currentModel.value;
+  if (!m) return false;
+  return (
+    s.width !== m.default_width ||
+    s.height !== m.default_height ||
+    s.steps !== m.default_steps ||
+    Math.abs(s.guidance - m.default_guidance) > 0.001 ||
+    s.batchSize !== 1 ||
+    s.seed !== null ||
+    s.negativePrompt.length > 0
+  );
+});
+
+// Placeholder TopBar props — filters/search/mute/refresh/counts are all
+// hidden on /generate by TopBar's `v-if="$route.name === 'gallery'"`, but
+// the props are still declared required on the component.
+const topBarCounts = computed(() => ({
+  total: galleryEntries.value.length,
+  images: galleryEntries.value.length,
+  video: 0,
+  filtered: galleryEntries.value.length,
+}));
+
+function onSubmit() {
+  if (!form.state.value.model) {
+    showSettings.value = true;
+    return;
+  }
+  const req = form.toRequest();
+  stream.submit(req);
+}
+
+function onClearSource() {
+  form.state.value.sourceImage = null;
+}
+
+function onPickSource(v: SourceImageState) {
+  form.state.value.sourceImage = v;
+}
+
+function openItem(item: GalleryImage) {
+  const idx = galleryEntries.value.findIndex(
+    (e) => e.filename === item.filename,
+  );
+  selectedIndex.value = idx;
+  selected.value = item;
+}
+
+// Map a finished Job back to its saved GalleryImage. The SSE complete
+// event doesn't echo the on-disk filename, so we match on seed + model
+// against the freshly-refreshed gallery (sorted newest-first, so the
+// first match is the right one if a seed happens to repeat).
+function openJob(job: Job) {
+  const r = job.result;
+  if (!r) return;
+  const match = galleryEntries.value.find(
+    (e) => e.metadata.seed === r.seed_used && e.metadata.model === r.model,
+  );
+  if (match) openItem(match);
+}
+function closeDrawer() {
+  selected.value = null;
+  selectedIndex.value = -1;
+}
+function stepDrawer(delta: number) {
+  if (selectedIndex.value < 0) return;
+  const list = galleryEntries.value;
+  const next = selectedIndex.value + delta;
+  if (next < 0 || next >= list.length) return;
+  selectedIndex.value = next;
+  selected.value = list[next] ?? null;
+}
+async function handleDelete(item: GalleryImage) {
+  try {
+    await deleteGalleryImage(item.filename);
+    galleryEntries.value = galleryEntries.value.filter(
+      (e) => e.filename !== item.filename,
+    );
+    if (selected.value && selected.value.filename === item.filename) {
+      closeDrawer();
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function setView(v: ViewMode) {
+  view.value = v;
+  persistViewMode(v);
+}
+function setMuted(v: boolean) {
+  muted.value = v;
+  persistMuted(v);
+}
+
+onMounted(async () => {
+  await refreshModels();
+  try {
+    galleryEntries.value = await listGallery();
+  } catch (e) {
+    console.error(e);
+  }
+  try {
+    capabilities.value = await fetchCapabilities();
+  } catch {
+    /* keep default */
+  }
+  if (!form.state.value.model) {
+    const first = models.value.find((m) => m.downloaded);
+    if (first) form.applyModelDefaults(first);
+  }
+});
+</script>
+
+<template>
+  <div class="mx-auto max-w-[1800px] px-4 pb-32 pt-4 sm:px-6 sm:pt-6 lg:px-10">
+    <TopBar
+      :filter="'all'"
+      :search="''"
+      :view="view"
+      :muted="muted"
+      :counts="topBarCounts"
+      :loading="false"
+      @update:filter="() => {}"
+      @update:search="() => {}"
+      @update:view="setView"
+      @update:muted="setMuted"
+      @refresh="refreshGallery"
+    />
+
+    <div class="mt-4 sm:mt-6">
+      <Composer
+        v-model="form.state.value"
+        :queue-depth="status?.queue_depth ?? null"
+        :queue-capacity="status?.queue_capacity ?? null"
+        :gpus="gpus"
+        :expand-active="form.state.value.expand.enabled"
+        :settings-dirty="settingsDirty"
+        @submit="onSubmit"
+        @open-settings="showSettings = true"
+        @open-expand="showExpand = true"
+        @open-image-picker="showPicker = true"
+        @clear-source="onClearSource"
+      />
+
+      <RunningStrip
+        :jobs="stream.jobs.value"
+        @cancel="stream.cancel"
+        @open="openJob"
+      />
+
+      <div class="mt-6">
+        <GalleryFeed
+          :entries="galleryEntries"
+          :loading="false"
+          :view="view"
+          :muted="muted"
+          @open="openItem"
+        />
+      </div>
+    </div>
+
+    <SettingsModal
+      :open="showSettings"
+      v-model="form.state.value"
+      :models="models"
+      @close="showSettings = false"
+    />
+    <ExpandModal
+      :open="showExpand"
+      :prompt="form.state.value.prompt"
+      :expand="form.state.value.expand"
+      :current-model="currentModel"
+      @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
+      @apply-prompt="(v: string) => (form.state.value.prompt = v)"
+      @close="showExpand = false"
+    />
+    <ImagePickerModal
+      :open="showPicker"
+      @pick="onPickSource"
+      @close="showPicker = false"
+    />
+
+    <DetailDrawer
+      :item="selected"
+      :has-prev="selectedIndex > 0"
+      :has-next="
+        selectedIndex >= 0 && selectedIndex < galleryEntries.length - 1
+      "
+      :index="selectedIndex"
+      :total="galleryEntries.length"
+      :can-delete="capabilities.gallery.can_delete"
+      :muted="muted"
+      @close="closeDrawer"
+      @prev="stepDrawer(-1)"
+      @next="stepDrawer(1)"
+      @delete="handleDelete"
+    />
+  </div>
+</template>

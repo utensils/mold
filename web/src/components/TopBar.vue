@@ -87,6 +87,27 @@ function clearSearch() {
       </div>
     </div>
 
+    <nav
+      class="flex items-center gap-1 rounded-full border border-white/5 bg-white/5 p-1 text-[13px] font-medium"
+      aria-label="Primary navigation"
+    >
+      <router-link
+        to="/"
+        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
+        active-class="bg-brand-500 text-white shadow-sm"
+        exact-active-class="bg-brand-500 text-white shadow-sm"
+      >
+        Gallery
+      </router-link>
+      <router-link
+        to="/generate"
+        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
+        active-class="bg-brand-500 text-white shadow-sm"
+      >
+        Generate
+      </router-link>
+    </nav>
+
     <!-- Search -->
     <label class="relative flex-1">
       <svg
@@ -133,7 +154,10 @@ function clearSearch() {
       </button>
     </label>
 
-    <div class="flex shrink-0 flex-wrap items-center gap-2">
+    <div
+      v-if="$route.name === 'gallery'"
+      class="flex shrink-0 flex-wrap items-center gap-2"
+    >
       <!-- View-mode toggle -->
       <div
         class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5"
