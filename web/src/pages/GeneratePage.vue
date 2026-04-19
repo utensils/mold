@@ -15,10 +15,7 @@ import {
   listGallery,
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
-import {
-  useGenerateStream,
-  type Job,
-} from "../composables/useGenerateStream";
+import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ExpandFormState,

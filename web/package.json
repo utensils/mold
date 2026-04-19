@@ -9,7 +9,10 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "fmt": "prettier --write .",
-    "fmt:check": "prettier --check ."
+    "fmt:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "vue": "^3.5.13",
@@ -18,10 +21,13 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.0",
     "@vitejs/plugin-vue": "^6.0.1",
+    "@vitest/coverage-v8": "^4.1.4",
+    "happy-dom": "^20.9.0",
     "prettier": "^3.3.3",
     "tailwindcss": "^4.2.0",
     "typescript": "^5.6.3",
     "vite": "^7.1.11",
+    "vitest": "^4.1.4",
     "vue-tsc": "^3.0.4"
   }
 }

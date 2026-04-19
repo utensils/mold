@@ -36,6 +36,26 @@ jobs:
         working-directory: website
         run: bun run build
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Check web formatting
+        working-directory: web
+        run: bun run fmt:check
+      - name: Run web tests
+        working-directory: web
+        run: bun run test
+      - name: Build web SPA (includes vue-tsc typecheck)
+        working-directory: web
+        run: bun run build
+
   fmt:
     runs-on: ubuntu-latest
     steps:
