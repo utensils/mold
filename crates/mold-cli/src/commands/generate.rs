@@ -16,9 +16,17 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::control::{stream_server_pull, CliContext};
+use crate::errors::RemoteInferenceError;
 use crate::output::{is_piped, status};
 use crate::theme;
 use crate::ui::{print_server_pull_missing_model, print_using_local_inference, render_progress};
+
+/// Tag an error as originating from the remote server so the top-level handler
+/// can produce a remote-context diagnostic (e.g. distinguishing a server-side
+/// CUDA OOM from a local Metal OOM on the client).
+fn tag_remote(client: &MoldClient, e: anyhow::Error) -> anyhow::Error {
+    RemoteInferenceError::wrap(client.host(), e)
+}
 
 /// Fit source image dimensions to the model's native resolution, preserving aspect ratio.
 fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Result<(u32, u32)> {
@@ -712,7 +720,9 @@ async fn generate_remote(
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
                     print_server_pull_missing_model(model);
-                    stream_server_pull(client, model).await?;
+                    stream_server_pull(client, model)
+                        .await
+                        .map_err(|e| tag_remote(client, e))?;
 
                     status!("{} Generating...", theme::icon_info());
 
@@ -723,9 +733,16 @@ async fn generate_remote(
                             let _ = render2.await;
                             Ok(response)
                         }
-                        _ => {
+                        Ok(None) => {
                             let _ = render2.await;
-                            Ok(client.generate(req.clone()).await?)
+                            client
+                                .generate(req.clone())
+                                .await
+                                .map_err(|e| tag_remote(client, e))
+                        }
+                        Err(e2) => {
+                            let _ = render2.await;
+                            Err(tag_remote(client, e2))
                         }
                     }
                 }
@@ -747,7 +764,7 @@ async fn generate_remote(
                     )
                     .await
                 }
-                GenerateServerAction::SurfaceError => Err(e),
+                GenerateServerAction::SurfaceError => Err(tag_remote(client, e)),
             }
         }
     }
@@ -800,9 +817,14 @@ async fn generate_remote_blocking(
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
                     print_server_pull_missing_model(model);
-                    stream_server_pull(client, model).await?;
+                    stream_server_pull(client, model)
+                        .await
+                        .map_err(|e| tag_remote(client, e))?;
                     status!("{} Generating...", theme::icon_info());
-                    Ok(client.generate(req.clone()).await?)
+                    client
+                        .generate(req.clone())
+                        .await
+                        .map_err(|e| tag_remote(client, e))
                 }
                 GenerateServerAction::FallbackLocal => {
                     print_using_local_inference();
@@ -822,7 +844,7 @@ async fn generate_remote_blocking(
                     )
                     .await
                 }
-                GenerateServerAction::SurfaceError => Err(e),
+                GenerateServerAction::SurfaceError => Err(tag_remote(client, e)),
             }
         }
     }
