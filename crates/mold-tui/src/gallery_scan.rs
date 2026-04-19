@@ -57,6 +57,58 @@ pub async fn fetch_and_cache_image(server_url: &str, filename: &str) -> Option<P
     Some(cached_path)
 }
 
+/// Local cache path for a server-provided animated GIF preview of a video
+/// gallery entry. Sits alongside the full-file cache so the two don't
+/// collide, and shares the same naming convention the server writes to
+/// (`<filename>.preview.gif`).
+pub fn preview_cache_path(filename: &str) -> PathBuf {
+    image_cache_dir().join(format!("{filename}.preview.gif"))
+}
+
+/// Fetch the cached GIF preview for a video gallery entry from the server
+/// and persist it under `preview_cache_path`.
+///
+/// Returns `Some(bytes)` on a 200 response (and updates the on-disk cache);
+/// returns `None` when the server returns 404 or the request fails —
+/// callers fall back to `fetch_and_cache_image` for the raw file in that
+/// case.
+pub async fn fetch_and_cache_preview(server_url: &str, filename: &str) -> Option<Vec<u8>> {
+    let cached = preview_cache_path(filename);
+    if cached.is_file() {
+        if let Ok(data) = std::fs::read(&cached) {
+            if !data.is_empty() {
+                return Some(data);
+            }
+        }
+    }
+
+    let client = mold_core::MoldClient::new(server_url);
+    let data = match client.get_gallery_preview(filename).await {
+        Ok(Some(bytes)) => bytes,
+        _ => return None,
+    };
+
+    if let Some(parent) = cached.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&cached, &data);
+    Some(data)
+}
+
+/// Whether `filename`'s extension looks like one of the video formats mold
+/// can emit. Used by the TUI to decide whether to try the GIF preview
+/// endpoint before falling back to the raw file.
+pub fn is_video_filename(filename: &str) -> bool {
+    matches!(
+        Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("mp4" | "webm" | "mov" | "mkv")
+    )
+}
+
 /// Scan for mold-generated images in the local output directory.
 ///
 /// Prefers the SQLite metadata DB (populated by both the CLI and server
@@ -370,5 +422,38 @@ mod tests {
     fn scan_images_local_returns_empty_for_nonexistent_dir() {
         let entries = scan_images_local();
         let _ = entries;
+    }
+
+    #[test]
+    fn is_video_filename_matches_known_extensions() {
+        assert!(is_video_filename("out.mp4"));
+        assert!(is_video_filename("OUT.MP4"));
+        assert!(is_video_filename("clip.webm"));
+        assert!(is_video_filename("clip.mov"));
+        assert!(is_video_filename("clip.mkv"));
+
+        // Raster formats that the preview endpoint shouldn't be tried on.
+        assert!(!is_video_filename("frame.png"));
+        assert!(!is_video_filename("frame.jpg"));
+        assert!(!is_video_filename("frame.gif"));
+        assert!(!is_video_filename("frame.apng"));
+        assert!(!is_video_filename("frame.webp"));
+        assert!(!is_video_filename("no_extension"));
+    }
+
+    #[test]
+    fn preview_cache_path_matches_server_naming() {
+        // The server stores previews at `<preview_dir>/<filename>.preview.gif`
+        // and the TUI cache must use the same suffix so the fetched bytes
+        // land where the `load_gallery_preview` fast path looks for them.
+        let path = preview_cache_path("ltx2-1234.mp4");
+        assert!(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "ltx2-1234.mp4.preview.gif"),
+            "unexpected preview cache filename: {}",
+            path.display()
+        );
+        assert!(path.starts_with(image_cache_dir()));
     }
 }

@@ -1947,6 +1947,110 @@ mod tests {
         );
     }
 
+    /// `GET /api/gallery/preview/:filename` serves the cached `.preview.gif`
+    /// the TUI's server-backed detail pane pulls when it wants to animate an
+    /// MP4 entry. Happy path: the file exists → 200 with `image/gif` + the
+    /// bytes. Missing file → 404 so the client can fall back to the full
+    /// `/api/gallery/image/:filename` path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn gallery_preview_returns_gif_when_present_and_404_otherwise() {
+        // Route is backed by `MOLD_HOME/cache/previews/<filename>.preview.gif`,
+        // so pin MOLD_HOME at a tempdir for the duration of the test — and
+        // hold env_lock so parallel tests can't race us.
+        let _lock = env_lock().lock().unwrap();
+        let mold_home = tempfile::tempdir().unwrap();
+        let prev = std::env::var("MOLD_HOME").ok();
+        unsafe {
+            std::env::set_var("MOLD_HOME", mold_home.path());
+        }
+
+        // Plant a minimal valid GIF (header only) at the path the handler
+        // will look for. The handler doesn't decode — it streams bytes back
+        // verbatim — so this suffices as a regression fixture.
+        const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3b";
+        let previews = mold_home.path().join("cache").join("previews");
+        std::fs::create_dir_all(&previews).unwrap();
+        std::fs::write(previews.join("ltx2-has-preview.mp4.preview.gif"), GIF).unwrap();
+        // Also plant an orphaned preview whose source MP4 doesn't exist —
+        // the endpoint must 404 it rather than leak the sidecar bytes.
+        std::fs::write(previews.join("ltx2-orphan.mp4.preview.gif"), GIF).unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        // Source MP4 must exist in the gallery dir for the endpoint to
+        // serve its preview — the cache is tied to the file lifecycle.
+        std::fs::write(output_dir.path().join("ltx2-has-preview.mp4"), b"fake-mp4").unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+        let app = crate::routes::create_router(state);
+
+        // Source present + sidecar present → 200 with image/gif + bytes.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/preview/ltx2-has-preview.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/gif")
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), GIF);
+
+        // Missing entirely → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/preview/ltx2-missing.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Orphaned sidecar (source MP4 deleted, GIF still on disk) → 404.
+        // Regression guard: previously this returned the stale bytes.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/preview/ltx2-orphan.mp4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Restore MOLD_HOME.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+        drop(_lock);
+    }
+
     /// `DELETE /api/gallery/image/:filename` must remove the matching DB
     /// row in addition to the file on disk so the next list call doesn't
     /// resurrect a stale entry from cache.
