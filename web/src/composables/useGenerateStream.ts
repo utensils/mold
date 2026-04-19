@@ -1,4 +1,4 @@
-import { ref, type Ref } from "vue";
+import { reactive, ref, type Ref } from "vue";
 import { generateStream } from "../api";
 import type {
   GenerateRequestWire,
@@ -90,7 +90,11 @@ export function useGenerateStream(
   function submit(req: GenerateRequestWire): string {
     const id = crypto.randomUUID();
     const controller = new AbortController();
-    const job: Job = {
+    // Wrap in reactive() so that property mutations during SSE streaming
+    // (stage, step, state, result) trigger RunningJobCard re-renders. The
+    // closure must hold the proxy, not the raw object — mutations through
+    // the raw target bypass the Proxy's set trap and skip dep notification.
+    const job = reactive<Job>({
       id,
       request: req,
       startedAt: Date.now(),
@@ -99,7 +103,7 @@ export function useGenerateStream(
       result: null,
       error: null,
       state: "running",
-    };
+    }) as Job;
     jobs.value = [...jobs.value, job];
 
     generateStream(
@@ -107,14 +111,12 @@ export function useGenerateStream(
       {
         onProgress: (evt) => {
           applyProgress(job, evt);
-          jobs.value = [...jobs.value];
         },
         onComplete: (evt) => {
           job.result = evt;
           job.state = "done";
           if (evt.gpu !== null && evt.gpu !== undefined)
             job.progress.gpu = evt.gpu;
-          jobs.value = [...jobs.value];
           onComplete?.(job);
         },
         onError: (err) => {
@@ -127,7 +129,6 @@ export function useGenerateStream(
             job.error = err.message;
           }
           job.state = "error";
-          jobs.value = [...jobs.value];
         },
       },
       controller.signal,
@@ -141,7 +142,6 @@ export function useGenerateStream(
     if (!job) return;
     job.controller.abort();
     job.state = "canceled";
-    jobs.value = [...jobs.value];
   }
 
   function clearDone() {
