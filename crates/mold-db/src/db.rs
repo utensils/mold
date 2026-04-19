@@ -3,13 +3,11 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use mold_core::{OutputFormat, OutputMetadata, Scheduler};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
+use crate::migrations;
+use crate::path::canonical_dir_string;
 use crate::record::{GenerationRecord, RecordSource};
-
-/// Current schema version. Bump and add a migration block in [`migrate`]
-/// whenever the table layout changes.
-const SCHEMA_VERSION: i64 = 1;
 
 /// Stat snapshot returned by [`MetadataDb::snapshot_paths`] — one entry per
 /// row, used by reconciliation to diff DB ↔ disk. Defined as a named struct
@@ -21,54 +19,44 @@ pub(crate) struct PathSnapshot {
     pub file_size_bytes: Option<i64>,
 }
 
-const SCHEMA_V1: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY
-);
+/// Configure connection-level pragmas at open time. Pragmas that fail to
+/// apply are logged at warn level — concurrent-writer performance degrades
+/// but correctness is preserved (SQLite falls back to rollback journal).
+/// Verifies `journal_mode=WAL` actually took by reading it back.
+fn configure_pragmas(conn: &Connection, path: &Path) {
+    if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "metadata DB journal_mode=WAL pragma failed — falling back to rollback journal"
+        );
+    }
+    // Read the mode back. Some filesystems (tmpfs, certain network mounts)
+    // silently accept the pragma but leave the mode unchanged.
+    if let Ok(mode) = query_pragma_string(conn, "journal_mode") {
+        if !mode.eq_ignore_ascii_case("wal") {
+            tracing::warn!(
+                mode = %mode,
+                path = %path.display(),
+                "metadata DB is not in WAL mode — concurrent writers will block longer"
+            );
+        }
+    }
+    if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+        tracing::warn!(error = %e, "metadata DB synchronous pragma failed");
+    }
+    if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
+        tracing::warn!(error = %e, "metadata DB foreign_keys pragma failed");
+    }
+}
 
-CREATE TABLE IF NOT EXISTS generations (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename           TEXT    NOT NULL,
-    output_dir         TEXT    NOT NULL,
-    created_at_ms      INTEGER NOT NULL,
-    file_mtime_ms      INTEGER,
-    file_size_bytes    INTEGER,
-
-    format             TEXT    NOT NULL,
-
-    model              TEXT    NOT NULL,
-    prompt             TEXT    NOT NULL DEFAULT '',
-    negative_prompt    TEXT,
-    original_prompt    TEXT,
-    seed               INTEGER NOT NULL DEFAULT 0,
-    steps              INTEGER NOT NULL DEFAULT 0,
-    guidance           REAL    NOT NULL DEFAULT 0.0,
-    width              INTEGER NOT NULL DEFAULT 0,
-    height             INTEGER NOT NULL DEFAULT 0,
-    strength           REAL,
-    scheduler          TEXT,
-    lora               TEXT,
-    lora_scale         REAL,
-    frames             INTEGER,
-    fps                INTEGER,
-    metadata_version   TEXT    NOT NULL DEFAULT '',
-
-    generation_time_ms INTEGER,
-    backend            TEXT,
-    hostname           TEXT,
-    source             TEXT    NOT NULL DEFAULT 'unknown',
-    metadata_synthetic INTEGER NOT NULL DEFAULT 0,
-
-    UNIQUE(output_dir, filename)
-);
-
-CREATE INDEX IF NOT EXISTS idx_gen_created_at ON generations(created_at_ms DESC);
-CREATE INDEX IF NOT EXISTS idx_gen_mtime      ON generations(file_mtime_ms DESC);
-CREATE INDEX IF NOT EXISTS idx_gen_model      ON generations(model);
-CREATE INDEX IF NOT EXISTS idx_gen_format     ON generations(format);
-CREATE INDEX IF NOT EXISTS idx_gen_filename   ON generations(filename);
-CREATE INDEX IF NOT EXISTS idx_gen_output_dir ON generations(output_dir);
-"#;
+/// Read a PRAGMA whose value is a single TEXT cell.
+fn query_pragma_string(conn: &Connection, name: &str) -> Result<String> {
+    // Pragma name is compile-time constant from our own code; never
+    // user-controlled. Safe to inline.
+    let v: String = conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))?;
+    Ok(v)
+}
 
 /// Thread-safe handle to the SQLite metadata DB.
 ///
@@ -89,51 +77,50 @@ impl std::fmt::Debug for MetadataDb {
 }
 
 impl MetadataDb {
-    /// Open (or create) the SQLite database at `path` and apply migrations.
+    /// Open (or create) the SQLite database at `path`, enable WAL journal
+    /// mode, and apply pending schema migrations.
+    ///
+    /// WAL mode is verified after the pragma: if it didn't actually take
+    /// (e.g. on a filesystem that rejects WAL, like certain network mounts)
+    /// a warning is logged so operators know concurrent writers will be
+    /// slower. The open still succeeds — functionality is preserved, just
+    /// with the default rollback journal.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("opening metadata DB at {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        conn.pragma_update(None, "foreign_keys", "ON").ok();
-        let db = Self {
+        configure_pragmas(&conn, path);
+        migrations::apply_pending(&mut conn)
+            .with_context(|| format!("applying migrations to metadata DB at {}", path.display()))?;
+        Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
-        };
-        db.migrate()?;
-        Ok(db)
+        })
     }
 
-    /// Open an in-memory database — used by unit tests.
+    /// Open an in-memory database — used by unit tests. WAL mode is
+    /// silently skipped for `:memory:` since SQLite only supports it on
+    /// file-backed databases.
     #[doc(hidden)]
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let db = Self {
+        let mut conn = Connection::open_in_memory()?;
+        // `synchronous = NORMAL` is safe for in-memory; journal_mode stays
+        // at `memory` which is correct for the `:memory:` backend.
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        migrations::apply_pending(&mut conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
             path: PathBuf::from(":memory:"),
-        };
-        db.migrate()?;
-        Ok(db)
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    fn migrate(&self) -> Result<()> {
+    /// Current applied schema version (see [`migrations::SCHEMA_VERSION`]).
+    pub fn schema_version(&self) -> Result<i64> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
-        conn.execute_batch(SCHEMA_V1)?;
-        let current: Option<i64> = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .optional()?
-            .flatten();
-        if current.unwrap_or(0) < SCHEMA_VERSION {
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_version(version) VALUES (?1)",
-                params![SCHEMA_VERSION],
-            )?;
-        }
-        Ok(())
+        migrations::current_version(&conn)
     }
 
     /// Insert or update a row keyed by `(output_dir, filename)`.
@@ -155,7 +142,10 @@ impl MetadataDb {
              FROM generations
              WHERE output_dir = ?1 AND filename = ?2",
         )?;
-        let mut rows = stmt.query(params![output_dir.to_string_lossy().as_ref(), filename])?;
+        // Normalize output_dir so `/tmp/foo` and `/private/tmp/foo`
+        // (macOS) or a symlinked path all resolve to the same stored key.
+        let dir_key = canonical_dir_string(output_dir);
+        let mut rows = stmt.query(params![dir_key, filename])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row_to_record(row)?))
         } else {
@@ -175,9 +165,10 @@ impl MetadataDb {
             metadata_synthetic FROM generations";
         let mut out = Vec::new();
         if let Some(dir) = output_dir {
+            let dir_key = canonical_dir_string(dir);
             let mut stmt =
                 conn.prepare(&format!("{select} WHERE output_dir = ?1 {order_clause}"))?;
-            let mut rows = stmt.query(params![dir.to_string_lossy().as_ref()])?;
+            let mut rows = stmt.query(params![dir_key])?;
             while let Some(row) = rows.next()? {
                 out.push(row_to_record(row)?);
             }
@@ -195,9 +186,10 @@ impl MetadataDb {
     /// row was deleted.
     pub fn delete(&self, output_dir: &Path, filename: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
+        let dir_key = canonical_dir_string(output_dir);
         let n = conn.execute(
             "DELETE FROM generations WHERE output_dir = ?1 AND filename = ?2",
-            params![output_dir.to_string_lossy().as_ref(), filename],
+            params![dir_key, filename],
         )?;
         Ok(n > 0)
     }
@@ -244,7 +236,14 @@ impl MetadataDb {
 
 /// Internal helper that takes an already-locked connection — lets callers
 /// batch many upserts inside one transaction.
+///
+/// Canonicalizes `rec.output_dir` before persisting so the `UNIQUE(output_dir,
+/// filename)` constraint matches rows written by different callers for the
+/// same underlying file (e.g. the CLI canonicalizes its saved path, the
+/// server used the raw `config.effective_output_dir()`). The canonical form
+/// is what actually lands in the DB — callers get consistent keys for free.
 pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Result<i64> {
+    let dir_key = canonical_dir_string(Path::new(&rec.output_dir));
     let scheduler_str = rec
         .metadata
         .scheduler
@@ -289,7 +288,7 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
             metadata_synthetic = excluded.metadata_synthetic",
         params![
             rec.filename,
-            rec.output_dir,
+            dir_key,
             rec.created_at_ms,
             rec.file_mtime_ms,
             rec.file_size_bytes,
@@ -319,7 +318,7 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
     )?;
     let id = conn.query_row(
         "SELECT id FROM generations WHERE output_dir = ?1 AND filename = ?2",
-        params![rec.output_dir, rec.filename],
+        params![dir_key, rec.filename],
         |r| r.get::<_, i64>(0),
     )?;
     Ok(id)
@@ -559,6 +558,90 @@ mod tests {
             .unwrap();
         assert_eq!(got.format, OutputFormat::Mp4);
         assert_eq!(got.metadata.scheduler, Some(Scheduler::EulerAncestral));
+    }
+
+    /// Fix 1 regression guard: two callers handing in different string
+    /// forms of the same directory (e.g. macOS `/tmp` vs `/private/tmp`,
+    /// or a symlink) must collapse to the same row. Before the fix, they
+    /// produced two rows and the gallery showed duplicates.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn upsert_and_get_collapse_macos_tmp_symlink_aliases() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        // Create a real dir under /tmp so both `/tmp/...` and
+        // `/private/tmp/...` resolve. tempdir_in("/tmp") forces the
+        // non-canonical-first form.
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let via_tmp = tmp.path().to_path_buf();
+        let via_private = Path::new("/private").join(via_tmp.strip_prefix("/").unwrap_or(&via_tmp));
+        assert!(via_private.exists(), "test setup sanity");
+
+        // Upsert via one alias, query via the other.
+        let mut r = rec();
+        r.filename = "dup.png".into();
+        r.output_dir = via_tmp.to_string_lossy().into_owned();
+        db.upsert(&r).unwrap();
+
+        let via_other = db.get(&via_private, "dup.png").unwrap();
+        assert!(
+            via_other.is_some(),
+            "get via /private/tmp must find the row written via /tmp"
+        );
+
+        // And a second upsert via the *other* alias must hit the same row.
+        r.output_dir = via_private.to_string_lossy().into_owned();
+        r.metadata.prompt = "updated via alias".into();
+        db.upsert(&r).unwrap();
+        assert_eq!(
+            db.count().unwrap(),
+            1,
+            "UNIQUE constraint must see the two aliases as one key"
+        );
+        let got = db.get(&via_tmp, "dup.png").unwrap().unwrap();
+        assert_eq!(got.metadata.prompt, "updated via alias");
+    }
+
+    #[test]
+    fn schema_version_matches_build_constant() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        assert_eq!(db.schema_version().unwrap(), crate::SCHEMA_VERSION);
+    }
+
+    /// Fix 2 regression guard: opening a file-backed DB should land in WAL
+    /// mode on every supported filesystem. tempdir gives us a writable
+    /// path on the host OS.
+    #[test]
+    fn open_file_backed_db_lands_in_wal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            mode.eq_ignore_ascii_case("wal"),
+            "expected WAL journal mode, got {mode:?}"
+        );
+    }
+
+    /// Fix 1 + 2 + 3 integration guard: a fresh file-backed DB applies the
+    /// v1 migration, lands at `SCHEMA_VERSION`, and round-trips a row
+    /// keyed via the canonical path helper.
+    #[test]
+    fn fresh_file_db_applies_v1_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&db_path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), crate::SCHEMA_VERSION);
+
+        // Write under the tempdir itself so canonicalization has something
+        // to resolve. The round-trip proves upsert + get both see the
+        // same canonical key.
+        let mut r = rec();
+        r.output_dir = dir.path().to_string_lossy().into_owned();
+        db.upsert(&r).unwrap();
+        assert!(db.get(dir.path(), &r.filename).unwrap().is_some());
     }
 
     #[test]

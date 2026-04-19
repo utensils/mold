@@ -9,10 +9,14 @@
 
 mod db;
 mod metadata_io;
+mod migrations;
+mod path;
 mod reconcile;
 mod record;
 
 pub use db::MetadataDb;
+pub use migrations::SCHEMA_VERSION;
+pub use path::{canonical_dir, canonical_dir_string};
 pub use reconcile::ReconcileStats;
 pub use record::{GenerationRecord, RecordSource};
 

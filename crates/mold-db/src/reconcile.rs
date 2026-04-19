@@ -22,6 +22,7 @@ use crate::metadata_io::{
     format_from_path, image_header_dims, is_valid_gallery_file, read_embedded,
     synthesize_from_filename,
 };
+use crate::path::canonical_dir_string;
 use crate::record::{GenerationRecord, RecordSource};
 
 /// Counters returned by [`MetadataDb::reconcile`].
@@ -58,9 +59,11 @@ impl MetadataDb {
         }
 
         // Snapshot existing rows for this dir up front so we can process
-        // disk + DB diffs in a single transaction afterward.
+        // disk + DB diffs in a single transaction afterward. Use the
+        // canonical form of `output_dir` — that's what upserts store, so
+        // the snapshot filter must match.
         let existing = self.snapshot_paths()?;
-        let dir_str = output_dir.to_string_lossy().into_owned();
+        let dir_str = canonical_dir_string(output_dir);
         let mut existing_for_dir: HashMap<String, (Option<i64>, Option<i64>)> = existing
             .into_iter()
             .filter(|s| s.output_dir == dir_str)
