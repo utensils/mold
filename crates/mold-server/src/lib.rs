@@ -197,10 +197,13 @@ pub async fn run_server(
     }
 
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
-    // Single-writer download queue driver. The handle lives for the process
-    // lifetime; on graceful shutdown the token is cancelled and the task exits.
+    // Single-writer download queue driver. Bind the `JoinHandle` so we can
+    // `.abort()` it when `axum::serve` returns — same pattern as the resource
+    // telemetry aggregator (see commit 5e43886). Without this the task would
+    // outlive graceful shutdown and keep polling its cancellation token until
+    // process exit.
     let downloads_shutdown = tokio_util::sync::CancellationToken::new();
-    let _downloads_driver = crate::downloads::spawn_driver(
+    let downloads_driver = crate::downloads::spawn_driver(
         state.downloads.clone(),
         std::sync::Arc::new(crate::downloads::HfPullDriver),
         downloads_shutdown.clone(),
@@ -345,6 +348,13 @@ pub async fn run_server(
         tracing::info!("shutting down");
     })
     .await?;
+
+    // Server has stopped accepting requests — cancel the downloads token so the
+    // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
+    // the task is cleaned up on the same shutdown path as the HTTP server.
+    // Matches the aggregator handle pattern from commit 5e43886.
+    downloads_shutdown.cancel();
+    downloads_driver.abort();
 
     Ok(())
 }
