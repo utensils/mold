@@ -2412,9 +2412,10 @@ async fn put_model_placement(
     {
         let mut cfg = state.config.write().await;
         cfg.set_model_placement(&name, Some(placement.clone()));
-        if let Err(e) = cfg.save() {
+        cfg.save().map_err(|e| {
             tracing::warn!("failed to persist placement to config.toml: {e}");
-        }
+            ApiError::internal(format!("failed to persist placement to config.toml: {e}"))
+        })?;
     }
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -2428,7 +2429,12 @@ async fn delete_model_placement(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut cfg = state.config.write().await;
     cfg.set_model_placement(&name, None);
-    let _ = cfg.save();
+    cfg.save().map_err(|e| {
+        tracing::warn!("failed to persist placement removal to config.toml: {e}");
+        ApiError::internal(format!(
+            "failed to persist placement removal to config.toml: {e}"
+        ))
+    })?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

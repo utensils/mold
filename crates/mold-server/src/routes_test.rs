@@ -2192,6 +2192,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_model_placement_returns_500_when_save_fails() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Point MOLD_HOME at a regular file so `config.toml` cannot be created
+        // underneath it — `Config::save()` must return `Err`.
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, "blocker").unwrap();
+        std::env::set_var("MOLD_HOME", &blocker);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
+        let app = crate::routes::create_router(state.clone());
+
+        let body = serde_json::json!({
+            "text_encoders": { "kind": "cpu" }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        std::env::remove_var("MOLD_HOME");
+    }
+
+    #[tokio::test]
     async fn put_model_placement_rejects_malformed_body() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let app = app_empty();
