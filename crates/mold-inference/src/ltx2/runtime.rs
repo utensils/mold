@@ -1379,6 +1379,36 @@ fn apply_video_token_replacements(
     Ok(patched)
 }
 
+/// Build the "clean reference" tensor used by the denoise mask blend at every
+/// step. For replacement-based conditioning (e.g. i2v source image) with
+/// `strength < 1.0`, `video_latents` already holds `noise*(1-s) + source*s` at
+/// the replacement positions. If we reuse that as the clean target, the
+/// denoise-mask blend pulls those tokens toward a noisy ghost of the image at
+/// every step — the first latent frame never converges to the pure source.
+///
+/// Re-applying the replacements with strength 1.0 overwrites those positions
+/// with the pure source tokens, leaving appended keyframe tokens (already
+/// full-strength in `apply_appended_video_conditioning`) and pure-noise
+/// regions untouched.
+fn clean_latents_for_conditioning(
+    video_latents: &Tensor,
+    conditioning: &StageVideoConditioning,
+) -> Result<Tensor> {
+    if conditioning.replacements.is_empty() {
+        return Ok(video_latents.clone());
+    }
+    let hard_replacements: Vec<VideoTokenReplacement> = conditioning
+        .replacements
+        .iter()
+        .map(|replacement| VideoTokenReplacement {
+            start_token: replacement.start_token,
+            tokens: replacement.tokens.clone(),
+            strength: 1.0,
+        })
+        .collect();
+    apply_video_token_replacements(video_latents, &hard_replacements)
+}
+
 fn apply_appended_video_conditioning(
     video_latents: &Tensor,
     video_positions: &Tensor,
@@ -2699,7 +2729,7 @@ fn run_real_distilled_stage(
     )?;
     let clean_video_latents = match video_clean_latents {
         Some(latents) => video_patchifier.patchify(latents)?,
-        None => video_latents.clone(),
+        None => clean_latents_for_conditioning(&video_latents, video_conditioning)?,
     };
     let video_denoise_mask = match video_denoise_mask {
         Some(mask) => mask.to_device(&device)?.to_dtype(DType::F32)?,
@@ -4622,14 +4652,14 @@ mod tests {
 
     use super::{
         apply_stage_video_conditioning, apply_video_token_replacements,
-        build_video_conditioning_self_attention_mask, convert_velocity_to_x0,
-        convert_x0_to_velocity, decoded_video_to_frames, effective_native_guidance_scale,
-        emit_denoise_progress, guided_velocity_from_cfg, keyframe_only_conditioning,
-        ltx2_video_transformer_config, reapply_stage_video_conditioning,
-        should_inspect_step_velocity, source_image_only_conditioning,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        build_video_conditioning_self_attention_mask, clean_latents_for_conditioning,
+        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
+        effective_native_guidance_scale, emit_denoise_progress, guided_velocity_from_cfg,
+        keyframe_only_conditioning, ltx2_video_transformer_config,
+        reapply_stage_video_conditioning, should_inspect_step_velocity,
+        source_image_only_conditioning, strip_appended_video_conditioning, Ltx2RuntimeSession,
+        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -5690,6 +5720,67 @@ mod tests {
         assert_eq!(
             stripped.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![7.0, 8.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn clean_latents_replace_soft_blended_positions_with_pure_source() {
+        // Simulate the state after `apply_stage_video_conditioning` with
+        // strength 0.75: at the replacement positions, `video_latents` already
+        // holds `noise*0.25 + source*0.75`. The denoise-mask blend uses
+        // `clean_latents` as the target it pulls those positions toward at
+        // every step — so the clean target must be pure source, not the
+        // pre-blended mix.
+        let noise = [0.0f32, 0.0, 1.0, 1.0, 2.0, 2.0];
+        let source = [10.0f32, 10.0];
+        let strength = 0.75f32;
+        let blended_first = [
+            noise[0] * (1.0 - strength) + source[0] * strength,
+            noise[1] * (1.0 - strength) + source[1] * strength,
+        ];
+        let soft_blended = Tensor::from_vec(
+            vec![
+                blended_first[0],
+                blended_first[1],
+                noise[2],
+                noise[3],
+                noise[4],
+                noise[5],
+            ],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![VideoTokenReplacement {
+                start_token: 0,
+                tokens: Tensor::from_vec(source.to_vec(), (1, 1, 2), &Device::Cpu).unwrap(),
+                strength: strength as f64,
+            }],
+            appended: vec![],
+        };
+
+        let clean = clean_latents_for_conditioning(&soft_blended, &conditioning).unwrap();
+        let values = clean.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        assert_eq!(
+            values,
+            vec![source[0], source[1], noise[2], noise[3], noise[4], noise[5]],
+            "soft-blended replacement positions must be overwritten with the pure \
+             source tokens; other positions must be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn clean_latents_passthrough_when_no_replacements() {
+        let latents =
+            Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning::default();
+
+        let clean = clean_latents_for_conditioning(&latents, &conditioning).unwrap();
+        assert_eq!(
+            clean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.0, 1.0, 2.0, 3.0]
         );
     }
 
