@@ -3,7 +3,10 @@ import type { AdvancedPlacement, DevicePlacement, DeviceRef } from "../types";
 import { RESOURCES_INJECTION_KEY, type UseResources } from "./useResources";
 
 // Families that support the Advanced (Tier 2) per-component disclosure.
-// Matches spec §3.2 — update both in lock-step.
+// Matches spec §3.2 — update both in lock-step. SD3.5 was marked stretch
+// and cut cleanly (see PR #256), so it's intentionally absent here: the
+// engine only honors Tier 1, and surfacing Advanced controls the server
+// would silently no-op would be a leaky abstraction.
 const TIER2_FAMILIES: ReadonlyArray<string> = [
   "flux",
   "flux2",
@@ -12,10 +15,6 @@ const TIER2_FAMILIES: ReadonlyArray<string> = [
   "z-image",
   "qwen-image",
   "qwen_image",
-  "sd3",
-  "sd3.5",
-  "stable-diffusion-3",
-  "stable-diffusion-3.5",
 ];
 
 export interface UsePlacement {

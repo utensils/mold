@@ -15,17 +15,15 @@ describe("usePlacement", () => {
     expect(supportsAdvanced("qwen-image")).toBe(true);
   });
 
-  it("supportsAdvanced respects the stretch flag for sd3", () => {
+  it("supportsAdvanced returns false for Tier 1 only families (including sd3)", () => {
     const { supportsAdvanced } = usePlacement();
-    // SD3.5 is in the Tier 2 family list (stretch goal, lands in Task 14).
-    // If Task 14 is skipped the panel still renders because supportsAdvanced
-    // reflects the intended allow-list — the server simply ignores the
-    // advanced override for SD3.5.
-    expect(supportsAdvanced("sd3")).toBe(true);
-  });
-
-  it("supportsAdvanced returns false for Tier 1 only families", () => {
-    const { supportsAdvanced } = usePlacement();
+    // SD3.5 was marked stretch in the spec and cut cleanly (see PR #256).
+    // The engine only honors Tier 1; surfacing Advanced here would be a
+    // leaky abstraction since the server would silently no-op overrides.
+    expect(supportsAdvanced("sd3")).toBe(false);
+    expect(supportsAdvanced("sd3.5")).toBe(false);
+    expect(supportsAdvanced("stable-diffusion-3")).toBe(false);
+    expect(supportsAdvanced("stable-diffusion-3.5")).toBe(false);
     expect(supportsAdvanced("sdxl")).toBe(false);
     expect(supportsAdvanced("sd15")).toBe(false);
     expect(supportsAdvanced("wuerstchen")).toBe(false);
