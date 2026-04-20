@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use mold_inference::shared_pool::SharedPool;
 
+use crate::downloads::DownloadQueue;
 use crate::gpu_pool::GpuPool;
 use crate::model_cache::ModelCache;
 
@@ -148,6 +149,9 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    // ── Downloads UI (Agent A) ──────────────────────────────────────────────
+    /// Single-writer download queue.
+    pub downloads: Arc<DownloadQueue>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -186,6 +190,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            downloads: DownloadQueue::new(),
         }
     }
 
@@ -211,15 +216,24 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            downloads: DownloadQueue::new(),
         }
     }
 
     /// Create an empty GpuPool for testing (no GPU workers).
     #[cfg(test)]
-    fn empty_gpu_pool() -> Arc<GpuPool> {
+    pub(crate) fn empty_gpu_pool() -> Arc<GpuPool> {
         Arc::new(GpuPool {
             workers: Vec::new(),
         })
+    }
+
+    /// Alias for `empty_gpu_pool` — exposed for tests in sibling modules
+    /// (routes_test.rs, downloads_test.rs) that live in the crate but not
+    /// in the same file.
+    #[cfg(test)]
+    pub(crate) fn empty_gpu_pool_for_test() -> Arc<GpuPool> {
+        Self::empty_gpu_pool()
     }
 
     #[cfg(test)]
@@ -250,6 +264,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            downloads: DownloadQueue::new(),
         }
     }
 
@@ -284,6 +299,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            downloads: DownloadQueue::new(),
         };
         (state, rx)
     }

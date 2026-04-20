@@ -1,4 +1,6 @@
 pub mod auth;
+// Agent A (downloads)
+pub mod downloads;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod logging;
