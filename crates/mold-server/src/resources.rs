@@ -157,6 +157,36 @@ pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
     Some((ordinal, name, total_mb * 1_000_000, used_mb * 1_000_000))
 }
 
+use mold_core::RamSnapshot;
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
+/// Build a single `RamSnapshot` using `sysinfo`. Refreshes only memory and
+/// the current process — cheap enough to run at 1 Hz (~200 µs).
+pub fn ram_snapshot() -> RamSnapshot {
+    let mut sys = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_memory(sysinfo::MemoryRefreshKind::everything())
+            .with_processes(ProcessRefreshKind::nothing().with_memory()),
+    );
+    sys.refresh_memory();
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    let total = sys.total_memory();
+    let used = sys.used_memory();
+    let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
+    let used_by_other = used.saturating_sub(used_by_mold);
+    RamSnapshot {
+        total,
+        used,
+        used_by_mold,
+        used_by_other,
+    }
+}
+
 pub struct SmiSource;
 
 impl SmiSource {

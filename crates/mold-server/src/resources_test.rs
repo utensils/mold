@@ -84,6 +84,29 @@ async fn subscribe_with_lagged_receiver_recovers() {
 }
 
 #[test]
+fn ram_snapshot_satisfies_invariants() {
+    let ram = crate::resources::ram_snapshot();
+    assert!(ram.total > 0, "total RAM should be >0 on any host");
+    assert!(
+        ram.used <= ram.total,
+        "used ({}) must be <= total ({})",
+        ram.used,
+        ram.total
+    );
+    assert!(
+        ram.used_by_mold <= ram.used,
+        "used_by_mold ({}) must be <= used ({})",
+        ram.used_by_mold,
+        ram.used
+    );
+    assert_eq!(
+        ram.used_by_other,
+        ram.used.saturating_sub(ram.used_by_mold),
+        "used_by_other must == used - used_by_mold"
+    );
+}
+
+#[test]
 fn parse_nvidia_smi_line_happy_path() {
     let line = "0, NVIDIA GeForce RTX 3090, 24564, 14248";
     let parsed = crate::resources::parse_nvidia_smi_line(line).expect("parse should succeed");
