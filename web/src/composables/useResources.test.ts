@@ -30,10 +30,7 @@ class MockEventSource {
     this.url = url;
     MockEventSource.instances.push(this);
   }
-  addEventListener(
-    type: string,
-    cb: EventListenerOrEventListenerObject,
-  ): void {
+  addEventListener(type: string, cb: EventListenerOrEventListenerObject): void {
     const arr = this.listeners.get(type) ?? [];
     // We only ever register plain function listeners in the production code.
     arr.push(cb as (e: MessageEvent) => void);
