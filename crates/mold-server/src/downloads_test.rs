@@ -222,6 +222,57 @@ async fn cancel_unknown_id_returns_false() {
     assert!(!queue.cancel("no-such-id").await);
 }
 
+#[test]
+fn cleanup_preserves_sha256_verified_files_and_deletes_partials() {
+    use crate::downloads::cleanup_partials_in_dir;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+
+    // A "verified" file: both the file and its marker exist — both should survive.
+    let verified = dir.join("transformer.gguf");
+    let verified_marker = dir.join("transformer.gguf.sha256-verified");
+    std::fs::write(&verified, b"verified payload").unwrap();
+    std::fs::write(&verified_marker, b"").unwrap();
+
+    // A "partial" file with no marker — should be deleted.
+    let partial = dir.join("vae.safetensors");
+    std::fs::write(&partial, b"partial payload").unwrap();
+
+    // A stray orphan marker (no matching file) — should survive (marker files
+    // are always kept; they're cheap and harmless).
+    let orphan_marker = dir.join("orphan.bin.sha256-verified");
+    std::fs::write(&orphan_marker, b"").unwrap();
+
+    cleanup_partials_in_dir(dir);
+
+    assert!(
+        verified.exists(),
+        "verified file should be preserved (has .sha256-verified marker)"
+    );
+    assert!(
+        verified_marker.exists(),
+        ".sha256-verified marker should be preserved"
+    );
+    assert!(
+        !partial.exists(),
+        "partial file (no marker) should be deleted"
+    );
+    assert!(
+        orphan_marker.exists(),
+        "orphan .sha256-verified marker should be preserved"
+    );
+}
+
+#[test]
+fn cleanup_handles_missing_dir_gracefully() {
+    use crate::downloads::cleanup_partials_in_dir;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("does-not-exist");
+    // Should not panic.
+    cleanup_partials_in_dir(&missing);
+    assert!(!missing.exists());
+}
+
 /// Fails once, then succeeds.
 #[derive(Clone, Default)]
 struct FlakyPuller {

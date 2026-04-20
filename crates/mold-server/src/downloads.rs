@@ -289,8 +289,11 @@ impl PullDriver for HfPullDriver {
     }
 }
 
-/// Delete partial files under `<models_dir>/<sanitized>/` for a cancelled pull.
-/// Leaves the HF cache under `~/.cache/huggingface` intact so retry is cheap.
+/// Delete partial files under `<models_dir>/<sanitized>/` for a cancelled or
+/// failed pull. Preserves any file that has a sibling `<file>.sha256-verified`
+/// marker (and the marker itself) — those represent fully-downloaded,
+/// integrity-checked content that should survive a retry/cancel cycle. Also
+/// leaves the HF cache under `~/.cache/huggingface` intact so retry is cheap.
 fn cleanup_partials_for_model(model: &str) {
     use mold_core::manifest::resolve_model_name;
     let canonical = resolve_model_name(model);
@@ -299,12 +302,64 @@ fn cleanup_partials_for_model(model: &str) {
     mold_core::download::remove_pulling_marker(&canonical);
     if let Ok(models_dir) = std::env::var("MOLD_MODELS_DIR") {
         let target = std::path::PathBuf::from(models_dir).join(&sanitized);
-        let _ = std::fs::remove_dir_all(target);
+        cleanup_partials_in_dir(&target);
         return;
     }
     if let Some(home) = dirs::home_dir() {
         let target = home.join(".mold/models").join(&sanitized);
-        let _ = std::fs::remove_dir_all(target);
+        cleanup_partials_in_dir(&target);
+    }
+}
+
+/// Marker suffix written after a successful SHA-256 verification.
+/// A file `foo.safetensors` is "verified" when `foo.safetensors.sha256-verified`
+/// exists next to it.
+const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
+
+/// Walk `dir` and delete every regular file that does NOT have a sibling
+/// `<file>.sha256-verified` marker. Files that are themselves `*.sha256-verified`
+/// markers are preserved. Best-effort — I/O errors are swallowed because cleanup
+/// runs on terminal paths where we can't recover anyway.
+///
+/// If `dir` does not exist or is not a directory, this is a no-op. Subdirectories
+/// are descended into and pruned if they end up empty.
+pub(crate) fn cleanup_partials_in_dir(dir: &std::path::Path) {
+    if !dir.is_dir() {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            cleanup_partials_in_dir(&path);
+            // Prune the directory if it's now empty.
+            let _ = std::fs::remove_dir(&path);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Keep marker files themselves.
+        if name.ends_with(SHA256_VERIFIED_SUFFIX) {
+            continue;
+        }
+        // Keep any file that has a sibling `<file>.sha256-verified` marker.
+        let marker = path.with_file_name(format!("{name}{SHA256_VERIFIED_SUFFIX}"));
+        if marker.exists() {
+            continue;
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
 
