@@ -126,6 +126,8 @@ pub struct ZImageEngine {
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
+    /// Per-request placement override.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl ZImageEngine {
@@ -140,6 +142,7 @@ impl ZImageEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -346,7 +349,7 @@ impl ZImageEngine {
         self.base.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
         let qwen3_preference = self.qwen3_variant.as_deref();
-        let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) = {
+        let (resolved_paths, is_qwen3_gguf, te_on_gpu, _te_auto_device_label) = {
             let bf16_paths = self.base.paths.text_encoder_files.clone();
             let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
             crate::encoders::variant_resolution::resolve_qwen3_variant(
@@ -364,11 +367,22 @@ impl ZImageEngine {
             .progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-        let te_device = if te_on_gpu {
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let auto_te_device = if te_on_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
+        let te_device = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_te_device.clone()),
+        )?;
+        let te_on_gpu = !te_device.is_cpu();
+        let te_device_label = if te_on_gpu { "GPU" } else { "CPU" };
         let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
 
         // Load text encoder
@@ -482,7 +496,7 @@ impl ZImageEngine {
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let qwen3_resolve_start = Instant::now();
             let qwen3_preference = self.qwen3_variant.as_deref();
-            let (resolved_paths, is_qwen3_gguf, te_on_gpu, te_device_label) = {
+            let (resolved_paths, is_qwen3_gguf, te_on_gpu, _te_auto_device_label) = {
                 let bf16_paths = self.base.paths.text_encoder_files.clone();
                 let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
                 crate::encoders::variant_resolution::resolve_qwen3_variant(
@@ -500,11 +514,22 @@ impl ZImageEngine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-            let te_device = if te_on_gpu {
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let auto_te_device = if te_on_gpu {
                 device.clone()
             } else {
                 Device::Cpu
             };
+            let te_device = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(auto_te_device.clone()),
+            )?;
+            let te_on_gpu = !te_device.is_cpu();
+            let te_device_label = if te_on_gpu { "GPU" } else { "CPU" };
             let te_dtype = if te_on_gpu { dtype } else { DType::F32 };
 
             let bf16_cfg = encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b();
@@ -840,8 +865,8 @@ impl ZImageEngine {
     }
 }
 
-impl InferenceEngine for ZImageEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl ZImageEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Z-Image (flow-matching), ignoring"
@@ -1204,6 +1229,15 @@ impl InferenceEngine for ZImageEngine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for ZImageEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
