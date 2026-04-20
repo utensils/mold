@@ -649,6 +649,9 @@ pub struct FluxEngine {
     lora_delta_cache: Arc<Mutex<super::lora::LoraDeltaCache>>,
     /// Optional shared tokenizer pool for cross-engine caching.
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+    /// Per-request placement override. Set at the start of `generate()`,
+    /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl FluxEngine {
@@ -678,6 +681,7 @@ impl FluxEngine {
             active_lora: None,
             lora_delta_cache: Arc::new(Mutex::new(super::lora::LoraDeltaCache::new())),
             shared_pool,
+            pending_placement: None,
         }
     }
 
@@ -962,7 +966,7 @@ impl FluxEngine {
         self.base.progress.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
-        let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+        let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
             crate::encoders::variant_resolution::resolve_t5_variant(
                 &self.base.progress,
                 t5_preference,
@@ -973,7 +977,21 @@ impl FluxEngine {
         self.base
             .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
-        let t5_device = if t5_on_gpu { &device } else { &cpu };
+        // Tier 1: a `text_encoders` group override replaces the VRAM-aware decision.
+        // Tier 2 (Task 10) adds per-encoder overrides via `placement.advanced.t5`.
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let auto_t5_device = if t5_on_gpu { device.clone() } else { cpu.clone() };
+        let t5_device_owned = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_t5_device.clone()),
+        )?;
+        let t5_device = &t5_device_owned;
+        let t5_on_gpu = !t5_device.is_cpu();
+        let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
         let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
         // Load T5 encoder
@@ -1008,7 +1026,13 @@ impl FluxEngine {
             free_after_t5,
             CLIP_VRAM_THRESHOLD,
         );
-        let clip_device = if clip_on_gpu { &device } else { &cpu };
+        let auto_clip_device = if clip_on_gpu { device.clone() } else { cpu.clone() };
+        let clip_device_owned = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_clip_device.clone()),
+        )?;
+        let clip_device = &clip_device_owned;
+        let clip_on_gpu = !clip_device.is_cpu();
         let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
         let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
 
@@ -1139,7 +1163,7 @@ impl FluxEngine {
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
-            let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+            let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
                 crate::encoders::variant_resolution::resolve_t5_variant(
                     &self.base.progress,
                     t5_preference,
@@ -1151,7 +1175,20 @@ impl FluxEngine {
                 .progress
                 .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-            let t5_device = if t5_on_gpu { &device } else { &Device::Cpu };
+            // Tier 1: a `text_encoders` group override replaces the VRAM-aware decision.
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let auto_t5_device = if t5_on_gpu { device.clone() } else { Device::Cpu };
+            let t5_device_owned = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(auto_t5_device.clone()),
+            )?;
+            let t5_device = &t5_device_owned;
+            let t5_on_gpu = !t5_device.is_cpu();
+            let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
             let t5_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
             let t5_size = std::fs::metadata(&resolved_t5_path)
@@ -1198,7 +1235,13 @@ impl FluxEngine {
                 free_for_clip,
                 CLIP_VRAM_THRESHOLD,
             );
-            let clip_device = if clip_on_gpu { &device } else { &Device::Cpu };
+            let auto_clip_device = if clip_on_gpu { device.clone() } else { Device::Cpu };
+            let clip_device_owned = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(auto_clip_device.clone()),
+            )?;
+            let clip_device = &clip_device_owned;
+            let clip_on_gpu = !clip_device.is_cpu();
             let clip_dtype = if clip_on_gpu { gpu_dtype } else { DType::F32 };
             let clip_device_label = if clip_on_gpu { "GPU" } else { "CPU" };
 
@@ -1624,8 +1667,8 @@ impl FluxEngine {
     }
 }
 
-impl InferenceEngine for FluxEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl FluxEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for FLUX (flow-matching), ignoring");
         }
@@ -1852,6 +1895,15 @@ impl InferenceEngine for FluxEngine {
                 start,
             )
         })()
+    }
+}
+
+impl InferenceEngine for FluxEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
