@@ -2134,4 +2134,97 @@ mod tests {
         let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();
         assert_eq!(db_after.count().unwrap(), 0, "DB row should be gone");
     }
+
+    // ─── Downloads UI (Agent A) ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn post_api_downloads_enqueues_job() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let body = serde_json::json!({ "model": "flux-schnell:q4" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/downloads")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("id").and_then(|x| x.as_str()).is_some());
+        assert!(v.get("position").and_then(|x| x.as_u64()).is_some());
+
+        let listing = state.downloads.listing().await;
+        // No driver running in this test, so the job sits in `queued`.
+        assert_eq!(listing.queued.len(), 1);
+        assert_eq!(listing.queued[0].model, "flux-schnell:q4");
+    }
+
+    #[tokio::test]
+    async fn post_api_downloads_unknown_model_400() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        let body = serde_json::json!({ "model": "not-a-real-model:xyz" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/downloads")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_api_downloads_duplicate_is_idempotent_409() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let body = serde_json::json!({ "model": "flux-schnell:q4" });
+        let make_req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/downloads")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let res1 = app.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let bytes1 = axum::body::to_bytes(res1.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&bytes1).unwrap();
+        let id1 = v1["id"].as_str().unwrap().to_string();
+
+        let res2 = app.oneshot(make_req()).await.unwrap();
+        assert_eq!(res2.status(), StatusCode::CONFLICT);
+        let bytes2 = axum::body::to_bytes(res2.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+        let id2 = v2["id"].as_str().unwrap().to_string();
+
+        assert_eq!(id1, id2, "duplicate enqueue must return the same id");
+    }
 }

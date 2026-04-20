@@ -178,6 +178,10 @@ pub fn create_router(state: AppState) -> Router {
             get(get_gallery_thumbnail),
         )
         .route("/api/gallery/preview/:filename", get(get_gallery_preview))
+        // ─── Downloads UI (Agent A) ────────────────────────────────────────
+        .route("/api/downloads", get(list_downloads).post(create_download))
+        .route("/api/downloads/:id", delete(delete_download))
+        .route("/api/downloads/stream", get(stream_downloads))
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/status", get(server_status))
@@ -2445,6 +2449,127 @@ fn query_gpu_info() -> Option<GpuInfo> {
         vram_total_mb: parts[1].parse().ok()?,
         vram_used_mb: parts[2].parse().ok()?,
     })
+}
+
+// ─── Downloads UI (Agent A) ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct CreateDownloadBody {
+    pub model: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CreateDownloadResponse {
+    pub id: String,
+    pub position: usize,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/downloads",
+    tag = "downloads",
+    request_body = CreateDownloadBody,
+    responses(
+        (status = 200, description = "Enqueued; position 0 = will start immediately", body = CreateDownloadResponse),
+        (status = 400, description = "Unknown model"),
+        (status = 409, description = "Already active or queued; body contains existing id", body = CreateDownloadResponse),
+    )
+)]
+pub async fn create_download(
+    State(state): State<AppState>,
+    Json(body): Json<CreateDownloadBody>,
+) -> axum::response::Response {
+    use crate::downloads::{EnqueueError, EnqueueOutcome};
+    match state.downloads.enqueue(body.model.clone()).await {
+        Ok((id, position, EnqueueOutcome::Created)) => (
+            StatusCode::OK,
+            Json(CreateDownloadResponse { id, position }),
+        )
+            .into_response(),
+        Ok((id, position, EnqueueOutcome::AlreadyPresent)) => (
+            StatusCode::CONFLICT,
+            Json(CreateDownloadResponse { id, position }),
+        )
+            .into_response(),
+        Err(EnqueueError::UnknownModel(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("unknown model '{}'. Run 'mold list' to see available models.", body.model)
+            })),
+        )
+            .into_response(),
+        Err(EnqueueError::LockPoisoned) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "download queue state is corrupt" })),
+        )
+            .into_response(),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/downloads/{id}",
+    tag = "downloads",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 204, description = "Cancelled"),
+        (status = 404, description = "Unknown id"),
+    )
+)]
+pub async fn delete_download(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if state.downloads.cancel(&id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown download id '{id}'") })),
+        )
+            .into_response()
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/downloads",
+    tag = "downloads",
+    responses((status = 200, description = "Current queue state"))
+)]
+pub async fn list_downloads(State(state): State<AppState>) -> axum::response::Response {
+    Json(state.downloads.listing().await).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/downloads/stream",
+    tag = "downloads",
+    responses((status = 200, description = "SSE stream of DownloadEvent JSON")),
+)]
+pub async fn stream_downloads(
+    State(state): State<AppState>,
+) -> Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::Event;
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::StreamExt as _;
+
+    let rx = state.downloads.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(event) => {
+            let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+            Some(Ok(Event::default().event("download").data(data)))
+        }
+        Err(_lagged) => None,
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "regis
 tracing-appender = "0.2"
 base64 = "0.22"
 futures-core = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 async-trait = "0.1"
 thiserror = "1"
