@@ -28,6 +28,8 @@ struct LoadedSDXL {
     tokenizer_g: tokenizers::Tokenizer,
     sd_config: stable_diffusion::StableDiffusionConfig,
     device: Device,
+    /// Device the CLIP-L / CLIP-G weights live on (shared — Tier 1 groups them).
+    clip_device: Device,
     dtype: DType,
 }
 
@@ -39,6 +41,7 @@ pub struct SDXLEngine {
     prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -62,6 +65,7 @@ impl SDXLEngine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -212,13 +216,24 @@ impl SDXLEngine {
             .progress
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
+        // Tier 1: honor `placement.text_encoders` for both CLIPs as a group.
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let clip_device = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(device.clone()),
+        )?;
+
         // Load CLIP-L encoder
         self.base.progress.stage_start("Loading CLIP-L encoder");
         let clip_l_start = Instant::now();
         let clip_l = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
             &clip_encoder,
-            &device,
+            &clip_device,
             DType::F32,
         )?;
         self.base
@@ -235,7 +250,7 @@ impl SDXLEngine {
         let clip_g = stable_diffusion::build_clip_transformer(
             clip2_config,
             &clip_encoder_2,
-            &device,
+            &clip_device,
             DType::F32,
         )?;
         self.base
@@ -257,6 +272,7 @@ impl SDXLEngine {
             tokenizer_g,
             sd_config,
             device,
+            clip_device,
             dtype,
         });
 
@@ -453,6 +469,7 @@ impl SDXLEngine {
         negative_prompt: &str,
         max_len: usize,
         device: &Device,
+        clip_device: &Device,
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
@@ -463,7 +480,7 @@ impl SDXLEngine {
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_l_start = Instant::now();
-                let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, device)?;
+                let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, clip_device)?;
                 let text_emb_l = clip_l.forward(&tokens_l)?;
                 self.base
                     .progress
@@ -471,7 +488,7 @@ impl SDXLEngine {
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-G)");
                 let encode_g_start = Instant::now();
-                let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, device)?;
+                let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, clip_device)?;
                 let text_emb_g = clip_g.forward(&tokens_g)?;
                 self.base
                     .progress
@@ -481,10 +498,10 @@ impl SDXLEngine {
 
                 let text_embeddings = if use_cfg {
                     let uncond_tokens_l =
-                        Self::tokenize(tokenizer_l, negative_prompt, max_len, device)?;
+                        Self::tokenize(tokenizer_l, negative_prompt, max_len, clip_device)?;
                     let uncond_emb_l = clip_l.forward(&uncond_tokens_l)?;
                     let uncond_tokens_g =
-                        Self::tokenize(tokenizer_g, negative_prompt, max_len, device)?;
+                        Self::tokenize(tokenizer_g, negative_prompt, max_len, clip_device)?;
                     let uncond_emb_g = clip_g.forward(&uncond_tokens_g)?;
                     let uncond_embeddings =
                         Tensor::cat(&[&uncond_emb_l, &uncond_emb_g], D::Minus1)?;
@@ -493,6 +510,7 @@ impl SDXLEngine {
                     text_embeddings
                 };
 
+                let text_embeddings = text_embeddings.to_device(device)?;
                 Ok(text_embeddings.to_dtype(dtype)?)
             })?;
         if cache_hit {
@@ -585,12 +603,22 @@ impl SDXLEngine {
             let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
                 .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
 
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let clip_device = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(device.clone()),
+            )?;
+
             self.base.progress.stage_start("Loading CLIP-L encoder");
             let clip_l_start = Instant::now();
             let clip_l = stable_diffusion::build_clip_transformer(
                 &sd_config.clip,
                 &clip_encoder,
-                &device,
+                &clip_device,
                 DType::F32,
             )?;
             self.base
@@ -606,7 +634,7 @@ impl SDXLEngine {
             let clip_g = stable_diffusion::build_clip_transformer(
                 clip2_config,
                 &clip_encoder_2,
-                &device,
+                &clip_device,
                 DType::F32,
             )?;
             self.base
@@ -622,6 +650,7 @@ impl SDXLEngine {
                 neg,
                 max_len,
                 &device,
+                &clip_device,
                 dtype,
                 guidance,
             )?;
@@ -802,8 +831,8 @@ impl SDXLEngine {
     }
 }
 
-impl InferenceEngine for SDXLEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl SDXLEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -846,6 +875,7 @@ impl InferenceEngine for SDXLEngine {
             neg,
             max_len,
             &loaded.device,
+            &loaded.clip_device,
             loaded.dtype,
             guidance,
         )?;
@@ -978,6 +1008,15 @@ impl InferenceEngine for SDXLEngine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for SDXLEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
