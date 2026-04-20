@@ -1203,6 +1203,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1254,6 +1255,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1508,6 +1510,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
