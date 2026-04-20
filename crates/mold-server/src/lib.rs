@@ -1,4 +1,6 @@
 pub mod auth;
+// Agent A (downloads)
+pub mod downloads;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod logging;
@@ -197,6 +199,19 @@ pub async fn run_server(
         tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
     }
 
+    // ── Downloads UI (Agent A) ──────────────────────────────────────────────
+    // Single-writer download queue driver. Bind the `JoinHandle` so we can
+    // `.abort()` it when `axum::serve` returns — same pattern as the resource
+    // telemetry aggregator (see commit 5e43886). Without this the task would
+    // outlive graceful shutdown and keep polling its cancellation token until
+    // process exit.
+    let downloads_shutdown = tokio_util::sync::CancellationToken::new();
+    let downloads_driver = crate::downloads::spawn_driver(
+        state.downloads.clone(),
+        std::sync::Arc::new(crate::downloads::HfPullDriver),
+        downloads_shutdown.clone(),
+    );
+
     // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
@@ -342,6 +357,12 @@ pub async fn run_server(
     })
     .await?;
 
+    // Server has stopped accepting requests — cancel the downloads token so the
+    // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
+    // the task is cleaned up on the same shutdown path as the HTTP server.
+    // Matches the aggregator handle pattern from commit 5e43886.
+    downloads_shutdown.cancel();
+    downloads_driver.abort();
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();

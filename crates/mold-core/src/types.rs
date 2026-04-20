@@ -2262,3 +2262,165 @@ pub fn default_output_filename(
         format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
     }
 }
+
+// ─── Downloads UI (Agent A) ─────────────────────────────────────────────────
+
+/// Lifecycle state of a download job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Queued,
+    Active,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Download queue entry. Mirrored 1:1 on the wire; the SPA consumes this as
+/// `DownloadJobWire` in `web/src/types.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadJob {
+    pub id: String,
+    pub model: String,
+    pub status: JobStatus,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Internally tagged enum — on the wire each variant is `{"type": "...", ...}`.
+/// Keep `#[serde(tag = "type", rename_all = "snake_case")]` stable; the SPA's
+/// `DownloadEventWire` union in `types.ts` depends on this exact shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DownloadEvent {
+    Enqueued {
+        id: String,
+        model: String,
+        position: usize,
+    },
+    Dequeued {
+        id: String,
+    },
+    Started {
+        id: String,
+        files_total: usize,
+        bytes_total: u64,
+    },
+    Progress {
+        id: String,
+        files_done: usize,
+        bytes_done: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_file: Option<String>,
+    },
+    FileDone {
+        id: String,
+        filename: String,
+    },
+    JobDone {
+        id: String,
+        model: String,
+    },
+    JobFailed {
+        id: String,
+        error: String,
+    },
+    JobCancelled {
+        id: String,
+    },
+}
+
+/// Listing returned from `GET /api/downloads`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadsListing {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<DownloadJob>,
+    pub queued: Vec<DownloadJob>,
+    pub history: Vec<DownloadJob>,
+}
+
+#[cfg(test)]
+mod downloads_types_tests {
+    use super::*;
+
+    #[test]
+    fn job_status_serde_snake_case() {
+        let cases = [
+            (JobStatus::Queued, "\"queued\""),
+            (JobStatus::Active, "\"active\""),
+            (JobStatus::Completed, "\"completed\""),
+            (JobStatus::Failed, "\"failed\""),
+            (JobStatus::Cancelled, "\"cancelled\""),
+        ];
+        for (status, wire) in cases {
+            let s = serde_json::to_string(&status).unwrap();
+            assert_eq!(s, wire);
+            let back: JobStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn download_job_round_trip() {
+        let job = DownloadJob {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            model: "flux-dev:q4".to_string(),
+            status: JobStatus::Active,
+            files_done: 2,
+            files_total: 5,
+            bytes_done: 1_000_000,
+            bytes_total: 3_000_000,
+            current_file: Some("transformer.gguf".to_string()),
+            started_at: Some(1_700_000_000_000),
+            completed_at: None,
+            error: None,
+        };
+        let s = serde_json::to_string(&job).unwrap();
+        let back: DownloadJob = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, job.id);
+        assert_eq!(back.model, job.model);
+        assert_eq!(back.status, JobStatus::Active);
+        assert_eq!(back.files_done, 2);
+        assert_eq!(back.files_total, 5);
+        assert_eq!(back.bytes_done, 1_000_000);
+        assert_eq!(back.bytes_total, 3_000_000);
+        assert_eq!(back.current_file.as_deref(), Some("transformer.gguf"));
+    }
+
+    #[test]
+    fn download_event_enqueued_tag_shape() {
+        let evt = DownloadEvent::Enqueued {
+            id: "abc".to_string(),
+            model: "flux-dev:q4".to_string(),
+            position: 2,
+        };
+        let s = serde_json::to_string(&evt).unwrap();
+        assert!(s.contains("\"type\":\"enqueued\""), "wire: {s}");
+        assert!(s.contains("\"id\":\"abc\""), "wire: {s}");
+        assert!(s.contains("\"model\":\"flux-dev:q4\""), "wire: {s}");
+        assert!(s.contains("\"position\":2"), "wire: {s}");
+    }
+
+    #[test]
+    fn download_event_progress_tag_shape() {
+        let evt = DownloadEvent::Progress {
+            id: "abc".to_string(),
+            files_done: 1,
+            bytes_done: 2_000_000,
+            current_file: Some("clip.safetensors".to_string()),
+        };
+        let s = serde_json::to_string(&evt).unwrap();
+        assert!(s.contains("\"type\":\"progress\""), "wire: {s}");
+        assert!(s.contains("\"bytes_done\":2000000"), "wire: {s}");
+    }
+}
