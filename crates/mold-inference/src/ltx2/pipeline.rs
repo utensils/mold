@@ -30,6 +30,7 @@ pub struct Ltx2Engine {
     loaded: bool,
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl Ltx2Engine {
@@ -57,6 +58,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: None,
             on_progress: None,
+            pending_placement: None,
         }
     }
 
@@ -393,8 +395,8 @@ fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
     Ok(())
 }
 
-impl InferenceEngine for Ltx2Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl Ltx2Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if !self.loaded {
             self.load()?;
         }
@@ -501,6 +503,15 @@ impl InferenceEngine for Ltx2Engine {
             seed_used: plan.seed,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for Ltx2Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
