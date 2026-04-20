@@ -329,6 +329,11 @@ pub struct GenerateRequest {
     /// Optional temporal latent upscaling mode for LTX-2 pipelines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Optional per-component device placement override. `None` preserves
+    /// the engine's VRAM-aware auto-placement end-to-end. See §3 of the
+    /// 2026-04-19 model-ui-overhaul design doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<DevicePlacement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -796,7 +801,7 @@ pub enum GpuWorkerState {
 /// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
 /// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
 /// field deserializes to `Auto`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeviceRef {
     Auto,
@@ -826,7 +831,7 @@ impl DeviceRef {
 ///   (FLUX, Flux.2, Z-Image, Qwen-Image; SD3.5 stretch). When `Some`, each
 ///   populated field overrides the Tier 1 group knob for that specific
 ///   component. When `None`, only the group knob is honored.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct DevicePlacement {
     #[serde(default)]
     pub text_encoders: DeviceRef,
@@ -841,7 +846,7 @@ pub struct DevicePlacement {
 /// every encoder — FLUX has T5 plus CLIP-L, Flux.2 and Z-Image have Qwen3,
 /// Qwen-Image has Qwen2.5-VL. `None` means "follow the Tier 1 group knob";
 /// `Some(DeviceRef::Auto)` means "follow the engine's own auto logic".
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AdvancedPlacement {
     #[serde(default)]
     pub transformer: DeviceRef,
@@ -1078,6 +1083,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -1234,6 +1240,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -1280,6 +1287,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -1323,6 +1331,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -1368,6 +1377,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -1411,6 +1421,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
 
         let metadata =
@@ -1622,6 +1633,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1671,6 +1683,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -1733,6 +1746,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1780,6 +1794,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1848,6 +1863,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));
