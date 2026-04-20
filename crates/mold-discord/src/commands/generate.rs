@@ -4,18 +4,83 @@ use crate::state::Context;
 use anyhow::Result;
 use mold_core::{GenerateRequest, Ltx2PipelineMode, ModelInfoExtended, OutputFormat};
 use poise::serenity_prelude as serenity;
+use std::time::Duration;
 
-/// Autocomplete function for model names.
-async fn autocomplete_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
-    let models = ctx.data().cached_models().await;
+/// Hard ceiling on how long we're willing to spend computing autocomplete
+/// choices. Discord drops the interaction after 3 s and shows "Loading options
+/// failed" — we stay well under that.
+const AUTOCOMPLETE_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Pick the best set of model names to suggest for the given partial input.
+///
+/// Pure function so we can test the ranking logic without a live bot. The
+/// autocomplete fn wraps this and adds the Discord-plumbing + timeout guard.
+pub fn rank_model_suggestions(
+    cached: &[ModelInfoExtended],
+    fallback_names: &[&str],
+    partial: &str,
+) -> Vec<String> {
     let lower = partial.to_lowercase();
-    models
+    let matches_partial =
+        |name: &str| -> bool { lower.is_empty() || name.to_lowercase().contains(&lower) };
+
+    // When we have a populated cache, prefer downloaded models and fall back
+    // to undownloaded (they still work — the server auto-pulls on demand).
+    if !cached.is_empty() {
+        let mut downloaded: Vec<String> = cached
+            .iter()
+            .filter(|m| m.downloaded && matches_partial(&m.info.name))
+            .map(|m| m.info.name.clone())
+            .collect();
+        if downloaded.len() < 25 {
+            let room = 25 - downloaded.len();
+            let also: Vec<String> = cached
+                .iter()
+                .filter(|m| !m.downloaded && matches_partial(&m.info.name))
+                .take(room)
+                .map(|m| m.info.name.clone())
+                .collect();
+            downloaded.extend(also);
+        }
+        downloaded.truncate(25);
+        return downloaded;
+    }
+
+    // Cold cache (bot just started / server unreachable): offer manifest
+    // names so the dropdown still renders instead of "Loading options failed".
+    fallback_names
         .iter()
-        .filter(|m| m.downloaded)
-        .filter(|m| m.info.name.to_lowercase().contains(&lower))
-        .map(|m| m.info.name.clone())
-        .take(25) // Discord autocomplete limit
+        .filter(|n| matches_partial(n))
+        .take(25)
+        .map(|n| n.to_string())
         .collect()
+}
+
+fn manifest_fallback_names() -> Vec<String> {
+    mold_core::manifest::visible_manifests()
+        .filter(|m| !mold_core::manifest::UTILITY_FAMILIES.contains(&m.family.as_str()))
+        .map(|m| m.name.clone())
+        .collect()
+}
+
+/// Autocomplete function for model names. Reads the cached model list without
+/// blocking on network I/O; the cache is refreshed by a background task so the
+/// hot path here is always a quick `RwLock::read`. Falls back to the static
+/// manifest if the cache is still cold so users never see "Loading options
+/// failed" due to a slow first fetch.
+async fn autocomplete_model(ctx: Context<'_>, partial: &str) -> Vec<String> {
+    let partial = partial.to_string();
+    let data = ctx.data();
+    let work = async {
+        let cached = data.cached_models().await;
+        let fallback = manifest_fallback_names();
+        let fallback_refs: Vec<&str> = fallback.iter().map(String::as_str).collect();
+        rank_model_suggestions(&cached, &fallback_refs, &partial)
+    };
+    match tokio::time::timeout(AUTOCOMPLETE_BUDGET, work).await {
+        Ok(v) => v,
+        Err(_) => manifest_fallback_names().into_iter().take(25).collect(),
+    }
 }
 
 /// Discord-selectable container for video generations. Videos are always
@@ -694,6 +759,92 @@ mod tests {
         // Landscape aspect preserved roughly
         let (w, h) = snap_dims_to_multiple_of_16(800, 600, 1024);
         assert_eq!((w, h), (800, 608));
+    }
+
+    // --- autocomplete ranking ---
+
+    fn mk_model(name: &str, family: &str, downloaded: bool) -> ModelInfoExtended {
+        ModelInfoExtended {
+            info: mold_core::ModelInfo {
+                name: name.to_string(),
+                family: family.to_string(),
+                size_gb: 1.0,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: "test/repo".to_string(),
+            },
+            defaults: defaults(),
+            downloaded,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+        }
+    }
+
+    #[test]
+    fn rank_prefers_downloaded_then_undownloaded() {
+        let models = vec![
+            mk_model("flux-schnell:q8", "flux", true),
+            mk_model("flux-dev:q4", "flux", false),
+            mk_model("ltx-2-19b-distilled:fp8", "ltx2", true),
+        ];
+        let out = rank_model_suggestions(&models, &[], "");
+        assert_eq!(
+            out,
+            vec![
+                "flux-schnell:q8".to_string(),
+                "ltx-2-19b-distilled:fp8".to_string(),
+                "flux-dev:q4".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rank_filters_by_partial_case_insensitive() {
+        let models = vec![
+            mk_model("flux-schnell:q8", "flux", true),
+            mk_model("flux-dev:q4", "flux", true),
+            mk_model("ltx-2-19b-distilled:fp8", "ltx2", true),
+        ];
+        let out = rank_model_suggestions(&models, &[], "FLUX");
+        assert!(out.iter().all(|n| n.to_lowercase().contains("flux")));
+        assert!(out.contains(&"flux-schnell:q8".to_string()));
+        assert!(!out.contains(&"ltx-2-19b-distilled:fp8".to_string()));
+    }
+
+    #[test]
+    fn rank_caps_at_discord_limit() {
+        let models: Vec<_> = (0..40)
+            .map(|i| mk_model(&format!("model-{i}:q8"), "flux", true))
+            .collect();
+        let out = rank_model_suggestions(&models, &[], "");
+        assert_eq!(out.len(), 25);
+    }
+
+    #[test]
+    fn rank_falls_back_to_manifest_when_cache_cold() {
+        // Simulate bot just started: cache empty, rely on static manifest.
+        let fallback = vec!["flux-schnell:q8", "ltx-2-19b-distilled:fp8", "sd15:fp16"];
+        let out = rank_model_suggestions(&[], &fallback, "ltx");
+        assert_eq!(out, vec!["ltx-2-19b-distilled:fp8".to_string()]);
+    }
+
+    #[test]
+    fn rank_empty_partial_returns_everything_within_limit() {
+        let models: Vec<_> = (0..5)
+            .map(|i| mk_model(&format!("m{i}:q8"), "flux", true))
+            .collect();
+        let out = rank_model_suggestions(&models, &[], "");
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn manifest_fallback_is_non_empty_and_excludes_utilities() {
+        let names = manifest_fallback_names();
+        assert!(!names.is_empty(), "manifest should supply fallback names");
+        assert!(
+            !names.iter().any(|n| n.starts_with("qwen3-expand")),
+            "utility models should be excluded from suggestions: {names:?}"
+        );
     }
 
     // --- Header sniff ---

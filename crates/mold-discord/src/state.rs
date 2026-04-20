@@ -2,8 +2,10 @@ use crate::access::{AllowedRoles, BlockList};
 use crate::cooldown::CooldownTracker;
 use crate::quota::QuotaTracker;
 use mold_core::{ModelInfoExtended, MoldClient};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 /// Bot-wide configuration loaded from environment variables.
 #[derive(Debug)]
@@ -23,8 +25,16 @@ pub struct BotState {
     pub cooldowns: CooldownTracker,
     pub quotas: QuotaTracker,
     pub block_list: BlockList,
-    pub model_cache: RwLock<(Instant, Vec<ModelInfoExtended>)>,
+    /// Server-reported model list + the `Instant` it was last refreshed.
+    /// A background task refreshes this every `MODEL_CACHE_TTL`; callers
+    /// never trigger a fetch on the hot path, so Discord's 3-second
+    /// autocomplete budget is never at the mercy of server latency.
+    pub model_cache: Arc<RwLock<(Instant, Vec<ModelInfoExtended>)>>,
 }
+
+/// Background-refresh interval for `model_cache`. Kept well under Discord's
+/// 3-second autocomplete timeout so even a cold fetch never stalls users.
+pub const MODEL_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl std::fmt::Debug for BotState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,33 +56,58 @@ impl BotState {
             cooldowns: CooldownTracker::new(),
             quotas: QuotaTracker::new(),
             block_list: BlockList::new(),
-            model_cache: RwLock::new((Instant::now() - std::time::Duration::from_secs(60), vec![])),
+            model_cache: Arc::new(RwLock::new((
+                Instant::now() - Duration::from_secs(60),
+                vec![],
+            ))),
         }
     }
 
-    /// Get cached models list, refreshing if older than 30 seconds.
+    /// Read the current model cache without blocking on the network. Returns
+    /// whatever is there — possibly empty when the bot just started and the
+    /// background refresher hasn't completed its first fetch yet. Callers
+    /// that need a fallback (e.g. autocomplete) should substitute
+    /// `mold_core::manifest::visible_manifests()` in that case.
     pub async fn cached_models(&self) -> Vec<ModelInfoExtended> {
-        let cache_ttl = std::time::Duration::from_secs(30);
+        self.model_cache.read().await.1.clone()
+    }
 
-        {
-            let cache = self.model_cache.read().await;
-            if cache.0.elapsed() < cache_ttl && !cache.1.is_empty() {
-                return cache.1.clone();
-            }
-        }
+    /// Force-refresh the model cache. Used by the background refresher and
+    /// by commands like `/models` that can afford to pay a round-trip.
+    pub async fn refresh_models(&self) -> Result<(), mold_core::MoldError> {
+        let models = self.client.list_models_extended().await?;
+        let mut cache = self.model_cache.write().await;
+        *cache = (Instant::now(), models);
+        Ok(())
+    }
 
-        // Cache miss — fetch from server
-        match self.client.list_models_extended().await {
-            Ok(models) => {
-                let mut cache = self.model_cache.write().await;
-                *cache = (Instant::now(), models.clone());
-                models
+    /// Spawn a background task that refreshes `model_cache` every
+    /// `MODEL_CACHE_TTL`. The first refresh runs immediately so the very
+    /// first `/generate` invocation after startup already has data.
+    pub fn spawn_model_cache_refresher(
+        cache: Arc<RwLock<(Instant, Vec<ModelInfoExtended>)>>,
+        client: MoldClient,
+    ) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(MODEL_CACHE_TTL);
+            // First tick fires immediately; subsequent ticks wait the full interval.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match client.list_models_extended().await {
+                    Ok(models) => {
+                        let mut guard = cache.write().await;
+                        *guard = (Instant::now(), models);
+                        debug!("model cache refreshed ({} entries)", guard.1.len());
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "model cache refresh failed; keeping previous entries",
+                        );
+                    }
+                }
             }
-            Err(_) => {
-                // Return stale cache on error
-                let cache = self.model_cache.read().await;
-                cache.1.clone()
-            }
-        }
+        });
     }
 }

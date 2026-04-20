@@ -89,7 +89,11 @@ pub async fn run() -> Result<()> {
                 info!("Bot connected, registering slash commands...");
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 info!("Slash commands registered");
-                Ok(BotState::new(client, config))
+                let state = BotState::new(client.clone(), config);
+                // Keep the model cache warm so autocomplete never races Discord's
+                // 3-second interaction budget against server latency.
+                BotState::spawn_model_cache_refresher(state.model_cache.clone(), client);
+                Ok(state)
             })
         })
         .build();
