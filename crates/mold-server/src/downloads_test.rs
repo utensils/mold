@@ -273,6 +273,56 @@ fn cleanup_handles_missing_dir_gracefully() {
     assert!(!missing.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn cleanup_does_not_follow_symlinks_outside_models_dir() {
+    use crate::downloads::cleanup_partials_in_dir;
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let models_dir = tmp.path().join("models");
+    let model_dir = models_dir.join("flux-schnell-q4");
+    std::fs::create_dir_all(&model_dir).unwrap();
+
+    // An "outside" file that must NOT be deleted by cleanup.
+    let outside_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside_file = outside_dir.join("precious.bin");
+    std::fs::write(&outside_file, b"do not delete me").unwrap();
+
+    // A real partial inside the model dir — should be deleted.
+    let partial = model_dir.join("vae.safetensors");
+    std::fs::write(&partial, b"partial payload").unwrap();
+
+    // A file symlink pointing to the outside file.
+    let file_link = model_dir.join("escape-file.bin");
+    symlink(&outside_file, &file_link).unwrap();
+
+    // A directory symlink pointing to the outside dir.
+    let dir_link = model_dir.join("escape-dir");
+    symlink(&outside_dir, &dir_link).unwrap();
+
+    cleanup_partials_in_dir(&model_dir);
+
+    // Absolute guarantees: outside-file and outside-dir contents stay intact.
+    assert!(
+        outside_file.exists(),
+        "outside file must not be deleted by cleanup"
+    );
+    assert!(
+        outside_dir.exists(),
+        "outside directory must not be deleted by cleanup"
+    );
+    // The partial inside the model dir must be gone.
+    assert!(!partial.exists(), "real partial should be deleted");
+    // Symlinks themselves are skipped (we don't chase hand-placed pointers).
+    // They may remain as-is; what matters is the target files survive.
+    // Accept both "link removed" and "link preserved" outcomes, but never a
+    // followed-and-deleted outcome.
+    let _ = file_link;
+    let _ = dir_link;
+}
+
 /// Process-wide gate for tests that call `drain_cleanups()`. The cleanup
 /// observation buffer is shared across tests in this binary, so tests that
 /// care about it must run serially.

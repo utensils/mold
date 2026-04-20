@@ -350,7 +350,23 @@ const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
 ///
 /// If `dir` does not exist or is not a directory, this is a no-op. Subdirectories
 /// are descended into and pruned if they end up empty.
+///
+/// **Safety:** symlinks (file or directory) are always skipped. Deleting follows
+/// `entry.path().symlink_metadata()` rather than `entry.file_type()` so a
+/// symlink planted inside the models dir can never cause recursion or deletion
+/// outside the tree. Before removing a file we also canonicalize the path and
+/// assert it's still under `dir`'s canonical root as a belt-and-braces check.
 pub(crate) fn cleanup_partials_in_dir(dir: &std::path::Path) {
+    // Resolve the intended root once. If this fails the dir doesn't exist or
+    // isn't accessible — treat as no-op.
+    let root = match dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    cleanup_partials_in_dir_under_root(dir, &root);
+}
+
+fn cleanup_partials_in_dir_under_root(dir: &std::path::Path, root: &std::path::Path) {
     if !dir.is_dir() {
         return;
     }
@@ -360,12 +376,25 @@ pub(crate) fn cleanup_partials_in_dir(dir: &std::path::Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
+
+        // Use symlink_metadata (does NOT follow symlinks) to detect symlinks
+        // before we decide whether to recurse or delete. A symlink
+        // (file or directory) is always skipped — we don't chase
+        // hand-placed pointers out of the models dir.
+        let meta = match path.symlink_metadata() {
+            Ok(m) => m,
             Err(_) => continue,
         };
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            tracing::warn!(
+                path = %path.display(),
+                "cleanup_partials: skipping symlink (not following)",
+            );
+            continue;
+        }
         if file_type.is_dir() {
-            cleanup_partials_in_dir(&path);
+            cleanup_partials_in_dir_under_root(&path, root);
             // Prune the directory if it's now empty.
             let _ = std::fs::remove_dir(&path);
             continue;
@@ -385,6 +414,24 @@ pub(crate) fn cleanup_partials_in_dir(dir: &std::path::Path) {
         let marker = path.with_file_name(format!("{name}{SHA256_VERIFIED_SUFFIX}"));
         if marker.exists() {
             continue;
+        }
+        // Belt-and-braces: canonicalize the target and refuse to delete
+        // anything that escapes the models-dir root. symlink_metadata already
+        // prevents symlink traversal, but this catches pathological cases
+        // (e.g. mount binds) before we hand the path to std::fs::remove_file.
+        match path.canonicalize() {
+            Ok(canon) => {
+                if !canon.starts_with(root) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        canon = %canon.display(),
+                        root = %root.display(),
+                        "cleanup_partials: refusing to delete file outside models dir",
+                    );
+                    continue;
+                }
+            }
+            Err(_) => continue,
         }
         let _ = std::fs::remove_file(&path);
     }
