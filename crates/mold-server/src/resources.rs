@@ -56,3 +56,74 @@ impl ResourceBroadcaster {
         self.latest.try_lock().ok().and_then(|g| g.clone())
     }
 }
+
+#[cfg(feature = "nvml")]
+pub(crate) mod nvml_source {
+    use mold_core::{GpuBackend, GpuSnapshot};
+    use nvml_wrapper::enums::device::UsedGpuMemory;
+    use nvml_wrapper::Nvml;
+
+    pub struct NvmlSource {
+        nvml: Nvml,
+    }
+
+    impl NvmlSource {
+        pub fn try_new() -> anyhow::Result<Self> {
+            let nvml = Nvml::init()?;
+            Ok(Self { nvml })
+        }
+
+        /// Produce a per-GPU snapshot. `pid` is `std::process::id()` of this
+        /// server process; we filter `running_compute_processes()` against it
+        /// to attribute `vram_used_by_mold`.
+        pub fn snapshot(&self, pid: u32) -> Vec<GpuSnapshot> {
+            let count = match self.nvml.device_count() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(err = %e, "NVML device_count failed");
+                    return Vec::new();
+                }
+            };
+            let mut out = Vec::with_capacity(count as usize);
+            for ordinal in 0..count {
+                let Ok(dev) = self.nvml.device_by_index(ordinal) else {
+                    continue;
+                };
+                let name = dev
+                    .name()
+                    .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
+                let mem = match dev.memory_info() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::debug!(ordinal, err = %e, "NVML memory_info failed");
+                        continue;
+                    }
+                };
+                let used_by_mold = dev.running_compute_processes().ok().map(|procs| {
+                    procs
+                        .iter()
+                        .filter(|p| p.pid == pid)
+                        .map(|p| match p.used_gpu_memory {
+                            UsedGpuMemory::Used(b) => b,
+                            UsedGpuMemory::Unavailable => 0,
+                        })
+                        .sum::<u64>()
+                });
+                let used_by_other = used_by_mold.map(|m| mem.used.saturating_sub(m));
+                out.push(GpuSnapshot {
+                    ordinal: ordinal as usize,
+                    name,
+                    backend: GpuBackend::Cuda,
+                    vram_total: mem.total,
+                    vram_used: mem.used,
+                    vram_used_by_mold: used_by_mold,
+                    vram_used_by_other: used_by_other,
+                });
+            }
+            out
+        }
+    }
+}
+
+#[cfg(feature = "nvml")]
+pub use nvml_source::NvmlSource;
