@@ -60,6 +60,9 @@ pub struct Flux2Engine {
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
+    /// Per-request placement override. Set at the start of `generate()`,
+    /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl Flux2Engine {
@@ -75,6 +78,7 @@ impl Flux2Engine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -391,7 +395,18 @@ impl Flux2Engine {
             .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-        let enc_device = if on_gpu { &device } else { &cpu };
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let auto_enc_device = if on_gpu { device.clone() } else { cpu.clone() };
+        let enc_device_owned = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_enc_device.clone()),
+        )?;
+        let enc_device = &enc_device_owned;
+        let on_gpu = !enc_device.is_cpu();
         let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
         let bf16_cfg = self.qwen3_bf16_config();
 
@@ -493,7 +508,18 @@ impl Flux2Engine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-            let enc_device = if on_gpu { &device } else { &Device::Cpu };
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
+            let enc_device_owned = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(auto_enc_device.clone()),
+            )?;
+            let enc_device = &enc_device_owned;
+            let on_gpu = !enc_device.is_cpu();
             let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
             let bf16_cfg = self.qwen3_bf16_config();
 
@@ -726,8 +752,8 @@ impl Flux2Engine {
 // InferenceEngine implementation
 // ---------------------------------------------------------------------------
 
-impl InferenceEngine for Flux2Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl Flux2Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Flux.2 (flow-matching), ignoring"
@@ -957,6 +983,15 @@ impl InferenceEngine for Flux2Engine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for Flux2Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
