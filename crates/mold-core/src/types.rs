@@ -801,18 +801,15 @@ pub enum GpuWorkerState {
 /// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
 /// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
 /// field deserializes to `Auto`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeviceRef {
+    #[default]
     Auto,
     Cpu,
-    Gpu { ordinal: usize },
-}
-
-impl Default for DeviceRef {
-    fn default() -> Self {
-        DeviceRef::Auto
-    }
+    Gpu {
+        ordinal: usize,
+    },
 }
 
 impl DeviceRef {
