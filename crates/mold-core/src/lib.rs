@@ -20,7 +20,8 @@ mod test_support;
 pub use catalog::build_model_catalog;
 pub use client::MoldClient;
 pub use config::{
-    Config, DefaultModelResolution, DefaultModelSource, LoggingConfig, ModelConfig, ModelPaths,
+    parse_device_ref_str, Config, DefaultModelResolution, DefaultModelSource, LoggingConfig,
+    ModelConfig, ModelPaths,
 };
 pub use control::{
     classify_generate_error, classify_server_error, GenerateServerAction, ServerAvailability,

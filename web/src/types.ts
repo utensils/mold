@@ -89,6 +89,26 @@ export interface LoraWeight {
   scale: number;
 }
 
+// ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
+export type DeviceRef =
+  | { kind: "auto" }
+  | { kind: "cpu" }
+  | { kind: "gpu"; ordinal: number };
+
+export interface AdvancedPlacement {
+  transformer: DeviceRef;
+  vae: DeviceRef;
+  clip_l?: DeviceRef | null;
+  clip_g?: DeviceRef | null;
+  t5?: DeviceRef | null;
+  qwen?: DeviceRef | null;
+}
+
+export interface DevicePlacement {
+  text_encoders: DeviceRef;
+  advanced?: AdvancedPlacement | null;
+}
+
 // Wire shape — what we POST to /api/generate/stream. snake_case to match serde.
 export interface GenerateRequestWire {
   prompt: string;
@@ -108,6 +128,7 @@ export interface GenerateRequestWire {
   original_prompt?: string | null;
   frames?: number | null;
   fps?: number | null;
+  placement?: DevicePlacement | null;
 }
 
 export interface ModelDefaults {
@@ -237,6 +258,7 @@ export interface GenerateFormState {
   outputFormat: OutputFormat;
   expand: ExpandFormState;
   sourceImage: SourceImageState | null;
+  placement: DevicePlacement | null;
 }
 
 // ── Video-family detection helper used by multiple components ──────────────
@@ -263,3 +285,87 @@ export const UNET_SCHEDULER_FAMILIES: ReadonlyArray<string> = [
   "stable-diffusion-1.5",
   "sdxl",
 ];
+
+// ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
+// Mirror of `mold_core::types::{DownloadJob, JobStatus, DownloadEvent,
+// DownloadsListing}`. Keep field names / string literals in sync with the
+// server's serde output.
+
+export type JobStatusWire =
+  | "queued"
+  | "active"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface DownloadJobWire {
+  id: string;
+  model: string;
+  status: JobStatusWire;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current_file?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+  error?: string | null;
+}
+
+export interface DownloadsListingWire {
+  active?: DownloadJobWire | null;
+  queued: DownloadJobWire[];
+  history: DownloadJobWire[];
+}
+
+export type DownloadEventWire =
+  | { type: "enqueued"; id: string; model: string; position: number }
+  | { type: "dequeued"; id: string }
+  | {
+      type: "started";
+      id: string;
+      files_total: number;
+      bytes_total: number;
+    }
+  | {
+      type: "progress";
+      id: string;
+      files_done: number;
+      bytes_done: number;
+      current_file?: string | null;
+    }
+  | { type: "file_done"; id: string; filename: string }
+  | { type: "job_done"; id: string; model: string }
+  | { type: "job_failed"; id: string; error: string }
+  | { type: "job_cancelled"; id: string };
+// ──────────────────────────────────────────────────────────────────────────────
+// Resource telemetry (Agent B scope). Mirror of `mold_core::ResourceSnapshot`
+// et al. `vram_used_by_mold` / `vram_used_by_other` are null on Metal hosts
+// and on CUDA hosts that fell back to the `nvidia-smi` subprocess path.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type GpuBackend = "cuda" | "metal";
+
+export interface GpuSnapshot {
+  ordinal: number;
+  name: string;
+  backend: GpuBackend;
+  vram_total: number;
+  vram_used: number;
+  vram_used_by_mold: number | null;
+  vram_used_by_other: number | null;
+}
+
+export interface RamSnapshot {
+  total: number;
+  used: number;
+  used_by_mold: number;
+  used_by_other: number;
+}
+
+export interface ResourceSnapshot {
+  hostname: string;
+  timestamp: number;
+  gpus: GpuSnapshot[];
+  system_ram: RamSnapshot;
+}

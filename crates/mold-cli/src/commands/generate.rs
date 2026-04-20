@@ -5,9 +5,9 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
-    GenerateRequest, GenerateResponse, GenerateServerAction, ImageData, KeyframeCondition,
-    LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient,
-    OutputFormat, Scheduler, TimeRange,
+    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, ImageData,
+    KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale,
+    MoldClient, OutputFormat, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -193,6 +193,7 @@ pub async fn run(
     scheduler: Option<Scheduler>,
     eager: bool,
     offload: bool,
+    placement: Option<DevicePlacement>,
     source_image: Option<Vec<u8>>,
     edit_images: Option<Vec<Vec<u8>>>,
     strength: f64,
@@ -311,6 +312,7 @@ pub async fn run(
         retake_range,
         spatial_upscale,
         temporal_upscale,
+        placement,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.

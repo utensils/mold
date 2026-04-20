@@ -31,8 +31,8 @@ use crate::cache::{
     clear_cache, prompt_text_key, CachedTensor, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    qwen2_vram_threshold, should_use_gpu,
+    effective_device_ref, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check, qwen2_vram_threshold, should_use_gpu,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -314,6 +314,8 @@ pub struct QwenImageEngine {
     base: EngineBase<LoadedQwenImage>,
     prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
     offload: bool,
+    /// Per-request placement override.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl QwenImageEngine {
@@ -759,6 +761,7 @@ impl QwenImageEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             offload,
+            pending_placement: None,
         }
     }
 
@@ -1331,7 +1334,14 @@ impl QwenImageEngine {
         tracing::info!(model = %self.base.model_name, "loading Qwen-Image model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let transformer_cfg = self.transformer_config();
         let transformer_is_quantized = self.detect_is_quantized();
         // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
@@ -1374,11 +1384,16 @@ impl QwenImageEngine {
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || {
+            Ok(if vae_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            })
+        })?;
+        let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
         let vae_dtype = DType::F32;
@@ -1396,14 +1411,25 @@ impl QwenImageEngine {
         // Load text encoder
         let resolved_text_encoder =
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
-        let (te_plan, te_device_label) =
+        let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let te_device = if te_plan.use_gpu {
+        let qwen_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
-        let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
+        let te_device =
+            crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
+        let te_use_gpu = !te_device.is_cpu();
+        let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
+            te_auto_device_label
+        } else if te_use_gpu {
+            "GPU".into()
+        } else {
+            "CPU".into()
+        };
+        let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
 
         let preload_text_encoder = self.should_preload_text_encoder();
         let te_label = if resolved_text_encoder.is_gguf {
@@ -1485,7 +1511,14 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_cfg = self.transformer_config();
 
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -1548,14 +1581,26 @@ impl QwenImageEngine {
                 };
                 (hs, mask, u_hs, u_mask)
             } else {
-                let (te_plan, te_device_label) =
+                let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let te_device = if te_plan.use_gpu {
+                let qwen_ref =
+                    effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+                let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
                     Device::Cpu
                 };
-                let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
+                let te_device =
+                    crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
+                let te_use_gpu = !te_device.is_cpu();
+                let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
+                    te_auto_device_label
+                } else if te_use_gpu {
+                    "GPU".into()
+                } else {
+                    "CPU".into()
+                };
+                let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
 
                 let te_label = if resolved_text_encoder.is_gguf {
                     format!(
@@ -1952,11 +1997,16 @@ impl QwenImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || {
+            Ok(if vae_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            })
+        })?;
+        let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
         let vae_dtype = DType::F32;
@@ -2330,8 +2380,8 @@ impl QwenImageEngine {
     }
 }
 
-impl InferenceEngine for QwenImageEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl QwenImageEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
@@ -2774,6 +2824,15 @@ impl InferenceEngine for QwenImageEngine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for QwenImageEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {

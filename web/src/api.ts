@@ -169,3 +169,80 @@ export async function generateStream(
     });
   }
 }
+
+// ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
+import type { DownloadJobWire, DownloadsListingWire } from "./types";
+
+export interface CreateDownloadResponse {
+  id: string;
+  position: number;
+}
+
+export async function postDownload(
+  model: string,
+  signal?: AbortSignal,
+): Promise<{ status: "created" | "duplicate"; id: string; position: number }> {
+  const res = await fetch(`${base}/api/downloads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+    signal,
+  });
+  if (res.status === 400) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `unknown model '${model}'`);
+  }
+  if (!res.ok && res.status !== 409) {
+    throw new Error(`POST /api/downloads failed: ${res.status}`);
+  }
+  const json = (await res.json()) as CreateDownloadResponse;
+  return {
+    status: res.status === 409 ? "duplicate" : "created",
+    id: json.id,
+    position: json.position,
+  };
+}
+
+export async function cancelDownload(id: string): Promise<void> {
+  const res = await fetch(`${base}/api/downloads/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (res.status === 404) {
+    // Idempotent — treat as already gone.
+    return;
+  }
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`DELETE /api/downloads failed: ${res.status}`);
+  }
+}
+
+export async function fetchDownloads(
+  signal?: AbortSignal,
+): Promise<DownloadsListingWire> {
+  const res = await fetch(`${base}/api/downloads`, { signal });
+  if (!res.ok) throw new Error(`GET /api/downloads failed: ${res.status}`);
+  const raw = (await res.json()) as DownloadsListingWire;
+  // Server may omit `active`/`history` as null; normalise.
+  return {
+    active: raw.active ?? null,
+    queued: raw.queued ?? [],
+    history: raw.history ?? [],
+  };
+}
+
+/** Returns the absolute URL for the SSE stream (consumed via EventSource). */
+export function downloadsStreamUrl(): string {
+  return `${base}/api/downloads/stream`;
+}
+
+export type { DownloadJobWire, DownloadsListingWire };
+// ── Resource telemetry (Agent B) ─────────────────────────────────────────────
+import type { ResourceSnapshot } from "./types";
+
+export async function fetchResources(
+  signal?: AbortSignal,
+): Promise<ResourceSnapshot> {
+  const res = await fetch("/api/resources", { signal });
+  if (!res.ok) throw new Error(`fetchResources failed: ${res.status}`);
+  return (await res.json()) as ResourceSnapshot;
+}

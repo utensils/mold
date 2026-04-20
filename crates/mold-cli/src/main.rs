@@ -489,6 +489,43 @@ Examples:
         #[arg(long, help_heading = "Advanced")]
         offload: bool,
 
+        /// Place all text encoders (T5/CLIP/Qwen) on a specific device.
+        /// Accepts `auto` (default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N`.
+        /// Applied to every model family. CLI flag overrides
+        /// `MOLD_PLACE_TEXT_ENCODERS` and any config-file placement.
+        #[arg(long = "device-text-encoders", help_heading = "Placement")]
+        device_text_encoders: Option<String>,
+
+        /// Place the transformer (FLUX / Flux.2 / Z-Image / Qwen-Image only).
+        /// Accepts `auto`, `cpu`, `gpu`, `gpu:N`. Overrides `MOLD_PLACE_TRANSFORMER`.
+        #[arg(long = "device-transformer", help_heading = "Placement")]
+        device_transformer: Option<String>,
+
+        /// Place the VAE (FLUX / Flux.2 / Z-Image / Qwen-Image only).
+        /// Accepts `auto`, `cpu`, `gpu`, `gpu:N`. Overrides `MOLD_PLACE_VAE`.
+        #[arg(long = "device-vae", help_heading = "Placement")]
+        device_vae: Option<String>,
+
+        /// Place the T5 text encoder (FLUX only). Accepts `auto`, `cpu`,
+        /// `gpu`, `gpu:N`. Overrides `MOLD_PLACE_T5`.
+        #[arg(long = "device-t5", help_heading = "Placement")]
+        device_t5: Option<String>,
+
+        /// Place CLIP-L (FLUX only). Accepts `auto`, `cpu`, `gpu`, `gpu:N`.
+        /// Overrides `MOLD_PLACE_CLIP_L`.
+        #[arg(long = "device-clip-l", help_heading = "Placement")]
+        device_clip_l: Option<String>,
+
+        /// Place CLIP-G. Accepts `auto`, `cpu`, `gpu`, `gpu:N`.
+        /// Overrides `MOLD_PLACE_CLIP_G`.
+        #[arg(long = "device-clip-g", help_heading = "Placement")]
+        device_clip_g: Option<String>,
+
+        /// Place the Qwen text encoder (Flux.2 / Z-Image / Qwen-Image).
+        /// Accepts `auto`, `cpu`, `gpu`, `gpu:N`. Overrides `MOLD_PLACE_QWEN`.
+        #[arg(long = "device-qwen", help_heading = "Placement")]
+        device_qwen: Option<String>,
+
         /// LoRA adapter safetensors file path. Repeat for multiple LTX-2 adapters.
         #[arg(long, help_heading = "LoRA", value_hint = ValueHint::FilePath)]
         lora: Vec<String>,
@@ -1133,6 +1170,13 @@ async fn run() -> anyhow::Result<()> {
             scheduler,
             eager,
             offload,
+            device_text_encoders,
+            device_transformer,
+            device_vae,
+            device_t5,
+            device_clip_l,
+            device_clip_g,
+            device_qwen,
             lora,
             lora_scale,
             image,
@@ -1184,6 +1228,15 @@ async fn run() -> anyhow::Result<()> {
                 scheduler,
                 eager,
                 offload,
+                commands::run::PlacementFlags {
+                    text_encoders: device_text_encoders,
+                    transformer: device_transformer,
+                    vae: device_vae,
+                    t5: device_t5,
+                    clip_l: device_clip_l,
+                    clip_g: device_clip_g,
+                    qwen: device_qwen,
+                },
                 lora,
                 lora_scale,
                 image,

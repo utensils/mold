@@ -30,6 +30,7 @@ pub struct Ltx2Engine {
     loaded: bool,
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl Ltx2Engine {
@@ -57,6 +58,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: None,
             on_progress: None,
+            pending_placement: None,
         }
     }
 
@@ -72,6 +74,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: Some(runtime),
             on_progress: None,
+            pending_placement: None,
         }
     }
 
@@ -265,9 +268,26 @@ impl Ltx2Engine {
         let backend = Ltx2Backend::detect();
         backend.ensure_supported()?;
 
-        match self.load_runtime_session_on_device(plan, self.native_device_for_backend(backend)?) {
+        // Honor Tier 1 `text_encoders` override for the Gemma prompt encoder.
+        // Auto falls back to whatever `native_device_for_backend(backend)` picks
+        // (CUDA when available, else CPU). Explicit Cpu/Gpu skips that auto path.
+        let tier1 = self.pending_placement.as_ref().map(|p| p.text_encoders);
+        let device =
+            crate::device::resolve_device(tier1, || self.native_device_for_backend(backend))?;
+        if device.is_cuda() {
+            configure_native_ltx2_cuda_device(&device)?;
+        }
+        // Only auto CUDA placement should retry on OOM — if the user explicitly
+        // pinned the encoder to a GPU, surface the OOM rather than silently
+        // rewriting their request.
+        let override_is_auto = matches!(tier1, None | Some(mold_core::types::DeviceRef::Auto));
+        match self.load_runtime_session_on_device(plan, device) {
             Ok(runtime) => Ok(runtime),
-            Err(err) if matches!(backend, Ltx2Backend::Cuda) && Self::is_oom_error(&err) => {
+            Err(err)
+                if matches!(backend, Ltx2Backend::Cuda)
+                    && override_is_auto
+                    && Self::is_oom_error(&err) =>
+            {
                 self.info(
                     "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
                 );
@@ -393,8 +413,8 @@ fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
     Ok(())
 }
 
-impl InferenceEngine for Ltx2Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl Ltx2Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if !self.loaded {
             self.load()?;
         }
@@ -501,6 +521,15 @@ impl InferenceEngine for Ltx2Engine {
             seed_used: plan.seed,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for Ltx2Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
@@ -866,6 +895,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         }
     }
 
@@ -912,6 +942,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         assert_eq!(
             engine.select_pipeline(&req).unwrap(),
@@ -991,6 +1022,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let bridge = engine

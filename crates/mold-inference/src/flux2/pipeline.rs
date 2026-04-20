@@ -22,12 +22,14 @@ use std::time::Instant;
 use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
 use super::vae::{Flux2AutoEncoder, Flux2VaeConfig};
+
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
     LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -60,6 +62,9 @@ pub struct Flux2Engine {
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
+    /// Per-request placement override. Set at the start of `generate()`,
+    /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl Flux2Engine {
@@ -75,6 +80,7 @@ impl Flux2Engine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -330,7 +336,14 @@ impl Flux2Engine {
         let text_tokenizer_path = self.validate_paths()?;
 
         let cpu = Device::Cpu;
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         tracing::info!("GPU device: {:?}, GPU dtype: {:?}", device, gpu_dtype);
@@ -344,6 +357,9 @@ impl Flux2Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Load VAE on GPU ---
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
@@ -351,7 +367,7 @@ impl Flux2Engine {
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
             gpu_dtype,
-            &device,
+            &vae_device,
             "VAE",
             &self.base.progress,
         )?;
@@ -391,7 +407,12 @@ impl Flux2Engine {
             .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-        let enc_device = if on_gpu { &device } else { &cpu };
+        let qwen3_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let auto_enc_device = if on_gpu { device.clone() } else { cpu.clone() };
+        let enc_device_owned =
+            crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
+        let enc_device = &enc_device_owned;
+        let on_gpu = !enc_device.is_cpu();
         let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
         let bf16_cfg = self.qwen3_bf16_config();
 
@@ -441,7 +462,14 @@ impl Flux2Engine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let gpu_dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -493,7 +521,13 @@ impl Flux2Engine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-            let enc_device = if on_gpu { &device } else { &Device::Cpu };
+            let qwen3_ref =
+                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+            let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
+            let enc_device_owned =
+                crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
+            let enc_device = &enc_device_owned;
+            let on_gpu = !enc_device.is_cpu();
             let enc_dtype = if on_gpu { gpu_dtype } else { DType::F32 };
             let bf16_cfg = self.qwen3_bf16_config();
 
@@ -569,13 +603,16 @@ impl Flux2Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // Load VAE
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_cfg = Flux2VaeConfig::klein();
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
             gpu_dtype,
-            &device,
+            &vae_device,
             "VAE",
             &self.base.progress,
         )?;
@@ -726,8 +763,8 @@ impl Flux2Engine {
 // InferenceEngine implementation
 // ---------------------------------------------------------------------------
 
-impl InferenceEngine for Flux2Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl Flux2Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Flux.2 (flow-matching), ignoring"
@@ -957,6 +994,15 @@ impl InferenceEngine for Flux2Engine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for Flux2Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {

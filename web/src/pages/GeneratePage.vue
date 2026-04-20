@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import Composer from "../components/Composer.vue";
+import ResourceStrip from "../components/ResourceStrip.vue";
 import SettingsModal from "../components/SettingsModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -107,6 +108,15 @@ const gpus = computed(
   () =>
     status.value?.gpus?.map((g) => ({ ordinal: g.ordinal, state: g.state })) ??
     null,
+);
+
+// TODO-REMOVE-AFTER-MERGE: use useResources().gpuList once Agent B merges.
+const gpuListForPlacement = computed(
+  () =>
+    status.value?.gpus?.map((g) => ({
+      ordinal: g.ordinal,
+      name: `GPU ${g.ordinal}`,
+    })) ?? [],
 );
 
 const settingsDirty = computed(() => {
@@ -249,12 +259,17 @@ onMounted(async () => {
         :gpus="gpus"
         :expand-active="form.state.value.expand.enabled"
         :settings-dirty="settingsDirty"
+        :family="currentModel?.family ?? ''"
+        :placement-gpus="gpuListForPlacement"
         @submit="onSubmit"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
+
+      <!-- Agent B: always-visible VRAM + RAM telemetry -->
+      <ResourceStrip class="mt-3 hidden lg:block" variant="full" />
 
       <RunningStrip
         :jobs="stream.jobs.value"

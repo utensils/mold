@@ -32,6 +32,7 @@ function defaultForm(): GenerateFormState {
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
     sourceImage: null,
+    placement: null,
   };
 }
 
@@ -120,6 +121,7 @@ export function useGenerateForm(): UseGenerateForm {
         expand: s.expand.enabled || undefined,
         frames: s.frames,
         fps: s.fps,
+        placement: s.placement ?? undefined,
       };
     },
     isVideoFamily: (family: string) => VIDEO_FAMILIES.includes(family),

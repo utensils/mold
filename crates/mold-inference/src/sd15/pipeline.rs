@@ -37,6 +37,9 @@ struct LoadedSD15 {
     tokenizer: tokenizers::Tokenizer,
     sd_config: stable_diffusion::StableDiffusionConfig,
     device: Device,
+    /// Device the CLIP-L weights live on. May differ from `device` when the
+    /// Tier 1 `text_encoders` placement override pins encoders to CPU.
+    clip_device: Device,
     dtype: DType,
 }
 
@@ -50,6 +53,7 @@ pub struct SD15Engine {
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     control_tensor_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl SD15Engine {
@@ -67,6 +71,7 @@ impl SD15Engine {
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             control_tensor_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -185,12 +190,19 @@ impl SD15Engine {
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
 
         // Load CLIP-L encoder
+        // Tier 1: honor `placement.text_encoders` override (group knob).
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading CLIP-L encoder");
         let clip_start = Instant::now();
         let clip = stable_diffusion::build_clip_transformer(
             &sd_config.clip,
             &clip_encoder,
-            &device,
+            &clip_device,
             DType::F32,
         )?;
         self.base
@@ -208,6 +220,7 @@ impl SD15Engine {
             tokenizer,
             sd_config,
             device,
+            clip_device,
             dtype,
         });
 
@@ -412,6 +425,7 @@ impl SD15Engine {
 
     /// Encode prompt with the single CLIP-L encoder.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn encode_prompt(
         &self,
         clip: &stable_diffusion::clip::ClipTextTransformer,
@@ -420,6 +434,7 @@ impl SD15Engine {
         negative_prompt: &str,
         max_len: usize,
         device: &Device,
+        clip_device: &Device,
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
@@ -430,7 +445,7 @@ impl SD15Engine {
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_start = Instant::now();
-                let tokens = Self::tokenize(tokenizer, prompt, max_len, device)?;
+                let tokens = Self::tokenize(tokenizer, prompt, max_len, clip_device)?;
                 let text_embeddings = clip.forward(&tokens)?;
                 self.base
                     .progress
@@ -438,13 +453,14 @@ impl SD15Engine {
 
                 let text_embeddings = if use_cfg {
                     let uncond_tokens =
-                        Self::tokenize(tokenizer, negative_prompt, max_len, device)?;
+                        Self::tokenize(tokenizer, negative_prompt, max_len, clip_device)?;
                     let uncond_embeddings = clip.forward(&uncond_tokens)?;
                     Tensor::cat(&[&uncond_embeddings, &text_embeddings], 0)?
                 } else {
                     text_embeddings
                 };
 
+                let text_embeddings = text_embeddings.to_device(device)?;
                 Ok(text_embeddings.to_dtype(dtype)?)
             })?;
         if cache_hit {
@@ -619,12 +635,18 @@ impl SD15Engine {
             let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
                 .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
 
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
             self.base.progress.stage_start("Loading CLIP-L encoder");
             let clip_start = Instant::now();
             let clip = stable_diffusion::build_clip_transformer(
                 &sd_config.clip,
                 &clip_encoder,
-                &device,
+                &clip_device,
                 DType::F32,
             )?;
             self.base
@@ -638,6 +660,7 @@ impl SD15Engine {
                 neg,
                 max_len,
                 &device,
+                &clip_device,
                 dtype,
                 guidance,
             )?;
@@ -821,8 +844,8 @@ impl SD15Engine {
     }
 }
 
-impl InferenceEngine for SD15Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl SD15Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         // Sequential mode: load-use-drop each component
         if self.base.load_strategy == LoadStrategy::Sequential {
             return self.generate_sequential(req);
@@ -863,6 +886,7 @@ impl InferenceEngine for SD15Engine {
             neg,
             max_len,
             &loaded.device,
+            &loaded.clip_device,
             loaded.dtype,
             guidance,
         )?;
@@ -996,6 +1020,15 @@ impl InferenceEngine for SD15Engine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for SD15Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {

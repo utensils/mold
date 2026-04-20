@@ -229,6 +229,7 @@ impl ModelManifest {
             default_fps: None,
             description: None,
             family: None,
+            placement: None,
         }
     }
 }

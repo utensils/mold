@@ -1377,6 +1377,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         retake_range: None,
         spatial_upscale: None,
         temporal_upscale: None,
+        placement: None,
     };
     let http = mold_core::MoldClient::new(&mold_host);
 

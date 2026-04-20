@@ -241,3 +241,33 @@ describe("useGenerateForm", () => {
     expect(form.state.value.steps).toBe(20);
   });
 });
+
+describe("useGenerateForm placement", () => {
+  it("carries placement into the outgoing request wire", () => {
+    const form = useGenerateForm();
+    form.state.value.placement = {
+      text_encoders: { kind: "cpu" },
+      advanced: {
+        transformer: { kind: "gpu", ordinal: 1 },
+        vae: { kind: "auto" },
+        t5: { kind: "cpu" },
+      },
+    };
+    const wire = form.toRequest();
+    expect(wire.placement).toEqual({
+      text_encoders: { kind: "cpu" },
+      advanced: {
+        transformer: { kind: "gpu", ordinal: 1 },
+        vae: { kind: "auto" },
+        t5: { kind: "cpu" },
+      },
+    });
+  });
+
+  it("omits placement from the request when null", () => {
+    const form = useGenerateForm();
+    form.state.value.placement = null;
+    const wire = form.toRequest();
+    expect(wire.placement).toBeUndefined();
+  });
+});

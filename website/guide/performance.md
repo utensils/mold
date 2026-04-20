@@ -65,6 +65,20 @@ already fits comfortably in VRAM.
 mold may place text encoders on CPU when VRAM is tight. That reduces memory
 pressure, but prompt encoding takes longer.
 
+You can also force the choice with `--device-text-encoders cpu` on `mold run`
+(or the web UI's **Placement** panel, or `MOLD_PLACE_TEXT_ENCODERS=cpu`). This
+is often the single biggest VRAM win short of quantization: FLUX's T5 is ~10
+GB, SD3.5's triple-encoder stack is larger, and freeing that budget lets the
+transformer stay fully resident without triggering block-level offload (which
+is 3–5× slower per step). Encoding moves from ≈200 ms to ≈2 s on typical CPU
+— negligible at 20+ denoising steps, painful at 4.
+
+For FLUX, Flux.2, Z-Image, and Qwen-Image specifically, you can also pin
+individual components: `--device-transformer gpu:1 --device-vae cpu` (two-GPU
+split with decode on host memory), `--device-t5 cpu` (FLUX only, keeps CLIP-L
+on GPU), etc. See [Configuration → Per-component device placement](./configuration.md#per-component-device-placement)
+for the full matrix.
+
 If your GPU has headroom, `--eager` can improve repeat generation speed by
 keeping more components resident.
 

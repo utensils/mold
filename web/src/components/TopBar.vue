@@ -1,8 +1,23 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
+import { useRoute } from "vue-router";
+import { useDownloads } from "../composables/useDownloads";
+import ResourceStrip from "./ResourceStrip.vue";
+
+const route = useRoute();
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
+
+// ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
+const downloads = useDownloads();
+const badgeCount = computed(
+  () => (downloads.active.value ? 1 : 0) + downloads.queued.value.length,
+);
+
+function openDownloadsDrawer() {
+  window.dispatchEvent(new CustomEvent("mold:open-downloads"));
+}
 
 const props = defineProps<{
   filter: FilterKind;
@@ -107,6 +122,37 @@ function clearSearch() {
         Generate
       </router-link>
     </nav>
+
+    <!-- Downloads drawer opener + badge (Agent A). Visible on every page. -->
+    <button
+      type="button"
+      class="relative inline-flex h-10 items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3 text-sm text-ink-200 hover:text-white"
+      aria-label="Open downloads"
+      @click="openDownloadsDrawer"
+    >
+      <svg
+        class="h-4 w-4"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 3v12" />
+        <path d="m7 10 5 5 5-5" />
+        <path d="M5 21h14" />
+      </svg>
+      <span class="hidden sm:inline">Downloads</span>
+      <span
+        v-if="badgeCount > 0"
+        class="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-500 px-1 text-[11px] font-medium text-white"
+        aria-label="Pending download count"
+      >
+        {{ badgeCount }}
+      </span>
+    </button>
 
     <!-- Search -->
     <label class="relative flex-1">
@@ -331,6 +377,15 @@ function clearSearch() {
           <path d="M3 21v-5h5" />
         </svg>
       </button>
+    </div>
+
+    <!-- Agent B: narrow-viewport resource chip. Renders only on /generate
+         below `lg` so desktop uses the full ResourceStrip inside the page. -->
+    <div
+      v-if="route.name === 'generate'"
+      class="flex shrink-0 items-center lg:hidden"
+    >
+      <ResourceStrip variant="chip" />
     </div>
   </header>
 </template>

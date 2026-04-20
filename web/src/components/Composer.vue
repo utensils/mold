@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { GenerateFormState } from "../types";
+import type { DevicePlacement, GenerateFormState } from "../types";
+import PlacementPanel from "./PlacementPanel.vue";
 
 const props = defineProps<{
   modelValue: GenerateFormState;
@@ -9,6 +10,10 @@ const props = defineProps<{
   gpus: { ordinal: number; state: string }[] | null;
   expandActive: boolean;
   settingsDirty: boolean;
+  // Agent C (model-ui-overhaul §3) ────────────────────────────────────
+  family: string; // family of the currently-selected model
+  placementGpus: { ordinal: number; name: string }[];
+  // ──────────────────────────────────────────────────────────────────
 }>();
 
 const emit = defineEmits<{
@@ -60,6 +65,10 @@ const statusLine = computed(() => {
   }
   return parts.join(" · ");
 });
+
+function updatePlacement(p: DevicePlacement | null) {
+  emit("update:modelValue", { ...props.modelValue, placement: p });
+}
 </script>
 
 <template>
@@ -130,6 +139,15 @@ const statusLine = computed(() => {
     <div v-if="statusLine" class="px-1 text-xs text-slate-500">
       {{ statusLine }}
     </div>
+
+    <!-- Agent C (model-ui-overhaul §3): device placement -->
+    <PlacementPanel
+      :model-value="modelValue.placement"
+      :family="family"
+      :model="modelValue.model"
+      :gpus="placementGpus"
+      @update:model-value="updatePlacement"
+    />
   </div>
 </template>
 

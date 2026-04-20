@@ -253,6 +253,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         retake_range: None,
         spatial_upscale: None,
         temporal_upscale: None,
+        placement: None,
     }
 }
 

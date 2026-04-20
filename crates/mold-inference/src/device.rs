@@ -159,6 +159,85 @@ pub const QWEN3_FP16_VRAM_THRESHOLD: u64 = 10_200_000_000;
 /// Headroom for activation memory during inference (denoising + VAE decode workspace).
 const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 
+// ── Placement resolution ─────────────────────────────────────────────────────
+
+/// Resolve a caller-supplied `DeviceRef` override into a concrete candle
+/// `Device`, falling back to `auto` when the override is missing or `Auto`.
+///
+/// - `None`, `Some(Auto)` — call `auto()` (existing VRAM-aware logic).
+/// - `Some(Cpu)`          — `Device::Cpu`, never invoke `auto()`.
+/// - `Some(Gpu { ordinal })` — try CUDA first, then Metal. Each backend is
+///   gated by its candle feature flag so a CPU-only build returns a clear
+///   error message instead of a build failure.
+pub fn resolve_device<F>(
+    req: Option<mold_core::types::DeviceRef>,
+    auto: F,
+) -> anyhow::Result<candle_core::Device>
+where
+    F: FnOnce() -> anyhow::Result<candle_core::Device>,
+{
+    use mold_core::types::DeviceRef;
+    match req {
+        None | Some(DeviceRef::Auto) => auto(),
+        Some(DeviceRef::Cpu) => Ok(candle_core::Device::Cpu),
+        Some(DeviceRef::Gpu { ordinal }) => resolve_gpu_ordinal(ordinal),
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    candle_core::Device::new_cuda(ordinal)
+        .map_err(|e| anyhow::anyhow!("failed to open CUDA device {ordinal}: {e}"))
+}
+
+#[cfg(all(not(feature = "cuda"), feature = "metal"))]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    candle_core::Device::new_metal(ordinal)
+        .map_err(|e| anyhow::anyhow!("failed to open Metal device {ordinal}: {e}"))
+}
+
+#[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    Err(anyhow::anyhow!(
+        "GPU ordinal {ordinal} requested but this build has neither CUDA nor Metal enabled"
+    ))
+}
+
+/// Resolve a component-level `DeviceRef` from a `DevicePlacement`, honoring
+/// the Tier 2 per-component override first, then the Tier 1 `text_encoders`
+/// group knob when appropriate.
+///
+/// Precedence:
+///   1. `advanced_override` (Tier 2 per-component) if `Some`.
+///   2. Fall back to `placement.text_encoders` (group knob) when
+///      `fallback_is_component_auto` is `true` (typically for text-encoder
+///      components — T5/CLIP-L/Qwen — that follow the group knob by default).
+///   3. Fall back to `DeviceRef::Auto` (non-text-encoder components like the
+///      VAE, which don't inherit from the text-encoder group knob).
+pub fn effective_device_ref(
+    placement: Option<&mold_core::types::DevicePlacement>,
+    advanced_override: impl FnOnce(
+        &mold_core::types::AdvancedPlacement,
+    ) -> Option<mold_core::types::DeviceRef>,
+    fallback_is_component_auto: bool,
+) -> mold_core::types::DeviceRef {
+    use mold_core::types::DeviceRef;
+    let Some(placement) = placement else {
+        return DeviceRef::Auto;
+    };
+    if let Some(adv) = placement.advanced.as_ref() {
+        if let Some(r) = advanced_override(adv) {
+            return r;
+        }
+        if fallback_is_component_auto {
+            return placement.text_encoders;
+        }
+        DeviceRef::Auto
+    } else {
+        placement.text_encoders
+    }
+}
+
 // ── macOS memory query ───────────────────────────────────────────────────────
 
 /// Raw VM statistics from macOS host_statistics64.
