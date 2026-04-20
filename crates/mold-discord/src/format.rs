@@ -111,14 +111,10 @@ fn progress_bar(current: usize, total: usize) -> String {
     )
 }
 
-/// Format a completed generation result into embed data.
+/// Format a completed generation result into embed data. Video responses get
+/// a distinct title and include frame/fps metadata alongside the usual fields.
 pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedData {
     let time_secs = resp.generation_time_ms as f64 / 1000.0;
-    let dims = resp
-        .images
-        .first()
-        .map(|img| format!("{}x{}", img.width, img.height))
-        .unwrap_or_default();
 
     let truncated_prompt = if prompt.chars().count() > 256 {
         let truncated: String = prompt.chars().take(253).collect();
@@ -127,15 +123,50 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
         prompt.to_string()
     };
 
-    EmbedData {
-        title: "Image Generated".to_string(),
-        description: truncated_prompt,
-        fields: vec![
+    let (title, mut fields) = if let Some(video) = resp.video.as_ref() {
+        let format_label = video.format.extension().to_ascii_uppercase();
+        let mut fields = vec![
+            ("Model".to_string(), resp.model.clone(), true),
+            (
+                "Size".to_string(),
+                format!("{}x{}", video.width, video.height),
+                true,
+            ),
+            ("Time".to_string(), format!("{time_secs:.1}s"), true),
+            (
+                "Frames".to_string(),
+                format!("{} @ {} fps", video.frames, video.fps),
+                true,
+            ),
+            ("Format".to_string(), format_label, true),
+        ];
+        if video.has_audio {
+            fields.push(("Audio".to_string(), "yes".to_string(), true));
+        }
+        fields.push(("Seed".to_string(), resp.seed_used.to_string(), false));
+        ("Video Generated".to_string(), fields)
+    } else {
+        let dims = resp
+            .images
+            .first()
+            .map(|img| format!("{}x{}", img.width, img.height))
+            .unwrap_or_default();
+        let fields = vec![
             ("Model".to_string(), resp.model.clone(), true),
             ("Size".to_string(), dims, true),
             ("Time".to_string(), format!("{time_secs:.1}s"), true),
             ("Seed".to_string(), resp.seed_used.to_string(), false),
-        ],
+        ];
+        ("Image Generated".to_string(), fields)
+    };
+
+    // Preserve insertion order so tests/UI stay stable.
+    fields.retain(|(_, v, _)| !v.is_empty());
+
+    EmbedData {
+        title,
+        description: truncated_prompt,
+        fields,
         color: COLOR_SUCCESS,
     }
 }
@@ -535,6 +566,81 @@ mod tests {
         let embed = format_generation_result(&resp, &long_prompt);
         assert!(embed.description.chars().count() <= 260);
         assert!(embed.description.ends_with("..."));
+    }
+
+    #[test]
+    fn generation_result_video_has_frame_and_format_fields() {
+        let resp = GenerateResponse {
+            images: vec![],
+            video: Some(mold_core::VideoData {
+                data: vec![0u8; 16],
+                format: OutputFormat::Mp4,
+                width: 768,
+                height: 512,
+                frames: 25,
+                fps: 24,
+                thumbnail: vec![],
+                gif_preview: vec![],
+                has_audio: true,
+                duration_ms: Some(1000),
+                audio_sample_rate: Some(44_100),
+                audio_channels: Some(2),
+            }),
+            generation_time_ms: 10_000,
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            seed_used: 7,
+            gpu: None,
+        };
+        let embed = format_generation_result(&resp, "a drone shot");
+        assert_eq!(embed.title, "Video Generated");
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Frames" && v == "25 @ 24 fps"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Format" && v == "MP4"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Audio" && v == "yes"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Size" && v == "768x512"));
+    }
+
+    #[test]
+    fn generation_result_video_gif_shows_gif_label() {
+        let resp = GenerateResponse {
+            images: vec![],
+            video: Some(mold_core::VideoData {
+                data: vec![0u8; 16],
+                format: OutputFormat::Gif,
+                width: 512,
+                height: 512,
+                frames: 17,
+                fps: 12,
+                thumbnail: vec![],
+                gif_preview: vec![],
+                has_audio: false,
+                duration_ms: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+            }),
+            generation_time_ms: 500,
+            model: "ltx-video-0.9.6-distilled:bf16".to_string(),
+            seed_used: 3,
+            gpu: None,
+        };
+        let embed = format_generation_result(&resp, "loop");
+        assert_eq!(embed.title, "Video Generated");
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| k == "Format" && v == "GIF"));
+        assert!(!embed.fields.iter().any(|(k, _, _)| k == "Audio"));
     }
 
     #[test]

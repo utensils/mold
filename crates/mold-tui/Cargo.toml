@@ -16,9 +16,9 @@ metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.8.1" }
-mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.8.1" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.8.1" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.9.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.9.0" }
 ratatui = { version = "0.29", features = ["crossterm"] }
 crossterm = "0.28"
 ratatui-image = "4"

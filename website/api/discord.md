@@ -25,16 +25,16 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                              |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image (prompt, model, width, height, steps, guidance, seed, negative_prompt) |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                   |
-| `/models`            | List available models with download/loaded status                                        |
-| `/status`            | Show server health, GPU info, uptime                                                     |
-| `/quota`             | Check your remaining daily generation quota                                              |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                      |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                        |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                               |
+| Command              | Description                                                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/generate`          | Generate an image or video (prompt, model, source_image, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt) |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                |
+| `/models`            | List available models with download/loaded status                                                                                                                     |
+| `/status`            | Show server health, GPU info, uptime                                                                                                                                  |
+| `/quota`             | Check your remaining daily generation quota                                                                                                                           |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                   |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                     |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                            |
 
 ## Configuration
 
@@ -45,6 +45,14 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | `MOLD_DISCORD_COOLDOWN`      | `10`                    | Per-user cooldown (s)                                                   |
 | `MOLD_DISCORD_ALLOWED_ROLES` | —                       | Comma-separated role names/IDs for access control (unset = all)         |
 | `MOLD_DISCORD_DAILY_QUOTA`   | —                       | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
+
+::: tip Video generation
+Running `/generate` against a video model (`ltx-video-*`, `ltx-2-*`) produces an
+MP4 by default. Pass `video_format: Animated GIF` to receive a GIF instead. You
+can also attach a `source_image` for img2img on regular models, or as the first
+frame for LTX-2 image-to-video. When the rendered MP4 exceeds Discord's upload
+ceiling the bot falls back to the always-bundled GIF preview.
+:::
 
 ::: info Block List
 The `/admin block` command stores blocks in memory. Blocks clear when the bot

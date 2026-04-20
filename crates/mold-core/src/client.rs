@@ -8,6 +8,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use reqwest::Client;
 
+#[derive(Clone)]
 pub struct MoldClient {
     base_url: String,
     client: Client,
