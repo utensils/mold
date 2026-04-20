@@ -2304,4 +2304,51 @@ mod tests {
         assert_eq!(v["queued"].as_array().unwrap().len(), 1);
         assert_eq!(v["queued"][0]["model"], "flux-schnell:q4");
     }
+
+    #[tokio::test]
+    async fn sse_stream_emits_enqueued_event() {
+        use futures::StreamExt as _;
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let req = Request::builder()
+            .uri("/api/downloads/stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Enqueue AFTER subscribing (SSE response already established).
+        let state_for_send = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = state_for_send
+                .downloads
+                .enqueue("flux-schnell:q4".into())
+                .await;
+        });
+
+        let mut body = res.into_body().into_data_stream();
+        let mut saw_enqueued = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), body.next()).await {
+                Ok(Some(Ok(bytes))) => {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if text.contains("\"type\":\"enqueued\"") {
+                        saw_enqueued = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(saw_enqueued, "did not observe an 'enqueued' SSE event");
+    }
 }
