@@ -623,6 +623,7 @@ pub struct LtxVideoEngine {
     base: EngineBase<LoadedLtxVideo>,
     t5_variant: Option<String>,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl LtxVideoEngine {
@@ -638,6 +639,7 @@ impl LtxVideoEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             t5_variant,
             shared_pool,
+            pending_placement: None,
         }
     }
 }
@@ -646,8 +648,8 @@ impl LtxVideoEngine {
 // InferenceEngine trait
 // ---------------------------------------------------------------------------
 
-impl crate::engine::InferenceEngine for LtxVideoEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl LtxVideoEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let start = Instant::now();
         let preset = LtxModelPreset::for_model(&self.base.model_name)?;
 
@@ -690,6 +692,15 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
             req, &preset, seed, num_frames, fps, steps, guidance, width, height, latent_h,
             latent_w, latent_f, start,
         )
+    }
+}
+
+impl crate::engine::InferenceEngine for LtxVideoEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
@@ -1051,10 +1062,19 @@ impl LtxVideoEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("T5 tokenizer path not configured"))?;
 
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let t5_device = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(device.clone()),
+        )?;
         let mut t5 = crate::encoders::t5::T5Encoder::load(
             t5_encoder_path,
             t5_tokenizer_path,
-            &device,
+            &t5_device,
             dtype,
             progress,
         )?;
@@ -1062,7 +1082,8 @@ impl LtxVideoEngine {
 
         progress.stage_start("Encoding prompt");
         let encode_start = Instant::now();
-        let prompt_embeds = t5.encode(&req.prompt, &device, dtype)?;
+        let prompt_embeds = t5.encode(&req.prompt, &t5_device, dtype)?;
+        let prompt_embeds = prompt_embeds.to_device(&device)?;
         // prompt_embeds: [1, seq_len, 4096] (T5 encoder already adds batch dim)
         progress.stage_done("Encoding prompt", encode_start.elapsed());
 
@@ -1088,7 +1109,8 @@ impl LtxVideoEngine {
 
         let (uncond_embeds, uncond_mask) = if needs_uncond {
             progress.stage_start("Encoding negative prompt (CFG)");
-            let ue = t5.encode("", &device, dtype)?;
+            let ue = t5.encode("", &t5_device, dtype)?;
+            let ue = ue.to_device(&device)?;
             let ue_seq = ue.dim(1)?;
             let um = Tensor::ones((1, ue_seq), DType::F32, &device)?.to_dtype(dtype)?;
             progress.stage_done("Encoding negative prompt (CFG)", encode_start.elapsed());
