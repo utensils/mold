@@ -127,3 +127,76 @@ pub(crate) mod nvml_source {
 
 #[cfg(feature = "nvml")]
 pub use nvml_source::NvmlSource;
+
+use mold_core::{GpuBackend, GpuSnapshot};
+
+/// Locate the `nvidia-smi` binary. Matches the existing resolver in
+/// `routes.rs::query_gpu_info` so NixOS hosts still work.
+pub(crate) fn resolve_nvidia_smi() -> &'static str {
+    if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
+        "/run/current-system/sw/bin/nvidia-smi"
+    } else {
+        "nvidia-smi"
+    }
+}
+
+/// Parse a single `nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader,nounits`
+/// line. Returns `(ordinal, name, total_bytes, used_bytes)` or `None` if the
+/// line doesn't have the expected shape.
+pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
+    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let ordinal: usize = parts[0].parse().ok()?;
+    let name = parts[1].to_string();
+    let total_mb: u64 = parts[2].parse().ok()?;
+    let used_mb: u64 = parts[3].parse().ok()?;
+    // nvidia-smi with `nounits` reports MiB; we expose bytes. Upstream uses
+    // 1 MiB = 1_000_000 for display consistency with the rest of mold.
+    Some((ordinal, name, total_mb * 1_000_000, used_mb * 1_000_000))
+}
+
+pub struct SmiSource;
+
+impl SmiSource {
+    /// Invoke `nvidia-smi` and parse the output. Returns an empty Vec if the
+    /// binary isn't present or returns non-zero.
+    pub fn snapshot() -> Vec<GpuSnapshot> {
+        let bin = resolve_nvidia_smi();
+        let output = match std::process::Command::new(bin)
+            .args([
+                "--query-gpu=index,name,memory.total,memory.used",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(_) => return Vec::new(),
+            Err(_) => return Vec::new(),
+        };
+        let text = match String::from_utf8(output.stdout) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        Self::parse_snapshot(&text)
+    }
+
+    /// Pure parser — split out for testability.
+    pub fn parse_snapshot(text: &str) -> Vec<GpuSnapshot> {
+        text.lines()
+            .filter_map(|l| {
+                let (ordinal, name, total, used) = parse_nvidia_smi_line(l)?;
+                Some(GpuSnapshot {
+                    ordinal,
+                    name,
+                    backend: GpuBackend::Cuda,
+                    vram_total: total,
+                    vram_used: used,
+                    vram_used_by_mold: None,
+                    vram_used_by_other: None,
+                })
+            })
+            .collect()
+    }
+}

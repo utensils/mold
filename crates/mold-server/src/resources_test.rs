@@ -84,6 +84,38 @@ async fn subscribe_with_lagged_receiver_recovers() {
 }
 
 #[test]
+fn parse_nvidia_smi_line_happy_path() {
+    let line = "0, NVIDIA GeForce RTX 3090, 24564, 14248";
+    let parsed = crate::resources::parse_nvidia_smi_line(line).expect("parse should succeed");
+    assert_eq!(parsed.0, 0);
+    assert_eq!(parsed.1, "NVIDIA GeForce RTX 3090");
+    assert_eq!(parsed.2, 24_564_000_000);
+    assert_eq!(parsed.3, 14_248_000_000);
+}
+
+#[test]
+fn parse_nvidia_smi_line_garbage_returns_none() {
+    assert!(crate::resources::parse_nvidia_smi_line("not,enough,fields").is_none());
+    assert!(crate::resources::parse_nvidia_smi_line("0,GPU,notnum,0").is_none());
+    assert!(crate::resources::parse_nvidia_smi_line("").is_none());
+}
+
+#[test]
+fn smi_snapshot_sets_per_process_fields_to_none() {
+    let gpus = crate::resources::SmiSource::parse_snapshot(
+        "0, NVIDIA GeForce RTX 3090, 24564, 14248\n\
+         1, NVIDIA GeForce RTX 3090, 24564, 800",
+    );
+    assert_eq!(gpus.len(), 2);
+    assert_eq!(gpus[0].ordinal, 0);
+    assert_eq!(gpus[0].vram_total, 24_564_000_000);
+    assert_eq!(gpus[0].vram_used, 14_248_000_000);
+    assert_eq!(gpus[0].vram_used_by_mold, None);
+    assert_eq!(gpus[0].vram_used_by_other, None);
+    assert_eq!(gpus[1].ordinal, 1);
+}
+
+#[test]
 #[cfg(feature = "nvml")]
 fn nvml_source_returns_zero_gpus_when_nvml_init_fails() {
     // On a CI box without NVML, `NvmlSource::try_new()` returns Err — the
