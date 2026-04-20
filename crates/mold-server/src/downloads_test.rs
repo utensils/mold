@@ -218,3 +218,83 @@ async fn cancel_unknown_id_returns_false() {
     let queue = DownloadQueue::new();
     assert!(!queue.cancel("no-such-id").await);
 }
+
+/// Fails once, then succeeds.
+#[derive(Clone, Default)]
+struct FlakyPuller {
+    pub calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PullDriver for FlakyPuller {
+    async fn pull(
+        &self,
+        _model: &str,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        // Emit a minimal FileStart so Started fires.
+        on_progress(mold_core::download::DownloadProgressEvent::FileStart {
+            filename: "f".into(),
+            file_index: 0,
+            total_files: 1,
+            size_bytes: 10,
+            batch_bytes_downloaded: 0,
+            batch_bytes_total: 10,
+            batch_elapsed_ms: 0,
+        });
+        if n == 1 {
+            Err("simulated network blip".into())
+        } else {
+            on_progress(mold_core::download::DownloadProgressEvent::FileDone {
+                filename: "f".into(),
+                file_index: 0,
+                total_files: 1,
+                batch_bytes_downloaded: 10,
+                batch_bytes_total: 10,
+                batch_elapsed_ms: 1,
+            });
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn driver_retries_once_then_succeeds() {
+    // The retry backoff is 5 s. We let it run in real time —
+    // `tokio::time::pause` interacts poorly with the broadcast receivers +
+    // mpsc drain task in this driver, and would make the test flaky.
+    let queue = DownloadQueue::new();
+    let puller = FlakyPuller::default();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let mut rx = queue.subscribe();
+
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut seen_done = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(DownloadEvent::JobDone { id: ev, .. })) if ev == id => {
+                seen_done = true;
+                break;
+            }
+            Ok(Ok(DownloadEvent::JobFailed { .. })) => {
+                panic!("expected JobDone after retry, got JobFailed");
+            }
+            _ => {}
+        }
+    }
+
+    shutdown.cancel();
+    let _ = handle.await;
+
+    assert!(seen_done, "expected JobDone after retry");
+    assert_eq!(
+        puller.calls.load(Ordering::SeqCst),
+        2,
+        "expected exactly 2 attempts"
+    );
+}
