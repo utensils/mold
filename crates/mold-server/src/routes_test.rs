@@ -2158,7 +2158,9 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v.get("id").and_then(|x| x.as_str()).is_some());
         assert!(v.get("position").and_then(|x| x.as_u64()).is_some());
@@ -2297,7 +2299,9 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["queued"].is_array());
         assert!(v["history"].is_array());

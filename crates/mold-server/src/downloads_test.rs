@@ -119,7 +119,10 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
     shutdown.cancel();
     let _ = driver_handle.await;
 
-    assert!(puller.called.load(Ordering::SeqCst), "puller was not invoked");
+    assert!(
+        puller.called.load(Ordering::SeqCst),
+        "puller was not invoked"
+    );
     assert!(seen_started, "missing Started event");
     assert!(seen_progress, "missing Progress event");
     assert!(seen_done, "missing JobDone event");

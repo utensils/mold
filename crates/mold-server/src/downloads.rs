@@ -125,8 +125,10 @@ impl DownloadQueue {
         }
         {
             let queued = self.queued.lock().map_err(|_| EnqueueError::LockPoisoned)?;
-            if let Some((idx, existing)) =
-                queued.iter().enumerate().find(|(_, j)| j.model == canonical)
+            if let Some((idx, existing)) = queued
+                .iter()
+                .enumerate()
+                .find(|(_, j)| j.model == canonical)
             {
                 return Ok((existing.id.clone(), idx + 1, EnqueueOutcome::AlreadyPresent));
             }
@@ -170,7 +172,9 @@ impl DownloadQueue {
             if let Some(pos) = queued.iter().position(|j| j.id == id) {
                 queued.remove(pos);
                 drop(queued);
-                let _ = self.events.send(DownloadEvent::Dequeued { id: id.to_string() });
+                let _ = self
+                    .events
+                    .send(DownloadEvent::Dequeued { id: id.to_string() });
                 return true;
             }
         }
