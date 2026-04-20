@@ -263,3 +263,56 @@ export const UNET_SCHEDULER_FAMILIES: ReadonlyArray<string> = [
   "stable-diffusion-1.5",
   "sdxl",
 ];
+
+// ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
+// Mirror of `mold_core::types::{DownloadJob, JobStatus, DownloadEvent,
+// DownloadsListing}`. Keep field names / string literals in sync with the
+// server's serde output.
+
+export type JobStatusWire =
+  | "queued"
+  | "active"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface DownloadJobWire {
+  id: string;
+  model: string;
+  status: JobStatusWire;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current_file?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+  error?: string | null;
+}
+
+export interface DownloadsListingWire {
+  active?: DownloadJobWire | null;
+  queued: DownloadJobWire[];
+  history: DownloadJobWire[];
+}
+
+export type DownloadEventWire =
+  | { type: "enqueued"; id: string; model: string; position: number }
+  | { type: "dequeued"; id: string }
+  | {
+      type: "started";
+      id: string;
+      files_total: number;
+      bytes_total: number;
+    }
+  | {
+      type: "progress";
+      id: string;
+      files_done: number;
+      bytes_done: number;
+      current_file?: string | null;
+    }
+  | { type: "file_done"; id: string; filename: string }
+  | { type: "job_done"; id: string; model: string }
+  | { type: "job_failed"; id: string; error: string }
+  | { type: "job_cancelled"; id: string };
