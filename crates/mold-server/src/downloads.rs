@@ -236,3 +236,354 @@ impl DownloadQueue {
 #[cfg(test)]
 #[path = "downloads_test.rs"]
 mod tests;
+
+// ── PullDriver trait + real & test implementations ──────────────────────────
+
+/// Trait that hides the HuggingFace pull behind something the tests can fake.
+///
+/// The real implementation in `HfPullDriver` calls
+/// `mold_core::download::pull_and_configure_with_callback`. Tests inject a stub.
+#[async_trait::async_trait]
+pub trait PullDriver: Send + Sync + 'static {
+    async fn pull(
+        &self,
+        model: &str,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String>;
+}
+
+/// Production driver — wraps the real HF pull.
+pub struct HfPullDriver;
+
+#[async_trait::async_trait]
+impl PullDriver for HfPullDriver {
+    async fn pull(
+        &self,
+        model: &str,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        let on_progress: mold_core::download::DownloadProgressCallback =
+            std::sync::Arc::from(on_progress);
+        let opts = mold_core::download::PullOptions::default();
+        let model = model.to_string();
+        // Race the pull against cancellation. pull_and_configure_with_callback
+        // is not cancel-aware internally, but dropping its future on cancel
+        // aborts the underlying tokio-based HTTP calls.
+        tokio::select! {
+            res = mold_core::download::pull_and_configure_with_callback(&model, on_progress, &opts) => {
+                res.map(|_| ()).map_err(|e| e.to_string())
+            }
+            _ = cancel.cancelled() => {
+                // Best-effort cleanup: the `.pulling` marker + partial clean-path
+                // files may remain. `cleanup_partials_for_model` below wipes them.
+                cleanup_partials_for_model(&model);
+                Err("cancelled".into())
+            }
+        }
+    }
+}
+
+/// Delete partial files under `<models_dir>/<sanitized>/` for a cancelled pull.
+/// Leaves the HF cache under `~/.cache/huggingface` intact so retry is cheap.
+fn cleanup_partials_for_model(model: &str) {
+    use mold_core::manifest::resolve_model_name;
+    let canonical = resolve_model_name(model);
+    let sanitized = canonical.replace(':', "-");
+    // Remove `.pulling` marker first so `has_pulling_marker` returns false.
+    mold_core::download::remove_pulling_marker(&canonical);
+    if let Ok(models_dir) = std::env::var("MOLD_MODELS_DIR") {
+        let target = std::path::PathBuf::from(models_dir).join(&sanitized);
+        let _ = std::fs::remove_dir_all(target);
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        let target = home.join(".mold/models").join(&sanitized);
+        let _ = std::fs::remove_dir_all(target);
+    }
+}
+
+/// Spawn the single driver task. Returns the JoinHandle; drop or await to
+/// stop the driver (combined with `shutdown.cancel()`).
+pub fn spawn_driver(
+    queue: Arc<DownloadQueue>,
+    driver: Arc<dyn PullDriver>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!("download queue driver started");
+        loop {
+            queue.wait_for_work(&shutdown).await;
+            if shutdown.is_cancelled() {
+                break;
+            }
+            while let Some(mut job) = queue.take_next_queued() {
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                run_one_job(&queue, &driver, &mut job).await;
+                if shutdown.is_cancelled() {
+                    break;
+                }
+            }
+        }
+        tracing::info!("download queue driver exiting");
+    })
+}
+
+async fn run_one_job(
+    queue: &Arc<DownloadQueue>,
+    driver: &Arc<dyn PullDriver>,
+    job: &mut DownloadJob,
+) {
+    job.status = JobStatus::Active;
+    job.started_at = Some(now_ms());
+    let cancel = CancellationToken::new();
+    let handle_job = job.clone();
+
+    // Install the job as active. Placeholder task handle — we're not tracking
+    // it separately because the pull runs inline in this function.
+    let active_handle = ActiveHandle {
+        job: handle_job,
+        abort: cancel.clone(),
+        task: tokio::spawn(async {}),
+    };
+    queue.set_active(active_handle).await;
+
+    let _ = try_pull_with_retry(queue, driver, job, cancel.clone()).await;
+
+    // Move the finished job into history.
+    let final_job = queue
+        .with_active(|a| a.clone())
+        .await
+        .unwrap_or_else(|| job.clone());
+    queue.clear_active().await;
+    queue.push_history(final_job);
+}
+
+async fn try_pull_with_retry(
+    queue: &Arc<DownloadQueue>,
+    driver: &Arc<dyn PullDriver>,
+    job: &mut DownloadJob,
+    cancel: CancellationToken,
+) -> Result<(), ()> {
+    // Initial attempt + optional single retry.
+    for attempt in 0..=1u8 {
+        let result = run_single_attempt(queue, driver, job, cancel.clone()).await;
+        match result {
+            Ok(()) => {
+                job.status = JobStatus::Completed;
+                job.completed_at = Some(now_ms());
+                // Reflect into the active-job snapshot so history includes the final state.
+                queue
+                    .with_active(|a| {
+                        *a = job.clone();
+                    })
+                    .await;
+                queue.emit(DownloadEvent::JobDone {
+                    id: job.id.clone(),
+                    model: job.model.clone(),
+                });
+                return Ok(());
+            }
+            Err(AttemptError::Cancelled) => {
+                job.status = JobStatus::Cancelled;
+                job.completed_at = Some(now_ms());
+                queue
+                    .with_active(|a| {
+                        *a = job.clone();
+                    })
+                    .await;
+                queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
+                return Err(());
+            }
+            Err(AttemptError::Failed(msg)) => {
+                if attempt == 0 {
+                    tracing::warn!(model = %job.model, "pull attempt 1 failed: {msg} — retrying in 5s");
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        _ = cancel.cancelled() => {
+                            job.status = JobStatus::Cancelled;
+                            job.completed_at = Some(now_ms());
+                            queue
+                                .with_active(|a| {
+                                    *a = job.clone();
+                                })
+                                .await;
+                            queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
+                            return Err(());
+                        }
+                    }
+                    continue;
+                }
+                job.status = JobStatus::Failed;
+                job.error = Some(msg.clone());
+                job.completed_at = Some(now_ms());
+                queue
+                    .with_active(|a| {
+                        *a = job.clone();
+                    })
+                    .await;
+                queue.emit(DownloadEvent::JobFailed {
+                    id: job.id.clone(),
+                    error: msg,
+                });
+                return Err(());
+            }
+        }
+    }
+    Err(())
+}
+
+enum AttemptError {
+    Cancelled,
+    Failed(String),
+}
+
+async fn run_single_attempt(
+    queue: &Arc<DownloadQueue>,
+    driver: &Arc<dyn PullDriver>,
+    job: &mut DownloadJob,
+    cancel: CancellationToken,
+) -> Result<(), AttemptError> {
+    // Pipe progress events through an mpsc so we can process them serially,
+    // maintain ordering, and guarantee they drain before JobDone fires.
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<mold_core::download::DownloadProgressEvent>();
+    let on_progress = Box::new(move |evt: mold_core::download::DownloadProgressEvent| {
+        let _ = tx.send(evt);
+    });
+
+    let queue_for_drain = queue.clone();
+    let job_id = job.id.clone();
+    let drain_handle = tokio::spawn(async move {
+        while let Some(evt) = rx.recv().await {
+            translate_event(&queue_for_drain, &job_id, evt).await;
+        }
+    });
+
+    let result = driver.pull(&job.model, on_progress, cancel.clone()).await;
+    // Wait for the drain task to finish (sender dropped when `pull` returned).
+    let _ = drain_handle.await;
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(msg) if cancel.is_cancelled() => {
+            let _ = msg;
+            Err(AttemptError::Cancelled)
+        }
+        Err(msg) => Err(AttemptError::Failed(msg)),
+    }
+}
+
+async fn translate_event(
+    queue: &Arc<DownloadQueue>,
+    job_id: &str,
+    evt: mold_core::download::DownloadProgressEvent,
+) {
+    use mold_core::download::DownloadProgressEvent as P;
+    let queue = queue.clone();
+    let id = job_id.to_string();
+    {
+        match evt {
+            P::FileStart {
+                total_files,
+                batch_bytes_total,
+                filename,
+                file_index,
+                ..
+            } => {
+                let emitted_started = queue
+                    .with_active(|j| {
+                        if j.files_total == 0 {
+                            j.files_total = total_files;
+                            j.bytes_total = batch_bytes_total;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .await
+                    .unwrap_or(false);
+                if emitted_started {
+                    queue.emit(DownloadEvent::Started {
+                        id: id.clone(),
+                        files_total: total_files,
+                        bytes_total: batch_bytes_total,
+                    });
+                }
+                let _ = file_index;
+                queue
+                    .with_active(|j| {
+                        j.current_file = Some(filename.clone());
+                    })
+                    .await;
+            }
+            P::FileProgress {
+                filename,
+                bytes_downloaded,
+                batch_bytes_downloaded,
+                batch_bytes_total,
+                file_index,
+                bytes_total,
+                ..
+            } => {
+                let _ = (bytes_downloaded, bytes_total, file_index);
+                queue
+                    .with_active(|j| {
+                        j.bytes_done = batch_bytes_downloaded;
+                        if j.bytes_total == 0 {
+                            j.bytes_total = batch_bytes_total;
+                        }
+                        j.current_file = Some(filename.clone());
+                    })
+                    .await;
+                queue.emit(DownloadEvent::Progress {
+                    id: id.clone(),
+                    files_done: 0, // populated on FileDone
+                    bytes_done: batch_bytes_downloaded,
+                    current_file: Some(filename),
+                });
+            }
+            P::FileDone {
+                filename,
+                file_index,
+                total_files,
+                batch_bytes_downloaded,
+                batch_bytes_total,
+                ..
+            } => {
+                let _ = batch_bytes_total;
+                queue
+                    .with_active(|j| {
+                        j.files_done = file_index + 1;
+                        j.files_total = total_files;
+                        j.bytes_done = batch_bytes_downloaded;
+                    })
+                    .await;
+                queue.emit(DownloadEvent::FileDone {
+                    id: id.clone(),
+                    filename,
+                });
+            }
+            P::Status { message } => {
+                // Only surface as a transient info on the active job's current_file
+                // placeholder. The drawer shows `current_file` literally.
+                queue
+                    .with_active(|j| {
+                        j.current_file = Some(message.clone());
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
