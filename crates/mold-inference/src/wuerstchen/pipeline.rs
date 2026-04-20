@@ -59,6 +59,7 @@ struct LoadedWuerstchen {
     prior_tokenizer: tokenizers::Tokenizer,
     decoder_tokenizer: tokenizers::Tokenizer,
     device: Device,
+    clip_device: Device,
     dtype: DType,
 }
 
@@ -68,6 +69,7 @@ struct LoadedWuerstchen {
 pub struct WuerstchenEngine {
     base: EngineBase<LoadedWuerstchen>,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl WuerstchenEngine {
@@ -206,6 +208,7 @@ impl WuerstchenEngine {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -219,6 +222,7 @@ impl WuerstchenEngine {
         prompt: &str,
         negative_prompt: &str,
         device: &Device,
+        clip_device: &Device,
         dtype: DType,
         prior_guidance: f64,
         decoder_guidance: f64,
@@ -240,7 +244,7 @@ impl WuerstchenEngine {
                     prior_tokenizer,
                     &prior_clip_config,
                     prompt,
-                    device,
+                    clip_device,
                     dtype,
                 )?;
                 let prior_text_embeddings = if use_prior_cfg {
@@ -249,7 +253,7 @@ impl WuerstchenEngine {
                         prior_tokenizer,
                         &prior_clip_config,
                         negative_prompt,
-                        device,
+                        clip_device,
                         dtype,
                     )?;
                     Tensor::cat(&[&prior_text_embeddings, &prior_negative_embeddings], 0)?
@@ -270,7 +274,7 @@ impl WuerstchenEngine {
                     decoder_tokenizer,
                     &dec_clip_config,
                     prompt,
-                    device,
+                    clip_device,
                     dtype,
                 )?;
                 let decoder_text_embeddings = if use_decoder_cfg {
@@ -279,7 +283,7 @@ impl WuerstchenEngine {
                         decoder_tokenizer,
                         &dec_clip_config,
                         negative_prompt,
-                        device,
+                        clip_device,
                         dtype,
                     )?;
                     Tensor::cat(&[&decoder_text_embeddings, &decoder_negative_embeddings], 0)?
@@ -290,6 +294,8 @@ impl WuerstchenEngine {
                     "Encoding prompt (Decoder CLIP, 1024-dim)",
                     dec_encode_start.elapsed(),
                 );
+                let prior_text_embeddings = prior_text_embeddings.to_device(device)?;
+                let decoder_text_embeddings = decoder_text_embeddings.to_device(device)?;
                 Ok((prior_text_embeddings, decoder_text_embeddings))
             })?;
         if cache_hit {
@@ -531,6 +537,17 @@ impl WuerstchenEngine {
             .progress
             .stage_done("Loading VQ-GAN (Stage A)", vqgan_start.elapsed());
 
+        // Tier 1: honor `placement.text_encoders` (both CLIPs as a group).
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let clip_device = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(device.clone()),
+        )?;
+
         // Load Prior CLIP-G encoder (1280-dim, 32 layers)
         self.base
             .progress
@@ -540,7 +557,7 @@ impl WuerstchenEngine {
         let prior_clip = stable_diffusion::build_clip_transformer(
             &prior_clip_config,
             &prior_clip_path,
-            &device,
+            &clip_device,
             DType::F32,
         )?;
         self.base.progress.stage_done(
@@ -557,7 +574,7 @@ impl WuerstchenEngine {
         let decoder_clip = stable_diffusion::build_clip_transformer(
             &dec_clip_config,
             &dec_clip_path,
-            &device,
+            &clip_device,
             DType::F32,
         )?;
         self.base.progress.stage_done(
@@ -580,6 +597,7 @@ impl WuerstchenEngine {
             prior_tokenizer,
             decoder_tokenizer,
             device,
+            clip_device,
             dtype,
         });
 
@@ -890,6 +908,16 @@ impl WuerstchenEngine {
                 let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
                     .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
 
+                let tier1 = self
+                    .pending_placement
+                    .as_ref()
+                    .map(|p| p.text_encoders)
+                    .unwrap_or_default();
+                let clip_device = crate::device::resolve_device(
+                    Some(tier1),
+                    || Ok(device.clone()),
+                )?;
+
                 self.base
                     .progress
                     .stage_start("Loading Prior CLIP-G encoder (1280-dim)");
@@ -898,7 +926,7 @@ impl WuerstchenEngine {
                 let prior_clip = stable_diffusion::build_clip_transformer(
                     &prior_clip_config,
                     &prior_clip_path,
-                    &device,
+                    &clip_device,
                     DType::F32,
                 )?;
                 self.base.progress.stage_done(
@@ -917,7 +945,7 @@ impl WuerstchenEngine {
                 let decoder_clip = stable_diffusion::build_clip_transformer(
                     &dec_clip_config,
                     &dec_clip_path,
-                    &device,
+                    &clip_device,
                     DType::F32,
                 )?;
                 self.base.progress.stage_done(
@@ -933,6 +961,7 @@ impl WuerstchenEngine {
                     &req.prompt,
                     negative_prompt,
                     &device,
+                    &clip_device,
                     dtype,
                     prior_guidance,
                     decoder_guidance,
@@ -1217,8 +1246,8 @@ impl WuerstchenEngine {
     }
 }
 
-impl InferenceEngine for WuerstchenEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl WuerstchenEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for Wuerstchen, ignoring");
         }
@@ -1265,6 +1294,7 @@ impl InferenceEngine for WuerstchenEngine {
             &req.prompt,
             negative_prompt,
             &loaded.device,
+            &loaded.clip_device,
             loaded.dtype,
             prior_guidance,
             decoder_guidance,
@@ -1437,6 +1467,15 @@ impl InferenceEngine for WuerstchenEngine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for WuerstchenEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
