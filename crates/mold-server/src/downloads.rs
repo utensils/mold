@@ -664,18 +664,26 @@ async fn translate_event(
                 ..
             } => {
                 let _ = (bytes_downloaded, bytes_total, file_index);
-                queue
+                // Read the current `files_done` counter from the active job
+                // so the emitted Progress event carries truth, not a zero
+                // placeholder. The client reducer assigns `files_done`
+                // directly from this field, so emitting 0 mid-batch would
+                // reset the drawer's "X of Y files" counter and cause a
+                // visible flicker until the next FileDone event.
+                let files_done = queue
                     .with_active(|j| {
                         j.bytes_done = batch_bytes_downloaded;
                         if j.bytes_total == 0 {
                             j.bytes_total = batch_bytes_total;
                         }
                         j.current_file = Some(filename.clone());
+                        j.files_done
                     })
-                    .await;
+                    .await
+                    .unwrap_or(0);
                 queue.emit(DownloadEvent::Progress {
                     id: id.clone(),
-                    files_done: 0, // populated on FileDone
+                    files_done,
                     bytes_done: batch_bytes_downloaded,
                     current_file: Some(filename),
                 });

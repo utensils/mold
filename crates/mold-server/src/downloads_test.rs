@@ -491,6 +491,146 @@ impl PullDriver for FlakyPuller {
     }
 }
 
+/// Puller that downloads two files and emits a few `FileProgress` events
+/// between the file boundaries. Used to verify that Progress events carry
+/// the current `files_done` counter rather than resetting it to 0.
+#[derive(Clone, Default)]
+struct MultiFilePuller;
+
+#[async_trait::async_trait]
+impl PullDriver for MultiFilePuller {
+    async fn pull(
+        &self,
+        _model: &str,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        use mold_core::download::DownloadProgressEvent as P;
+        // File 0 — start, mid-progress, done.
+        on_progress(P::FileStart {
+            filename: "a.safetensors".into(),
+            file_index: 0,
+            total_files: 2,
+            size_bytes: 100,
+            batch_bytes_downloaded: 0,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 0,
+        });
+        on_progress(P::FileProgress {
+            filename: "a.safetensors".into(),
+            file_index: 0,
+            bytes_downloaded: 50,
+            bytes_total: 100,
+            batch_bytes_downloaded: 50,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 1,
+        });
+        on_progress(P::FileDone {
+            filename: "a.safetensors".into(),
+            file_index: 0,
+            total_files: 2,
+            batch_bytes_downloaded: 100,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 2,
+        });
+        // File 1 — two mid-progress events (this is where the bug flickered).
+        on_progress(P::FileStart {
+            filename: "b.safetensors".into(),
+            file_index: 1,
+            total_files: 2,
+            size_bytes: 100,
+            batch_bytes_downloaded: 100,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 3,
+        });
+        on_progress(P::FileProgress {
+            filename: "b.safetensors".into(),
+            file_index: 1,
+            bytes_downloaded: 25,
+            bytes_total: 100,
+            batch_bytes_downloaded: 125,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 4,
+        });
+        on_progress(P::FileProgress {
+            filename: "b.safetensors".into(),
+            file_index: 1,
+            bytes_downloaded: 75,
+            bytes_total: 100,
+            batch_bytes_downloaded: 175,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 5,
+        });
+        on_progress(P::FileDone {
+            filename: "b.safetensors".into(),
+            file_index: 1,
+            total_files: 2,
+            batch_bytes_downloaded: 200,
+            batch_bytes_total: 200,
+            batch_elapsed_ms: 6,
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn progress_events_carry_current_files_done_counter() {
+    let queue = DownloadQueue::new();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_driver(queue.clone(), Arc::new(MultiFilePuller), shutdown.clone());
+    let mut rx = queue.subscribe();
+
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+
+    // Collect (files_done, bytes_done) from each Progress event for this job,
+    // in order, until JobDone arrives or we time out.
+    let mut progress_samples: Vec<(usize, u64)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(DownloadEvent::Progress {
+                id: ev_id,
+                files_done,
+                bytes_done,
+                ..
+            })) if ev_id == id => {
+                progress_samples.push((files_done, bytes_done));
+            }
+            Ok(Ok(DownloadEvent::JobDone { id: ev_id, .. })) if ev_id == id => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    shutdown.cancel();
+    let _ = handle.await;
+
+    // We expect three Progress events in order:
+    //   1. during file 0 (before any file has finished) → files_done = 0
+    //   2. during file 1 (after file 0 is done)          → files_done = 1
+    //   3. during file 1 again                            → files_done = 1
+    assert!(
+        progress_samples.len() >= 3,
+        "expected at least 3 Progress events, got {progress_samples:?}"
+    );
+    assert_eq!(
+        progress_samples[0].0, 0,
+        "first Progress (mid file 0) should report files_done = 0, got {progress_samples:?}",
+    );
+    // Every Progress sample emitted after the first FileDone must report
+    // `files_done >= 1` — i.e. the counter must never reset to 0 mid-stream.
+    // The old bug unconditionally emitted 0, causing the drawer to flicker.
+    let after_first_done = &progress_samples[1..];
+    for (files_done, _) in after_first_done {
+        assert!(
+            *files_done >= 1,
+            "Progress events after the first FileDone must carry files_done >= 1; \
+             got sequence {progress_samples:?}",
+        );
+    }
+}
+
 #[tokio::test]
 async fn driver_retries_once_then_succeeds() {
     // The retry backoff is 5 s. We let it run in real time —
