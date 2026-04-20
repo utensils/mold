@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Discord bot now supports video generation and img2img / img-to-video.** `/generate` accepts an optional `source_image` attachment (PNG/JPEG, ≤10 MiB) that is forwarded to the server as `source_image` — image-family models run img2img, LTX-2 runs image-to-video with the attachment as the first frame. New `video_format` choice (MP4 default, animated GIF) plus `frames`, `fps`, `audio` (LTX-2 only), `pipeline` (LTX-2 one-stage / two-stage / two-stage-hq / distilled / a2vid / retake), `strength`, and `negative_prompt` params wire through to the underlying `GenerateRequest`. Video families default to 25 frames @ 24 fps when unspecified. The handler picks up `GenerateResponse.video` and attaches the MP4/GIF bytes (plus a "Video Generated" embed with frame count, fps, and optional audio flag); when the primary MP4 exceeds Discord's ~24 MiB effective upload cap it automatically falls back to the always-generated GIF preview and notes the swap in the embed footer.
+
+### Fixed
+
+- **Discord bot no longer silently drops video-family generations.** Previously `/generate` hard-coded `output_format: Png` and `resp.images.first()` for the attachment, so LTX-Video / LTX-2 jobs either bounced off server validation (LTX-2 rejects non-video containers) or came back with the video missing from the reply.
+
 ## [0.9.0] - 2026-04-19
 
 *Multi-GPU inference server, browser-driven generate UI, SQLite gallery metadata, and animated video previews.*
