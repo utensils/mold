@@ -159,6 +159,50 @@ pub const QWEN3_FP16_VRAM_THRESHOLD: u64 = 10_200_000_000;
 /// Headroom for activation memory during inference (denoising + VAE decode workspace).
 const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 
+// ── Placement resolution ─────────────────────────────────────────────────────
+
+/// Resolve a caller-supplied `DeviceRef` override into a concrete candle
+/// `Device`, falling back to `auto` when the override is missing or `Auto`.
+///
+/// - `None`, `Some(Auto)` — call `auto()` (existing VRAM-aware logic).
+/// - `Some(Cpu)`          — `Device::Cpu`, never invoke `auto()`.
+/// - `Some(Gpu { ordinal })` — try CUDA first, then Metal. Each backend is
+///   gated by its candle feature flag so a CPU-only build returns a clear
+///   error message instead of a build failure.
+pub fn resolve_device<F>(
+    req: Option<mold_core::types::DeviceRef>,
+    auto: F,
+) -> anyhow::Result<candle_core::Device>
+where
+    F: FnOnce() -> anyhow::Result<candle_core::Device>,
+{
+    use mold_core::types::DeviceRef;
+    match req {
+        None | Some(DeviceRef::Auto) => auto(),
+        Some(DeviceRef::Cpu) => Ok(candle_core::Device::Cpu),
+        Some(DeviceRef::Gpu { ordinal }) => resolve_gpu_ordinal(ordinal),
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    candle_core::Device::new_cuda(ordinal)
+        .map_err(|e| anyhow::anyhow!("failed to open CUDA device {ordinal}: {e}"))
+}
+
+#[cfg(all(not(feature = "cuda"), feature = "metal"))]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    candle_core::Device::new_metal(ordinal)
+        .map_err(|e| anyhow::anyhow!("failed to open Metal device {ordinal}: {e}"))
+}
+
+#[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
+fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    Err(anyhow::anyhow!(
+        "GPU ordinal {ordinal} requested but this build has neither CUDA nor Metal enabled"
+    ))
+}
+
 // ── macOS memory query ───────────────────────────────────────────────────────
 
 /// Raw VM statistics from macOS host_statistics64.
