@@ -1035,104 +1035,111 @@ async fn pull_model_endpoint(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("text/event-stream"));
 
+    // Enqueue via the queue. Treat idempotent AlreadyPresent as success.
+    let (job_id, _position) = match state.downloads.enqueue(body.model.clone()).await {
+        Ok((id, pos, _)) => (id, pos),
+        Err(crate::downloads::EnqueueError::UnknownModel(_)) => {
+            return Err(ApiError::unknown_model(format!(
+                "unknown model '{}'. Run 'mold list' to see available models.",
+                body.model
+            )));
+        }
+        Err(crate::downloads::EnqueueError::LockPoisoned) => {
+            return Err(ApiError::internal("download queue state is corrupt"));
+        }
+    };
+
     if !wants_sse {
-        // Legacy: blocking pull with plain text response
-        return pull_model_blocking(state, body.model)
-            .await
-            .map(PullResponse::Text);
+        // Await terminal event for this job, return plain text.
+        let mut rx = state.downloads.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(mold_core::types::DownloadEvent::JobDone { id, model }) if id == job_id => {
+                    return Ok(PullResponse::Text(format!(
+                        "model '{model}' pulled successfully"
+                    )));
+                }
+                Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "failed to pull model '{}': {error}",
+                        body.model
+                    )));
+                }
+                Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "pull of '{}' was cancelled",
+                        body.model
+                    )));
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(ApiError::internal("download queue channel closed"));
+                }
+            }
+        }
     }
 
-    // SSE streaming pull
-    let model = body.model.clone();
-
-    // Validate model exists in manifest before starting SSE
-    if mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
-        .is_none()
-    {
-        return Err(ApiError::unknown_model(format!(
-            "unknown model '{model}'. Run 'mold list' to see available models."
-        )));
-    }
-
+    // SSE: re-emit queue events shaped like the legacy SseProgressEvent::DownloadProgress
+    // so the TUI's existing consumer continues to work unchanged.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
-
+    let mut events = state.downloads.subscribe();
+    let model_for_cb = body.model.clone();
     tokio::spawn(async move {
-        let progress_tx = tx.clone();
-        let model_for_cb = model.clone();
-        let callback =
-            std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
-                let sse_event = match event {
-                    mold_core::download::DownloadProgressEvent::Status { message } => {
-                        SseProgressEvent::Info { message }
-                    }
-                    mold_core::download::DownloadProgressEvent::FileStart {
-                        filename,
-                        file_index,
-                        total_files,
-                        size_bytes,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadProgress {
-                        filename,
-                        file_index,
-                        total_files,
+        loop {
+            match events.recv().await {
+                Ok(mold_core::types::DownloadEvent::Started {
+                    id,
+                    files_total,
+                    bytes_total,
+                }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::DownloadProgress {
+                        filename: String::new(),
+                        file_index: 0,
+                        total_files: files_total,
                         bytes_downloaded: 0,
-                        bytes_total: size_bytes,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                    mold_core::download::DownloadProgressEvent::FileProgress {
-                        filename,
-                        file_index,
-                        bytes_downloaded,
                         bytes_total,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadProgress {
-                        filename,
-                        file_index,
+                        batch_bytes_downloaded: 0,
+                        batch_bytes_total: bytes_total,
+                        batch_elapsed_ms: 0,
+                    }));
+                }
+                Ok(mold_core::types::DownloadEvent::Progress {
+                    id,
+                    files_done,
+                    bytes_done,
+                    current_file,
+                }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::DownloadProgress {
+                        filename: current_file.unwrap_or_default(),
+                        file_index: files_done,
                         total_files: 0,
-                        bytes_downloaded,
-                        bytes_total,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                    mold_core::download::DownloadProgressEvent::FileDone {
-                        filename,
-                        file_index,
-                        total_files,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadDone {
-                        filename,
-                        file_index,
-                        total_files,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                };
-                let _ = progress_tx.send(SseMessage::Progress(sse_event));
-            });
-
-        match model_manager::pull_model(&state, &model, Some(callback)).await {
-            Ok(model_manager::PullStatus::AlreadyAvailable) => {
-                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
-                    model: model_for_cb,
-                }));
-            }
-            Ok(model_manager::PullStatus::Pulled) => {
-                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
-                    model: model_for_cb,
-                }));
-            }
-            Err(e) => {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent { message: e.error }));
+                        bytes_downloaded: bytes_done,
+                        bytes_total: 0,
+                        batch_bytes_downloaded: bytes_done,
+                        batch_bytes_total: 0,
+                        batch_elapsed_ms: 0,
+                    }));
+                }
+                Ok(mold_core::types::DownloadEvent::JobDone { id, .. }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+                        model: model_for_cb.clone(),
+                    }));
+                    break;
+                }
+                Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent { message: error }));
+                    break;
+                }
+                Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: "pull cancelled".into(),
+                    }));
+                    break;
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -1149,16 +1156,6 @@ async fn pull_model_endpoint(
             )
             .into_response(),
     ))
-}
-
-/// Legacy blocking pull — returns plain text.
-async fn pull_model_blocking(state: AppState, model: String) -> Result<String, ApiError> {
-    match model_manager::pull_model(&state, &model, None).await? {
-        model_manager::PullStatus::AlreadyAvailable => {
-            Ok(format!("model '{}' already available", model))
-        }
-        model_manager::PullStatus::Pulled => Ok(format!("model '{}' pulled successfully", model)),
-    }
 }
 
 /// Response type that can be either SSE stream or plain text.
