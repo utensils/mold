@@ -183,8 +183,12 @@
             bunDeps = pkgs.bun2nix.fetchBunDeps {
               bunNix = ./web/bun.nix;
             };
-            # vue-tsc + vite resolve peer deps via hoisted lookups.
-            bunInstallFlags = [ "--linker=hoisted" ];
+            # --linker=isolated gives each package its own node_modules, which
+            # sidesteps bun's AccessDenied failures when the hoisted linker tries
+            # to create nested `@vue/compiler-*/node_modules/estree-walker`
+            # directories during a sandboxed Darwin build (Vue pulls v2 while
+            # Vitest pulls v3, so the tree can't be flattened).
+            bunInstallFlags = [ "--linker=isolated" ];
             buildPhase = ''
               runHook preBuild
               bun run build
