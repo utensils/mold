@@ -49,6 +49,7 @@ pub struct SD3Engine {
     is_medium: bool,
     t5_variant: Option<String>,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl SD3Engine {
@@ -68,6 +69,7 @@ impl SD3Engine {
             is_medium,
             t5_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
         }
     }
 
@@ -305,7 +307,7 @@ impl SD3Engine {
         self.base.progress.stage_start("Selecting T5 encoder");
         let t5_resolve_start = Instant::now();
         let t5_preference = self.t5_variant.as_deref();
-        let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+        let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
             crate::encoders::variant_resolution::resolve_t5_variant(
                 &self.base.progress,
                 t5_preference,
@@ -317,7 +319,20 @@ impl SD3Engine {
             .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-        let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
+        // Tier 1: honor `placement.text_encoders` — all three encoders share the knob.
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let auto_encoder_device = if t5_on_gpu { device.clone() } else { Device::Cpu };
+        let encoder_device_owned = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_encoder_device.clone()),
+        )?;
+        let encoder_device = &encoder_device_owned;
+        let t5_on_gpu = !encoder_device.is_cpu();
+        let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
         let encoder_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
         let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
@@ -423,7 +438,7 @@ impl SD3Engine {
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
-            let (resolved_t5_path, t5_on_gpu, t5_device_label) =
+            let (resolved_t5_path, t5_on_gpu, _t5_auto_device_label) =
                 crate::encoders::variant_resolution::resolve_t5_variant(
                     &self.base.progress,
                     t5_preference,
@@ -435,7 +450,19 @@ impl SD3Engine {
                 .progress
                 .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-            let encoder_device = if t5_on_gpu { &device } else { &Device::Cpu };
+            let tier1 = self
+                .pending_placement
+                .as_ref()
+                .map(|p| p.text_encoders)
+                .unwrap_or_default();
+            let auto_encoder_device = if t5_on_gpu { device.clone() } else { Device::Cpu };
+            let encoder_device_owned = crate::device::resolve_device(
+                Some(tier1),
+                || Ok(auto_encoder_device.clone()),
+            )?;
+            let encoder_device = &encoder_device_owned;
+            let t5_on_gpu = !encoder_device.is_cpu();
+            let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
             let encoder_dtype = if t5_on_gpu { gpu_dtype } else { DType::F32 };
 
             let t5_size = std::fs::metadata(&resolved_t5_path)
@@ -718,8 +745,8 @@ impl SD3Engine {
     }
 }
 
-impl InferenceEngine for SD3Engine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl SD3Engine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for SD3 (flow-matching), ignoring");
         }
@@ -997,6 +1024,15 @@ impl InferenceEngine for SD3Engine {
                 gpu: None,
             })
         })()
+    }
+}
+
+impl InferenceEngine for SD3Engine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
