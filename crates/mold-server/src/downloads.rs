@@ -300,6 +300,8 @@ fn cleanup_partials_for_model(model: &str) {
     let sanitized = canonical.replace(':', "-");
     // Remove `.pulling` marker first so `has_pulling_marker` returns false.
     mold_core::download::remove_pulling_marker(&canonical);
+    #[cfg(test)]
+    test_hooks::record_cleanup(&canonical);
     if let Ok(models_dir) = std::env::var("MOLD_MODELS_DIR") {
         let target = std::path::PathBuf::from(models_dir).join(&sanitized);
         cleanup_partials_in_dir(&target);
@@ -308,6 +310,31 @@ fn cleanup_partials_for_model(model: &str) {
     if let Some(home) = dirs::home_dir() {
         let target = home.join(".mold/models").join(&sanitized);
         cleanup_partials_in_dir(&target);
+    }
+}
+
+/// Test seam: lets the test module observe which models `cleanup_partials_for_model`
+/// has been called with, without having to mutate process-wide `MOLD_MODELS_DIR`
+/// (which races against other tests in the same binary).
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::sync::Mutex;
+    static CLEANUPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record_cleanup(model: &str) {
+        if let Ok(mut v) = CLEANUPS.lock() {
+            v.push(model.to_string());
+        }
+    }
+
+    /// Drain and return every model name `cleanup_partials_for_model` has
+    /// recorded since the last call. Tests should snapshot this before and
+    /// after their exercise to get a stable comparison.
+    pub fn drain_cleanups() -> Vec<String> {
+        CLEANUPS
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 }
 

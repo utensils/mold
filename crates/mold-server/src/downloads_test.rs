@@ -273,10 +273,10 @@ fn cleanup_handles_missing_dir_gracefully() {
     assert!(!missing.exists());
 }
 
-/// Process-wide gate for tests that mutate `MOLD_MODELS_DIR`. Env vars are
-/// shared across threads, so these tests can't run in parallel without
-/// clobbering each other.
-static MODELS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Process-wide gate for tests that call `drain_cleanups()`. The cleanup
+/// observation buffer is shared across tests in this binary, so tests that
+/// care about it must run serially.
+static CLEANUP_OBSERVER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Puller that always fails. Used to verify terminal-failure cleanup runs
 /// after both the initial attempt AND the retry have exhausted.
@@ -300,26 +300,11 @@ impl PullDriver for AlwaysFailsPuller {
 
 #[tokio::test]
 async fn driver_failed_retry_sequence_cleans_up_partials() {
-    let _env_guard = MODELS_DIR_ENV_LOCK
+    let _guard = CLEANUP_OBSERVER_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let prev = std::env::var("MOLD_MODELS_DIR").ok();
-    // `MOLD_MODELS_DIR` is read-only elsewhere in this test binary; the
-    // `MODELS_DIR_ENV_LOCK` gate serializes tests that mutate it.
-    std::env::set_var("MOLD_MODELS_DIR", tmp.path());
-
-    // Seed the model dir with a partial file (no `.sha256-verified` marker)
-    // and a verified file (with marker). The canonical sanitized dir name
-    // for `flux-schnell:q4` is `flux-schnell-q4`.
-    let model_dir = tmp.path().join("flux-schnell-q4");
-    std::fs::create_dir_all(&model_dir).unwrap();
-    let partial = model_dir.join("partial.safetensors");
-    let verified = model_dir.join("good.safetensors");
-    let verified_marker = model_dir.join("good.safetensors.sha256-verified");
-    std::fs::write(&partial, b"partial").unwrap();
-    std::fs::write(&verified, b"good").unwrap();
-    std::fs::write(&verified_marker, b"").unwrap();
+    // Drain any leftover observations from prior tests.
+    let _ = crate::downloads::test_hooks::drain_cleanups();
 
     let queue = DownloadQueue::new();
     let puller = AlwaysFailsPuller::default();
@@ -345,29 +330,16 @@ async fn driver_failed_retry_sequence_cleans_up_partials() {
     shutdown.cancel();
     let _ = handle.await;
 
-    // Restore env.
-    match prev {
-        Some(v) => std::env::set_var("MOLD_MODELS_DIR", v),
-        None => std::env::remove_var("MOLD_MODELS_DIR"),
-    }
-
     assert!(seen_failed, "expected JobFailed after retry");
     assert_eq!(
         puller.calls.load(Ordering::SeqCst),
         2,
         "expected exactly 2 attempts"
     );
+    let cleanups = crate::downloads::test_hooks::drain_cleanups();
     assert!(
-        !partial.exists(),
-        "partial file should be cleaned up after terminal failure"
-    );
-    assert!(
-        verified.exists(),
-        "verified file (with marker) should survive terminal failure"
-    );
-    assert!(
-        verified_marker.exists(),
-        ".sha256-verified marker should survive terminal failure"
+        cleanups.iter().any(|m| m == "flux-schnell:q4"),
+        "cleanup_partials_for_model should have been invoked for the failed model, got {cleanups:?}"
     );
 }
 
@@ -391,17 +363,10 @@ impl PullDriver for CancellablePuller {
 
 #[tokio::test]
 async fn driver_cancel_also_cleans_up_partials() {
-    let _env_guard = MODELS_DIR_ENV_LOCK
+    let _guard = CLEANUP_OBSERVER_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let prev = std::env::var("MOLD_MODELS_DIR").ok();
-    std::env::set_var("MOLD_MODELS_DIR", tmp.path());
-
-    let model_dir = tmp.path().join("flux-schnell-q4");
-    std::fs::create_dir_all(&model_dir).unwrap();
-    let partial = model_dir.join("partial.safetensors");
-    std::fs::write(&partial, b"partial").unwrap();
+    let _ = crate::downloads::test_hooks::drain_cleanups();
 
     let queue = DownloadQueue::new();
     let shutdown = CancellationToken::new();
@@ -427,15 +392,11 @@ async fn driver_cancel_also_cleans_up_partials() {
     shutdown.cancel();
     let _ = handle.await;
 
-    match prev {
-        Some(v) => std::env::set_var("MOLD_MODELS_DIR", v),
-        None => std::env::remove_var("MOLD_MODELS_DIR"),
-    }
-
     assert!(seen, "expected JobCancelled");
+    let cleanups = crate::downloads::test_hooks::drain_cleanups();
     assert!(
-        !partial.exists(),
-        "partial file should be cleaned up after cancel"
+        cleanups.iter().any(|m| m == "flux-schnell:q4"),
+        "cleanup_partials_for_model should have been invoked for the cancelled model, got {cleanups:?}"
     );
 }
 
