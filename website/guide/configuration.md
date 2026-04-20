@@ -198,15 +198,15 @@ pipeline. All variables accept the same four forms: `auto` (preserve the
 engine's VRAM-aware default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N` for a
 specific ordinal.
 
-| Variable                    | Applies to                                                         | Notes                                                                                           |
-| --------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `MOLD_PLACE_TEXT_ENCODERS`  | Every model family (Tier 1)                                        | Single knob that moves every text encoder slot as a group. Picking `cpu` frees the transformer's full VRAM budget without triggering block offload. |
-| `MOLD_PLACE_TRANSFORMER`    | FLUX, Flux.2, Z-Image, Qwen-Image                                  | Per-component override. Interacts with `MOLD_OFFLOAD` — blocks still stream from CPU but target the chosen ordinal. |
-| `MOLD_PLACE_VAE`            | FLUX, Flux.2, Z-Image, Qwen-Image                                  | Decode stage; CPU is fine for preview, GPU is faster.                                           |
-| `MOLD_PLACE_T5`             | FLUX                                                               | Per-encoder override; unset falls through to `MOLD_PLACE_TEXT_ENCODERS`.                        |
-| `MOLD_PLACE_CLIP_L`         | FLUX                                                               | Per-encoder override.                                                                           |
-| `MOLD_PLACE_CLIP_G`         | SDXL and others that use CLIP-G                                    | Per-encoder override.                                                                           |
-| `MOLD_PLACE_QWEN`           | Flux.2, Z-Image, Qwen-Image                                        | Per-encoder override for the Qwen text encoder.                                                 |
+| Variable                   | Applies to                        | Notes                                                                                                                                               |
+| -------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_PLACE_TEXT_ENCODERS` | Every model family (Tier 1)       | Single knob that moves every text encoder slot as a group. Picking `cpu` frees the transformer's full VRAM budget without triggering block offload. |
+| `MOLD_PLACE_TRANSFORMER`   | FLUX, Flux.2, Z-Image, Qwen-Image | Per-component override. Interacts with `MOLD_OFFLOAD` — blocks still stream from CPU but target the chosen ordinal.                                 |
+| `MOLD_PLACE_VAE`           | FLUX, Flux.2, Z-Image, Qwen-Image | Decode stage; CPU is fine for preview, GPU is faster.                                                                                               |
+| `MOLD_PLACE_T5`            | FLUX                              | Per-encoder override; unset falls through to `MOLD_PLACE_TEXT_ENCODERS`.                                                                            |
+| `MOLD_PLACE_CLIP_L`        | FLUX                              | Per-encoder override.                                                                                                                               |
+| `MOLD_PLACE_CLIP_G`        | SDXL and others that use CLIP-G   | Per-encoder override.                                                                                                                               |
+| `MOLD_PLACE_QWEN`          | Flux.2, Z-Image, Qwen-Image       | Per-encoder override for the Qwen text encoder.                                                                                                     |
 
 Precedence (highest wins): CLI flag (`--device-text-encoders`, `--device-vae`, …)
 → env var → `[models."name:tag".placement]` TOML block → engine auto.
