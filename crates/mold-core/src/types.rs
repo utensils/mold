@@ -918,6 +918,52 @@ pub struct SseErrorEvent {
     pub message: String,
 }
 
+// ── Resource telemetry (Agent B scope) ───────────────────────────────────────
+
+/// Point-in-time resource snapshot emitted by the server aggregator at 1 Hz.
+/// Serialized over `GET /api/resources` and `GET /api/resources/stream`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ResourceSnapshot {
+    /// Host that produced this snapshot. Useful when pointing `MOLD_HOST` at
+    /// a remote GPU — the SPA shows this in the resource side-sheet.
+    pub hostname: String,
+    /// Unix millis at sample time.
+    pub timestamp: i64,
+    pub gpus: Vec<GpuSnapshot>,
+    pub system_ram: RamSnapshot,
+}
+
+/// Per-GPU memory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GpuSnapshot {
+    pub ordinal: usize,
+    pub name: String,
+    pub backend: GpuBackend,
+    pub vram_total: u64,
+    pub vram_used: u64,
+    /// Bytes attributable to the running `mold` process (CUDA only).
+    /// `None` on Metal and on CUDA hosts that fell back to `nvidia-smi`.
+    pub vram_used_by_mold: Option<u64>,
+    /// `vram_used - vram_used_by_mold`. `None` whenever `vram_used_by_mold` is.
+    pub vram_used_by_other: Option<u64>,
+}
+
+/// System RAM snapshot. Per-process fields are always populated (via sysinfo).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RamSnapshot {
+    pub total: u64,
+    pub used: u64,
+    pub used_by_mold: u64,
+    pub used_by_other: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuBackend {
+    Cuda,
+    Metal,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2086,6 +2132,69 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("video_"));
+    }
+
+    #[test]
+    fn resource_snapshot_serde_roundtrip() {
+        let snap = ResourceSnapshot {
+            hostname: "hal9000".to_string(),
+            timestamp: 1_700_000_000_000,
+            gpus: vec![GpuSnapshot {
+                ordinal: 0,
+                name: "NVIDIA RTX 3090".to_string(),
+                backend: GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 14_200_000_000,
+                vram_used_by_mold: Some(10_100_000_000),
+                vram_used_by_other: Some(4_100_000_000),
+            }],
+            system_ram: RamSnapshot {
+                total: 64_000_000_000,
+                used: 38_400_000_000,
+                used_by_mold: 22_100_000_000,
+                used_by_other: 16_300_000_000,
+            },
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: ResourceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.hostname, "hal9000");
+        assert_eq!(back.gpus.len(), 1);
+        assert_eq!(back.gpus[0].ordinal, 0);
+        assert_eq!(back.gpus[0].backend, GpuBackend::Cuda);
+        assert_eq!(back.gpus[0].vram_used_by_mold, Some(10_100_000_000));
+        assert_eq!(back.system_ram.used_by_mold, 22_100_000_000);
+    }
+
+    #[test]
+    fn gpu_backend_serializes_lowercase() {
+        let cuda = serde_json::to_string(&GpuBackend::Cuda).unwrap();
+        let metal = serde_json::to_string(&GpuBackend::Metal).unwrap();
+        assert_eq!(cuda, "\"cuda\"");
+        assert_eq!(metal, "\"metal\"");
+    }
+
+    #[test]
+    fn metal_snapshot_has_none_per_process_fields() {
+        let snap = GpuSnapshot {
+            ordinal: 0,
+            name: "Apple M3 Max".to_string(),
+            backend: GpuBackend::Metal,
+            vram_total: 64_000_000_000,
+            vram_used: 38_000_000_000,
+            vram_used_by_mold: None,
+            vram_used_by_other: None,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        // Both fields are present as `null` (not elided) so the SPA can
+        // reliably `vram_used_by_mold === null` to hide the row.
+        assert!(
+            json.contains("\"vram_used_by_mold\":null"),
+            "json was: {json}"
+        );
+        assert!(
+            json.contains("\"vram_used_by_other\":null"),
+            "json was: {json}"
+        );
     }
 }
 

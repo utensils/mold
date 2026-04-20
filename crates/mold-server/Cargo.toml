@@ -26,6 +26,7 @@ cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+nvml = ["dep:nvml-wrapper"]
 
 
 [dependencies]
@@ -45,7 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "regis
 tracing-appender = "0.2"
 base64 = "0.22"
 futures-core = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 utoipa = { version = "5", features = ["preserve_order"] }
 sha2 = "0.10"
@@ -60,6 +61,10 @@ metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
 mime_guess = "2"
+nvml-wrapper = { version = "0.10", optional = true }
+sysinfo = "0.34"
+async-stream = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -10,6 +10,7 @@ use mold_inference::shared_pool::SharedPool;
 
 use crate::gpu_pool::GpuPool;
 use crate::model_cache::ModelCache;
+use crate::resources::ResourceBroadcaster;
 
 #[derive(Debug, Clone, Default)]
 pub struct EngineSnapshot {
@@ -148,6 +149,8 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    /// Always-on resource telemetry (Agent B).
+    pub resources: Arc<ResourceBroadcaster>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
@@ -186,6 +189,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: ResourceBroadcaster::new(),
         }
     }
 
@@ -211,6 +215,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: ResourceBroadcaster::new(),
         }
     }
 
@@ -250,6 +255,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: ResourceBroadcaster::new(),
         }
     }
 
@@ -284,6 +290,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: ResourceBroadcaster::new(),
         };
         (state, rx)
     }
@@ -348,5 +355,20 @@ mod tests {
         }
         let cache = state.upscaler_cache.lock().unwrap();
         assert!(cache.is_none());
+    }
+
+    #[test]
+    fn app_state_exposes_resources_broadcaster() {
+        let config = mold_core::Config::default();
+        let state = AppState::empty(
+            config,
+            QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool(),
+            200,
+        );
+        // The broadcaster must exist and return None before any aggregator tick.
+        assert!(state.resources.latest().is_none());
+        // Subscribing must succeed (no panics).
+        let _rx = state.resources.subscribe();
     }
 }

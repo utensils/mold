@@ -1203,6 +1203,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1254,6 +1255,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1508,6 +1510,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            resources: crate::resources::ResourceBroadcaster::new(),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -2130,5 +2133,94 @@ mod tests {
         assert!(!target.exists(), "file should be removed from disk");
         let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();
         assert_eq!(db_after.count().unwrap(), 0, "DB row should be gone");
+    }
+
+    // ── Resource telemetry (Agent B) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_api_resources_returns_snapshot() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        // Seed the broadcaster so the endpoint has something to return.
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "unit-test".into(),
+            timestamp: 12345,
+            gpus: vec![],
+            system_ram: mold_core::RamSnapshot {
+                total: 1,
+                used: 0,
+                used_by_mold: 0,
+                used_by_other: 0,
+            },
+        });
+
+        let app = create_router(state);
+        let req = Request::builder()
+            .uri("/api/resources")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["hostname"], "unit-test");
+        assert_eq!(body["timestamp"], 12345);
+        assert!(body["system_ram"].is_object());
+    }
+
+    #[tokio::test]
+    async fn get_api_resources_stream_sets_sse_content_type() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        let app = create_router(state);
+        let req = Request::builder()
+            .uri("/api/resources/stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected SSE content-type, got: {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_api_resources_returns_503_before_first_tick() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        // Do NOT publish — broadcaster has no cached snapshot.
+        let app = create_router(state);
+        let req = Request::builder()
+            .uri("/api/resources")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

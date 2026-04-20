@@ -9,12 +9,15 @@ pub mod model_manager;
 pub mod queue;
 pub mod rate_limit;
 pub mod request_id;
+pub mod resources;
 pub mod routes;
 pub mod state;
 pub mod web_ui;
 
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_test;
+#[cfg(test)]
+mod resources_test;
 #[cfg(test)]
 mod routes_test;
 
@@ -274,6 +277,11 @@ pub async fn run_server(
         });
     }
 
+    // Spawn the resource telemetry aggregator (1 Hz). Keep the `JoinHandle`
+    // bound so we can `.abort()` it when `axum::serve` returns — otherwise
+    // the task outlives server shutdown and keeps ticking until process exit.
+    let resources_aggregator = resources::spawn_aggregator(state.resources.clone());
+
     // Save start_time before state is moved into the router (needed for metrics).
     #[cfg(feature = "metrics")]
     let server_start_time = state.start_time;
@@ -333,6 +341,10 @@ pub async fn run_server(
         tracing::info!("shutting down");
     })
     .await?;
+
+    // Server has stopped accepting requests — stop the telemetry aggregator
+    // so it doesn't outlive the server loop.
+    resources_aggregator.abort();
 
     Ok(())
 }
