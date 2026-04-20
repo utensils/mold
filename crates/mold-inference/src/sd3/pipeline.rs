@@ -325,11 +325,13 @@ impl SD3Engine {
             .as_ref()
             .map(|p| p.text_encoders)
             .unwrap_or_default();
-        let auto_encoder_device = if t5_on_gpu { device.clone() } else { Device::Cpu };
-        let encoder_device_owned = crate::device::resolve_device(
-            Some(tier1),
-            || Ok(auto_encoder_device.clone()),
-        )?;
+        let auto_encoder_device = if t5_on_gpu {
+            device.clone()
+        } else {
+            Device::Cpu
+        };
+        let encoder_device_owned =
+            crate::device::resolve_device(Some(tier1), || Ok(auto_encoder_device.clone()))?;
         let encoder_device = &encoder_device_owned;
         let t5_on_gpu = !encoder_device.is_cpu();
         let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };
@@ -455,11 +457,13 @@ impl SD3Engine {
                 .as_ref()
                 .map(|p| p.text_encoders)
                 .unwrap_or_default();
-            let auto_encoder_device = if t5_on_gpu { device.clone() } else { Device::Cpu };
-            let encoder_device_owned = crate::device::resolve_device(
-                Some(tier1),
-                || Ok(auto_encoder_device.clone()),
-            )?;
+            let auto_encoder_device = if t5_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let encoder_device_owned =
+                crate::device::resolve_device(Some(tier1), || Ok(auto_encoder_device.clone()))?;
             let encoder_device = &encoder_device_owned;
             let t5_on_gpu = !encoder_device.is_cpu();
             let t5_device_label = if t5_on_gpu { "GPU" } else { "CPU" };

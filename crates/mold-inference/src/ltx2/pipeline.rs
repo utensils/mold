@@ -74,6 +74,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: Some(runtime),
             on_progress: None,
+            pending_placement: None,
         }
     }
 
@@ -877,6 +878,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         }
     }
 
@@ -923,6 +925,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         assert_eq!(
             engine.select_pipeline(&req).unwrap(),
@@ -1002,6 +1005,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let bridge = engine

@@ -222,10 +222,7 @@ impl SDXLEngine {
             .as_ref()
             .map(|p| p.text_encoders)
             .unwrap_or_default();
-        let clip_device = crate::device::resolve_device(
-            Some(tier1),
-            || Ok(device.clone()),
-        )?;
+        let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
         // Load CLIP-L encoder
         self.base.progress.stage_start("Loading CLIP-L encoder");
@@ -608,10 +605,7 @@ impl SDXLEngine {
                 .as_ref()
                 .map(|p| p.text_encoders)
                 .unwrap_or_default();
-            let clip_device = crate::device::resolve_device(
-                Some(tier1),
-                || Ok(device.clone()),
-            )?;
+            let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
             self.base.progress.stage_start("Loading CLIP-L encoder");
             let clip_l_start = Instant::now();

@@ -425,6 +425,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
 
         assert!(build_output_metadata(&req, 42, None).is_none());

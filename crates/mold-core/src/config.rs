@@ -982,10 +982,7 @@ impl Config {
     ///   - `"cpu"`     — `DeviceRef::Cpu`
     ///   - `"gpu:N"`   — `DeviceRef::Gpu { ordinal: N }`
     ///   - `"gpu"`     — `DeviceRef::Gpu { ordinal: 0 }`
-    pub fn resolved_placement(
-        &self,
-        model_name: &str,
-    ) -> Option<crate::types::DevicePlacement> {
+    pub fn resolved_placement(&self, model_name: &str) -> Option<crate::types::DevicePlacement> {
         use crate::types::DevicePlacement;
 
         let mut placement = self

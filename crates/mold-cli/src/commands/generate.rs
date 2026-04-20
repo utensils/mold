@@ -311,6 +311,7 @@ pub async fn run(
         retake_range,
         spatial_upscale,
         temporal_upscale,
+        placement: None,
     };
 
     // Warn if user-provided dimensions don't match model recommendations.

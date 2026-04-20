@@ -289,6 +289,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         }
     }
 

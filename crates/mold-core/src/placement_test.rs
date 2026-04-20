@@ -177,10 +177,7 @@ fn model_config_serializes_placement_section() {
     cfg.models.insert("flux-dev:q4".to_string(), mc);
 
     let toml = toml::to_string(&cfg).unwrap();
-    assert!(
-        toml.contains(r#"flux-dev:q4".placement"#),
-        "toml:\n{toml}"
-    );
+    assert!(toml.contains(r#"flux-dev:q4".placement"#), "toml:\n{toml}");
     // round-trip
     let back: Config = toml::from_str(&toml).unwrap();
     let p = back.models["flux-dev:q4"].placement.as_ref().unwrap();
@@ -204,7 +201,9 @@ fn env_override_transformer_gpu_ordinal() {
     let cfg = crate::config::Config::default();
     std::env::set_var("MOLD_PLACE_TRANSFORMER", "gpu:1");
     let p = cfg.resolved_placement("flux-dev:q4").unwrap();
-    let adv = p.advanced.expect("gpu env override should populate advanced");
+    let adv = p
+        .advanced
+        .expect("gpu env override should populate advanced");
     assert_eq!(adv.transformer, DeviceRef::gpu(1));
     std::env::remove_var("MOLD_PLACE_TRANSFORMER");
 }

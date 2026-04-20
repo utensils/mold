@@ -543,10 +543,7 @@ impl WuerstchenEngine {
             .as_ref()
             .map(|p| p.text_encoders)
             .unwrap_or_default();
-        let clip_device = crate::device::resolve_device(
-            Some(tier1),
-            || Ok(device.clone()),
-        )?;
+        let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
         // Load Prior CLIP-G encoder (1280-dim, 32 layers)
         self.base
@@ -913,10 +910,8 @@ impl WuerstchenEngine {
                     .as_ref()
                     .map(|p| p.text_encoders)
                     .unwrap_or_default();
-                let clip_device = crate::device::resolve_device(
-                    Some(tier1),
-                    || Ok(device.clone()),
-                )?;
+                let clip_device =
+                    crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
                 self.base
                     .progress

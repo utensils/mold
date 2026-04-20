@@ -1067,10 +1067,7 @@ impl LtxVideoEngine {
             .as_ref()
             .map(|p| p.text_encoders)
             .unwrap_or_default();
-        let t5_device = crate::device::resolve_device(
-            Some(tier1),
-            || Ok(device.clone()),
-        )?;
+        let t5_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
         let mut t5 = crate::encoders::t5::T5Encoder::load(
             t5_encoder_path,
             t5_tokenizer_path,

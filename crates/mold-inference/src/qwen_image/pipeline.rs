@@ -312,7 +312,9 @@ impl QwenImageTransformer {
 /// Resolve a component override given Tier 1 plus Tier 2 requests.
 fn effective_device_ref(
     placement: Option<&mold_core::types::DevicePlacement>,
-    advanced_override: impl FnOnce(&mold_core::types::AdvancedPlacement) -> Option<mold_core::types::DeviceRef>,
+    advanced_override: impl FnOnce(
+        &mold_core::types::AdvancedPlacement,
+    ) -> Option<mold_core::types::DeviceRef>,
     fallback_is_component_auto: bool,
 ) -> mold_core::types::DeviceRef {
     use mold_core::types::DeviceRef;
@@ -1362,10 +1364,9 @@ impl QwenImageEngine {
             |adv| Some(adv.transformer),
             false,
         );
-        let device = crate::device::resolve_device(
-            Some(transformer_ref),
-            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
-        )?;
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let transformer_cfg = self.transformer_config();
         let transformer_is_quantized = self.detect_is_quantized();
         // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
@@ -1408,15 +1409,15 @@ impl QwenImageEngine {
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_ref = effective_device_ref(
-            self.pending_placement.as_ref(),
-            |adv| Some(adv.vae),
-            false,
-        );
-        let vae_device = crate::device::resolve_device(
-            Some(vae_ref),
-            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
-        )?;
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || {
+            Ok(if vae_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            })
+        })?;
         let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
@@ -1437,20 +1438,14 @@ impl QwenImageEngine {
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
         let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let qwen_ref = effective_device_ref(
-            self.pending_placement.as_ref(),
-            |adv| adv.qwen,
-            true,
-        );
+        let qwen_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
         let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
-        let te_device = crate::device::resolve_device(
-            Some(qwen_ref),
-            || Ok(auto_te_device.clone()),
-        )?;
+        let te_device =
+            crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
         let te_use_gpu = !te_device.is_cpu();
         let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
             te_auto_device_label
@@ -1546,10 +1541,9 @@ impl QwenImageEngine {
             |adv| Some(adv.transformer),
             false,
         );
-        let device = crate::device::resolve_device(
-            Some(transformer_ref),
-            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
-        )?;
+        let device = crate::device::resolve_device(Some(transformer_ref), || {
+            crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)
+        })?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -1614,20 +1608,15 @@ impl QwenImageEngine {
             } else {
                 let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let qwen_ref = effective_device_ref(
-                    self.pending_placement.as_ref(),
-                    |adv| adv.qwen,
-                    true,
-                );
+                let qwen_ref =
+                    effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
                 let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
                     Device::Cpu
                 };
-                let te_device = crate::device::resolve_device(
-                    Some(qwen_ref),
-                    || Ok(auto_te_device.clone()),
-                )?;
+                let te_device =
+                    crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
                 let te_use_gpu = !te_device.is_cpu();
                 let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
                     te_auto_device_label
@@ -2033,15 +2022,15 @@ impl QwenImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_ref = effective_device_ref(
-            self.pending_placement.as_ref(),
-            |adv| Some(adv.vae),
-            false,
-        );
-        let vae_device = crate::device::resolve_device(
-            Some(vae_ref),
-            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
-        )?;
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || {
+            Ok(if vae_on_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            })
+        })?;
         let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
