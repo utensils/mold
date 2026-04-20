@@ -314,6 +314,8 @@ pub struct QwenImageEngine {
     base: EngineBase<LoadedQwenImage>,
     prompt_cache: Mutex<LruCache<String, CachedPromptConditioning>>,
     offload: bool,
+    /// Per-request placement override.
+    pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
 impl QwenImageEngine {
@@ -759,6 +761,7 @@ impl QwenImageEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             offload,
+            pending_placement: None,
         }
     }
 
@@ -1396,14 +1399,31 @@ impl QwenImageEngine {
         // Load text encoder
         let resolved_text_encoder =
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
-        let (te_plan, te_device_label) =
+        let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let te_device = if te_plan.use_gpu {
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders)
+            .unwrap_or_default();
+        let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
-        let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
+        let te_device = crate::device::resolve_device(
+            Some(tier1),
+            || Ok(auto_te_device.clone()),
+        )?;
+        let te_use_gpu = !te_device.is_cpu();
+        let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
+            te_auto_device_label
+        } else if te_use_gpu {
+            "GPU".into()
+        } else {
+            "CPU".into()
+        };
+        let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
 
         let preload_text_encoder = self.should_preload_text_encoder();
         let te_label = if resolved_text_encoder.is_gguf {
@@ -1548,14 +1568,31 @@ impl QwenImageEngine {
                 };
                 (hs, mask, u_hs, u_mask)
             } else {
-                let (te_plan, te_device_label) =
+                let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let te_device = if te_plan.use_gpu {
+                let tier1 = self
+                    .pending_placement
+                    .as_ref()
+                    .map(|p| p.text_encoders)
+                    .unwrap_or_default();
+                let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
                     Device::Cpu
                 };
-                let te_dtype = Self::text_encoder_load_dtype(te_plan.use_gpu, dtype);
+                let te_device = crate::device::resolve_device(
+                    Some(tier1),
+                    || Ok(auto_te_device.clone()),
+                )?;
+                let te_use_gpu = !te_device.is_cpu();
+                let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
+                    te_auto_device_label
+                } else if te_use_gpu {
+                    "GPU".into()
+                } else {
+                    "CPU".into()
+                };
+                let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
 
                 let te_label = if resolved_text_encoder.is_gguf {
                     format!(
@@ -2330,8 +2367,8 @@ impl QwenImageEngine {
     }
 }
 
-impl InferenceEngine for QwenImageEngine {
-    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+impl QwenImageEngine {
+    fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!(
                 "scheduler selection not supported for Qwen-Image (flow-matching), ignoring"
@@ -2774,6 +2811,15 @@ impl InferenceEngine for QwenImageEngine {
             video: None,
             gpu: None,
         })
+    }
+}
+
+impl InferenceEngine for QwenImageEngine {
+    fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.pending_placement = req.placement.clone();
+        let result = self.generate_inner(req);
+        self.pending_placement = None;
+        result
     }
 
     fn model_name(&self) -> &str {
