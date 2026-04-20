@@ -68,10 +68,15 @@ export function useResources(): UseResources {
   function scheduleRetry() {
     if (stopped) return;
     if (retryTimer) clearTimeout(retryTimer);
+    const delay = retryDelay;
+    // Double before scheduling so the next failure uses the backed-off
+    // delay. Doing it after `connect()` inside the callback let `connect()`
+    // synchronously re-trigger `scheduleRetry` with the un-doubled value,
+    // causing the first two retries to both wait 1000 ms.
+    retryDelay = Math.min(retryDelay * 2, MAX_RETRY);
     retryTimer = setTimeout(() => {
       connect();
-      retryDelay = Math.min(retryDelay * 2, MAX_RETRY);
-    }, retryDelay);
+    }, delay);
   }
 
   function stop() {
