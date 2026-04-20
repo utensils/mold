@@ -136,46 +136,28 @@ fn gguf_header_contains_tensor(path: &std::path::Path, needle: &str) -> bool {
     buf.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
 
-/// Warn the operator if the downloaded transformer is a city96-format GGUF
-/// that will need an additional reference pull before inference will run.
+/// Decide whether to emit the pull-time "city96-format, needs reference" warning.
 ///
-/// Community FLUX fine-tune GGUFs ship only the diffusion blocks; their input
-/// embedding layers (img_in / time_in / vector_in / guidance_in) are inherited
-/// from base flux-dev and must be patched in from a locally-downloaded
-/// reference. This check surfaces the dependency at pull time so users don't
-/// discover it on the first generation attempt.
-fn warn_if_flux_gguf_needs_reference(
-    manifest: &ModelManifest,
-    callback: Option<&DownloadProgressCallback>,
-) {
+/// Pure logic, no process-global state — `models_dir` is always passed in so
+/// tests can use a temp dir. Returns `Some(message)` when the warning should
+/// fire, `None` otherwise.
+fn flux_reference_warning(manifest: &ModelManifest, models_dir: &Path) -> Option<String> {
     if manifest.family != "flux" {
-        return;
+        return None;
     }
-    let Some((xformer_file, xformer_path)) =
-        manifest.files.iter().find_map(|f| -> Option<(_, PathBuf)> {
-            if f.component != ModelComponent::Transformer {
-                return None;
-            }
-            if !f.hf_filename.to_lowercase().ends_with(".gguf") {
-                return None;
-            }
-            Some((
-                f,
-                models_dir().join(crate::manifest::storage_path(manifest, f)),
-            ))
-        })
-    else {
-        return;
-    };
+    let xformer_file = manifest.files.iter().find(|f| {
+        f.component == ModelComponent::Transformer
+            && f.hf_filename.to_lowercase().ends_with(".gguf")
+    })?;
+    let xformer_path = models_dir.join(crate::manifest::storage_path(manifest, xformer_file));
     if !xformer_path.exists() {
-        return;
+        return None;
     }
     // img_in is present in schnell and in complete dev GGUFs; missing from city96-format
     if gguf_header_contains_tensor(&xformer_path, "img_in.weight") {
-        return;
+        return None;
     }
 
-    let mdir = models_dir();
     let needs_guidance = !manifest.defaults.is_schnell;
     let reference_candidates: &[&str] = if needs_guidance {
         &["flux-dev:q8", "flux-dev:q6", "flux-dev:q4"]
@@ -199,14 +181,14 @@ fn warn_if_flux_gguf_needs_reference(
         else {
             return false;
         };
-        let path = mdir.join(crate::manifest::storage_path(m, xf));
+        let path = models_dir.join(crate::manifest::storage_path(m, xf));
         path.exists()
             && gguf_header_contains_tensor(&path, "img_in.weight")
             && (!needs_guidance
                 || gguf_header_contains_tensor(&path, "guidance_in.in_layer.weight"))
     });
     if have_reference {
-        return;
+        return None;
     }
 
     let fix_cmd = if needs_guidance {
@@ -214,7 +196,7 @@ fn warn_if_flux_gguf_needs_reference(
     } else {
         "mold pull flux-dev:q8 (or flux-schnell:q8)"
     };
-    let msg = format!(
+    Some(format!(
         "Heads up: {} is a city96-format GGUF — it ships only the diffusion blocks. \
          FLUX input embedding layers{} must be patched from a separate reference \
          model at load time, and none is downloaded yet. Run `{fix_cmd}` before \
@@ -226,7 +208,24 @@ fn warn_if_flux_gguf_needs_reference(
             ""
         },
         manifest.name,
-    );
+    ))
+}
+
+/// Warn the operator if the downloaded transformer is a city96-format GGUF
+/// that will need an additional reference pull before inference will run.
+///
+/// Community FLUX fine-tune GGUFs ship only the diffusion blocks; their input
+/// embedding layers (img_in / time_in / vector_in / guidance_in) are inherited
+/// from base flux-dev and must be patched in from a locally-downloaded
+/// reference. This check surfaces the dependency at pull time so users don't
+/// discover it on the first generation attempt.
+fn warn_if_flux_gguf_needs_reference(
+    manifest: &ModelManifest,
+    callback: Option<&DownloadProgressCallback>,
+) {
+    let Some(msg) = flux_reference_warning(manifest, &models_dir()) else {
+        return;
+    };
     if let Some(cb) = callback {
         cb(DownloadProgressEvent::Status {
             message: format!("⚠ {msg}"),
@@ -1431,6 +1430,268 @@ mod tests {
     /// Mutex to serialize tests that mutate `HF_TOKEN` — `set_var`/`remove_var`
     /// are process-global and not thread-safe, so parallel tests race.
     static HF_TOKEN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ---------------------------------------------------------------------
+    // FLUX city96-format GGUF pull-time warning tests.
+    // `gguf_header_contains_tensor` just does a bounded substring scan after
+    // validating the "GGUF" magic — no real GGUF parsing — so tests can write
+    // synthetic files that only satisfy those two properties.
+    // `flux_reference_warning` is pure over (manifest, models_dir), so we can
+    // drive every branch without touching process-global state.
+    // ---------------------------------------------------------------------
+
+    fn write_fake_gguf(path: &std::path::Path, tensor_names: &[&str]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut buf = Vec::with_capacity(4096);
+        buf.extend_from_slice(b"GGUF");
+        // Pad a couple hundred bytes of synthetic header bytes, then include
+        // every tensor name as a plain UTF-8 substring so the scanner finds it.
+        buf.extend(std::iter::repeat(0u8).take(256));
+        for name in tensor_names {
+            buf.extend_from_slice(name.as_bytes());
+            buf.push(0);
+        }
+        std::fs::write(path, &buf).unwrap();
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-dl-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_flux_gguf_manifest(name: &str, filename: &str, is_schnell: bool) -> ModelManifest {
+        use crate::manifest::{ManifestDefaults, ModelFile};
+        ModelManifest {
+            name: name.to_string(),
+            family: "flux".to_string(),
+            description: "test".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "test/repo".to_string(),
+                hf_filename: filename.to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 0,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: ManifestDefaults {
+                steps: 20,
+                guidance: 3.5,
+                width: 1024,
+                height: 1024,
+                is_schnell,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn gguf_header_contains_tensor_false_for_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "mold-dl-nofile-{}-{}.gguf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!gguf_header_contains_tensor(&path, "img_in.weight"));
+    }
+
+    #[test]
+    fn gguf_header_contains_tensor_false_for_non_gguf_magic() {
+        let dir = tmp_dir("nonmagic");
+        let path = dir.join("not-a-gguf.gguf");
+        std::fs::write(&path, b"SAFE\0\0\0\0img_in.weight\0").unwrap();
+        assert!(!gguf_header_contains_tensor(&path, "img_in.weight"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gguf_header_contains_tensor_finds_needle_after_magic() {
+        let dir = tmp_dir("finds");
+        let path = dir.join("has.gguf");
+        write_fake_gguf(&path, &["img_in.weight", "time_in.in_layer.weight"]);
+        assert!(gguf_header_contains_tensor(&path, "img_in.weight"));
+        assert!(gguf_header_contains_tensor(
+            &path,
+            "time_in.in_layer.weight"
+        ));
+        assert!(!gguf_header_contains_tensor(
+            &path,
+            "guidance_in.in_layer.weight"
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_noop_for_non_flux_family() {
+        use crate::manifest::{ManifestDefaults, ModelFile};
+        let dir = tmp_dir("non-flux");
+        let manifest = ModelManifest {
+            name: "sd15:fp16".to_string(),
+            family: "sd15".to_string(),
+            description: "test".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "test/repo".to_string(),
+                hf_filename: "model.gguf".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 0,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: ManifestDefaults {
+                steps: 25,
+                guidance: 7.5,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: false,
+        };
+        assert!(flux_reference_warning(&manifest, &dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_noop_for_safetensors_transformer() {
+        let dir = tmp_dir("safetensors");
+        // Non-GGUF filename is ignored even when everything else matches.
+        let manifest = fake_flux_gguf_manifest("ultra-test:bf16", "model.safetensors", false);
+        assert!(flux_reference_warning(&manifest, &dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_noop_when_file_absent() {
+        let dir = tmp_dir("absent");
+        let manifest = fake_flux_gguf_manifest("ultra-absent:q8", "ultra-absent-q8.gguf", false);
+        // Transformer file not written — function should silently return None.
+        assert!(flux_reference_warning(&manifest, &dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_noop_when_transformer_is_complete() {
+        let dir = tmp_dir("complete");
+        let manifest =
+            fake_flux_gguf_manifest("ultra-complete:q8", "ultra-complete-q8.gguf", false);
+        // A "complete" GGUF has img_in.weight, so no patching needed.
+        let xformer = dir.join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        write_fake_gguf(&xformer, &["img_in.weight", "guidance_in.in_layer.weight"]);
+        assert!(flux_reference_warning(&manifest, &dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_fires_for_city96_dev_without_reference() {
+        let dir = tmp_dir("city96-dev");
+        let manifest = fake_flux_gguf_manifest("ultra-v4:q8", "ultra-v4-q8.gguf", false);
+        let xformer = dir.join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        // city96-format: diffusion blocks but no embedding layers.
+        write_fake_gguf(&xformer, &["double_blocks.0.img_mod.lin.weight"]);
+
+        let msg = flux_reference_warning(&manifest, &dir)
+            .expect("city96-format dev GGUF without reference must emit warning");
+        assert!(msg.contains("ultra-v4-q8.gguf"));
+        assert!(msg.contains("ultra-v4:q8"));
+        assert!(msg.contains("mold pull flux-dev:q8"));
+        assert!(
+            msg.contains("guidance_in"),
+            "dev target message must mention guidance_in: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_fires_for_city96_schnell_without_reference() {
+        let dir = tmp_dir("city96-schnell");
+        let manifest = fake_flux_gguf_manifest("ultra-schnell:q8", "ultra-schnell-q8.gguf", true);
+        let xformer = dir.join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        write_fake_gguf(&xformer, &["double_blocks.0.img_mod.lin.weight"]);
+
+        let msg = flux_reference_warning(&manifest, &dir)
+            .expect("city96-format schnell GGUF without reference must emit warning");
+        // Schnell target: message accepts flux-schnell OR flux-dev as reference.
+        assert!(msg.contains("ultra-schnell-q8.gguf"));
+        assert!(msg.contains("mold pull flux-dev:q8"));
+        assert!(!msg.contains("guidance_in"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_silenced_when_dev_reference_exists() {
+        let dir = tmp_dir("has-dev-ref");
+        let manifest = fake_flux_gguf_manifest("ultra-v4:q8", "ultra-v4-q8.gguf", false);
+        let xformer = dir.join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        write_fake_gguf(&xformer, &["double_blocks.0.img_mod.lin.weight"]);
+
+        // Place a fake "downloaded" complete flux-dev:q8 alongside.
+        let dev_manifest = crate::manifest::find_manifest("flux-dev:q8")
+            .expect("flux-dev:q8 must exist in the static manifest catalog");
+        let dev_xformer_file = dev_manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .expect("flux-dev:q8 must declare a Transformer file");
+        let dev_path = dir.join(crate::manifest::storage_path(
+            dev_manifest,
+            dev_xformer_file,
+        ));
+        write_fake_gguf(&dev_path, &["img_in.weight", "guidance_in.in_layer.weight"]);
+
+        assert!(
+            flux_reference_warning(&manifest, &dir).is_none(),
+            "warning must be silenced when a complete flux-dev reference is downloaded"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flux_reference_warning_rejects_schnell_as_reference_for_dev_target() {
+        // Regression: schnell has img_in but not guidance_in. Pre-fix, it was
+        // accepted as a reference; then ensure_gguf_embeddings failed mid-patch.
+        let dir = tmp_dir("schnell-only-for-dev");
+        let manifest = fake_flux_gguf_manifest("ultra-v4:q8", "ultra-v4-q8.gguf", false);
+        let xformer = dir.join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        write_fake_gguf(&xformer, &["double_blocks.0.img_mod.lin.weight"]);
+
+        // Drop a schnell GGUF that looks "valid" (has img_in, lacks guidance_in).
+        let schnell_manifest = crate::manifest::find_manifest("flux-schnell:q8")
+            .expect("flux-schnell:q8 must exist in the static manifest catalog");
+        let schnell_xformer_file = schnell_manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .expect("flux-schnell:q8 must declare a Transformer file");
+        let schnell_path = dir.join(crate::manifest::storage_path(
+            schnell_manifest,
+            schnell_xformer_file,
+        ));
+        write_fake_gguf(&schnell_path, &["img_in.weight"]);
+
+        let msg = flux_reference_warning(&manifest, &dir)
+            .expect("dev target must not accept schnell as reference; warning should fire");
+        assert!(msg.contains("mold pull flux-dev:q8"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn resolve_hf_token_reads_env_var() {

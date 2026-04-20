@@ -2548,6 +2548,48 @@ mod tests {
     }
 
     #[test]
+    fn find_flux_reference_accepts_dev_candidate_with_guidance() {
+        // Happy path for the needs_guidance branch: a dev reference that has
+        // guidance_in is accepted; a dev reference lacking guidance (truncated
+        // or swapped file) is rejected.
+        let dir = std::env::temp_dir().join(format!(
+            "mold-ref-dev-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let models_dir = dir.join("models");
+        let dev_dir = models_dir.join("flux-dev-q8");
+        std::fs::create_dir_all(&dev_dir).unwrap();
+        let dev_path = dev_dir.join("flux1-dev-Q8_0.gguf");
+
+        // Reference without guidance — needs_guidance=true must reject it.
+        let incomplete: Vec<&str> = super::FLUX_EMBEDDING_TENSORS.to_vec();
+        write_test_gguf(&dev_path, &incomplete);
+        assert!(
+            super::find_flux_reference_gguf(true, Some(&models_dir)).is_none(),
+            "dev candidate without guidance_in must be rejected for dev targets"
+        );
+
+        // Now add guidance tensors — same path should be accepted.
+        let mut complete: Vec<&str> = super::FLUX_EMBEDDING_TENSORS.to_vec();
+        complete.extend_from_slice(super::FLUX_GUIDANCE_EMBEDDING_TENSORS);
+        write_test_gguf(&dev_path, &complete);
+        let picked = super::find_flux_reference_gguf(true, Some(&models_dir))
+            .expect("complete dev reference must be accepted");
+        assert_eq!(picked, dev_path);
+
+        // Schnell target (needs_guidance=false) also accepts the dev candidate.
+        let picked = super::find_flux_reference_gguf(false, Some(&models_dir))
+            .expect("dev candidate satisfies schnell targets too");
+        assert_eq!(picked, dev_path);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn embedding_tensor_names_are_exhaustive() {
         // Verify the const arrays cover all non-diffusion-block tensors that
         // Flux::new() in quantized_model.rs expects (lines 378-416).
