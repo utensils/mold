@@ -133,6 +133,19 @@ pub struct DiscordPayload {
     pub note: Option<String>,
 }
 
+/// Whether a Discord attachment filename is an MP4. Used to decide between
+/// embedding the attachment inside the embed's `image` slot (PNG / JPEG / GIF
+/// / APNG / WebP all render correctly there) and leaving the attachment
+/// unreferenced so Discord renders its own inline video-player block — MP4
+/// rendered as an embed image degrades to a static first-frame WebP preview
+/// with no playback controls.
+fn is_mp4_filename(filename: &str) -> bool {
+    std::path::Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+}
+
 /// Edit the existing reply with the final generation result and image attachment.
 async fn send_result_edit(
     handle: &poise::ReplyHandle<'_>,
@@ -150,7 +163,15 @@ async fn send_result_edit(
             embed = embed.footer(poise::serenity_prelude::CreateEmbedFooter::new(note));
         }
         let attachment = CreateAttachment::bytes(payload.data.clone(), payload.filename.clone());
-        embed = embed.attachment(&payload.filename);
+        // Only reference the attachment as the embed's image for image-shaped
+        // formats. MP4 attachments get left off the embed so Discord renders
+        // them as a separate inline video player block below — setting
+        // `image.url = attachment://mold-*.mp4` on an embed forces Discord's
+        // CDN to serve a WebP preview in the embed's image slot, which shows
+        // up as a static first frame instead of a playable video.
+        if !is_mp4_filename(&payload.filename) {
+            embed = embed.attachment(&payload.filename);
+        }
         reply = reply.attachment(attachment);
     }
 
@@ -271,5 +292,26 @@ mod tests {
             gpu: None,
         };
         assert!(select_attachment(&resp, 0).is_none());
+    }
+
+    #[test]
+    fn is_mp4_filename_matches_mp4_case_insensitive() {
+        assert!(is_mp4_filename("mold-7.mp4"));
+        assert!(is_mp4_filename("mold-7.MP4"));
+        assert!(is_mp4_filename("a.b.Mp4"));
+    }
+
+    #[test]
+    fn is_mp4_filename_rejects_image_formats() {
+        // These all render correctly inside an embed image, so we *want* to
+        // keep `embed.attachment(...)` for them.
+        assert!(!is_mp4_filename("mold-7.png"));
+        assert!(!is_mp4_filename("mold-7.jpg"));
+        assert!(!is_mp4_filename("mold-7.jpeg"));
+        assert!(!is_mp4_filename("mold-7.gif"));
+        assert!(!is_mp4_filename("mold-7.apng"));
+        assert!(!is_mp4_filename("mold-7.webp"));
+        assert!(!is_mp4_filename("mold-7"));
+        assert!(!is_mp4_filename("mp4"));
     }
 }
