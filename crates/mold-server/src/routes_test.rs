@@ -2273,4 +2273,35 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn get_api_downloads_returns_listing_shape() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let _ = state
+            .downloads
+            .enqueue("flux-schnell:q4".into())
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .uri("/api/downloads")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["queued"].is_array());
+        assert!(v["history"].is_array());
+        assert_eq!(v["queued"].as_array().unwrap().len(), 1);
+        assert_eq!(v["queued"][0]["model"], "flux-schnell:q4");
+    }
 }
