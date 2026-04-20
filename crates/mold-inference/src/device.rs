@@ -151,6 +151,55 @@ pub fn qwen2_vram_threshold(model_size_bytes: u64) -> u64 {
     model_size_bytes + T5_ACTIVATION_HEADROOM
 }
 
+/// Headroom above the expand LLM weights for activations + KV cache.
+/// The expander generates short sequences (<= 512 tokens) so 2 GB is generous.
+/// Matches `T5_ACTIVATION_HEADROOM` convention (decimal GB) for easy comparison.
+pub const EXPAND_ACTIVATION_HEADROOM: u64 = 2_000_000_000;
+
+/// Compute VRAM threshold for an expand LLM of a given size (weights + headroom).
+pub fn expand_vram_threshold(model_size_bytes: u64) -> u64 {
+    model_size_bytes + EXPAND_ACTIVATION_HEADROOM
+}
+
+/// Resolved placement for the expand LLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpandPlacement {
+    /// Place on GPU with the given ordinal.
+    Gpu(usize),
+    /// Place on CPU (system RAM).
+    Cpu,
+}
+
+/// Pick where to run the expand LLM: main GPU first, then remaining GPUs in
+/// ordinal order, then CPU.
+///
+/// - `gpus` must be in ordinal order (as returned by `discover_gpus()`).
+/// - On Metal (unified memory) the single discovered "GPU" is always chosen
+///   — memory policing happens via system-RAM preflight at the call site,
+///   since GPU VRAM and system RAM are the same pool.
+/// - A GPU is considered to fit when `free_vram_bytes > threshold`.
+/// - Returns `ExpandPlacement::Cpu` when no GPU has room (or when `gpus` is
+///   empty). The caller is responsible for running a system-RAM preflight
+///   before actually allocating on CPU.
+pub fn select_expand_device(
+    gpus: &[DiscoveredGpu],
+    threshold: u64,
+    is_metal: bool,
+) -> ExpandPlacement {
+    if is_metal {
+        if let Some(g) = gpus.first() {
+            return ExpandPlacement::Gpu(g.ordinal);
+        }
+        return ExpandPlacement::Cpu;
+    }
+    for g in gpus {
+        if g.free_vram_bytes > threshold {
+            return ExpandPlacement::Gpu(g.ordinal);
+        }
+    }
+    ExpandPlacement::Cpu
+}
+
 /// Minimum free VRAM for BF16 Qwen3-4B on GPU with drop-and-reload.
 /// 8.2GB model + 2GB activation headroom = 10.2GB.
 /// With drop-and-reload, the encoder is temporary — loaded for encoding, then dropped.
@@ -1104,5 +1153,104 @@ mod tests {
     fn no_offload_when_vram_too_small_for_single_block() {
         // 24GB transformer but only 2GB free — not enough for even one block
         assert!(!should_offload(24 * GB, 2 * GB));
+    }
+
+    // ── select_expand_device tests ─────────────────────────────────────────
+
+    fn gpu(ordinal: usize, free_gb: u64) -> DiscoveredGpu {
+        DiscoveredGpu {
+            ordinal,
+            name: format!("gpu{ordinal}"),
+            total_vram_bytes: 24 * GB,
+            free_vram_bytes: free_gb * GB,
+        }
+    }
+
+    #[test]
+    fn expand_picks_main_gpu_when_it_fits() {
+        let gpus = vec![gpu(0, 20), gpu(1, 20)];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Gpu(0),
+        );
+    }
+
+    #[test]
+    fn expand_falls_through_to_second_gpu_when_main_full() {
+        let gpus = vec![gpu(0, 1), gpu(1, 10)];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Gpu(1),
+        );
+    }
+
+    #[test]
+    fn expand_walks_all_gpus_in_ordinal_order() {
+        // GPU 1 also full, GPU 2 fits — should reach ordinal 2
+        let gpus = vec![gpu(0, 1), gpu(1, 2), gpu(2, 10)];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Gpu(2),
+        );
+    }
+
+    #[test]
+    fn expand_falls_back_to_cpu_when_no_gpu_fits() {
+        let gpus = vec![gpu(0, 1), gpu(1, 2)];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Cpu,
+        );
+    }
+
+    #[test]
+    fn expand_falls_back_to_cpu_when_no_gpus_discovered() {
+        let gpus: Vec<DiscoveredGpu> = vec![];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Cpu,
+        );
+    }
+
+    #[test]
+    fn expand_metal_always_picks_gpu_0_when_present() {
+        // Metal: unified memory, VRAM threshold doesn't gate — RAM preflight does.
+        let gpus = vec![gpu(0, 0)];
+        assert_eq!(
+            select_expand_device(&gpus, 100 * GB, true),
+            ExpandPlacement::Gpu(0),
+        );
+    }
+
+    #[test]
+    fn expand_metal_with_no_gpus_goes_to_cpu() {
+        let gpus: Vec<DiscoveredGpu> = vec![];
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, true),
+            ExpandPlacement::Cpu,
+        );
+    }
+
+    #[test]
+    fn expand_threshold_sums_weights_and_headroom() {
+        // 4 GB q8 model → 4 + 2 = 6 GB threshold
+        assert_eq!(expand_vram_threshold(4 * GB), 6 * GB);
+        // 1.3 GB q4 model → 1.3 + 2 = 3.3 GB
+        assert_eq!(
+            expand_vram_threshold(1_300_000_000),
+            1_300_000_000 + EXPAND_ACTIVATION_HEADROOM,
+        );
+    }
+
+    #[test]
+    fn expand_strictly_greater_than_threshold() {
+        // free_vram must exceed threshold (strict >), not just equal it —
+        // matches should_use_gpu's convention so an exactly-fitting model
+        // still leaves no room for OS overhead.
+        let gpus = vec![gpu(0, 3)]; // exactly 3 GB free
+        assert_eq!(
+            select_expand_device(&gpus, 3 * GB, false),
+            ExpandPlacement::Cpu,
+        );
     }
 }

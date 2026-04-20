@@ -14,19 +14,16 @@ use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
 
 use crate::device::{
-    create_device, free_vram_bytes, memory_status_string, preflight_memory_check, should_use_gpu,
+    discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
+    select_expand_device, ExpandPlacement,
 };
 use crate::progress::{ProgressCallback, ProgressReporter};
-
-/// VRAM threshold for placing the expand LLM on GPU (Q4 1.7B ~1.3GB + headroom).
-const EXPAND_LLM_VRAM_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 
 /// Local prompt expander using quantized Qwen3 GGUF.
 pub struct LocalExpander {
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     progress: ProgressReporter,
-    gpu_ordinal: usize,
 }
 
 impl LocalExpander {
@@ -36,7 +33,6 @@ impl LocalExpander {
             model_path: model_path.into(),
             tokenizer_path: tokenizer_path.into(),
             progress: ProgressReporter::default(),
-            gpu_ordinal: 0,
         }
     }
 
@@ -117,18 +113,49 @@ impl LocalExpander {
 
     /// Load model, generate text, drop model.
     fn generate_text(&self, prompt_text: &str, config: &ExpandConfig) -> Result<String> {
-        // Device selection: Metal always uses GPU (unified memory), CUDA checks VRAM
-        let gpu_device = create_device(self.gpu_ordinal, &self.progress)?;
-        let is_cuda = gpu_device.is_cuda();
-        let is_metal = gpu_device.is_metal();
-        let free_vram = free_vram_bytes(self.gpu_ordinal).unwrap_or(0);
+        // Size the VRAM/RAM budget off the actual GGUF file (weights + 2 GB
+        // activations), not a static constant — a 4 GB q8 model needs ~6 GB
+        // to fit, not 2 GB.
+        let model_size = std::fs::metadata(&self.model_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let threshold = expand_vram_threshold(model_size);
 
-        let device = if should_use_gpu(is_cuda, is_metal, free_vram, EXPAND_LLM_VRAM_THRESHOLD) {
-            gpu_device
-        } else {
-            self.progress
-                .info("Using CPU for prompt expansion (insufficient GPU memory)");
-            Device::Cpu
+        // Cascade: main GPU → remaining GPUs (ordinal order) → CPU.
+        // `discover_gpus()` returns an empty list on CPU-only builds, which
+        // lands us directly on CPU.
+        let gpus = discover_gpus();
+        let is_metal = candle_core::utils::metal_is_available();
+        let placement = select_expand_device(&gpus, threshold, is_metal);
+
+        let device = match placement {
+            ExpandPlacement::Gpu(ordinal) => {
+                // Metal is always ordinal 0 (single device). CUDA may pick any
+                // ordinal; create_device() respects MOLD_DEVICE=cpu override.
+                let dev = crate::device::create_device(ordinal, &self.progress)?;
+                // Metal and CPU fallback both draw from system RAM — preflight
+                // either way. Pure CUDA allocation doesn't touch RAM and is
+                // already bounded by the VRAM threshold check above.
+                if dev.is_cpu() || dev.is_metal() {
+                    preflight_memory_check("Expand LLM", model_size)?;
+                }
+                dev
+            }
+            ExpandPlacement::Cpu => {
+                if gpus.is_empty() {
+                    self.progress
+                        .info("Using CPU for prompt expansion (no GPU detected)");
+                } else {
+                    self.progress.info(&format!(
+                        "Using CPU for prompt expansion (needed {:.1} GB, no GPU had room)",
+                        threshold as f64 / 1_000_000_000.0,
+                    ));
+                }
+                // Final guard: if system RAM can't hold the model, fail fast
+                // with a clear message rather than OOM mid-load.
+                preflight_memory_check("Expand LLM", model_size)?;
+                Device::Cpu
+            }
         };
 
         let device_label = if device.is_metal() {
@@ -143,12 +170,6 @@ impl LocalExpander {
         if let Some(mem_status) = memory_status_string() {
             self.progress.info(&mem_status);
         }
-
-        // Preflight memory check (Darwin safety guard — prevents OOM from page reclamation storms)
-        let model_size = std::fs::metadata(&self.model_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        preflight_memory_check("Expand LLM", model_size)?;
 
         // Load GGUF model
         let load_start = std::time::Instant::now();
@@ -250,16 +271,16 @@ impl LocalExpander {
             .decode(&generated_tokens, true)
             .map_err(|e| anyhow::anyhow!("failed to decode generated tokens: {e}"))?;
 
-        // Clear KV cache and drop model + device to free VRAM.
+        // Clear KV cache and drop model weights to free VRAM.
         // NOTE: We intentionally do NOT call reclaim_gpu_memory() here.
         // That function resets the CUDA primary context, but cudarc caches
         // CudaDevice per ordinal — the next Device::new_cuda(0) would get
-        // the stale cached handle and segfault.  Dropping the model and
-        // device frees all tensor allocations; the context stays valid for
-        // the diffusion engine that runs next.
+        // the stale cached handle and segfault.  Dropping the model frees
+        // all tensor allocations; the device handle is cheap and the context
+        // stays valid for the diffusion engine that runs next.
         model.clear_kv_cache();
         drop(model);
-        drop(device);
+        let _ = device;
 
         Ok(output)
     }
