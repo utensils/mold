@@ -7,9 +7,9 @@
 //! `GET /api/resources/stream` that replays the broadcast channel.
 
 use mold_core::ResourceSnapshot;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 /// Broadcast buffer size. Per spec 2.3 — small because downstream consumers
@@ -40,12 +40,10 @@ impl ResourceBroadcaster {
     /// ignored — the cache still updates, so the next `GET /api/resources`
     /// call will see it.
     pub fn publish(&self, snapshot: ResourceSnapshot) {
-        // Cache first, then fan out.
-        // `try_lock` is used because the aggregator never contends with other
-        // writers and publish may be called from sync/async contexts.
-        if let Ok(mut guard) = self.latest.try_lock() {
-            *guard = Some(snapshot.clone());
-        }
+        // Cache first, then fan out. The critical section is a pointer write
+        // so a `std::sync::Mutex` is the right primitive — no async scheduler
+        // overhead, no silent-drop-on-contention from `try_lock`.
+        *self.latest.lock().expect("resource cache mutex poisoned") = Some(snapshot.clone());
         let _ = self.tx.send(snapshot);
     }
 
@@ -55,7 +53,10 @@ impl ResourceBroadcaster {
 
     /// Returns the most recent published snapshot. Used by `GET /api/resources`.
     pub fn latest(&self) -> Option<ResourceSnapshot> {
-        self.latest.try_lock().ok().and_then(|g| g.clone())
+        self.latest
+            .lock()
+            .expect("resource cache mutex poisoned")
+            .clone()
     }
 }
 
