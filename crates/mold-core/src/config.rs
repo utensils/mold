@@ -93,6 +93,11 @@ pub struct ModelConfig {
     // --- metadata ---
     pub description: Option<String>,
     pub family: Option<String>,
+
+    /// Per-component device placement override. `None` preserves the
+    /// engine's VRAM-aware auto-placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::types::DevicePlacement>,
 }
 
 impl ModelConfig {
@@ -963,6 +968,95 @@ impl Config {
         self.models.remove(name)
     }
 
+    /// Return the effective placement for a model: config entry plus env overrides.
+    ///
+    /// Precedence (higher wins):
+    ///   1. `MOLD_PLACE_TRANSFORMER`, `MOLD_PLACE_VAE`, `MOLD_PLACE_TEXT_ENCODERS`,
+    ///      `MOLD_PLACE_T5`, `MOLD_PLACE_CLIP_L`, `MOLD_PLACE_CLIP_G`,
+    ///      `MOLD_PLACE_QWEN` (env overrides per-component).
+    ///   2. Config file `[models."name:tag".placement]` table.
+    ///   3. `None` (use engine auto).
+    ///
+    /// Each env var parses:
+    ///   - `"auto"`    — `DeviceRef::Auto`
+    ///   - `"cpu"`     — `DeviceRef::Cpu`
+    ///   - `"gpu:N"`   — `DeviceRef::Gpu { ordinal: N }`
+    ///   - `"gpu"`     — `DeviceRef::Gpu { ordinal: 0 }`
+    pub fn resolved_placement(&self, model_name: &str) -> Option<crate::types::DevicePlacement> {
+        use crate::types::DevicePlacement;
+
+        let mut placement = self
+            .lookup_model_config(model_name)
+            .and_then(|mc| mc.placement);
+
+        let env_tier1 = parse_device_ref_env("MOLD_PLACE_TEXT_ENCODERS");
+        let env_transformer = parse_device_ref_env("MOLD_PLACE_TRANSFORMER");
+        let env_vae = parse_device_ref_env("MOLD_PLACE_VAE");
+        let env_t5 = parse_device_ref_env("MOLD_PLACE_T5");
+        let env_clip_l = parse_device_ref_env("MOLD_PLACE_CLIP_L");
+        let env_clip_g = parse_device_ref_env("MOLD_PLACE_CLIP_G");
+        let env_qwen = parse_device_ref_env("MOLD_PLACE_QWEN");
+
+        let any_env = env_tier1.is_some()
+            || env_transformer.is_some()
+            || env_vae.is_some()
+            || env_t5.is_some()
+            || env_clip_l.is_some()
+            || env_clip_g.is_some()
+            || env_qwen.is_some();
+
+        if !any_env {
+            return placement;
+        }
+
+        let mut effective: DevicePlacement = placement.unwrap_or_default();
+        if let Some(r) = env_tier1 {
+            effective.text_encoders = r;
+        }
+        let any_advanced = env_transformer.is_some()
+            || env_vae.is_some()
+            || env_t5.is_some()
+            || env_clip_l.is_some()
+            || env_clip_g.is_some()
+            || env_qwen.is_some();
+        if any_advanced {
+            let mut adv = effective.advanced.unwrap_or_default();
+            if let Some(r) = env_transformer {
+                adv.transformer = r;
+            }
+            if let Some(r) = env_vae {
+                adv.vae = r;
+            }
+            if let Some(r) = env_t5 {
+                adv.t5 = Some(r);
+            }
+            if let Some(r) = env_clip_l {
+                adv.clip_l = Some(r);
+            }
+            if let Some(r) = env_clip_g {
+                adv.clip_g = Some(r);
+            }
+            if let Some(r) = env_qwen {
+                adv.qwen = Some(r);
+            }
+            effective.advanced = Some(adv);
+        }
+        placement = Some(effective);
+        placement
+    }
+
+    /// Persist a placement for `model_name`, creating the model entry if
+    /// missing. `None` clears the placement (and leaves the rest of the
+    /// entry intact).
+    pub fn set_model_placement(
+        &mut self,
+        model_name: &str,
+        placement: Option<crate::types::DevicePlacement>,
+    ) {
+        let entry = self.models.entry(model_name.to_string()).or_default();
+        entry.placement = placement;
+    }
+
     /// Write the config to disk at `config_path()`.
     ///
     /// Safety: refuses to save if `models_dir` points to a temp/test directory,
@@ -1140,4 +1234,22 @@ fn resolved_manifest_paths_exist(
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })
+}
+
+fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
+    use crate::types::DeviceRef;
+    let raw = std::env::var(key).ok()?;
+    let raw = raw.trim().to_lowercase();
+    if raw == "auto" {
+        Some(DeviceRef::Auto)
+    } else if raw == "cpu" {
+        Some(DeviceRef::Cpu)
+    } else if raw == "gpu" {
+        Some(DeviceRef::gpu(0))
+    } else if let Some(rest) = raw.strip_prefix("gpu:") {
+        rest.parse::<usize>().ok().map(DeviceRef::gpu)
+    } else {
+        eprintln!("mold: ignoring invalid {key}={raw} (expected auto|cpu|gpu[:N])");
+        None
+    }
 }

@@ -89,6 +89,26 @@ export interface LoraWeight {
   scale: number;
 }
 
+// ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
+export type DeviceRef =
+  | { kind: "auto" }
+  | { kind: "cpu" }
+  | { kind: "gpu"; ordinal: number };
+
+export interface AdvancedPlacement {
+  transformer: DeviceRef;
+  vae: DeviceRef;
+  clip_l?: DeviceRef | null;
+  clip_g?: DeviceRef | null;
+  t5?: DeviceRef | null;
+  qwen?: DeviceRef | null;
+}
+
+export interface DevicePlacement {
+  text_encoders: DeviceRef;
+  advanced?: AdvancedPlacement | null;
+}
+
 // Wire shape — what we POST to /api/generate/stream. snake_case to match serde.
 export interface GenerateRequestWire {
   prompt: string;
@@ -108,6 +128,7 @@ export interface GenerateRequestWire {
   original_prompt?: string | null;
   frames?: number | null;
   fps?: number | null;
+  placement?: DevicePlacement | null;
 }
 
 export interface ModelDefaults {
@@ -237,6 +258,7 @@ export interface GenerateFormState {
   outputFormat: OutputFormat;
   expand: ExpandFormState;
   sourceImage: SourceImageState | null;
+  placement: DevicePlacement | null;
 }
 
 // ── Video-family detection helper used by multiple components ──────────────

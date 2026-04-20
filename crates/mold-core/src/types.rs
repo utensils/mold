@@ -329,6 +329,11 @@ pub struct GenerateRequest {
     /// Optional temporal latent upscaling mode for LTX-2 pipelines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
+    /// Optional per-component device placement override. `None` preserves
+    /// the engine's VRAM-aware auto-placement end-to-end. See §3 of the
+    /// 2026-04-19 model-ui-overhaul design doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<DevicePlacement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -784,6 +789,76 @@ pub enum GpuWorkerState {
     Degraded,
 }
 
+// ── Device placement (Agent C: model-ui-overhaul §3) ─────────────────────────
+
+/// A user-facing request for where a component should run.
+///
+/// - `Auto` preserves the existing VRAM-aware auto-placement logic.
+/// - `Cpu` pins the component to CPU regardless of available VRAM.
+/// - `Gpu { ordinal }` pins to GPU ordinal `n` (CUDA-specific ordinal,
+///   or `0` on Metal/unified memory).
+///
+/// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
+/// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
+/// field deserializes to `Auto`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeviceRef {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu {
+        ordinal: usize,
+    },
+}
+
+impl DeviceRef {
+    /// Helper constructor mirroring the compact `Gpu(n)` form used in tests.
+    pub const fn gpu(ordinal: usize) -> Self {
+        DeviceRef::Gpu { ordinal }
+    }
+}
+
+/// Top-level placement request attached to `GenerateRequest` and persisted
+/// under `[models."name:tag".placement]` in config.
+///
+/// - `text_encoders` is the Tier 1 "group knob" — a single override applied
+///   to all text-encoder components (T5 plus CLIP-L, Qwen3, Qwen2.5-VL, etc.).
+/// - `advanced` is Tier 2, available only for families listed in spec §3.2
+///   (FLUX, Flux.2, Z-Image, Qwen-Image; SD3.5 stretch). When `Some`, each
+///   populated field overrides the Tier 1 group knob for that specific
+///   component. When `None`, only the group knob is honored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct DevicePlacement {
+    #[serde(default)]
+    pub text_encoders: DeviceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<AdvancedPlacement>,
+}
+
+/// Per-component placement overrides available only for Tier 2 families.
+///
+/// `transformer` and `vae` are required fields (default `Auto`). The
+/// per-encoder fields are `Option<DeviceRef>` because not every family has
+/// every encoder — FLUX has T5 plus CLIP-L, Flux.2 and Z-Image have Qwen3,
+/// Qwen-Image has Qwen2.5-VL. `None` means "follow the Tier 1 group knob";
+/// `Some(DeviceRef::Auto)` means "follow the engine's own auto logic".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AdvancedPlacement {
+    #[serde(default)]
+    pub transformer: DeviceRef,
+    #[serde(default)]
+    pub vae: DeviceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_l: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_g: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t5: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qwen: Option<DeviceRef>,
+}
+
 // ── SSE streaming wire types ─────────────────────────────────────────────────
 
 /// Progress event for SSE streaming. Mirrors `mold_inference::ProgressEvent`
@@ -1051,6 +1126,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: GenerateRequest = serde_json::from_str(&json).unwrap();
@@ -1207,6 +1283,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("negative_prompt"));
@@ -1253,6 +1330,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
@@ -1296,6 +1374,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
@@ -1341,6 +1420,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let metadata = OutputMetadata::from_generate_request(&req, 1, None, "0.1.0");
         assert_eq!(metadata.negative_prompt.as_deref(), Some("blurry, ugly"));
@@ -1384,6 +1464,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
 
         let metadata =
@@ -1595,6 +1676,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // Verify base64 encoding is in the JSON
@@ -1644,6 +1726,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("edit_images"));
@@ -1706,6 +1789,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("source_image"));
@@ -1753,6 +1837,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("control_image"));
@@ -1821,6 +1906,7 @@ mod tests {
             retake_range: None,
             spatial_upscale: None,
             temporal_upscale: None,
+            placement: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("mask_image"));
@@ -2262,6 +2348,10 @@ pub fn default_output_filename(
         format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
     }
 }
+
+#[cfg(test)]
+#[path = "placement_test.rs"]
+mod placement_test;
 
 // ─── Downloads UI (Agent A) ─────────────────────────────────────────────────
 

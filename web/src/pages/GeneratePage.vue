@@ -110,6 +110,15 @@ const gpus = computed(
     null,
 );
 
+// TODO-REMOVE-AFTER-MERGE: use useResources().gpuList once Agent B merges.
+const gpuListForPlacement = computed(
+  () =>
+    status.value?.gpus?.map((g) => ({
+      ordinal: g.ordinal,
+      name: `GPU ${g.ordinal}`,
+    })) ?? [],
+);
+
 const settingsDirty = computed(() => {
   const s = form.state.value;
   const m = currentModel.value;
@@ -250,6 +259,8 @@ onMounted(async () => {
         :gpus="gpus"
         :expand-active="form.state.value.expand.enabled"
         :settings-dirty="settingsDirty"
+        :family="currentModel?.family ?? ''"
+        :placement-gpus="gpuListForPlacement"
         @submit="onSubmit"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
