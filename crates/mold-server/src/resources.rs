@@ -292,6 +292,7 @@ pub fn build_snapshot() -> ResourceSnapshot {
     }
 }
 
+#[allow(clippy::needless_return)]
 fn collect_gpus() -> Vec<GpuSnapshot> {
     // Darwin: Metal is the only GPU path.
     #[cfg(target_os = "macos")]
