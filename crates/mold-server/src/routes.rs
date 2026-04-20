@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ServerStatus,
-    SseErrorEvent, SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ResourceSnapshot,
+    ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -78,6 +78,14 @@ impl ApiError {
             error: msg.into(),
             code: "INTERNAL_ERROR".to_string(),
             status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub fn internal_with_status(msg: impl Into<String>, status: StatusCode) -> Self {
+        Self {
+            error: msg.into(),
+            code: "INTERNAL_ERROR".to_string(),
+            status,
         }
     }
 
@@ -184,6 +192,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/downloads/stream", get(stream_downloads))
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
+        .route("/api/resources", get(get_resources))
+        .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/shutdown", post(shutdown_server))
@@ -2567,6 +2577,64 @@ pub async fn stream_downloads(
             .interval(std::time::Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+// ── Resource telemetry (Agent B scope) ───────────────────────────────────────
+
+/// `GET /api/resources` — one-shot JSON snapshot from the aggregator cache.
+/// Returns 503 if the aggregator has not yet fired (first 1 s after startup
+/// and before `spawn_aggregator` has run).
+async fn get_resources(State(state): State<AppState>) -> Result<Json<ResourceSnapshot>, ApiError> {
+    match state.resources.latest() {
+        Some(snap) => Ok(Json(snap)),
+        None => Err(ApiError::internal_with_status(
+            "resource telemetry not ready",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )),
+    }
+}
+
+/// `GET /api/resources/stream` — SSE stream of `ResourceSnapshot` frames.
+/// Event name: `snapshot`. Matches the keepalive cadence of `/api/generate/stream`.
+async fn get_resources_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = state.resources.subscribe();
+    // Attach the cached `latest` snapshot as the first frame so clients
+    // don't wait up to one full tick for their initial value.
+    let initial = state.resources.latest();
+
+    let stream = async_stream::stream! {
+        if let Some(snap) = initial {
+            yield Ok::<_, Infallible>(snapshot_to_sse(&snap));
+        }
+        let mut bs = BroadcastStream::new(rx);
+        while let Some(item) = bs.next().await {
+            match item {
+                Ok(snap) => yield Ok(snapshot_to_sse(&snap)),
+                // Lag is normal for slow clients — skip dropped frames
+                // silently; the next one will catch them up.
+                Err(_lagged) => continue,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
+    match serde_json::to_string(snap) {
+        Ok(data) => SseEvent::default().event("snapshot").data(data),
+        Err(e) => SseEvent::default()
+            .event("error")
+            .data(format!("{{\"message\":\"serialize failed: {e}\"}}")),
+    }
 }
 
 #[cfg(test)]

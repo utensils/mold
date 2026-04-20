@@ -316,3 +316,34 @@ export type DownloadEventWire =
   | { type: "job_done"; id: string; model: string }
   | { type: "job_failed"; id: string; error: string }
   | { type: "job_cancelled"; id: string };
+// ──────────────────────────────────────────────────────────────────────────────
+// Resource telemetry (Agent B scope). Mirror of `mold_core::ResourceSnapshot`
+// et al. `vram_used_by_mold` / `vram_used_by_other` are null on Metal hosts
+// and on CUDA hosts that fell back to the `nvidia-smi` subprocess path.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type GpuBackend = "cuda" | "metal";
+
+export interface GpuSnapshot {
+  ordinal: number;
+  name: string;
+  backend: GpuBackend;
+  vram_total: number;
+  vram_used: number;
+  vram_used_by_mold: number | null;
+  vram_used_by_other: number | null;
+}
+
+export interface RamSnapshot {
+  total: number;
+  used: number;
+  used_by_mold: number;
+  used_by_other: number;
+}
+
+export interface ResourceSnapshot {
+  hostname: string;
+  timestamp: number;
+  gpus: GpuSnapshot[];
+  system_ram: RamSnapshot;
+}

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { useDownloads } from "../composables/useDownloads";
+import ResourceStrip from "./ResourceStrip.vue";
+
+const route = useRoute();
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -373,6 +377,15 @@ function clearSearch() {
           <path d="M3 21v-5h5" />
         </svg>
       </button>
+    </div>
+
+    <!-- Agent B: narrow-viewport resource chip. Renders only on /generate
+         below `lg` so desktop uses the full ResourceStrip inside the page. -->
+    <div
+      v-if="route.name === 'generate'"
+      class="flex shrink-0 items-center lg:hidden"
+    >
+      <ResourceStrip variant="chip" />
     </div>
   </header>
 </template>

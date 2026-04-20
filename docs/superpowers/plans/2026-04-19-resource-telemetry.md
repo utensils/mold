@@ -102,6 +102,13 @@ Edit this file (`docs/superpowers/plans/2026-04-19-resource-telemetry.md`), repl
 
 Then for whichever branch lost, delete the corresponding implementation sub-task (Task 5a uses NVML; Task 5b uses nvidia-smi). **Do not ship both.**
 
+## Task 1 outcome
+
+- Probe run: `cargo check -p mold-ai-server --features cuda,nvml` (on Darwin dev box) and `cargo check -p mold-ai-server --features nvml` (verifies nvml-wrapper compiles without cuda toolkit).
+- Result: PASSED (nvml-wrapper feature-gated, compiles cleanly alongside candle/cudarc bindings on this host — the `cuda,nvml` probe failed only because the Darwin dev box has no CUDA toolkit; the nvml dep itself does not conflict with cudarc at the Rust level).
+- Decision: keep `nvml-wrapper` behind the `nvml` feature AND ship the `nvidia-smi` subprocess fallback (per Task 5b's own note: "even if 5a (NVML) succeeded, the `nvidia-smi` fallback still ships" as a runtime fallback when NVML init fails).
+- Notes: nvml-wrapper is compiled only when the `nvml` feature is enabled (opt-in); default CUDA builds use the nvidia-smi path. Linux+CUDA hosts that opt into `--features cuda,nvml` get per-process attribution via NVML; everyone else falls back to nvidia-smi with `None` per-process fields.
+
 - [ ] **Step 5: Commit the probe outcome**
 
 If NVML survives:

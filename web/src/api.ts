@@ -236,3 +236,13 @@ export function downloadsStreamUrl(): string {
 }
 
 export type { DownloadJobWire, DownloadsListingWire };
+// ── Resource telemetry (Agent B) ─────────────────────────────────────────────
+import type { ResourceSnapshot } from "./types";
+
+export async function fetchResources(
+  signal?: AbortSignal,
+): Promise<ResourceSnapshot> {
+  const res = await fetch("/api/resources", { signal });
+  if (!res.ok) throw new Error(`fetchResources failed: ${res.status}`);
+  return (await res.json()) as ResourceSnapshot;
+}
