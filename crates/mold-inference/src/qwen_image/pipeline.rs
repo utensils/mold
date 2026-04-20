@@ -309,6 +309,29 @@ impl QwenImageTransformer {
     }
 }
 
+/// Resolve a component override given Tier 1 plus Tier 2 requests.
+fn effective_device_ref(
+    placement: Option<&mold_core::types::DevicePlacement>,
+    advanced_override: impl FnOnce(&mold_core::types::AdvancedPlacement) -> Option<mold_core::types::DeviceRef>,
+    fallback_is_component_auto: bool,
+) -> mold_core::types::DeviceRef {
+    use mold_core::types::DeviceRef;
+    let Some(placement) = placement else {
+        return DeviceRef::Auto;
+    };
+    if let Some(adv) = placement.advanced.as_ref() {
+        if let Some(r) = advanced_override(adv) {
+            return r;
+        }
+        if fallback_is_component_auto {
+            return placement.text_encoders;
+        }
+        DeviceRef::Auto
+    } else {
+        placement.text_encoders
+    }
+}
+
 /// Qwen-Image-2512 inference engine.
 pub struct QwenImageEngine {
     base: EngineBase<LoadedQwenImage>,
@@ -1334,7 +1357,15 @@ impl QwenImageEngine {
         tracing::info!(model = %self.base.model_name, "loading Qwen-Image model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(
+            Some(transformer_ref),
+            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
+        )?;
         let transformer_cfg = self.transformer_config();
         let transformer_is_quantized = self.detect_is_quantized();
         // FP8 safetensors are loaded as BF16 via CPU (candle CUDA kernel bug
@@ -1377,11 +1408,16 @@ impl QwenImageEngine {
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae),
+            false,
+        );
+        let vae_device = crate::device::resolve_device(
+            Some(vae_ref),
+            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
+        )?;
+        let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
         let vae_dtype = DType::F32;
@@ -1401,18 +1437,18 @@ impl QwenImageEngine {
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
         let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let tier1 = self
-            .pending_placement
-            .as_ref()
-            .map(|p| p.text_encoders)
-            .unwrap_or_default();
+        let qwen_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen,
+            true,
+        );
         let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
         let te_device = crate::device::resolve_device(
-            Some(tier1),
+            Some(qwen_ref),
             || Ok(auto_te_device.clone()),
         )?;
         let te_use_gpu = !te_device.is_cpu();
@@ -1505,7 +1541,15 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_cfg = self.transformer_config();
 
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(
+            Some(transformer_ref),
+            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
+        )?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_is_quantized = self.detect_is_quantized();
 
@@ -1570,18 +1614,18 @@ impl QwenImageEngine {
             } else {
                 let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let tier1 = self
-                    .pending_placement
-                    .as_ref()
-                    .map(|p| p.text_encoders)
-                    .unwrap_or_default();
+                let qwen_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.qwen,
+                    true,
+                );
                 let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
                     Device::Cpu
                 };
                 let te_device = crate::device::resolve_device(
-                    Some(tier1),
+                    Some(qwen_ref),
                     || Ok(auto_te_device.clone()),
                 )?;
                 let te_use_gpu = !te_device.is_cpu();
@@ -1989,11 +2033,16 @@ impl QwenImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae),
+            false,
+        );
+        let vae_device = crate::device::resolve_device(
+            Some(vae_ref),
+            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
+        )?;
+        let vae_on_gpu = !vae_device.is_cpu();
         // Always decode in F32 — BF16 convolutions accumulate quantization noise across
         // the 4 upsampling blocks, producing visible grain. Matches diffusers' force_upcast.
         let vae_dtype = DType::F32;
