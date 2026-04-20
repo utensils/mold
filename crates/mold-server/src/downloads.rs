@@ -25,7 +25,6 @@ pub const HISTORY_CAP: usize = 20;
 pub struct ActiveHandle {
     pub job: DownloadJob,
     pub abort: CancellationToken,
-    pub task: tokio::task::JoinHandle<()>,
 }
 
 pub struct DownloadQueue {
@@ -475,12 +474,11 @@ async fn run_one_job(
     let cancel = CancellationToken::new();
     let handle_job = job.clone();
 
-    // Install the job as active. Placeholder task handle — we're not tracking
-    // it separately because the pull runs inline in this function.
+    // Install the job as active. The pull runs inline in this function so we
+    // don't need a separate task handle — cancellation flows through `abort`.
     let active_handle = ActiveHandle {
         job: handle_job,
         abort: cancel.clone(),
-        task: tokio::spawn(async {}),
     };
     queue.set_active(active_handle).await;
 
