@@ -1,0 +1,119 @@
+<h2>How is the /generate page laid out?</h2>
+<p class="subtitle">Three wireframes. All dark-themed / glass-panelled / brand-500-accented to match the gallery — these mockups are just showing structure, not final styling.</p>
+
+<div class="cards">
+  <div class="card" data-choice="split" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A — Split: form left, live strip right</div>
+        <div class="mockup-body">
+          <div class="mock-nav">mold · Gallery | <b>Generate</b></div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <div style="flex:1 1 40%; border:1px dashed #999; padding:8px; min-height:180px;">
+              <div class="label">form</div>
+              <div class="mock-input" style="margin:4px 0;">prompt…</div>
+              <div class="mock-input" style="margin:4px 0;">model ▾</div>
+              <div style="display:flex; gap:4px;">
+                <div class="mock-input" style="flex:1;">w</div>
+                <div class="mock-input" style="flex:1;">h</div>
+              </div>
+              <div class="mock-input" style="margin:4px 0;">▾ advanced</div>
+              <button class="mock-button">Generate</button>
+            </div>
+            <div style="flex:1 1 60%; border:1px dashed #999; padding:8px; min-height:180px;">
+              <div class="label">running jobs</div>
+              <div class="placeholder" style="margin:4px 0;">GPU 0 · step 14/28 · 47%</div>
+              <div class="placeholder" style="margin:4px 0;">GPU 1 · queued</div>
+              <div class="label" style="margin-top:10px;">recent from this session</div>
+              <div style="display:flex; gap:4px;">
+                <div class="placeholder" style="flex:1; height:50px;"></div>
+                <div class="placeholder" style="flex:1; height:50px;"></div>
+                <div class="placeholder" style="flex:1; height:50px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Split (studio app)</h3>
+      <p>Form always visible on the left, live jobs + this-session results on the right. Mobile stacks the two panes. Classic A1111/ComfyUI shape.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="composer" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B — Composer top, running strip, feed below</div>
+        <div class="mockup-body">
+          <div class="mock-nav">mold · Gallery | <b>Generate</b></div>
+          <div style="border:1px dashed #999; padding:8px; margin-top:8px;">
+            <div class="label">composer (full width)</div>
+            <div class="mock-input" style="margin:4px 0;">prompt…</div>
+            <div style="display:flex; gap:4px;">
+              <div class="mock-input" style="flex:2;">model ▾</div>
+              <div class="mock-input" style="flex:1;">1024×1024</div>
+              <div class="mock-input" style="flex:1;">▾ more</div>
+              <button class="mock-button">Generate</button>
+            </div>
+          </div>
+          <div style="border:1px dashed #999; padding:8px; margin-top:8px;">
+            <div class="label">running (horizontal strip)</div>
+            <div style="display:flex; gap:4px;">
+              <div class="placeholder" style="flex:1; height:60px;">GPU 0 · 47%</div>
+              <div class="placeholder" style="flex:1; height:60px;">GPU 1 · 12%</div>
+              <div class="placeholder" style="flex:1; height:60px;">queued…</div>
+            </div>
+          </div>
+          <div style="border:1px dashed #999; padding:8px; margin-top:8px;">
+            <div class="label">session feed / gallery</div>
+            <div style="display:flex; gap:4px;">
+              <div class="placeholder" style="flex:1; height:50px;"></div>
+              <div class="placeholder" style="flex:1; height:50px;"></div>
+              <div class="placeholder" style="flex:1; height:50px;"></div>
+              <div class="placeholder" style="flex:1; height:50px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Composer on top</h3>
+      <p>Hero-style prompt composer spans the top. Running jobs sit as a horizontal strip underneath. Results flow into a feed below — reuses <code>GalleryFeed</code>/<code>GalleryCard</code>. Best mobile story.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="sticky" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C — Compact sticky composer, interleaved feed</div>
+        <div class="mockup-body">
+          <div class="mock-nav">mold · Gallery | <b>Generate</b> &nbsp; | queue 1/8 · GPU 0 ▮ · GPU 1 ▯</div>
+          <div style="border:1px dashed #999; padding:6px; margin-top:8px; position:sticky; top:0;">
+            <div style="display:flex; gap:4px;">
+              <div class="mock-input" style="flex:4;">prompt…</div>
+              <div class="mock-input" style="flex:1;">model ▾</div>
+              <button class="mock-button">↵</button>
+              <div class="mock-input" style="flex:0.6;">⚙</div>
+            </div>
+          </div>
+          <div style="border:1px dashed #999; padding:8px; margin-top:8px;">
+            <div class="label">feed — running cards interleave with finished</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px;">
+              <div class="placeholder" style="height:60px; outline:1px solid #6366f1;">GPU 0 · 47%</div>
+              <div class="placeholder" style="height:60px;"></div>
+              <div class="placeholder" style="height:60px; outline:1px solid #6366f1;">GPU 1 · 12%</div>
+              <div class="placeholder" style="height:60px;"></div>
+              <div class="placeholder" style="height:60px;"></div>
+              <div class="placeholder" style="height:60px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Sticky composer + interleaved</h3>
+      <p>Composer is one compact sticky row (⚙ opens a modal for knobs). Running jobs appear as "in-progress" tiles interleaved with finished results in the feed — literally the gallery with some tiles still rendering. Most minimal new UI.</p>
+    </div>
+  </div>
+</div>

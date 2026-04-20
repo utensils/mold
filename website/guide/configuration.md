@@ -191,6 +191,36 @@ services.mold = {
 These are mainly useful for custom local model layouts, manual debugging, or
 testing alternative weight files without editing `config.toml`.
 
+### Per-component device placement
+
+Override which device (CPU or a specific GPU) runs each part of the diffusion
+pipeline. All variables accept the same four forms: `auto` (preserve the
+engine's VRAM-aware default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N` for a
+specific ordinal.
+
+| Variable                    | Applies to                                                         | Notes                                                                                           |
+| --------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `MOLD_PLACE_TEXT_ENCODERS`  | Every model family (Tier 1)                                        | Single knob that moves every text encoder slot as a group. Picking `cpu` frees the transformer's full VRAM budget without triggering block offload. |
+| `MOLD_PLACE_TRANSFORMER`    | FLUX, Flux.2, Z-Image, Qwen-Image                                  | Per-component override. Interacts with `MOLD_OFFLOAD` — blocks still stream from CPU but target the chosen ordinal. |
+| `MOLD_PLACE_VAE`            | FLUX, Flux.2, Z-Image, Qwen-Image                                  | Decode stage; CPU is fine for preview, GPU is faster.                                           |
+| `MOLD_PLACE_T5`             | FLUX                                                               | Per-encoder override; unset falls through to `MOLD_PLACE_TEXT_ENCODERS`.                        |
+| `MOLD_PLACE_CLIP_L`         | FLUX                                                               | Per-encoder override.                                                                           |
+| `MOLD_PLACE_CLIP_G`         | SDXL and others that use CLIP-G                                    | Per-encoder override.                                                                           |
+| `MOLD_PLACE_QWEN`           | Flux.2, Z-Image, Qwen-Image                                        | Per-encoder override for the Qwen text encoder.                                                 |
+
+Precedence (highest wins): CLI flag (`--device-text-encoders`, `--device-vae`, …)
+→ env var → `[models."name:tag".placement]` TOML block → engine auto.
+
+The web UI's **Placement** panel, the `PUT /api/config/model/:name/placement`
+route, and `mold run --device-*` flags all write/read the same shape, so any
+surface can drive it.
+
+Tier 2 per-component controls are intentionally gated: families other than
+FLUX, Flux.2, Z-Image, and Qwen-Image only honor Tier 1 (`MOLD_PLACE_TEXT_ENCODERS`)
+— their engines don't yet split encoder/transformer/VAE across devices. Setting
+the advanced variables on a Tier 1-only family is a no-op (the web UI hides
+the Advanced disclosure for those families so it isn't misleading).
+
 For Qwen-Image and Qwen-Image-Edit:
 
 - CUDA `auto` prefers BF16 when enough headroom remains after the transformer

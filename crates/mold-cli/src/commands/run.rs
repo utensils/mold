@@ -5,8 +5,9 @@ use mold_core::manifest::{
     suggest_similar_models,
 };
 use mold_core::{
-    Config, KeyframeCondition, LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale,
-    Ltx2TemporalUpscale, OutputFormat, Scheduler, TimeRange,
+    parse_device_ref_str, AdvancedPlacement, Config, DevicePlacement, KeyframeCondition,
+    LoraWeight, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, OutputFormat, Scheduler,
+    TimeRange,
 };
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -338,6 +339,91 @@ fn parse_keyframes(values: &[String]) -> Result<Option<Vec<KeyframeCondition>>> 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// CLI device-placement overrides collected from the seven `--device-*` flags.
+/// Each field is the raw user-supplied string (e.g. `"cpu"`, `"gpu:1"`); parsing
+/// happens in [`resolve_placement`] so the caller gets a single aggregate error.
+#[derive(Debug, Clone, Default)]
+pub struct PlacementFlags {
+    pub text_encoders: Option<String>,
+    pub transformer: Option<String>,
+    pub vae: Option<String>,
+    pub t5: Option<String>,
+    pub clip_l: Option<String>,
+    pub clip_g: Option<String>,
+    pub qwen: Option<String>,
+}
+
+impl PlacementFlags {
+    fn any_set(&self) -> bool {
+        self.text_encoders.is_some()
+            || self.transformer.is_some()
+            || self.vae.is_some()
+            || self.t5.is_some()
+            || self.clip_l.is_some()
+            || self.clip_g.is_some()
+            || self.qwen.is_some()
+    }
+
+    fn any_advanced(&self) -> bool {
+        self.transformer.is_some()
+            || self.vae.is_some()
+            || self.t5.is_some()
+            || self.clip_l.is_some()
+            || self.clip_g.is_some()
+            || self.qwen.is_some()
+    }
+}
+
+/// Merge CLI placement flags on top of the effective placement from config +
+/// env vars (via `config.resolved_placement(model)`). Returns `Ok(None)` when
+/// nothing overrides the engine's built-in auto selection. Flag parse errors
+/// surface with the flag name so users know which `--device-*` was bad.
+fn resolve_placement(
+    config: &Config,
+    model: &str,
+    flags: &PlacementFlags,
+) -> Result<Option<DevicePlacement>> {
+    let parse = |flag: &str, raw: &Option<String>| -> Result<Option<_>> {
+        raw.as_deref()
+            .map(|s| parse_device_ref_str(s).map_err(|e| anyhow::anyhow!("--device-{flag}: {e}")))
+            .transpose()
+    };
+
+    let base = config.resolved_placement(model);
+    if !flags.any_set() {
+        return Ok(base);
+    }
+
+    let mut effective: DevicePlacement = base.unwrap_or_default();
+    if let Some(r) = parse("text-encoders", &flags.text_encoders)? {
+        effective.text_encoders = r;
+    }
+    if flags.any_advanced() {
+        let mut adv: AdvancedPlacement = effective.advanced.unwrap_or_default();
+        if let Some(r) = parse("transformer", &flags.transformer)? {
+            adv.transformer = r;
+        }
+        if let Some(r) = parse("vae", &flags.vae)? {
+            adv.vae = r;
+        }
+        if let Some(r) = parse("t5", &flags.t5)? {
+            adv.t5 = Some(r);
+        }
+        if let Some(r) = parse("clip-l", &flags.clip_l)? {
+            adv.clip_l = Some(r);
+        }
+        if let Some(r) = parse("clip-g", &flags.clip_g)? {
+            adv.clip_g = Some(r);
+        }
+        if let Some(r) = parse("qwen", &flags.qwen)? {
+            adv.qwen = Some(r);
+        }
+        effective.advanced = Some(adv);
+    }
+    Ok(Some(effective))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     model_or_prompt: Option<String>,
     prompt_rest: Vec<String>,
@@ -373,6 +459,7 @@ pub async fn run(
     scheduler: Option<Scheduler>,
     eager: bool,
     offload: bool,
+    placement_flags: PlacementFlags,
     lora: Vec<String>,
     lora_scale: f64,
     image: Vec<String>,
@@ -723,6 +810,8 @@ pub async fn run(
         None
     };
 
+    let placement = resolve_placement(&config, &model, &placement_flags)?;
+
     generate::run(
         &final_prompt,
         &model,
@@ -765,6 +854,7 @@ pub async fn run(
         scheduler,
         eager,
         offload,
+        placement,
         source_image,
         edit_images,
         strength,
@@ -779,6 +869,161 @@ pub async fn run(
         server_expand,
     )
     .await
+}
+
+#[cfg(test)]
+mod placement_flag_tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+    use mold_core::DeviceRef;
+
+    /// Mirrors `tests::test_config()` below — duplicated on purpose to avoid
+    /// cross-module visibility games. Keeps the two test modules independent
+    /// so adding/removing Config fields is a single local edit.
+    fn minimal_config() -> Config {
+        Config {
+            config_version: 1,
+            default_model: "flux2-klein".to_string(),
+            models_dir: "/tmp/mold-test-nonexistent-models".to_string(),
+            server_port: 7680,
+            default_width: 1024,
+            default_height: 1024,
+            default_steps: 4,
+            embed_metadata: true,
+            t5_variant: None,
+            qwen3_variant: None,
+            output_dir: None,
+            default_negative_prompt: None,
+            expand: mold_core::ExpandSettings::default(),
+            logging: mold_core::LoggingConfig::default(),
+            runpod: mold_core::runpod::RunPodSettings::default(),
+            gpus: None,
+            queue_size: None,
+            models: std::collections::HashMap::new(),
+        }
+    }
+
+    fn clear_placement_env() {
+        for key in [
+            "MOLD_PLACE_TEXT_ENCODERS",
+            "MOLD_PLACE_TRANSFORMER",
+            "MOLD_PLACE_VAE",
+            "MOLD_PLACE_T5",
+            "MOLD_PLACE_CLIP_L",
+            "MOLD_PLACE_CLIP_G",
+            "MOLD_PLACE_QWEN",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn resolve_placement_returns_none_when_nothing_set() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_placement_env();
+        let cfg = minimal_config();
+        let out = resolve_placement(&cfg, "flux-dev:q4", &PlacementFlags::default()).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn resolve_placement_cli_flag_sets_text_encoders() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for key in [
+            "MOLD_PLACE_TEXT_ENCODERS",
+            "MOLD_PLACE_TRANSFORMER",
+            "MOLD_PLACE_VAE",
+            "MOLD_PLACE_T5",
+            "MOLD_PLACE_CLIP_L",
+            "MOLD_PLACE_CLIP_G",
+            "MOLD_PLACE_QWEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        let cfg = minimal_config();
+        let flags = PlacementFlags {
+            text_encoders: Some("cpu".into()),
+            ..Default::default()
+        };
+        let out = resolve_placement(&cfg, "flux-dev:q4", &flags)
+            .unwrap()
+            .expect("placement present");
+        assert_eq!(out.text_encoders, DeviceRef::Cpu);
+        assert!(out.advanced.is_none());
+    }
+
+    #[test]
+    fn resolve_placement_cli_overrides_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_placement_env();
+        std::env::set_var("MOLD_PLACE_TEXT_ENCODERS", "cpu");
+        let cfg = minimal_config();
+        let flags = PlacementFlags {
+            text_encoders: Some("gpu:1".into()),
+            ..Default::default()
+        };
+        let out = resolve_placement(&cfg, "flux-dev:q4", &flags)
+            .unwrap()
+            .expect("placement present");
+        assert_eq!(out.text_encoders, DeviceRef::gpu(1));
+        std::env::remove_var("MOLD_PLACE_TEXT_ENCODERS");
+    }
+
+    #[test]
+    fn resolve_placement_tier2_flags_populate_advanced() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for key in [
+            "MOLD_PLACE_TEXT_ENCODERS",
+            "MOLD_PLACE_TRANSFORMER",
+            "MOLD_PLACE_VAE",
+            "MOLD_PLACE_T5",
+            "MOLD_PLACE_CLIP_L",
+            "MOLD_PLACE_CLIP_G",
+            "MOLD_PLACE_QWEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        let cfg = minimal_config();
+        let flags = PlacementFlags {
+            transformer: Some("gpu:0".into()),
+            vae: Some("cpu".into()),
+            t5: Some("cpu".into()),
+            ..Default::default()
+        };
+        let out = resolve_placement(&cfg, "flux-dev:q4", &flags)
+            .unwrap()
+            .expect("placement present");
+        let adv = out.advanced.expect("advanced populated");
+        assert_eq!(adv.transformer, DeviceRef::gpu(0));
+        assert_eq!(adv.vae, DeviceRef::Cpu);
+        assert_eq!(adv.t5, Some(DeviceRef::Cpu));
+        assert_eq!(adv.clip_l, None);
+    }
+
+    #[test]
+    fn resolve_placement_invalid_flag_value_errors_with_flag_name() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for key in [
+            "MOLD_PLACE_TEXT_ENCODERS",
+            "MOLD_PLACE_TRANSFORMER",
+            "MOLD_PLACE_VAE",
+            "MOLD_PLACE_T5",
+            "MOLD_PLACE_CLIP_L",
+            "MOLD_PLACE_CLIP_G",
+            "MOLD_PLACE_QWEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        let cfg = minimal_config();
+        let flags = PlacementFlags {
+            vae: Some("banana".into()),
+            ..Default::default()
+        };
+        let err = resolve_placement(&cfg, "flux-dev:q4", &flags).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("--device-vae"), "got: {msg}");
+        assert!(msg.contains("banana"), "got: {msg}");
+    }
 }
 
 #[cfg(test)]

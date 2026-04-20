@@ -1236,20 +1236,37 @@ fn resolved_manifest_paths_exist(
     })
 }
 
-fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
+/// Parse a device-placement string (`auto`, `cpu`, `gpu`, `gpu:N`) into a
+/// `DeviceRef`. Case-insensitive, whitespace-trimmed. Used by env-var and CLI
+/// parsers alike so all three surfaces (TOML, env, CLI flag) accept the same
+/// forms.
+pub fn parse_device_ref_str(raw: &str) -> Result<crate::types::DeviceRef, String> {
     use crate::types::DeviceRef;
-    let raw = std::env::var(key).ok()?;
     let raw = raw.trim().to_lowercase();
     if raw == "auto" {
-        Some(DeviceRef::Auto)
+        Ok(DeviceRef::Auto)
     } else if raw == "cpu" {
-        Some(DeviceRef::Cpu)
+        Ok(DeviceRef::Cpu)
     } else if raw == "gpu" {
-        Some(DeviceRef::gpu(0))
+        Ok(DeviceRef::gpu(0))
     } else if let Some(rest) = raw.strip_prefix("gpu:") {
-        rest.parse::<usize>().ok().map(DeviceRef::gpu)
+        rest.parse::<usize>()
+            .map(DeviceRef::gpu)
+            .map_err(|_| format!("invalid device '{raw}' (expected auto|cpu|gpu[:N])"))
     } else {
-        eprintln!("mold: ignoring invalid {key}={raw} (expected auto|cpu|gpu[:N])");
-        None
+        Err(format!(
+            "invalid device '{raw}' (expected auto|cpu|gpu[:N])"
+        ))
+    }
+}
+
+fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {
+    let raw = std::env::var(key).ok()?;
+    match parse_device_ref_str(&raw) {
+        Ok(dr) => Some(dr),
+        Err(msg) => {
+            eprintln!("mold: ignoring {key}={raw}: {msg}");
+            None
+        }
     }
 }
