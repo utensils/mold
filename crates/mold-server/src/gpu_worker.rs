@@ -1,11 +1,11 @@
 use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
-use crate::queue::{clean_error_message, save_image_to_dir, save_video_to_dir};
+use crate::queue::{
+    build_sse_complete_event, clean_error_message, save_image_to_dir, save_video_to_dir,
+};
 use crate::state::{GenerationJobResult, SseMessage};
-use base64::Engine as _;
 use mold_core::{
-    Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent,
+    Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseErrorEvent, SseProgressEvent,
 };
 use mold_inference::device;
 use std::sync::atomic::Ordering;
@@ -205,26 +205,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                 }
             }
 
-            // Send SSE complete event.
+            // Send SSE complete event. Video responses carry the actual MP4 /
+            // GIF bytes plus frames / fps / thumbnail / audio metadata so the
+            // SSE client can reconstruct a `VideoData` — without this the
+            // Discord bot silently degraded every LTX-Video / LTX-2 response
+            // into an image attachment (the synthesized thumbnail PNG).
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Complete(SseCompleteEvent {
-                    image: base64::engine::general_purpose::STANDARD.encode(&img.data),
-                    format: img.format,
-                    width: img.width,
-                    height: img.height,
-                    seed_used: response.seed_used,
-                    generation_time_ms: response.generation_time_ms,
-                    model: response.model.clone(),
-                    video_frames: None,
-                    video_fps: None,
-                    video_thumbnail: None,
-                    video_gif_preview: None,
-                    video_has_audio: false,
-                    video_duration_ms: None,
-                    video_audio_sample_rate: None,
-                    video_audio_channels: None,
-                    gpu: response.gpu,
-                }));
+                let event = build_sse_complete_event(&response, &img);
+                let _ = tx.send(SseMessage::Complete(event));
             }
 
             // Send result through oneshot.

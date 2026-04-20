@@ -244,6 +244,72 @@ fn current_backend_label() -> Option<String> {
     }
 }
 
+/// Build the SSE `complete` wire event from a finished generation response.
+///
+/// Video responses encode the actual video bytes (MP4/GIF/APNG/WebP) as the
+/// payload and populate every `video_*` metadata field; image responses
+/// encode the image bytes with the video fields cleared. `img` is the
+/// `ImageData` chosen by the caller — either the first generated image or an
+/// `ImageData` synthesized from the video thumbnail (the single-primary-image
+/// shape that the internal `GenerationJobResult` still expects).
+///
+/// Shared between the single-GPU path (`process_job` in this file) and the
+/// multi-GPU path (`gpu_worker::process_job`) so the two can never drift on
+/// which `video_*` fields are populated. Before this helper existed the
+/// multi-GPU worker always encoded the thumbnail PNG as the payload and
+/// hard-coded every `video_*` field to `None`, which silently degraded every
+/// LTX-Video / LTX-2 generation into an image response on hosts with at
+/// least one GPU worker.
+pub(crate) fn build_sse_complete_event(
+    response: &mold_core::GenerateResponse,
+    img: &mold_core::ImageData,
+) -> SseCompleteEvent {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    if let Some(ref video) = response.video {
+        SseCompleteEvent {
+            image: b64.encode(&video.data),
+            format: video.format,
+            width: video.width,
+            height: video.height,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+            model: response.model.clone(),
+            video_frames: Some(video.frames),
+            video_fps: Some(video.fps),
+            video_thumbnail: Some(b64.encode(&video.thumbnail)),
+            video_gif_preview: if video.gif_preview.is_empty() {
+                None
+            } else {
+                Some(b64.encode(&video.gif_preview))
+            },
+            video_has_audio: video.has_audio,
+            video_duration_ms: video.duration_ms,
+            video_audio_sample_rate: video.audio_sample_rate,
+            video_audio_channels: video.audio_channels,
+            gpu: response.gpu,
+        }
+    } else {
+        SseCompleteEvent {
+            image: b64.encode(&img.data),
+            format: img.format,
+            width: img.width,
+            height: img.height,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+            model: response.model.clone(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            gpu: response.gpu,
+        }
+    }
+}
+
 /// Runs the generation queue worker loop. Processes one job at a time (FIFO).
 /// Exits when the sender half of the channel is dropped (server shutdown).
 pub async fn run_queue_worker(
@@ -431,52 +497,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
             // Send SSE complete event
             if let Some(ref tx) = job.progress_tx {
-                let b64 = base64::engine::general_purpose::STANDARD;
-                let event = if let Some(ref video) = response.video {
-                    // Video response: encode the actual video data + metadata
-                    SseCompleteEvent {
-                        image: b64.encode(&video.data),
-                        format: video.format,
-                        width: video.width,
-                        height: video.height,
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                        model: response.model.clone(),
-                        video_frames: Some(video.frames),
-                        video_fps: Some(video.fps),
-                        video_thumbnail: Some(b64.encode(&video.thumbnail)),
-                        video_gif_preview: if video.gif_preview.is_empty() {
-                            None
-                        } else {
-                            Some(b64.encode(&video.gif_preview))
-                        },
-                        video_has_audio: video.has_audio,
-                        video_duration_ms: video.duration_ms,
-                        video_audio_sample_rate: video.audio_sample_rate,
-                        video_audio_channels: video.audio_channels,
-                        gpu: response.gpu,
-                    }
-                } else {
-                    // Image response: same as before
-                    SseCompleteEvent {
-                        image: b64.encode(&img.data),
-                        format: img.format,
-                        width: img.width,
-                        height: img.height,
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                        model: response.model.clone(),
-                        video_frames: None,
-                        video_fps: None,
-                        video_thumbnail: None,
-                        video_gif_preview: None,
-                        video_has_audio: false,
-                        video_duration_ms: None,
-                        video_audio_sample_rate: None,
-                        video_audio_channels: None,
-                        gpu: response.gpu,
-                    }
-                };
+                let event = build_sse_complete_event(&response, &img);
                 let _ = tx.send(SseMessage::Complete(event));
             }
 
@@ -922,5 +943,111 @@ mod tests {
             expected.display()
         );
         assert_eq!(std::fs::read(&expected).unwrap(), GIF);
+    }
+
+    #[test]
+    fn build_sse_complete_event_video_carries_mp4_payload_and_metadata() {
+        // Regression guard for the multi-GPU bug: if `response.video` is set,
+        // the SSE complete event must encode the actual video bytes and
+        // populate every `video_*` field so the client can reconstruct a
+        // `VideoData`. Before the shared helper, `gpu_worker.rs` encoded the
+        // thumbnail PNG and hard-coded every `video_*` field to `None`,
+        // silently degrading every LTX-Video / LTX-2 response to an image.
+        let video = mold_core::VideoData {
+            data: vec![0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p'],
+            format: OutputFormat::Mp4,
+            width: 768,
+            height: 512,
+            frames: 25,
+            fps: 24,
+            thumbnail: vec![0x89, 0x50, 0x4E, 0x47],
+            gif_preview: vec![b'G', b'I', b'F', b'8'],
+            has_audio: true,
+            duration_ms: Some(1040),
+            audio_sample_rate: Some(44100),
+            audio_channels: Some(2),
+        };
+        let resp = mold_core::GenerateResponse {
+            images: vec![],
+            video: Some(video.clone()),
+            generation_time_ms: 1234,
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            seed_used: 7,
+            gpu: Some(0),
+        };
+        // The `img` the caller synthesizes from the video thumbnail — must be
+        // ignored for the video branch.
+        let thumb_img = ImageData {
+            data: video.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: video.width,
+            height: video.height,
+            index: 0,
+        };
+
+        let event = build_sse_complete_event(&resp, &thumb_img);
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(event.image, b64.encode(&video.data));
+        assert_eq!(event.format, OutputFormat::Mp4);
+        assert_eq!(event.video_frames, Some(25));
+        assert_eq!(event.video_fps, Some(24));
+        assert_eq!(event.video_thumbnail, Some(b64.encode(&video.thumbnail)));
+        assert_eq!(
+            event.video_gif_preview,
+            Some(b64.encode(&video.gif_preview))
+        );
+        assert!(event.video_has_audio);
+        assert_eq!(event.video_duration_ms, Some(1040));
+        assert_eq!(event.gpu, Some(0));
+    }
+
+    #[test]
+    fn build_sse_complete_event_video_empty_gif_preview_omits_field() {
+        let video = mold_core::VideoData {
+            data: vec![0x00, 0x00, 0x00, 0x18],
+            format: OutputFormat::Mp4,
+            width: 256,
+            height: 256,
+            frames: 17,
+            fps: 12,
+            thumbnail: vec![0x89, 0x50],
+            gif_preview: Vec::new(),
+            has_audio: false,
+            duration_ms: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        let resp = mold_core::GenerateResponse {
+            images: vec![],
+            video: Some(video),
+            generation_time_ms: 0,
+            model: "m".to_string(),
+            seed_used: 0,
+            gpu: None,
+        };
+        let event = build_sse_complete_event(&resp, &fake_image());
+        assert!(event.video_gif_preview.is_none());
+        assert!(!event.video_has_audio);
+    }
+
+    #[test]
+    fn build_sse_complete_event_image_clears_all_video_fields() {
+        let resp = mold_core::GenerateResponse {
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-schnell:q8".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let event = build_sse_complete_event(&resp, &fake_image());
+        assert_eq!(event.format, OutputFormat::Png);
+        assert!(event.video_frames.is_none());
+        assert!(event.video_fps.is_none());
+        assert!(event.video_thumbnail.is_none());
+        assert!(event.video_gif_preview.is_none());
+        assert!(!event.video_has_audio);
+        assert!(event.video_duration_ms.is_none());
     }
 }
