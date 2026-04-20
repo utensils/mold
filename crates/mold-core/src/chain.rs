@@ -158,6 +158,85 @@ pub struct ChainResponse {
     pub gpu: Option<usize>,
 }
 
+/// SSE completion event for a successful chain run. Streamed as the final
+/// `data:` frame under the `event: complete` SSE type. The payload is
+/// base64-encoded to stay JSON-safe; clients decode it into `VideoData`.
+///
+/// This is a sibling to [`crate::types::SseCompleteEvent`] rather than an
+/// extension so image/video vs. chain completion shapes stay independent
+/// and can evolve separately.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SseChainCompleteEvent {
+    /// Base64-encoded stitched video bytes (format per `format` field).
+    pub video: String,
+    pub format: OutputFormat,
+    #[schema(example = 1216)]
+    pub width: u32,
+    #[schema(example = 704)]
+    pub height: u32,
+    #[schema(example = 400)]
+    pub frames: u32,
+    #[schema(example = 24)]
+    pub fps: u32,
+    /// Base64-encoded first-frame PNG thumbnail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    /// Base64-encoded animated GIF preview (always emitted for gallery UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gif_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_audio: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<u32>,
+    /// Number of stages that ran end-to-end.
+    #[schema(example = 5)]
+    pub stage_count: u32,
+    /// GPU ordinal that handled the chain (multi-GPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+    /// Wall-clock elapsed time across all stages + stitching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_time_ms: Option<u64>,
+}
+
+/// Chain-specific SSE progress event. Streamed as `data:` JSON frames from
+/// `POST /api/generate/chain/stream` under the `event: progress` SSE type.
+///
+/// Per-stage denoise steps are wrapped with `stage_idx` so consumers can
+/// render stacked progress bars (overall chain + per-stage) without a
+/// separate subscription. Non-denoise engine events (weight load, cache
+/// hits, etc.) are intentionally not forwarded through this enum in v1 —
+/// they're scoped to individual stages and the UX goal for v1 is per-stage
+/// progress, not per-component telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChainProgressEvent {
+    /// Emitted once at the start of the chain, after normalisation. Gives
+    /// consumers the final stage count and the target pre-trim frame total
+    /// so they can size progress bars up front.
+    ChainStart {
+        stage_count: u32,
+        estimated_total_frames: u32,
+    },
+    /// Stage `stage_idx` (0-indexed) has started its denoise loop.
+    StageStart { stage_idx: u32 },
+    /// Per-step denoise progress for the active stage.
+    DenoiseStep {
+        stage_idx: u32,
+        step: u32,
+        total: u32,
+    },
+    /// Stage finished generating; `frames_emitted` is the raw clip frame
+    /// count before motion-tail trim at stitch time.
+    StageDone { stage_idx: u32, frames_emitted: u32 },
+    /// All stages complete; stitching/encoding the final MP4.
+    Stitching { total_frames: u32 },
+}
+
 fn default_motion_tail_frames() -> u32 {
     4
 }
@@ -563,6 +642,51 @@ mod tests {
                 !is_ltx2_frame_count(invalid),
                 "{invalid} must not pass the 8k+1 check",
             );
+        }
+    }
+
+    #[test]
+    fn chain_progress_event_roundtrips_json_with_snake_case_tags() {
+        let cases = [
+            (
+                ChainProgressEvent::ChainStart {
+                    stage_count: 5,
+                    estimated_total_frames: 469,
+                },
+                r#""type":"chain_start""#,
+            ),
+            (
+                ChainProgressEvent::StageStart { stage_idx: 0 },
+                r#""type":"stage_start""#,
+            ),
+            (
+                ChainProgressEvent::DenoiseStep {
+                    stage_idx: 2,
+                    step: 4,
+                    total: 8,
+                },
+                r#""type":"denoise_step""#,
+            ),
+            (
+                ChainProgressEvent::StageDone {
+                    stage_idx: 3,
+                    frames_emitted: 97,
+                },
+                r#""type":"stage_done""#,
+            ),
+            (
+                ChainProgressEvent::Stitching { total_frames: 400 },
+                r#""type":"stitching""#,
+            ),
+        ];
+        for (event, expected_tag) in cases {
+            let json = serde_json::to_string(&event).expect("serialize");
+            assert!(
+                json.contains(expected_tag),
+                "missing snake_case tag {expected_tag} in {json}",
+            );
+            let roundtrip: ChainProgressEvent = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(roundtrip, event, "roundtrip must preserve payload");
         }
     }
 

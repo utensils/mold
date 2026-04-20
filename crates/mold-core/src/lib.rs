@@ -19,7 +19,10 @@ mod config_test;
 mod test_support;
 
 pub use catalog::build_model_catalog;
-pub use chain::{ChainRequest, ChainResponse, ChainStage, MAX_CHAIN_STAGES};
+pub use chain::{
+    ChainProgressEvent, ChainRequest, ChainResponse, ChainStage, SseChainCompleteEvent,
+    MAX_CHAIN_STAGES,
+};
 pub use client::MoldClient;
 pub use config::{
     parse_device_ref_str, Config, DefaultModelResolution, DefaultModelSource, LoggingConfig,

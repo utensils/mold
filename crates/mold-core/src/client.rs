@@ -1,3 +1,4 @@
+use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
 use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
@@ -311,6 +312,137 @@ impl MoldClient {
         }
 
         anyhow::bail!("SSE stream ended without complete event")
+    }
+
+    /// Submit a chained video generation request (non-streaming).
+    ///
+    /// The server normalises the auto-expand form into stages, runs each
+    /// stage sequentially with motion-tail latent carryover, stitches the
+    /// result into a single video, and returns a [`ChainResponse`]. Large
+    /// chains take minutes — prefer [`Self::generate_chain_stream`] for
+    /// interactive clients that want progress updates.
+    pub async fn generate_chain(&self, req: &ChainRequest) -> Result<ChainResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/generate/chain", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                anyhow::bail!("chain endpoint not found — server predates render-chain v1");
+            }
+            return Err(MoldError::ModelNotFound(body).into());
+        }
+        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+        }
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server error {status}: {body}");
+        }
+
+        let chain: ChainResponse = resp.json().await?;
+        Ok(chain)
+    }
+
+    /// Submit a chained video generation request with SSE progress streaming.
+    ///
+    /// Returns:
+    /// - `Ok(Some(response))` — streaming succeeded and the `complete` event
+    ///   carried the stitched video.
+    /// - `Ok(None)` — server doesn't have the chain endpoint (empty 404).
+    ///   Callers can fall back to [`Self::generate_chain`] or error.
+    /// - `Err(_)` — validation, model-not-found, or mid-stream server error.
+    pub async fn generate_chain_stream(
+        &self,
+        req: &ChainRequest,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<ChainProgressEvent>,
+    ) -> Result<Option<ChainResponse>> {
+        let mut resp = self
+            .client
+            .post(format!("{}/api/generate/chain/stream", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                return Ok(None);
+            }
+            return Err(MoldError::ModelNotFound(body).into());
+        }
+        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MoldError::Validation(format!("validation error: {body}")).into());
+        }
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server error {status}: {body}");
+        }
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (event_type, data) = parse_sse_event(&event_text);
+                match event_type.as_str() {
+                    "progress" => {
+                        if let Ok(p) = serde_json::from_str::<ChainProgressEvent>(&data) {
+                            let _ = progress_tx.send(p);
+                        }
+                    }
+                    "complete" => {
+                        let complete: SseChainCompleteEvent = serde_json::from_str(&data)?;
+                        let payload = b64.decode(&complete.video)?;
+                        let thumbnail = complete
+                            .thumbnail
+                            .as_deref()
+                            .and_then(|s| b64.decode(s).ok())
+                            .unwrap_or_default();
+                        let gif_preview = complete
+                            .gif_preview
+                            .as_deref()
+                            .and_then(|s| b64.decode(s).ok())
+                            .unwrap_or_default();
+                        let video = VideoData {
+                            data: payload,
+                            format: complete.format,
+                            width: complete.width,
+                            height: complete.height,
+                            frames: complete.frames,
+                            fps: complete.fps,
+                            thumbnail,
+                            gif_preview,
+                            has_audio: complete.has_audio,
+                            duration_ms: complete.duration_ms,
+                            audio_sample_rate: complete.audio_sample_rate,
+                            audio_channels: complete.audio_channels,
+                        };
+                        return Ok(Some(ChainResponse {
+                            video,
+                            stage_count: complete.stage_count,
+                            gpu: complete.gpu,
+                        }));
+                    }
+                    "error" => {
+                        let error: SseErrorEvent = serde_json::from_str(&data)?;
+                        anyhow::bail!("server error: {}", error.message);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        anyhow::bail!("chain SSE stream ended without complete event")
     }
 
     /// Ask the server to pull (download) a model. Blocks until the download
