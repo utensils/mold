@@ -120,6 +120,29 @@ struct LoadedZImage {
     vae_path: std::path::PathBuf,
 }
 
+/// Resolve a component override given Tier 1 plus Tier 2 requests.
+fn effective_device_ref(
+    placement: Option<&mold_core::types::DevicePlacement>,
+    advanced_override: impl FnOnce(&mold_core::types::AdvancedPlacement) -> Option<mold_core::types::DeviceRef>,
+    fallback_is_component_auto: bool,
+) -> mold_core::types::DeviceRef {
+    use mold_core::types::DeviceRef;
+    let Some(placement) = placement else {
+        return DeviceRef::Auto;
+    };
+    if let Some(adv) = placement.advanced.as_ref() {
+        if let Some(r) = advanced_override(adv) {
+            return r;
+        }
+        if fallback_is_component_auto {
+            return placement.text_encoders;
+        }
+        DeviceRef::Auto
+    } else {
+        placement.text_encoders
+    }
+}
+
 /// Z-Image inference engine backed by candle's z_image module.
 pub struct ZImageEngine {
     base: EngineBase<LoadedZImage>,
@@ -281,7 +304,15 @@ impl ZImageEngine {
         let is_gguf = self.detect_is_gguf();
         let text_tokenizer_path = self.validate_paths()?;
 
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(
+            Some(transformer_ref),
+            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
+        )?;
         let dtype = crate::engine::gpu_dtype(&device);
         let transformer_cfg = Config::z_image_turbo();
 
@@ -319,11 +350,16 @@ impl ZImageEngine {
         // VAE decode at 1024x1024 needs ~6GB workspace for conv2d im2col.
         // On tight VRAM, load VAE on CPU to guarantee decode succeeds.
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae),
+            false,
+        );
+        let vae_device = crate::device::resolve_device(
+            Some(vae_ref),
+            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
+        )?;
+        let vae_on_gpu = !vae_device.is_cpu();
         let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
@@ -367,18 +403,18 @@ impl ZImageEngine {
             .progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-        let tier1 = self
-            .pending_placement
-            .as_ref()
-            .map(|p| p.text_encoders)
-            .unwrap_or_default();
+        let qwen3_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen,
+            true,
+        );
         let auto_te_device = if te_on_gpu {
             device.clone()
         } else {
             Device::Cpu
         };
         let te_device = crate::device::resolve_device(
-            Some(tier1),
+            Some(qwen3_ref),
             || Ok(auto_te_device.clone()),
         )?;
         let te_on_gpu = !te_device.is_cpu();
@@ -462,7 +498,15 @@ impl ZImageEngine {
             self.base.progress.info(&warning);
         }
 
-        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let transformer_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.transformer),
+            false,
+        );
+        let device = crate::device::resolve_device(
+            Some(transformer_ref),
+            || crate::device::create_device(self.base.gpu_ordinal, &self.base.progress),
+        )?;
         let dtype = crate::engine::gpu_dtype(&device);
 
         let start = Instant::now();
@@ -514,18 +558,18 @@ impl ZImageEngine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-            let tier1 = self
-                .pending_placement
-                .as_ref()
-                .map(|p| p.text_encoders)
-                .unwrap_or_default();
+            let qwen3_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen,
+                true,
+            );
             let auto_te_device = if te_on_gpu {
                 device.clone()
             } else {
                 Device::Cpu
             };
             let te_device = crate::device::resolve_device(
-                Some(tier1),
+                Some(qwen3_ref),
                 || Ok(auto_te_device.clone()),
             )?;
             let te_on_gpu = !te_device.is_cpu();
@@ -800,11 +844,16 @@ impl ZImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_device = if vae_on_gpu {
-            device.clone()
-        } else {
-            Device::Cpu
-        };
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae),
+            false,
+        );
+        let vae_device = crate::device::resolve_device(
+            Some(vae_ref),
+            || Ok(if vae_on_gpu { device.clone() } else { Device::Cpu }),
+        )?;
+        let vae_on_gpu = !vae_device.is_cpu();
         let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
