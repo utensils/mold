@@ -84,6 +84,36 @@ async fn subscribe_with_lagged_receiver_recovers() {
 }
 
 #[test]
+fn build_snapshot_populates_hostname_and_timestamp() {
+    let snap = crate::resources::build_snapshot();
+    assert!(!snap.hostname.is_empty(), "hostname must be populated");
+    assert!(snap.timestamp > 0, "timestamp must be non-zero");
+    // On any host, either gpus is non-empty (CUDA/Metal) or it's empty
+    // (CPU-only). Both are valid — we just require the call doesn't panic.
+    assert!(snap.system_ram.total > 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn aggregator_publishes_within_first_tick() {
+    let bcast = crate::resources::ResourceBroadcaster::new();
+    let mut rx = bcast.subscribe();
+    let handle = crate::resources::spawn_aggregator(bcast.clone());
+
+    // Advance virtual time past one tick interval (1 s).
+    tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+
+    // The aggregator fires immediately on startup, so there should be a
+    // snapshot waiting even before the 1-second tick.
+    let got = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+        .await
+        .expect("aggregator should publish within first tick")
+        .expect("channel should not be closed");
+    assert!(got.timestamp > 0);
+
+    handle.abort();
+}
+
+#[test]
 #[cfg(target_os = "macos")]
 fn metal_snapshot_reports_unified_memory_with_none_attribution() {
     let gpus = crate::resources::metal_snapshot();

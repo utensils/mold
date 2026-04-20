@@ -277,6 +277,9 @@ pub async fn run_server(
         });
     }
 
+    // Spawn the resource telemetry aggregator (1 Hz).
+    let _resources_aggregator = resources::spawn_aggregator(state.resources.clone());
+
     // Save start_time before state is moved into the router (needed for metrics).
     #[cfg(feature = "metrics")]
     let server_start_time = state.start_time;

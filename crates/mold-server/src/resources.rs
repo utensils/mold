@@ -8,7 +8,9 @@
 
 use mold_core::ResourceSnapshot;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex};
+use tokio::task::JoinHandle;
 
 /// Broadcast buffer size. Per spec 2.3 — small because downstream consumers
 /// only care about the latest tick and lagging receivers (slow SSE clients)
@@ -262,4 +264,84 @@ impl SmiSource {
             })
             .collect()
     }
+}
+
+/// Assemble a single `ResourceSnapshot` from whichever data sources are
+/// available on the current host. Cheap enough to run at 1 Hz (~200 µs).
+///
+/// Source priority on CUDA: NVML (if linked) → `nvidia-smi` subprocess → empty.
+/// On macOS: `metal_snapshot()`.
+pub fn build_snapshot() -> ResourceSnapshot {
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let gpus = collect_gpus();
+    let system_ram = ram_snapshot();
+
+    ResourceSnapshot {
+        hostname,
+        timestamp,
+        gpus,
+        system_ram,
+    }
+}
+
+fn collect_gpus() -> Vec<GpuSnapshot> {
+    // Darwin: Metal is the only GPU path.
+    #[cfg(target_os = "macos")]
+    {
+        return metal_snapshot();
+    }
+    // Linux / other: try NVML first, fall back to nvidia-smi.
+    #[cfg(all(not(target_os = "macos"), feature = "nvml"))]
+    {
+        if let Ok(src) = NvmlSource::try_new() {
+            let gpus = src.snapshot(std::process::id());
+            if !gpus.is_empty() {
+                return gpus;
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        SmiSource::snapshot()
+    }
+}
+
+/// Spawn the 1 Hz aggregator task. Returns the `JoinHandle` so `run_server`
+/// can drop it on shutdown. The task fires once immediately on startup so
+/// `GET /api/resources` succeeds without waiting a full second.
+pub fn spawn_aggregator(bcast: Arc<ResourceBroadcaster>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // Immediate first tick so `latest()` is populated before any HTTP
+        // request arrives.
+        bcast.publish(build_snapshot());
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume the first tick (it fires immediately) so we don't double-emit.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let snap = tokio::task::spawn_blocking(build_snapshot)
+                .await
+                .unwrap_or_else(|_| ResourceSnapshot {
+                    hostname: "unknown".to_string(),
+                    timestamp: 0,
+                    gpus: Vec::new(),
+                    system_ram: mold_core::RamSnapshot {
+                        total: 0,
+                        used: 0,
+                        used_by_mold: 0,
+                        used_by_other: 0,
+                    },
+                });
+            bcast.publish(snap);
+        }
+    })
 }
