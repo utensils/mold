@@ -9,12 +9,15 @@ pub mod model_manager;
 pub mod queue;
 pub mod rate_limit;
 pub mod request_id;
+pub mod resources;
 pub mod routes;
 pub mod state;
 pub mod web_ui;
 
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_test;
+#[cfg(test)]
+mod resources_test;
 #[cfg(test)]
 mod routes_test;
 
