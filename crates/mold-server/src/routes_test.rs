@@ -2175,6 +2175,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_api_resources_stream_sets_sse_content_type() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        let app = create_router(state);
+        let req = Request::builder()
+            .uri("/api/resources/stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected SSE content-type, got: {ct}"
+        );
+    }
+
+    #[tokio::test]
     async fn get_api_resources_returns_503_before_first_tick() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let state = AppState::empty(
