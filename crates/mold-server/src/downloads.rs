@@ -280,9 +280,9 @@ impl PullDriver for HfPullDriver {
                 res.map(|_| ()).map_err(|e| e.to_string())
             }
             _ = cancel.cancelled() => {
-                // Best-effort cleanup: the `.pulling` marker + partial clean-path
-                // files may remain. `cleanup_partials_for_model` below wipes them.
-                cleanup_partials_for_model(&model);
+                // Terminal cleanup (markers + partials) happens in
+                // `try_pull_with_retry` so it covers both cancel and failure
+                // paths uniformly. Just surface the cancel error here.
                 Err("cancelled".into())
             }
         }
@@ -454,6 +454,7 @@ async fn try_pull_with_retry(
                         *a = job.clone();
                     })
                     .await;
+                cleanup_partials_for_model(&job.model);
                 queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
                 return Err(());
             }
@@ -470,6 +471,7 @@ async fn try_pull_with_retry(
                                     *a = job.clone();
                                 })
                                 .await;
+                            cleanup_partials_for_model(&job.model);
                             queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
                             return Err(());
                         }
@@ -484,6 +486,7 @@ async fn try_pull_with_retry(
                         *a = job.clone();
                     })
                     .await;
+                cleanup_partials_for_model(&job.model);
                 queue.emit(DownloadEvent::JobFailed {
                     id: job.id.clone(),
                     error: msg,

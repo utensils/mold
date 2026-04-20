@@ -273,6 +273,168 @@ fn cleanup_handles_missing_dir_gracefully() {
     assert!(!missing.exists());
 }
 
+/// Process-wide gate for tests that mutate `MOLD_MODELS_DIR`. Env vars are
+/// shared across threads, so these tests can't run in parallel without
+/// clobbering each other.
+static MODELS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Puller that always fails. Used to verify terminal-failure cleanup runs
+/// after both the initial attempt AND the retry have exhausted.
+#[derive(Clone, Default)]
+struct AlwaysFailsPuller {
+    pub calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PullDriver for AlwaysFailsPuller {
+    async fn pull(
+        &self,
+        _model: &str,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err("simulated terminal failure".into())
+    }
+}
+
+#[tokio::test]
+async fn driver_failed_retry_sequence_cleans_up_partials() {
+    let _env_guard = MODELS_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prev = std::env::var("MOLD_MODELS_DIR").ok();
+    // `MOLD_MODELS_DIR` is read-only elsewhere in this test binary; the
+    // `MODELS_DIR_ENV_LOCK` gate serializes tests that mutate it.
+    std::env::set_var("MOLD_MODELS_DIR", tmp.path());
+
+    // Seed the model dir with a partial file (no `.sha256-verified` marker)
+    // and a verified file (with marker). The canonical sanitized dir name
+    // for `flux-schnell:q4` is `flux-schnell-q4`.
+    let model_dir = tmp.path().join("flux-schnell-q4");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let partial = model_dir.join("partial.safetensors");
+    let verified = model_dir.join("good.safetensors");
+    let verified_marker = model_dir.join("good.safetensors.sha256-verified");
+    std::fs::write(&partial, b"partial").unwrap();
+    std::fs::write(&verified, b"good").unwrap();
+    std::fs::write(&verified_marker, b"").unwrap();
+
+    let queue = DownloadQueue::new();
+    let puller = AlwaysFailsPuller::default();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let mut rx = queue.subscribe();
+
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+
+    // Wait up to 12 s for the retry sequence (5 s backoff + overhead).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut seen_failed = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(DownloadEvent::JobFailed { id: ev, .. })) =
+            tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+        {
+            if ev == id {
+                seen_failed = true;
+                break;
+            }
+        }
+    }
+    shutdown.cancel();
+    let _ = handle.await;
+
+    // Restore env.
+    match prev {
+        Some(v) => std::env::set_var("MOLD_MODELS_DIR", v),
+        None => std::env::remove_var("MOLD_MODELS_DIR"),
+    }
+
+    assert!(seen_failed, "expected JobFailed after retry");
+    assert_eq!(
+        puller.calls.load(Ordering::SeqCst),
+        2,
+        "expected exactly 2 attempts"
+    );
+    assert!(
+        !partial.exists(),
+        "partial file should be cleaned up after terminal failure"
+    );
+    assert!(
+        verified.exists(),
+        "verified file (with marker) should survive terminal failure"
+    );
+    assert!(
+        verified_marker.exists(),
+        ".sha256-verified marker should survive terminal failure"
+    );
+}
+
+/// Puller that waits for cancel, then returns Err("cancelled").
+/// Same as `SlowPuller` but defined locally to avoid coupling.
+#[derive(Clone, Default)]
+struct CancellablePuller;
+
+#[async_trait::async_trait]
+impl PullDriver for CancellablePuller {
+    async fn pull(
+        &self,
+        _model: &str,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        cancel.cancelled().await;
+        Err("cancelled".into())
+    }
+}
+
+#[tokio::test]
+async fn driver_cancel_also_cleans_up_partials() {
+    let _env_guard = MODELS_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prev = std::env::var("MOLD_MODELS_DIR").ok();
+    std::env::set_var("MOLD_MODELS_DIR", tmp.path());
+
+    let model_dir = tmp.path().join("flux-schnell-q4");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let partial = model_dir.join("partial.safetensors");
+    std::fs::write(&partial, b"partial").unwrap();
+
+    let queue = DownloadQueue::new();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_driver(queue.clone(), Arc::new(CancellablePuller), shutdown.clone());
+    let mut rx = queue.subscribe();
+
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(queue.cancel(&id).await);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut seen = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(DownloadEvent::JobCancelled { id: ev_id })) =
+            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+        {
+            if ev_id == id {
+                seen = true;
+                break;
+            }
+        }
+    }
+    shutdown.cancel();
+    let _ = handle.await;
+
+    match prev {
+        Some(v) => std::env::set_var("MOLD_MODELS_DIR", v),
+        None => std::env::remove_var("MOLD_MODELS_DIR"),
+    }
+
+    assert!(seen, "expected JobCancelled");
+    assert!(
+        !partial.exists(),
+        "partial file should be cleaned up after cancel"
+    );
+}
+
 /// Fails once, then succeeds.
 #[derive(Clone, Default)]
 struct FlakyPuller {
