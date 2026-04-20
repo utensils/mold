@@ -113,6 +113,129 @@ pub enum DownloadError {
     ConfigSave(String),
 }
 
+/// Does a GGUF file's header contain the given tensor name?
+///
+/// Scans the first 4 MiB of the file — enough to cover tensor_infos for any
+/// real FLUX GGUF (~800 tensors × ~100 B per entry). Tensor names are stored
+/// as UTF-8 in the header, so a substring search is reliable: the needle is
+/// length-prefixed by a u64, so accidental coincidences in the scanned region
+/// would need to match a 31+ character needle exactly.
+fn gguf_header_contains_tensor(path: &std::path::Path, needle: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    buf.truncate(n);
+    if buf.len() < 4 || &buf[..4] != b"GGUF" {
+        return false;
+    }
+    buf.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+/// Warn the operator if the downloaded transformer is a city96-format GGUF
+/// that will need an additional reference pull before inference will run.
+///
+/// Community FLUX fine-tune GGUFs ship only the diffusion blocks; their input
+/// embedding layers (img_in / time_in / vector_in / guidance_in) are inherited
+/// from base flux-dev and must be patched in from a locally-downloaded
+/// reference. This check surfaces the dependency at pull time so users don't
+/// discover it on the first generation attempt.
+fn warn_if_flux_gguf_needs_reference(
+    manifest: &ModelManifest,
+    callback: Option<&DownloadProgressCallback>,
+) {
+    if manifest.family != "flux" {
+        return;
+    }
+    let Some((xformer_file, xformer_path)) =
+        manifest.files.iter().find_map(|f| -> Option<(_, PathBuf)> {
+            if f.component != ModelComponent::Transformer {
+                return None;
+            }
+            if !f.hf_filename.to_lowercase().ends_with(".gguf") {
+                return None;
+            }
+            Some((
+                f,
+                models_dir().join(crate::manifest::storage_path(manifest, f)),
+            ))
+        })
+    else {
+        return;
+    };
+    if !xformer_path.exists() {
+        return;
+    }
+    // img_in is present in schnell and in complete dev GGUFs; missing from city96-format
+    if gguf_header_contains_tensor(&xformer_path, "img_in.weight") {
+        return;
+    }
+
+    let mdir = models_dir();
+    let needs_guidance = !manifest.defaults.is_schnell;
+    let reference_candidates: &[&str] = if needs_guidance {
+        &["flux-dev:q8", "flux-dev:q6", "flux-dev:q4"]
+    } else {
+        &[
+            "flux-dev:q8",
+            "flux-dev:q6",
+            "flux-dev:q4",
+            "flux-schnell:q8",
+            "flux-schnell:q4",
+        ]
+    };
+    let have_reference = reference_candidates.iter().any(|name| {
+        let Some(m) = crate::manifest::find_manifest(name) else {
+            return false;
+        };
+        let Some(xf) = m
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+        else {
+            return false;
+        };
+        let path = mdir.join(crate::manifest::storage_path(m, xf));
+        path.exists()
+            && gguf_header_contains_tensor(&path, "img_in.weight")
+            && (!needs_guidance
+                || gguf_header_contains_tensor(&path, "guidance_in.in_layer.weight"))
+    });
+    if have_reference {
+        return;
+    }
+
+    let fix_cmd = if needs_guidance {
+        "mold pull flux-dev:q8"
+    } else {
+        "mold pull flux-dev:q8 (or flux-schnell:q8)"
+    };
+    let msg = format!(
+        "Heads up: {} is a city96-format GGUF — it ships only the diffusion blocks. \
+         FLUX input embedding layers{} must be patched from a separate reference \
+         model at load time, and none is downloaded yet. Run `{fix_cmd}` before \
+         generating with {}.",
+        xformer_file.hf_filename,
+        if needs_guidance {
+            " (including dev-only guidance_in)"
+        } else {
+            ""
+        },
+        manifest.name,
+    );
+    if let Some(cb) = callback {
+        cb(DownloadProgressEvent::Status {
+            message: format!("⚠ {msg}"),
+        });
+    } else {
+        let _ = console::Term::stderr().write_line(&format!("\n⚠ {msg}\n"));
+    }
+}
+
 /// Resolve HuggingFace token: `HF_TOKEN` env var takes precedence over
 /// the token file (`~/.cache/huggingface/token` from `huggingface-cli login`).
 fn resolve_hf_token() -> Option<String> {
@@ -639,6 +762,8 @@ pub async fn pull_model(
         downloads.push((file.component, clean_path));
     }
 
+    warn_if_flux_gguf_needs_reference(manifest, None);
+
     remove_pulling_marker(&manifest.name);
     paths_from_downloads(&downloads, &manifest.family).ok_or(DownloadError::MissingComponent)
 }
@@ -751,6 +876,8 @@ pub async fn pull_model_with_callback(
         downloads.push((file.component, clean_path));
         completed_bytes += file.size_bytes;
     }
+
+    warn_if_flux_gguf_needs_reference(manifest, Some(&callback));
 
     remove_pulling_marker(&manifest.name);
     paths_from_downloads(&downloads, &manifest.family).ok_or(DownloadError::MissingComponent)

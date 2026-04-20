@@ -287,27 +287,40 @@ fn gguf_has_embeddings(path: &Path) -> Result<bool> {
     Ok(content.tensor_infos.contains_key("img_in.weight"))
 }
 
+/// Does a GGUF contain the flux-dev-only `guidance_in` tensors? Schnell GGUFs
+/// return false because the schnell architecture is distilled without guidance.
+fn gguf_has_guidance(path: &Path) -> Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
+    Ok(content
+        .tensor_infos
+        .contains_key("guidance_in.in_layer.weight"))
+}
+
 /// Search for a downloaded FLUX GGUF that contains complete embeddings.
 ///
-/// Prefers dev models (guaranteed `guidance_in`) over schnell, and larger
-/// quantizations (more likely downloaded) first.
+/// Prefers larger quantizations (more likely downloaded) first. When
+/// `needs_guidance` is true, schnell candidates are skipped and dev candidates
+/// are verified to contain `guidance_in` tensors — a schnell GGUF passes the
+/// basic `img_in` check but cannot supply `guidance_in` for a dev-family target.
 ///
 /// When `models_dir_override` is `Some`, searches that directory instead of
 /// the config-resolved models dir (used by tests to avoid global state).
-fn find_flux_reference_gguf(models_dir_override: Option<&Path>) -> Option<PathBuf> {
+fn find_flux_reference_gguf(
+    needs_guidance: bool,
+    models_dir_override: Option<&Path>,
+) -> Option<PathBuf> {
     let config = mold_core::Config::load_or_default();
     let models_dir = models_dir_override
         .map(PathBuf::from)
         .unwrap_or_else(|| config.resolved_models_dir());
 
-    // Prioritize dev models (have guidance_in), then schnell as fallback
-    let candidates = [
-        "flux-dev:q8",
-        "flux-dev:q6",
-        "flux-dev:q4",
-        "flux-schnell:q8",
-        "flux-schnell:q4",
-    ];
+    // Dev candidates satisfy both schnell and dev targets (schnell tensors are a
+    // subset of dev). Schnell candidates only satisfy schnell targets.
+    let mut candidates: Vec<&str> = vec!["flux-dev:q8", "flux-dev:q6", "flux-dev:q4"];
+    if !needs_guidance {
+        candidates.extend(["flux-schnell:q8", "flux-schnell:q4"]);
+    }
 
     for name in candidates {
         let Some(manifest) = mold_core::manifest::find_manifest(name) else {
@@ -329,9 +342,30 @@ fn find_flux_reference_gguf(models_dir_override: Option<&Path>) -> Option<PathBu
         // Verify it actually has the embeddings (don't assume)
         match gguf_has_embeddings(&xformer_path) {
             Ok(true) => {
+                if needs_guidance {
+                    match gguf_has_guidance(&xformer_path) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::debug!(
+                                model = name,
+                                "reference candidate lacks guidance_in, skipping for dev target"
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                model = name,
+                                err = %e,
+                                "failed to probe guidance tensors"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 tracing::info!(
                     reference = %xformer_path.display(),
                     model = name,
+                    needs_guidance,
                     "found reference FLUX GGUF with embeddings"
                 );
                 return Some(xformer_path);
@@ -422,18 +456,27 @@ fn ensure_gguf_embeddings(
     );
     tracing::info!(
         path = %path.display(),
+        is_schnell,
         "GGUF missing embedding layers, searching for reference model"
     );
 
-    let reference_path = find_flux_reference_gguf(models_dir_override).ok_or_else(|| {
-        anyhow::anyhow!(
-            "This GGUF is missing FLUX embedding layers (img_in, time_in, vector_in, \
-             guidance_in) which are required for inference.\n\n\
-             To fix this, download a complete FLUX model to use as a reference:\n\
-             \n  mold pull flux-dev:q8\n\n\
-             Then retry — mold will automatically patch the incomplete GGUF."
-        )
-    })?;
+    let source_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>");
+    let needs_guidance = !is_schnell;
+    let reference_path =
+        find_flux_reference_gguf(needs_guidance, models_dir_override).ok_or_else(|| {
+            let family = if needs_guidance { "dev" } else { "schnell" };
+            anyhow::anyhow!(
+                "{source_name} is a city96-format GGUF that ships only the diffusion \
+                 blocks — its FLUX input embedding layers (img_in, time_in, vector_in{guidance}) \
+                 must be sourced from a complete flux-{family} GGUF, but none is downloaded.\n\n\
+                 To fix this:\n\n  mold pull flux-dev:q8\n\n\
+                 Then retry — mold will patch the incomplete GGUF from the reference.",
+                guidance = if needs_guidance { ", guidance_in" } else { "" },
+            )
+        })?;
 
     // Determine which embedding tensors we need
     let mut needed: Vec<&str> = FLUX_EMBEDDING_TENSORS.to_vec();
@@ -479,10 +522,13 @@ fn ensure_gguf_embeddings(
         }
         if !ref_content.tensor_infos.contains_key(*name) {
             bail!(
-                "reference GGUF ({}) is also missing required tensor '{}' — \
-                 download a complete FLUX-dev model: mold pull flux-dev:q8",
-                reference_path.display(),
-                name
+                "while patching {source_name}: the only downloaded reference ({}) \
+                 is also missing '{name}'. This model needs a complete flux-dev GGUF \
+                 — run 'mold pull flux-dev:q8' and retry.",
+                reference_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<unknown>"),
             );
         }
         let tensor = ref_content.tensor(&mut ref_file, name, &cpu)?;
@@ -2462,6 +2508,43 @@ mod tests {
         std::fs::remove_file(&cache_path).ok();
         // Try to clean up cache parent dir (may fail if other tests use it)
         let _ = std::fs::remove_dir(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn find_flux_reference_skips_schnell_when_dev_needed() {
+        // Regression: if only flux-schnell is downloaded, a dev-family target
+        // (e.g. ultrareal-v4:q8) would previously pick schnell as reference and
+        // then fail mid-patch because schnell lacks guidance_in.
+        let dir = std::env::temp_dir().join(format!(
+            "mold-ref-picker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let models_dir = dir.join("models");
+        let schnell_dir = models_dir.join("flux-schnell-q8");
+        std::fs::create_dir_all(&schnell_dir).unwrap();
+        let schnell_path = schnell_dir.join("flux1-schnell-Q8_0.gguf");
+
+        // Schnell has img_in but not guidance_in — mirrors the real city96 schnell GGUF
+        let mut schnell_tensors: Vec<&str> = super::FLUX_EMBEDDING_TENSORS.to_vec();
+        schnell_tensors.push("double_blocks.0.img_mod.lin.weight");
+        write_test_gguf(&schnell_path, &schnell_tensors);
+
+        // needs_guidance=true must reject the schnell-only state
+        let result = super::find_flux_reference_gguf(true, Some(&models_dir));
+        assert!(
+            result.is_none(),
+            "schnell must not be picked as reference for dev targets: got {result:?}"
+        );
+
+        // needs_guidance=false (schnell target) accepts the schnell reference
+        let result = super::find_flux_reference_gguf(false, Some(&models_dir));
+        assert_eq!(result.as_deref(), Some(schnell_path.as_path()));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
