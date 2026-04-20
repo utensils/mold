@@ -272,19 +272,15 @@ impl Ltx2Engine {
         // Auto falls back to whatever `native_device_for_backend(backend)` picks
         // (CUDA when available, else CPU). Explicit Cpu/Gpu skips that auto path.
         let tier1 = self.pending_placement.as_ref().map(|p| p.text_encoders);
-        let device = crate::device::resolve_device(tier1, || {
-            self.native_device_for_backend(backend)
-        })?;
+        let device =
+            crate::device::resolve_device(tier1, || self.native_device_for_backend(backend))?;
         if device.is_cuda() {
             configure_native_ltx2_cuda_device(&device)?;
         }
         // Only auto CUDA placement should retry on OOM — if the user explicitly
         // pinned the encoder to a GPU, surface the OOM rather than silently
         // rewriting their request.
-        let override_is_auto = matches!(
-            tier1,
-            None | Some(mold_core::types::DeviceRef::Auto)
-        );
+        let override_is_auto = matches!(tier1, None | Some(mold_core::types::DeviceRef::Auto));
         match self.load_runtime_session_on_device(plan, device) {
             Ok(runtime) => Ok(runtime),
             Err(err)
