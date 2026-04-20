@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Serde helpers for `Option<Vec<u8>>` as base64 in JSON.
-mod base64_opt {
+pub(crate) mod base64_opt {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
