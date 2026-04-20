@@ -1,9 +1,5 @@
 import { computed, ref } from "vue";
-import type {
-  AdvancedPlacement,
-  DevicePlacement,
-  DeviceRef,
-} from "../types";
+import type { AdvancedPlacement, DevicePlacement, DeviceRef } from "../types";
 
 // Families that support the Advanced (Tier 2) per-component disclosure.
 // Matches spec §3.2 — update both in lock-step.

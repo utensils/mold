@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type {
-  AdvancedPlacement,
-  DevicePlacement,
-  DeviceRef,
-} from "../types";
+import type { AdvancedPlacement, DevicePlacement, DeviceRef } from "../types";
 import { usePlacement } from "../composables/usePlacement";
 
 interface GpuEntry {
@@ -157,7 +153,7 @@ const isDirty = computed(() => props.modelValue !== null);
         type="button"
         data-test="advanced-toggle"
         class="text-xs text-slate-400 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
-        :disabled="!tier2 ? '' : undefined"
+        :disabled="!tier2"
         :title="
           tier2
             ? undefined
