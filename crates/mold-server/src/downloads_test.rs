@@ -300,7 +300,9 @@ impl PullDriver for AlwaysFailsPuller {
 
 #[tokio::test]
 async fn driver_failed_retry_sequence_cleans_up_partials() {
-    let _env_guard = MODELS_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = MODELS_DIR_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     let prev = std::env::var("MOLD_MODELS_DIR").ok();
     // `MOLD_MODELS_DIR` is read-only elsewhere in this test binary; the
@@ -389,7 +391,9 @@ impl PullDriver for CancellablePuller {
 
 #[tokio::test]
 async fn driver_cancel_also_cleans_up_partials() {
-    let _env_guard = MODELS_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = MODELS_DIR_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     let prev = std::env::var("MOLD_MODELS_DIR").ok();
     std::env::set_var("MOLD_MODELS_DIR", tmp.path());
