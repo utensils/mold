@@ -2131,4 +2131,80 @@ mod tests {
         let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();
         assert_eq!(db_after.count().unwrap(), 0, "DB row should be gone");
     }
+
+    #[tokio::test]
+    async fn put_model_placement_updates_config_and_persists() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("MOLD_HOME", tmp.path());
+        let app = app_empty();
+        // Re-create state inside this test with mutable access.
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
+        let app = {
+            let _ = app;
+            crate::routes::create_router(state.clone())
+        };
+
+        let body = serde_json::json!({
+            "text_encoders": { "kind": "cpu" },
+            "advanced": {
+                "transformer": { "kind": "gpu", "ordinal": 1 },
+                "vae": { "kind": "auto" },
+                "t5": { "kind": "cpu" }
+            }
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let cfg = state.config.read().await;
+        let p = cfg
+            .models
+            .get("flux-dev:q4")
+            .and_then(|m| m.placement.clone())
+            .expect("placement not persisted");
+        assert_eq!(p.text_encoders, mold_core::types::DeviceRef::Cpu);
+        let adv = p.advanced.unwrap();
+        assert_eq!(adv.transformer, mold_core::types::DeviceRef::gpu(1));
+        std::env::remove_var("MOLD_HOME");
+    }
+
+    #[tokio::test]
+    async fn put_model_placement_rejects_malformed_body() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text_encoders":"not-an-object"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST
+                || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+            "got status {}",
+            resp.status()
+        );
+    }
 }

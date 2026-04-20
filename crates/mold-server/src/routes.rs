@@ -183,6 +183,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/status", get(server_status))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/shutdown", post(shutdown_server))
+        // Agent C (model-ui-overhaul §3): placement persistence.
+        .route(
+            "/api/config/model/:name/placement",
+            axum::routing::put(put_model_placement).delete(delete_model_placement),
+        )
         .route("/health", get(health))
         .with_state(state)
         .route("/api/openapi.json", get(openapi_json))
@@ -2384,6 +2389,36 @@ fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadat
         }
     }
     None
+}
+
+// ── /api/config/model/:name/placement (Agent C, model-ui-overhaul §3) ────────
+
+async fn put_model_placement(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(placement): Json<mold_core::types::DevicePlacement>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    {
+        let mut cfg = state.config.write().await;
+        cfg.set_model_placement(&name, Some(placement.clone()));
+        if let Err(e) = cfg.save() {
+            tracing::warn!("failed to persist placement to config.toml: {e}");
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "model": name,
+    })))
+}
+
+async fn delete_model_placement(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut cfg = state.config.write().await;
+    cfg.set_model_placement(&name, None);
+    let _ = cfg.save();
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── /api/openapi.json ─────────────────────────────────────────────────────────
