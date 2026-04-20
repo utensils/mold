@@ -2,14 +2,27 @@
 import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useDownloads } from "../composables/useDownloads";
+import { useTweaks } from "../composables/useTweaks";
 import ResourceStrip from "./ResourceStrip.vue";
 
+/*
+ * Top bar has two distinct looks, driven by Tweaks:
+ *
+ *   - Studio (default): a sticky glass pill — brand, nav, search, filters,
+ *     view toggle, sound, refresh — all on one line.
+ *   - Lab: an editorial masthead — big gradient wordmark + nav on the
+ *     first row, search/filters/view on a second "controls" row.
+ *
+ * Both variants speak the same `update:*` event API, so the parent doesn't
+ * care which is rendered. Downloads and ResourceStrip hooks are shared.
+ */
+
 const route = useRoute();
+const { tweaks } = useTweaks();
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
 
-// ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
 const downloads = useDownloads();
 const badgeCount = computed(
   () => (downloads.active.value ? 1 : 0) + downloads.queued.value.length,
@@ -36,9 +49,8 @@ const emit = defineEmits<{
   (e: "refresh"): void;
 }>();
 
-// Simple 180ms debounce so the search doesn't re-filter 1500 rows on every
-// keystroke. We keep a local ref for the input and only push upwards once
-// the user pauses.
+// 180ms input debounce so a 1500-item gallery doesn't re-filter on every
+// keystroke.
 const local = ref(props.search);
 let t: ReturnType<typeof setTimeout> | null = null;
 
@@ -47,8 +59,6 @@ watch(local, (v) => {
   t = setTimeout(() => emit("update:search", v), 180);
 });
 
-// If the parent resets the search (e.g. via a "clear all" button later),
-// keep the local input in sync.
 watch(
   () => props.search,
   (v) => {
@@ -68,96 +78,39 @@ function clearSearch() {
   local.value = "";
   emit("update:search", "");
 }
+
+const isGallery = computed(() => route.name === "gallery");
+const isGenerate = computed(() => route.name === "generate");
+const direction = computed(() => tweaks.value.direction);
 </script>
 
 <template>
-  <!--
-    Sticky positioning is sm-and-up only. On mobile the header scrolls
-    away with the content so the feed has the full viewport height (a
-    persistent bar eats 10-15 % of vertical space, which matters on
-    phones). A "back to top" FAB in `App.vue` brings the user back when
-    they want to reach the header again.
-  -->
+  <!-- Studio direction -->
   <header
-    class="glass relative z-30 flex flex-col gap-3 rounded-3xl px-4 py-3 sm:sticky sm:top-4 sm:flex-row sm:items-center sm:gap-4 sm:px-5 sm:py-3.5"
+    v-if="direction === 'studio'"
+    class="studio-topbar glass-panel"
+    :class="{ 'flex-col sm:flex-row': true }"
   >
-    <!-- Brand -->
-    <div class="flex shrink-0 items-center gap-3">
-      <img
-        src="/logo.png"
-        alt="mold"
-        width="40"
-        height="40"
-        class="h-10 w-10 shrink-0 rounded-lg object-contain drop-shadow-[0_6px_18px_rgba(99,102,241,0.4)]"
-      />
-      <div class="leading-tight">
-        <div class="text-base font-semibold tracking-tight text-ink-50">
-          mold
-        </div>
-        <div
-          class="hidden text-[11px] font-medium uppercase tracking-[0.18em] text-ink-400 sm:block"
-        >
+    <div class="studio-brand">
+      <img src="/logo.png" alt="mold" />
+      <div>
+        <div class="studio-brand-name">mold</div>
+        <div class="studio-brand-sub">
           gallery · {{ counts.filtered }}/{{ counts.total }}
         </div>
       </div>
     </div>
 
-    <nav
-      class="flex items-center gap-1 rounded-full border border-white/5 bg-white/5 p-1 text-[13px] font-medium"
-      aria-label="Primary navigation"
-    >
-      <router-link
-        to="/"
-        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
-        active-class="bg-brand-500 text-white shadow-sm"
-        exact-active-class="bg-brand-500 text-white shadow-sm"
-      >
-        Gallery
-      </router-link>
-      <router-link
-        to="/generate"
-        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
-        active-class="bg-brand-500 text-white shadow-sm"
-      >
+    <nav class="studio-nav" aria-label="Primary">
+      <router-link to="/" :class="{ on: isGallery }">Gallery</router-link>
+      <router-link to="/generate" :class="{ on: isGenerate }">
         Generate
       </router-link>
     </nav>
 
-    <!-- Downloads drawer opener + badge (Agent A). Visible on every page. -->
-    <button
-      type="button"
-      class="relative inline-flex h-10 items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3 text-sm text-ink-200 hover:text-white"
-      aria-label="Open downloads"
-      @click="openDownloadsDrawer"
-    >
+    <label class="studio-search">
       <svg
         class="h-4 w-4"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 3v12" />
-        <path d="m7 10 5 5 5-5" />
-        <path d="M5 21h14" />
-      </svg>
-      <span class="hidden sm:inline">Downloads</span>
-      <span
-        v-if="badgeCount > 0"
-        class="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-500 px-1 text-[11px] font-medium text-white"
-        aria-label="Pending download count"
-      >
-        {{ badgeCount }}
-      </span>
-    </button>
-
-    <!-- Search -->
-    <label class="relative flex-1">
-      <svg
-        class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
@@ -175,17 +128,11 @@ function clearSearch() {
         placeholder="Search prompts, models, filenames…"
         autocomplete="off"
         spellcheck="false"
-        class="h-11 w-full rounded-full border border-white/5 bg-white/5 pl-10 pr-10 text-[14px] text-ink-100 placeholder:text-ink-400 focus:border-brand-400/40 focus:outline-none focus:ring-2 focus:ring-brand-400/25"
       />
-      <button
-        v-if="local"
-        type="button"
-        class="absolute right-2.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-ink-300 transition hover:bg-white/10 hover:text-white"
-        aria-label="Clear search"
-        @click="clearSearch"
-      >
+      <button v-if="local" aria-label="Clear search" @click="clearSearch">
         <svg
-          class="h-3.5 w-3.5"
+          width="14"
+          height="14"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -200,28 +147,16 @@ function clearSearch() {
       </button>
     </label>
 
-    <div
-      v-if="$route.name === 'gallery'"
-      class="flex shrink-0 flex-wrap items-center gap-2"
-    >
-      <!-- View-mode toggle -->
-      <div
-        class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5"
-        role="group"
-        aria-label="View mode"
-      >
+    <template v-if="isGallery">
+      <div class="studio-seg" role="group" aria-label="View mode">
         <button
-          class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
-          :class="
-            view === 'feed'
-              ? 'bg-brand-500 text-white shadow-sm'
-              : 'text-ink-200 hover:text-white'
-          "
+          :class="{ on: view === 'feed' }"
           :aria-pressed="view === 'feed'"
           @click="setView('feed')"
         >
           <svg
-            class="h-3.5 w-3.5"
+            width="13"
+            height="13"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -236,17 +171,13 @@ function clearSearch() {
           Feed
         </button>
         <button
-          class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
-          :class="
-            view === 'grid'
-              ? 'bg-brand-500 text-white shadow-sm'
-              : 'text-ink-200 hover:text-white'
-          "
+          :class="{ on: view === 'grid' }"
           :aria-pressed="view === 'grid'"
           @click="setView('grid')"
         >
           <svg
-            class="h-3.5 w-3.5"
+            width="13"
+            height="13"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -263,67 +194,28 @@ function clearSearch() {
         </button>
       </div>
 
-      <!-- Kind filter -->
-      <nav
-        class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
-      >
-        <button
-          class="rounded-full px-3 py-1.5 transition"
-          :class="
-            filter === 'all'
-              ? 'bg-brand-500 text-white shadow-sm'
-              : 'hover:text-white'
-          "
-          @click="pick('all')"
-        >
-          All
-          <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-            counts.total
-          }}</span>
+      <div class="studio-seg" role="group" aria-label="Kind filter">
+        <button :class="{ on: filter === 'all' }" @click="pick('all')">
+          All <span class="studio-seg-count">{{ counts.total }}</span>
         </button>
-        <button
-          class="hidden rounded-full px-3 py-1.5 transition sm:inline-flex"
-          :class="
-            filter === 'images'
-              ? 'bg-brand-500 text-white shadow-sm'
-              : 'hover:text-white'
-          "
-          @click="pick('images')"
-        >
-          Images
-          <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-            counts.images
-          }}</span>
+        <button :class="{ on: filter === 'images' }" @click="pick('images')">
+          Images <span class="studio-seg-count">{{ counts.images }}</span>
         </button>
-        <button
-          class="rounded-full px-3 py-1.5 transition"
-          :class="
-            filter === 'video'
-              ? 'bg-brand-500 text-white shadow-sm'
-              : 'hover:text-white'
-          "
-          @click="pick('video')"
-        >
-          Video
-          <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-            counts.video
-          }}</span>
+        <button :class="{ on: filter === 'video' }" @click="pick('video')">
+          Video <span class="studio-seg-count">{{ counts.video }}</span>
         </button>
-      </nav>
+      </div>
 
-      <!-- Sound toggle: clicking this counts as the user gesture browsers
-           require before they'll autoplay unmuted video, so after the first
-           click every subsequent in-view video plays with sound. -->
       <button
-        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white"
+        class="studio-iconbtn"
         :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
-        :title="muted ? 'Unmute videos' : 'Mute videos'"
         :aria-pressed="!muted"
         @click="emit('update:muted', !muted)"
       >
         <svg
           v-if="muted"
-          class="h-4 w-4"
+          width="15"
+          height="15"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -338,7 +230,8 @@ function clearSearch() {
         </svg>
         <svg
           v-else
-          class="h-4 w-4 text-brand-300"
+          width="15"
+          height="15"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -354,15 +247,15 @@ function clearSearch() {
       </button>
 
       <button
-        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white disabled:opacity-60"
+        class="studio-iconbtn"
         :disabled="loading"
         :aria-busy="loading"
         aria-label="Refresh gallery"
         @click="emit('refresh')"
       >
         <svg
-          class="h-4 w-4"
-          :class="{ 'animate-spin': loading }"
+          width="15"
+          height="15"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -370,6 +263,7 @@ function clearSearch() {
           stroke-linecap="round"
           stroke-linejoin="round"
           aria-hidden="true"
+          :class="{ 'animate-spin': loading }"
         >
           <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
           <path d="M21 3v5h-5" />
@@ -377,14 +271,223 @@ function clearSearch() {
           <path d="M3 21v-5h5" />
         </svg>
       </button>
+    </template>
+
+    <button
+      class="studio-iconbtn"
+      aria-label="Open downloads"
+      @click="openDownloadsDrawer"
+    >
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 3v12" />
+        <path d="m7 10 5 5 5-5" />
+        <path d="M5 21h14" />
+      </svg>
+      <span v-if="badgeCount > 0" class="studio-iconbtn-badge">
+        {{ badgeCount }}
+      </span>
+    </button>
+
+    <div
+      v-if="isGenerate"
+      class="flex shrink-0 items-center lg:hidden"
+      style="margin-left: auto"
+    >
+      <ResourceStrip variant="chip" />
+    </div>
+  </header>
+
+  <!-- Lab direction — editorial masthead -->
+  <header v-else class="lab-masthead">
+    <div class="lab-masthead-row">
+      <div class="lab-brand">
+        <img src="/logo.png" alt="mold" class="lab-brand-mark" />
+        <div class="lab-brand-type">
+          <div class="lab-brand-name">mold</div>
+          <div class="lab-brand-sub">local diffusion atelier</div>
+        </div>
+      </div>
+
+      <nav class="lab-nav" aria-label="Primary">
+        <router-link to="/" :class="{ on: isGallery }">Gallery</router-link>
+        <router-link to="/generate" :class="{ on: isGenerate }">
+          Generate
+        </router-link>
+        <button disabled>Models</button>
+        <button disabled>Runs</button>
+      </nav>
+
+      <div class="lab-actions">
+        <button
+          class="lab-iconbtn"
+          aria-label="Open downloads"
+          @click="openDownloadsDrawer"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 3v12" />
+            <path d="m7 10 5 5 5-5" />
+            <path d="M5 21h14" />
+          </svg>
+          <span v-if="badgeCount > 0" class="topbar-badge">
+            {{ badgeCount }}
+          </span>
+        </button>
+        <button
+          v-if="isGallery"
+          class="lab-iconbtn"
+          :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
+          @click="emit('update:muted', !muted)"
+        >
+          <svg
+            v-if="muted"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            <path d="m22 9-6 6" />
+            <path d="m16 9 6 6" />
+          </svg>
+          <svg
+            v-else
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+          </svg>
+        </button>
+        <button
+          v-if="isGallery"
+          class="lab-iconbtn"
+          :disabled="loading"
+          aria-label="Refresh"
+          @click="emit('refresh')"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            :class="{ 'animate-spin': loading }"
+          >
+            <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
+            <path d="M21 3v5h-5" />
+            <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
+            <path d="M3 21v-5h5" />
+          </svg>
+        </button>
+      </div>
     </div>
 
-    <!-- Agent B: narrow-viewport resource chip. Renders only on /generate
-         below `lg` so desktop uses the full ResourceStrip inside the page. -->
-    <div
-      v-if="route.name === 'generate'"
-      class="flex shrink-0 items-center lg:hidden"
-    >
+    <div v-if="isGallery" class="lab-controls">
+      <label class="lab-search">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input
+          v-model="local"
+          type="search"
+          placeholder="Search prompts, models, seeds…"
+          spellcheck="false"
+        />
+        <button v-if="local" aria-label="Clear" @click="clearSearch">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M6 6l12 12" />
+            <path d="M18 6 6 18" />
+          </svg>
+        </button>
+      </label>
+
+      <div class="lab-segctl">
+        <button :class="{ on: filter === 'all' }" @click="pick('all')">
+          all <span class="lab-count">{{ counts.total }}</span>
+        </button>
+        <button :class="{ on: filter === 'images' }" @click="pick('images')">
+          images <span class="lab-count">{{ counts.images }}</span>
+        </button>
+        <button :class="{ on: filter === 'video' }" @click="pick('video')">
+          video <span class="lab-count">{{ counts.video }}</span>
+        </button>
+      </div>
+
+      <div class="lab-segctl">
+        <button :class="{ on: view === 'feed' }" @click="setView('feed')">
+          feed
+        </button>
+        <button :class="{ on: view === 'grid' }" @click="setView('grid')">
+          grid
+        </button>
+      </div>
+
+      <div class="lab-counter">
+        <span class="lab-counter-num">{{ counts.filtered }}</span>
+        <span class="lab-counter-sep">/</span>
+        <span class="lab-counter-total">{{ counts.total }}</span>
+        <span class="lab-counter-label">shown</span>
+      </div>
+    </div>
+
+    <div v-if="isGenerate" class="lab-controls">
       <ResourceStrip variant="chip" />
     </div>
   </header>

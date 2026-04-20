@@ -18,6 +18,7 @@ import {
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useStatusPoll } from "../composables/useStatusPoll";
+import { useStarred } from "../composables/useStarred";
 import type {
   ExpandFormState,
   GalleryImage,
@@ -60,6 +61,51 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
+const { starred, toggle: toggleStar } = useStarred();
+
+/*
+ * Re-run: when the user clicks "Re-run" on a gallery item (from any
+ * surface — feed card, detail drawer, or inline feed under /generate),
+ * we populate the composer's form state from the item's metadata.
+ *
+ * Cross-page transitions hand off through a `window.__moldRerun` stash
+ * set by GalleryPage; same-page transitions (inline feed / detail drawer
+ * under /generate) call `applyRerun` directly.
+ */
+type RerunPayload = {
+  prompt?: string | null;
+  negative_prompt?: string | null;
+  model?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  guidance?: number;
+  seed?: number | null;
+  scheduler?: unknown;
+  strength?: number | null;
+  frames?: number | null;
+  fps?: number | null;
+};
+
+function applyRerun(p: RerunPayload) {
+  const s = form.state.value;
+  s.prompt = p.prompt || "";
+  s.negativePrompt = p.negative_prompt || "";
+  if (p.model) s.model = p.model;
+  if (p.width) s.width = p.width;
+  if (p.height) s.height = p.height;
+  if (p.steps !== undefined && p.steps !== null) s.steps = p.steps;
+  if (p.guidance !== undefined && p.guidance !== null) s.guidance = p.guidance;
+  s.seed = p.seed ?? null;
+  if (p.strength !== undefined && p.strength !== null) s.strength = p.strength;
+  if (p.frames !== undefined) s.frames = p.frames;
+  if (p.fps !== undefined) s.fps = p.fps;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function rerunItem(item: GalleryImage) {
+  applyRerun(item.metadata);
+}
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -217,6 +263,13 @@ function setMuted(v: boolean) {
 }
 
 onMounted(async () => {
+  // Pull rerun stash set by GalleryPage before we touch the form, so the
+  // navigated-in prefill wins over a stale localStorage snapshot.
+  const w = window as unknown as { __moldRerun?: RerunPayload };
+  if (w.__moldRerun) {
+    applyRerun(w.__moldRerun);
+    delete w.__moldRerun;
+  }
   await refreshModels();
   try {
     galleryEntries.value = await listGallery();
@@ -236,7 +289,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-32 pt-4 sm:px-6 sm:pt-6 lg:px-10">
+  <div class="mold-shell">
     <TopBar
       :filter="'all'"
       :search="''"
@@ -283,7 +336,10 @@ onMounted(async () => {
           :loading="false"
           :view="view"
           :muted="muted"
+          :starred="starred"
           @open="openItem"
+          @star="(i: GalleryImage) => toggleStar(i.filename)"
+          @rerun="rerunItem"
         />
       </div>
     </div>
@@ -323,6 +379,7 @@ onMounted(async () => {
       @prev="stepDrawer(-1)"
       @next="stepDrawer(1)"
       @delete="handleDelete"
+      @rerun="rerunItem"
     />
   </div>
 </template>

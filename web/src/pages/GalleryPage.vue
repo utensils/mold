@@ -1,11 +1,41 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { listGallery, deleteGalleryImage, fetchCapabilities } from "../api";
 import type { GalleryImage, ServerCapabilities } from "../types";
 import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
+import { useStarred } from "../composables/useStarred";
+
+const router = useRouter();
+const { starred, toggle: toggleStar } = useStarred();
+
+/*
+ * Re-run: stash the chosen item's metadata on `window.__moldRerun` and
+ * navigate to /generate. GeneratePage reads the stash on mount and
+ * applies it to the form. This is a lightweight hand-off that avoids
+ * cramming a global store in just for one route transition.
+ */
+function rerunItem(item: GalleryImage) {
+  const m = item.metadata;
+  (window as unknown as { __moldRerun?: unknown }).__moldRerun = {
+    prompt: m.prompt,
+    negative_prompt: m.negative_prompt,
+    model: m.model,
+    width: m.width,
+    height: m.height,
+    steps: m.steps,
+    guidance: m.guidance,
+    seed: m.seed,
+    scheduler: m.scheduler,
+    strength: m.strength,
+    frames: m.frames,
+    fps: m.fps,
+  };
+  router.push({ name: "generate" });
+}
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -203,9 +233,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div
-    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-32 sm:px-6 lg:px-10"
-  >
+  <div class="mold-shell">
     <TopBar
       :filter="filter"
       :search="search"
@@ -238,7 +266,10 @@ onMounted(async () => {
         :loading="loading"
         :view="view"
         :muted="muted"
+        :starred="starred"
         @open="openItem"
+        @star="(i: GalleryImage) => toggleStar(i.filename)"
+        @rerun="rerunItem"
       />
     </main>
 
@@ -281,6 +312,7 @@ onMounted(async () => {
       @prev="stepDrawer(-1)"
       @next="stepDrawer(1)"
       @delete="handleDelete"
+      @rerun="rerunItem"
     />
   </div>
 </template>

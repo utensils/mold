@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { GalleryImage } from "../types";
+import { useTweaks } from "../composables/useTweaks";
 import GalleryCard from "./GalleryCard.vue";
 
 type ViewMode = "feed" | "grid";
@@ -10,16 +11,21 @@ const props = defineProps<{
   loading: boolean;
   view: ViewMode;
   muted: boolean;
+  starred?: Set<string>;
 }>();
 
 const emit = defineEmits<{
   (e: "open", item: GalleryImage): void;
+  (e: "star", item: GalleryImage): void;
+  (e: "rerun", item: GalleryImage): void;
 }>();
+
+const { tweaks } = useTweaks();
 
 /*
  * Chunked rendering
  * -----------------
- * The gallery commonly holds 1000+ items. Mounting all of them up front
+ * The gallery commonly holds 1000+ items. Mounting them all up front
  * would stall the main thread (every card registers an IntersectionObserver
  * and a <video>/<img> element). Feed mode (tall cards) shows fewer per
  * viewport so we render a smaller chunk; grid mode packs more, so we
@@ -49,9 +55,7 @@ function installObserver() {
   observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
-        if (entry.isIntersecting && hasMore.value) {
-          loadMore();
-        }
+        if (entry.isIntersecting && hasMore.value) loadMore();
       }
     },
     { rootMargin: "800px 0px" },
@@ -67,9 +71,6 @@ onBeforeUnmount(() => {
   observer?.disconnect();
 });
 
-// Reset the visible window whenever the filtered list or view mode
-// changes — narrowing the set shouldn't keep 1500 cards mounted, and a
-// switch from grid to feed (or vice versa) should snap back to page 1.
 watch(
   () => [props.entries, props.view] as const,
   () => {
@@ -81,6 +82,10 @@ watch(
 const skeletons = computed(() =>
   props.loading && props.entries.length === 0 ? 8 : 0,
 );
+
+function isStarred(item: GalleryImage): boolean {
+  return props.starred ? props.starred.has(item.filename) : false;
+}
 </script>
 
 <template>
@@ -88,29 +93,30 @@ const skeletons = computed(() =>
     <!-- Loading skeletons -->
     <div
       v-if="skeletons > 0 && view === 'grid'"
-      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
+      class="grid-wrap"
+      :class="`density-${tweaks.density}`"
     >
       <div
         v-for="i in skeletons"
         :key="`skel-${i}`"
-        class="aspect-square animate-pulse rounded-2xl bg-white/[0.04]"
-      ></div>
+        class="card-skeleton"
+        style="aspect-ratio: 1 / 1"
+      />
     </div>
-    <div v-else-if="skeletons > 0" class="flex flex-col gap-6">
+    <div v-else-if="skeletons > 0" class="feed-wrap">
       <div
         v-for="i in skeletons"
         :key="`skel-${i}`"
-        class="aspect-[4/3] w-full animate-pulse rounded-3xl bg-white/[0.04]"
-      ></div>
+        class="card-skeleton"
+        style="aspect-ratio: 4 / 3; width: 100%"
+      />
     </div>
 
     <!-- Empty state -->
-    <div
-      v-else-if="entries.length === 0"
-      class="glass flex flex-col items-center gap-3 rounded-[var(--radius-card)] px-6 py-20 text-center"
-    >
+    <div v-else-if="entries.length === 0" class="empty glass-panel">
       <svg
-        class="h-14 w-14 text-ink-400"
+        width="40"
+        height="40"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
@@ -119,55 +125,44 @@ const skeletons = computed(() =>
         stroke-linejoin="round"
         aria-hidden="true"
       >
-        <rect x="3" y="5" width="18" height="14" rx="3" />
+        <rect x="3" y="5" width="18" height="14" rx="2" />
         <circle cx="9" cy="11" r="1.6" />
         <path d="m4 19 6-6 4 4 3-3 3 3" />
       </svg>
-      <div>
-        <p class="text-lg font-medium text-ink-100">Nothing to show.</p>
-        <p class="mt-1 text-sm text-ink-400">
-          Try clearing the search or filter, or generate something with
-          <code
-            class="rounded bg-white/10 px-1.5 py-0.5 text-[12px] text-ink-100"
-            >mold run</code
-          >.
-        </p>
-      </div>
+      <p class="empty-title">Nothing to show.</p>
+      <p class="empty-sub">
+        Try clearing the search or filter, or generate something with
+        <code>mold run</code>.
+      </p>
     </div>
 
-    <!--
-      Feed mode: Tumblr-style single-column stream.
-      On mobile we cancel the parent page padding (`-mx-4 sm:mx-auto`) so
-      cards run edge-to-edge; on sm+ we constrain to a comfortable reading
-      width. Spacing between cards is tight on mobile (2) and generous on
-      larger screens (8).
-    -->
-    <div
-      v-else-if="view === 'feed'"
-      class="-mx-4 flex flex-col gap-2 sm:-mx-0 sm:mx-auto sm:max-w-3xl sm:gap-8 lg:max-w-4xl"
-    >
+    <!-- Feed — single-column stream -->
+    <div v-else-if="view === 'feed'" class="feed-wrap">
       <GalleryCard
         v-for="entry in visibleEntries"
         :key="entry.filename"
         :item="entry"
         :muted="muted"
+        :starred="isStarred(entry)"
         variant="feed"
         @open="emit('open', entry)"
+        @star="emit('star', entry)"
+        @rerun="emit('rerun', entry)"
       />
     </div>
 
-    <!-- Grid mode: dense masonry via CSS columns for scanning. -->
-    <div
-      v-else
-      class="columns-2 gap-4 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 [&>*]:mb-4 [&>*]:break-inside-avoid"
-    >
+    <!-- Grid — dense masonry via CSS columns -->
+    <div v-else class="grid-wrap" :class="`density-${tweaks.density}`">
       <GalleryCard
         v-for="entry in visibleEntries"
         :key="entry.filename"
         :item="entry"
         :muted="muted"
+        :starred="isStarred(entry)"
         variant="grid"
         @open="emit('open', entry)"
+        @star="emit('star', entry)"
+        @rerun="emit('rerun', entry)"
       />
     </div>
 
@@ -175,13 +170,14 @@ const skeletons = computed(() =>
     <div
       v-if="entries.length > 0"
       ref="sentinel"
-      class="mt-8 flex h-10 items-center justify-center text-[12px] font-medium text-ink-400"
+      class="mt-8 flex h-10 items-center justify-center"
+      style="font-size: 12px; color: var(--fg-3)"
       aria-hidden="true"
     >
       <span v-if="hasMore">
         Loading more… ({{ visibleCount }}/{{ entries.length }})
       </span>
-      <span v-else class="opacity-60">
+      <span v-else style="opacity: 0.6">
         End of feed · {{ entries.length }} items
       </span>
     </div>

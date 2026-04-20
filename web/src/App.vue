@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import DownloadsDrawer from "./components/DownloadsDrawer.vue";
+import TweaksPanel from "./components/TweaksPanel.vue";
 import {
   computeEtaSeconds,
   onDownloadComplete,
   useDownloads,
 } from "./composables/useDownloads";
+import { useTweaks } from "./composables/useTweaks";
 import { fetchModels } from "./api";
+
+// Direction/density/accent — drives both the `dir-*` root class and the
+// CSS custom props the stylesheet reads. See useTweaks().
+const { dirClass } = useTweaks();
 
 // Singleton — mounted once, survives navigation.
 const downloads = useDownloads();
@@ -66,15 +72,18 @@ provide(RESOURCES_INJECTION_KEY, resources);
 </script>
 
 <template>
-  <router-view />
-  <DownloadsDrawer
-    :open="drawerOpen"
-    :active="downloads.active.value"
-    :queued="downloads.queued.value"
-    :history="downloads.history.value"
-    :eta-seconds="etaSeconds"
-    @close="closeDownloads"
-    @cancel="handleCancel"
-    @retry="handleRetry"
-  />
+  <div :class="dirClass" class="mold-app-root">
+    <router-view />
+    <DownloadsDrawer
+      :open="drawerOpen"
+      :active="downloads.active.value"
+      :queued="downloads.queued.value"
+      :history="downloads.history.value"
+      :eta-seconds="etaSeconds"
+      @close="closeDownloads"
+      @cancel="handleCancel"
+      @retry="handleRetry"
+    />
+    <TweaksPanel />
+  </div>
 </template>
