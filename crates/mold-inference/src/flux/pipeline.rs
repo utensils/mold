@@ -13,8 +13,8 @@ use crate::cache::{
     CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
+    check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check, should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -23,36 +23,6 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 use super::transformer::FluxTransformer;
-
-/// Resolve a component override given Tier 1 plus Tier 2 requests.
-///
-/// Precedence:
-///   1. `advanced_override` (Tier 2 per-component) if `Some`.
-///   2. Fall back to `tier1` (group knob) if `fallback_is_component_auto`.
-///   3. Fall back to `Auto`.
-fn effective_device_ref(
-    placement: Option<&mold_core::types::DevicePlacement>,
-    advanced_override: impl FnOnce(
-        &mold_core::types::AdvancedPlacement,
-    ) -> Option<mold_core::types::DeviceRef>,
-    fallback_is_component_auto: bool,
-) -> mold_core::types::DeviceRef {
-    use mold_core::types::DeviceRef;
-    let Some(placement) = placement else {
-        return DeviceRef::Auto;
-    };
-    if let Some(adv) = placement.advanced.as_ref() {
-        if let Some(r) = advanced_override(adv) {
-            return r;
-        }
-        if fallback_is_component_auto {
-            return placement.text_encoders;
-        }
-        DeviceRef::Auto
-    } else {
-        placement.text_encoders
-    }
-}
 
 /// Some FLUX safetensors checkpoints store transformer tensors at the root
 /// while others nest them under `model.diffusion_model`.

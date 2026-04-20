@@ -16,8 +16,8 @@ use crate::cache::{
     LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    should_use_gpu,
+    check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check, should_use_gpu,
 };
 // Re-exported for tests (test harness is disabled via `test = false` in Cargo.toml,
 // but tests reference this constant via `super::*`).
@@ -118,31 +118,6 @@ struct LoadedZImage {
     is_gguf: bool,
     /// Path to the VAE safetensors file (needed for CPU fallback reload on OOM).
     vae_path: std::path::PathBuf,
-}
-
-/// Resolve a component override given Tier 1 plus Tier 2 requests.
-fn effective_device_ref(
-    placement: Option<&mold_core::types::DevicePlacement>,
-    advanced_override: impl FnOnce(
-        &mold_core::types::AdvancedPlacement,
-    ) -> Option<mold_core::types::DeviceRef>,
-    fallback_is_component_auto: bool,
-) -> mold_core::types::DeviceRef {
-    use mold_core::types::DeviceRef;
-    let Some(placement) = placement else {
-        return DeviceRef::Auto;
-    };
-    if let Some(adv) = placement.advanced.as_ref() {
-        if let Some(r) = advanced_override(adv) {
-            return r;
-        }
-        if fallback_is_component_auto {
-            return placement.text_encoders;
-        }
-        DeviceRef::Auto
-    } else {
-        placement.text_encoders
-    }
 }
 
 /// Z-Image inference engine backed by candle's z_image module.

@@ -23,36 +23,13 @@ use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
 use super::vae::{Flux2AutoEncoder, Flux2VaeConfig};
 
-/// Resolve a component override given Tier 1 plus Tier 2 requests.
-fn effective_device_ref(
-    placement: Option<&mold_core::types::DevicePlacement>,
-    advanced_override: impl FnOnce(
-        &mold_core::types::AdvancedPlacement,
-    ) -> Option<mold_core::types::DeviceRef>,
-    fallback_is_component_auto: bool,
-) -> mold_core::types::DeviceRef {
-    use mold_core::types::DeviceRef;
-    let Some(placement) = placement else {
-        return DeviceRef::Auto;
-    };
-    if let Some(adv) = placement.advanced.as_ref() {
-        if let Some(r) = advanced_override(adv) {
-            return r;
-        }
-        if fallback_is_component_auto {
-            return placement.text_encoders;
-        }
-        DeviceRef::Auto
-    } else {
-        placement.text_encoders
-    }
-}
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
     LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};

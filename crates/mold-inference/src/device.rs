@@ -203,6 +203,41 @@ fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
     ))
 }
 
+/// Resolve a component-level `DeviceRef` from a `DevicePlacement`, honoring
+/// the Tier 2 per-component override first, then the Tier 1 `text_encoders`
+/// group knob when appropriate.
+///
+/// Precedence:
+///   1. `advanced_override` (Tier 2 per-component) if `Some`.
+///   2. Fall back to `placement.text_encoders` (group knob) when
+///      `fallback_is_component_auto` is `true` (typically for text-encoder
+///      components — T5/CLIP-L/Qwen — that follow the group knob by default).
+///   3. Fall back to `DeviceRef::Auto` (non-text-encoder components like the
+///      VAE, which don't inherit from the text-encoder group knob).
+pub fn effective_device_ref(
+    placement: Option<&mold_core::types::DevicePlacement>,
+    advanced_override: impl FnOnce(
+        &mold_core::types::AdvancedPlacement,
+    ) -> Option<mold_core::types::DeviceRef>,
+    fallback_is_component_auto: bool,
+) -> mold_core::types::DeviceRef {
+    use mold_core::types::DeviceRef;
+    let Some(placement) = placement else {
+        return DeviceRef::Auto;
+    };
+    if let Some(adv) = placement.advanced.as_ref() {
+        if let Some(r) = advanced_override(adv) {
+            return r;
+        }
+        if fallback_is_component_auto {
+            return placement.text_encoders;
+        }
+        DeviceRef::Auto
+    } else {
+        placement.text_encoders
+    }
+}
+
 // ── macOS memory query ───────────────────────────────────────────────────────
 
 /// Raw VM statistics from macOS host_statistics64.

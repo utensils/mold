@@ -31,8 +31,8 @@ use crate::cache::{
     clear_cache, prompt_text_key, CachedTensor, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
-    fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
-    qwen2_vram_threshold, should_use_gpu,
+    effective_device_ref, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
+    preflight_memory_check, qwen2_vram_threshold, should_use_gpu,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -306,31 +306,6 @@ impl QwenImageTransformer {
                 img_shapes,
             ),
         }
-    }
-}
-
-/// Resolve a component override given Tier 1 plus Tier 2 requests.
-fn effective_device_ref(
-    placement: Option<&mold_core::types::DevicePlacement>,
-    advanced_override: impl FnOnce(
-        &mold_core::types::AdvancedPlacement,
-    ) -> Option<mold_core::types::DeviceRef>,
-    fallback_is_component_auto: bool,
-) -> mold_core::types::DeviceRef {
-    use mold_core::types::DeviceRef;
-    let Some(placement) = placement else {
-        return DeviceRef::Auto;
-    };
-    if let Some(adv) = placement.advanced.as_ref() {
-        if let Some(r) = advanced_override(adv) {
-            return r;
-        }
-        if fallback_is_component_auto {
-            return placement.text_encoders;
-        }
-        DeviceRef::Auto
-    } else {
-        placement.text_encoders
     }
 }
 
