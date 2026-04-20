@@ -18,7 +18,7 @@ function snap(overrides: Partial<ResourceSnapshot> = {}): ResourceSnapshot {
  * EventSource; we replace it with a class that lets each test drive
  * `message` / `error` / `open` events deterministically.
  */
-class MockEventSource implements Partial<EventSource> {
+class MockEventSource {
   static instances: MockEventSource[] = [];
   url: string;
   listeners = new Map<string, ((e: MessageEvent) => void)[]>();
@@ -30,21 +30,25 @@ class MockEventSource implements Partial<EventSource> {
     this.url = url;
     MockEventSource.instances.push(this);
   }
-  addEventListener(type: string, cb: (e: MessageEvent) => void) {
+  addEventListener(
+    type: string,
+    cb: EventListenerOrEventListenerObject,
+  ): void {
     const arr = this.listeners.get(type) ?? [];
-    arr.push(cb);
+    // We only ever register plain function listeners in the production code.
+    arr.push(cb as (e: MessageEvent) => void);
     this.listeners.set(type, arr);
   }
-  removeEventListener() {}
-  close() {
+  removeEventListener(): void {}
+  close(): void {
     this.closed = true;
   }
-  fire(event: string, data: unknown) {
+  fire(event: string, data: unknown): void {
     const listeners = this.listeners.get(event) ?? [];
     const evt = new MessageEvent(event, { data: JSON.stringify(data) });
     for (const l of listeners) l(evt);
   }
-  fireError() {
+  fireError(): void {
     if (this.onerror) this.onerror(new Event("error"));
   }
 }
