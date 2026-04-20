@@ -2227,4 +2227,50 @@ mod tests {
 
         assert_eq!(id1, id2, "duplicate enqueue must return the same id");
     }
+
+    #[tokio::test]
+    async fn delete_api_downloads_204_for_queued() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let (id, _, _) = state
+            .downloads
+            .enqueue("flux-schnell:q4".into())
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/downloads/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let listing = state.downloads.listing().await;
+        assert!(listing.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_api_downloads_404_when_unknown() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/downloads/nonexistent-id")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
 }
