@@ -196,6 +196,16 @@ pub async fn run_server(
         tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
     }
 
+    // ── Downloads UI (Agent A) ──────────────────────────────────────────────
+    // Single-writer download queue driver. The handle lives for the process
+    // lifetime; on graceful shutdown the token is cancelled and the task exits.
+    let downloads_shutdown = tokio_util::sync::CancellationToken::new();
+    let _downloads_driver = crate::downloads::spawn_driver(
+        state.downloads.clone(),
+        std::sync::Arc::new(crate::downloads::HfPullDriver),
+        downloads_shutdown.clone(),
+    );
+
     // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
