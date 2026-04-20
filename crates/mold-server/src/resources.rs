@@ -160,6 +160,39 @@ pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
 use mold_core::RamSnapshot;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
+/// Metal unified-memory snapshot — macOS only. Off-Darwin returns an empty
+/// Vec so callers on Linux/CUDA hosts can unconditionally call this.
+///
+/// Unified memory means there's no distinct VRAM total; we report the
+/// system RAM total so the SPA's GPU row still communicates "this is how
+/// much the GPU can address." Per-process attribution is unavailable on
+/// macOS (IOKit doesn't expose it in userspace), so both per-process fields
+/// are `None` and the SPA hides those rows.
+pub fn metal_snapshot() -> Vec<GpuSnapshot> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut sys = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+        );
+        sys.refresh_memory();
+        let total = sys.total_memory();
+        let used = sys.used_memory();
+        vec![GpuSnapshot {
+            ordinal: 0,
+            name: "Apple Metal GPU".to_string(),
+            backend: GpuBackend::Metal,
+            vram_total: total,
+            vram_used: used,
+            vram_used_by_mold: None,
+            vram_used_by_other: None,
+        }]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 /// Build a single `RamSnapshot` using `sysinfo`. Refreshes only memory and
 /// the current process — cheap enough to run at 1 Hz (~200 µs).
 pub fn ram_snapshot() -> RamSnapshot {

@@ -84,6 +84,33 @@ async fn subscribe_with_lagged_receiver_recovers() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn metal_snapshot_reports_unified_memory_with_none_attribution() {
+    let gpus = crate::resources::metal_snapshot();
+    assert_eq!(
+        gpus.len(),
+        1,
+        "Metal hosts expose a single unified-memory GPU"
+    );
+    let gpu = &gpus[0];
+    assert_eq!(gpu.backend, mold_core::GpuBackend::Metal);
+    assert_eq!(gpu.ordinal, 0);
+    assert!(gpu.vram_total > 0);
+    assert!(
+        gpu.vram_used_by_mold.is_none(),
+        "Metal does not expose per-process GPU attribution"
+    );
+    assert!(gpu.vram_used_by_other.is_none());
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn metal_snapshot_is_empty_off_darwin() {
+    let gpus = crate::resources::metal_snapshot();
+    assert!(gpus.is_empty());
+}
+
+#[test]
 fn ram_snapshot_satisfies_invariants() {
     let ram = crate::resources::ram_snapshot();
     assert!(ram.total > 0, "total RAM should be >0 on any host");
