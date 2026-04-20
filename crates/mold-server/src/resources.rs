@@ -228,6 +228,10 @@ pub struct SmiSource;
 impl SmiSource {
     /// Invoke `nvidia-smi` and parse the output. Returns an empty Vec if the
     /// binary isn't present or returns non-zero.
+    ///
+    /// Cost note: this fork/execs `nvidia-smi`, which takes on the order of
+    /// tens of milliseconds — not microseconds. Call from a blocking task
+    /// (e.g. `tokio::task::spawn_blocking`) if invoked from an async context.
     pub fn snapshot() -> Vec<GpuSnapshot> {
         let bin = resolve_nvidia_smi();
         let output = match std::process::Command::new(bin)
