@@ -25,16 +25,16 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                              |
-| -------------------- | ---------------------------------------------------------------------------------------- |
+| Command              | Description                                                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/generate`          | Generate an image or video (prompt, model, source_image, video_format, frames, fps, width, height, steps, guidance, seed, strength, audio, pipeline, negative_prompt) |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                   |
-| `/models`            | List available models with download/loaded status                                        |
-| `/status`            | Show server health, GPU info, uptime                                                     |
-| `/quota`             | Check your remaining daily generation quota                                              |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                      |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                        |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                               |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                |
+| `/models`            | List available models with download/loaded status                                                                                                                     |
+| `/status`            | Show server health, GPU info, uptime                                                                                                                                  |
+| `/quota`             | Check your remaining daily generation quota                                                                                                                           |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                   |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                     |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                            |
 
 ## Configuration
 
