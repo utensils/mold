@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import Composer from "../components/Composer.vue";
+import ResourceStrip from "../components/ResourceStrip.vue";
 import SettingsModal from "../components/SettingsModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -266,6 +267,9 @@ onMounted(async () => {
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
+
+      <!-- Agent B: always-visible VRAM + RAM telemetry -->
+      <ResourceStrip class="mt-3 hidden lg:block" variant="full" />
 
       <RunningStrip
         :jobs="stream.jobs.value"

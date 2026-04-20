@@ -1,5 +1,6 @@
-import { computed, ref } from "vue";
+import { computed, inject, ref } from "vue";
 import type { AdvancedPlacement, DevicePlacement, DeviceRef } from "../types";
+import { RESOURCES_INJECTION_KEY, type UseResources } from "./useResources";
 
 // Families that support the Advanced (Tier 2) per-component disclosure.
 // Matches spec §3.2 — update both in lock-step.
@@ -45,22 +46,17 @@ function defaultAdvanced(): AdvancedPlacement {
 export function usePlacement(): UsePlacement {
   const placement = ref<DevicePlacement | null>(null);
 
-  // TODO-REMOVE-AFTER-MERGE: replace this stub with
-  //   const { gpuList: resourceGpus } = useResources();
-  // once Agent B's resource-telemetry branch merges into the umbrella.
-  // The stub keeps this composable testable in isolation and lets the UI
-  // render a plausible list during agent-C development. Search for
-  // `TODO-REMOVE-AFTER-MERGE` to find every site that needs updating.
-  const gpuList = computed(
-    () =>
-      (
-        globalThis as unknown as {
-          __MOLD_GPU_STUB__?: Array<{ ordinal: number; name: string }>;
-        }
-      ).__MOLD_GPU_STUB__ ?? [
-        { ordinal: 0, name: "GPU 0 (stub)" },
-        { ordinal: 1, name: "GPU 1 (stub)" },
-      ],
+  // Consume Agent B's resource telemetry via the provided singleton
+  // (`RESOURCES_INJECTION_KEY`, mounted once in App.vue). Fall back to an
+  // empty list when running outside the provider (e.g. unit tests that
+  // instantiate `usePlacement()` directly). The mapped `{ordinal, name}`
+  // shape matches `PlacementPanel.vue`'s consumer contract.
+  const resources = inject<UseResources | null>(RESOURCES_INJECTION_KEY, null);
+  const gpuList = computed<Array<{ ordinal: number; name: string }>>(() =>
+    (resources?.snapshot.value?.gpus ?? []).map((g) => ({
+      ordinal: g.ordinal,
+      name: g.name,
+    })),
   );
 
   const supportsAdvanced = (family: string) => TIER2_FAMILIES.includes(family);

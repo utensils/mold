@@ -993,6 +993,52 @@ pub struct SseErrorEvent {
     pub message: String,
 }
 
+// ── Resource telemetry (Agent B scope) ───────────────────────────────────────
+
+/// Point-in-time resource snapshot emitted by the server aggregator at 1 Hz.
+/// Serialized over `GET /api/resources` and `GET /api/resources/stream`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ResourceSnapshot {
+    /// Host that produced this snapshot. Useful when pointing `MOLD_HOST` at
+    /// a remote GPU — the SPA shows this in the resource side-sheet.
+    pub hostname: String,
+    /// Unix millis at sample time.
+    pub timestamp: i64,
+    pub gpus: Vec<GpuSnapshot>,
+    pub system_ram: RamSnapshot,
+}
+
+/// Per-GPU memory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GpuSnapshot {
+    pub ordinal: usize,
+    pub name: String,
+    pub backend: GpuBackend,
+    pub vram_total: u64,
+    pub vram_used: u64,
+    /// Bytes attributable to the running `mold` process (CUDA only).
+    /// `None` on Metal and on CUDA hosts that fell back to `nvidia-smi`.
+    pub vram_used_by_mold: Option<u64>,
+    /// `vram_used - vram_used_by_mold`. `None` whenever `vram_used_by_mold` is.
+    pub vram_used_by_other: Option<u64>,
+}
+
+/// System RAM snapshot. Per-process fields are always populated (via sysinfo).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RamSnapshot {
+    pub total: u64,
+    pub used: u64,
+    pub used_by_mold: u64,
+    pub used_by_other: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuBackend {
+    Cuda,
+    Metal,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,6 +2219,69 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("video_"));
     }
+
+    #[test]
+    fn resource_snapshot_serde_roundtrip() {
+        let snap = ResourceSnapshot {
+            hostname: "hal9000".to_string(),
+            timestamp: 1_700_000_000_000,
+            gpus: vec![GpuSnapshot {
+                ordinal: 0,
+                name: "NVIDIA RTX 3090".to_string(),
+                backend: GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 14_200_000_000,
+                vram_used_by_mold: Some(10_100_000_000),
+                vram_used_by_other: Some(4_100_000_000),
+            }],
+            system_ram: RamSnapshot {
+                total: 64_000_000_000,
+                used: 38_400_000_000,
+                used_by_mold: 22_100_000_000,
+                used_by_other: 16_300_000_000,
+            },
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: ResourceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.hostname, "hal9000");
+        assert_eq!(back.gpus.len(), 1);
+        assert_eq!(back.gpus[0].ordinal, 0);
+        assert_eq!(back.gpus[0].backend, GpuBackend::Cuda);
+        assert_eq!(back.gpus[0].vram_used_by_mold, Some(10_100_000_000));
+        assert_eq!(back.system_ram.used_by_mold, 22_100_000_000);
+    }
+
+    #[test]
+    fn gpu_backend_serializes_lowercase() {
+        let cuda = serde_json::to_string(&GpuBackend::Cuda).unwrap();
+        let metal = serde_json::to_string(&GpuBackend::Metal).unwrap();
+        assert_eq!(cuda, "\"cuda\"");
+        assert_eq!(metal, "\"metal\"");
+    }
+
+    #[test]
+    fn metal_snapshot_has_none_per_process_fields() {
+        let snap = GpuSnapshot {
+            ordinal: 0,
+            name: "Apple M3 Max".to_string(),
+            backend: GpuBackend::Metal,
+            vram_total: 64_000_000_000,
+            vram_used: 38_000_000_000,
+            vram_used_by_mold: None,
+            vram_used_by_other: None,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        // Both fields are present as `null` (not elided) so the SPA can
+        // reliably `vram_used_by_mold === null` to hide the row.
+        assert!(
+            json.contains("\"vram_used_by_mold\":null"),
+            "json was: {json}"
+        );
+        assert!(
+            json.contains("\"vram_used_by_other\":null"),
+            "json was: {json}"
+        );
+    }
 }
 
 /// A gallery image entry returned by the server API.
@@ -2243,3 +2352,165 @@ pub fn default_output_filename(
 #[cfg(test)]
 #[path = "placement_test.rs"]
 mod placement_test;
+
+// ─── Downloads UI (Agent A) ─────────────────────────────────────────────────
+
+/// Lifecycle state of a download job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Queued,
+    Active,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Download queue entry. Mirrored 1:1 on the wire; the SPA consumes this as
+/// `DownloadJobWire` in `web/src/types.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadJob {
+    pub id: String,
+    pub model: String,
+    pub status: JobStatus,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Internally tagged enum — on the wire each variant is `{"type": "...", ...}`.
+/// Keep `#[serde(tag = "type", rename_all = "snake_case")]` stable; the SPA's
+/// `DownloadEventWire` union in `types.ts` depends on this exact shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DownloadEvent {
+    Enqueued {
+        id: String,
+        model: String,
+        position: usize,
+    },
+    Dequeued {
+        id: String,
+    },
+    Started {
+        id: String,
+        files_total: usize,
+        bytes_total: u64,
+    },
+    Progress {
+        id: String,
+        files_done: usize,
+        bytes_done: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_file: Option<String>,
+    },
+    FileDone {
+        id: String,
+        filename: String,
+    },
+    JobDone {
+        id: String,
+        model: String,
+    },
+    JobFailed {
+        id: String,
+        error: String,
+    },
+    JobCancelled {
+        id: String,
+    },
+}
+
+/// Listing returned from `GET /api/downloads`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadsListing {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<DownloadJob>,
+    pub queued: Vec<DownloadJob>,
+    pub history: Vec<DownloadJob>,
+}
+
+#[cfg(test)]
+mod downloads_types_tests {
+    use super::*;
+
+    #[test]
+    fn job_status_serde_snake_case() {
+        let cases = [
+            (JobStatus::Queued, "\"queued\""),
+            (JobStatus::Active, "\"active\""),
+            (JobStatus::Completed, "\"completed\""),
+            (JobStatus::Failed, "\"failed\""),
+            (JobStatus::Cancelled, "\"cancelled\""),
+        ];
+        for (status, wire) in cases {
+            let s = serde_json::to_string(&status).unwrap();
+            assert_eq!(s, wire);
+            let back: JobStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn download_job_round_trip() {
+        let job = DownloadJob {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            model: "flux-dev:q4".to_string(),
+            status: JobStatus::Active,
+            files_done: 2,
+            files_total: 5,
+            bytes_done: 1_000_000,
+            bytes_total: 3_000_000,
+            current_file: Some("transformer.gguf".to_string()),
+            started_at: Some(1_700_000_000_000),
+            completed_at: None,
+            error: None,
+        };
+        let s = serde_json::to_string(&job).unwrap();
+        let back: DownloadJob = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, job.id);
+        assert_eq!(back.model, job.model);
+        assert_eq!(back.status, JobStatus::Active);
+        assert_eq!(back.files_done, 2);
+        assert_eq!(back.files_total, 5);
+        assert_eq!(back.bytes_done, 1_000_000);
+        assert_eq!(back.bytes_total, 3_000_000);
+        assert_eq!(back.current_file.as_deref(), Some("transformer.gguf"));
+    }
+
+    #[test]
+    fn download_event_enqueued_tag_shape() {
+        let evt = DownloadEvent::Enqueued {
+            id: "abc".to_string(),
+            model: "flux-dev:q4".to_string(),
+            position: 2,
+        };
+        let s = serde_json::to_string(&evt).unwrap();
+        assert!(s.contains("\"type\":\"enqueued\""), "wire: {s}");
+        assert!(s.contains("\"id\":\"abc\""), "wire: {s}");
+        assert!(s.contains("\"model\":\"flux-dev:q4\""), "wire: {s}");
+        assert!(s.contains("\"position\":2"), "wire: {s}");
+    }
+
+    #[test]
+    fn download_event_progress_tag_shape() {
+        let evt = DownloadEvent::Progress {
+            id: "abc".to_string(),
+            files_done: 1,
+            bytes_done: 2_000_000,
+            current_file: Some("clip.safetensors".to_string()),
+        };
+        let s = serde_json::to_string(&evt).unwrap();
+        assert!(s.contains("\"type\":\"progress\""), "wire: {s}");
+        assert!(s.contains("\"bytes_done\":2000000"), "wire: {s}");
+    }
+}

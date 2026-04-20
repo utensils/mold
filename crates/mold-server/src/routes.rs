@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ServerStatus,
-    SseErrorEvent, SseProgressEvent,
+    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ResourceSnapshot,
+    ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -78,6 +78,14 @@ impl ApiError {
             error: msg.into(),
             code: "INTERNAL_ERROR".to_string(),
             status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub fn internal_with_status(msg: impl Into<String>, status: StatusCode) -> Self {
+        Self {
+            error: msg.into(),
+            code: "INTERNAL_ERROR".to_string(),
+            status,
         }
     }
 
@@ -178,8 +186,14 @@ pub fn create_router(state: AppState) -> Router {
             get(get_gallery_thumbnail),
         )
         .route("/api/gallery/preview/:filename", get(get_gallery_preview))
+        // ─── Downloads UI (Agent A) ────────────────────────────────────────
+        .route("/api/downloads", get(list_downloads).post(create_download))
+        .route("/api/downloads/:id", delete(delete_download))
+        .route("/api/downloads/stream", get(stream_downloads))
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
+        .route("/api/resources", get(get_resources))
+        .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/shutdown", post(shutdown_server))
@@ -1036,104 +1050,111 @@ async fn pull_model_endpoint(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("text/event-stream"));
 
+    // Enqueue via the queue. Treat idempotent AlreadyPresent as success.
+    let (job_id, _position) = match state.downloads.enqueue(body.model.clone()).await {
+        Ok((id, pos, _)) => (id, pos),
+        Err(crate::downloads::EnqueueError::UnknownModel(_)) => {
+            return Err(ApiError::unknown_model(format!(
+                "unknown model '{}'. Run 'mold list' to see available models.",
+                body.model
+            )));
+        }
+        Err(crate::downloads::EnqueueError::LockPoisoned) => {
+            return Err(ApiError::internal("download queue state is corrupt"));
+        }
+    };
+
     if !wants_sse {
-        // Legacy: blocking pull with plain text response
-        return pull_model_blocking(state, body.model)
-            .await
-            .map(PullResponse::Text);
+        // Await terminal event for this job, return plain text.
+        let mut rx = state.downloads.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(mold_core::types::DownloadEvent::JobDone { id, model }) if id == job_id => {
+                    return Ok(PullResponse::Text(format!(
+                        "model '{model}' pulled successfully"
+                    )));
+                }
+                Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "failed to pull model '{}': {error}",
+                        body.model
+                    )));
+                }
+                Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    return Err(ApiError::internal(format!(
+                        "pull of '{}' was cancelled",
+                        body.model
+                    )));
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(ApiError::internal("download queue channel closed"));
+                }
+            }
+        }
     }
 
-    // SSE streaming pull
-    let model = body.model.clone();
-
-    // Validate model exists in manifest before starting SSE
-    if mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(&model))
-        .is_none()
-    {
-        return Err(ApiError::unknown_model(format!(
-            "unknown model '{model}'. Run 'mold list' to see available models."
-        )));
-    }
-
+    // SSE: re-emit queue events shaped like the legacy SseProgressEvent::DownloadProgress
+    // so the TUI's existing consumer continues to work unchanged.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
-
+    let mut events = state.downloads.subscribe();
+    let model_for_cb = body.model.clone();
     tokio::spawn(async move {
-        let progress_tx = tx.clone();
-        let model_for_cb = model.clone();
-        let callback =
-            std::sync::Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
-                let sse_event = match event {
-                    mold_core::download::DownloadProgressEvent::Status { message } => {
-                        SseProgressEvent::Info { message }
-                    }
-                    mold_core::download::DownloadProgressEvent::FileStart {
-                        filename,
-                        file_index,
-                        total_files,
-                        size_bytes,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadProgress {
-                        filename,
-                        file_index,
-                        total_files,
+        loop {
+            match events.recv().await {
+                Ok(mold_core::types::DownloadEvent::Started {
+                    id,
+                    files_total,
+                    bytes_total,
+                }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::DownloadProgress {
+                        filename: String::new(),
+                        file_index: 0,
+                        total_files: files_total,
                         bytes_downloaded: 0,
-                        bytes_total: size_bytes,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                    mold_core::download::DownloadProgressEvent::FileProgress {
-                        filename,
-                        file_index,
-                        bytes_downloaded,
                         bytes_total,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadProgress {
-                        filename,
-                        file_index,
+                        batch_bytes_downloaded: 0,
+                        batch_bytes_total: bytes_total,
+                        batch_elapsed_ms: 0,
+                    }));
+                }
+                Ok(mold_core::types::DownloadEvent::Progress {
+                    id,
+                    files_done,
+                    bytes_done,
+                    current_file,
+                }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::DownloadProgress {
+                        filename: current_file.unwrap_or_default(),
+                        file_index: files_done,
                         total_files: 0,
-                        bytes_downloaded,
-                        bytes_total,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                    mold_core::download::DownloadProgressEvent::FileDone {
-                        filename,
-                        file_index,
-                        total_files,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    } => SseProgressEvent::DownloadDone {
-                        filename,
-                        file_index,
-                        total_files,
-                        batch_bytes_downloaded,
-                        batch_bytes_total,
-                        batch_elapsed_ms,
-                    },
-                };
-                let _ = progress_tx.send(SseMessage::Progress(sse_event));
-            });
-
-        match model_manager::pull_model(&state, &model, Some(callback)).await {
-            Ok(model_manager::PullStatus::AlreadyAvailable) => {
-                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
-                    model: model_for_cb,
-                }));
-            }
-            Ok(model_manager::PullStatus::Pulled) => {
-                let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
-                    model: model_for_cb,
-                }));
-            }
-            Err(e) => {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent { message: e.error }));
+                        bytes_downloaded: bytes_done,
+                        bytes_total: 0,
+                        batch_bytes_downloaded: bytes_done,
+                        batch_bytes_total: 0,
+                        batch_elapsed_ms: 0,
+                    }));
+                }
+                Ok(mold_core::types::DownloadEvent::JobDone { id, .. }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+                        model: model_for_cb.clone(),
+                    }));
+                    break;
+                }
+                Ok(mold_core::types::DownloadEvent::JobFailed { id, error }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent { message: error }));
+                    break;
+                }
+                Ok(mold_core::types::DownloadEvent::JobCancelled { id }) if id == job_id => {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: "pull cancelled".into(),
+                    }));
+                    break;
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -1150,16 +1171,6 @@ async fn pull_model_endpoint(
             )
             .into_response(),
     ))
-}
-
-/// Legacy blocking pull — returns plain text.
-async fn pull_model_blocking(state: AppState, model: String) -> Result<String, ApiError> {
-    match model_manager::pull_model(&state, &model, None).await? {
-        model_manager::PullStatus::AlreadyAvailable => {
-            Ok(format!("model '{}' already available", model))
-        }
-        model_manager::PullStatus::Pulled => Ok(format!("model '{}' pulled successfully", model)),
-    }
 }
 
 /// Response type that can be either SSE stream or plain text.
@@ -2480,6 +2491,185 @@ fn query_gpu_info() -> Option<GpuInfo> {
         vram_total_mb: parts[1].parse().ok()?,
         vram_used_mb: parts[2].parse().ok()?,
     })
+}
+
+// ─── Downloads UI (Agent A) ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct CreateDownloadBody {
+    pub model: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CreateDownloadResponse {
+    pub id: String,
+    pub position: usize,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/downloads",
+    tag = "downloads",
+    request_body = CreateDownloadBody,
+    responses(
+        (status = 200, description = "Enqueued; position 0 = will start immediately", body = CreateDownloadResponse),
+        (status = 400, description = "Unknown model"),
+        (status = 409, description = "Already active or queued; body contains existing id", body = CreateDownloadResponse),
+    )
+)]
+pub async fn create_download(
+    State(state): State<AppState>,
+    Json(body): Json<CreateDownloadBody>,
+) -> axum::response::Response {
+    use crate::downloads::{EnqueueError, EnqueueOutcome};
+    match state.downloads.enqueue(body.model.clone()).await {
+        Ok((id, position, EnqueueOutcome::Created)) => (
+            StatusCode::OK,
+            Json(CreateDownloadResponse { id, position }),
+        )
+            .into_response(),
+        Ok((id, position, EnqueueOutcome::AlreadyPresent)) => (
+            StatusCode::CONFLICT,
+            Json(CreateDownloadResponse { id, position }),
+        )
+            .into_response(),
+        Err(EnqueueError::UnknownModel(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("unknown model '{}'. Run 'mold list' to see available models.", body.model)
+            })),
+        )
+            .into_response(),
+        Err(EnqueueError::LockPoisoned) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "download queue state is corrupt" })),
+        )
+            .into_response(),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/downloads/{id}",
+    tag = "downloads",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 204, description = "Cancelled"),
+        (status = 404, description = "Unknown id"),
+    )
+)]
+pub async fn delete_download(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if state.downloads.cancel(&id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown download id '{id}'") })),
+        )
+            .into_response()
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/downloads",
+    tag = "downloads",
+    responses((status = 200, description = "Current queue state"))
+)]
+pub async fn list_downloads(State(state): State<AppState>) -> axum::response::Response {
+    Json(state.downloads.listing().await).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/downloads/stream",
+    tag = "downloads",
+    responses((status = 200, description = "SSE stream of DownloadEvent JSON")),
+)]
+pub async fn stream_downloads(
+    State(state): State<AppState>,
+) -> Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::Event;
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::StreamExt as _;
+
+    let rx = state.downloads.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(event) => {
+            let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+            Some(Ok(Event::default().event("download").data(data)))
+        }
+        Err(_lagged) => None,
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+// ── Resource telemetry (Agent B scope) ───────────────────────────────────────
+
+/// `GET /api/resources` — one-shot JSON snapshot from the aggregator cache.
+/// Returns 503 if the aggregator has not yet fired (first 1 s after startup
+/// and before `spawn_aggregator` has run).
+async fn get_resources(State(state): State<AppState>) -> Result<Json<ResourceSnapshot>, ApiError> {
+    match state.resources.latest() {
+        Some(snap) => Ok(Json(snap)),
+        None => Err(ApiError::internal_with_status(
+            "resource telemetry not ready",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )),
+    }
+}
+
+/// `GET /api/resources/stream` — SSE stream of `ResourceSnapshot` frames.
+/// Event name: `snapshot`. Matches the keepalive cadence of `/api/generate/stream`.
+async fn get_resources_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = state.resources.subscribe();
+    // Attach the cached `latest` snapshot as the first frame so clients
+    // don't wait up to one full tick for their initial value.
+    let initial = state.resources.latest();
+
+    let stream = async_stream::stream! {
+        if let Some(snap) = initial {
+            yield Ok::<_, Infallible>(snapshot_to_sse(&snap));
+        }
+        let mut bs = BroadcastStream::new(rx);
+        while let Some(item) = bs.next().await {
+            match item {
+                Ok(snap) => yield Ok(snapshot_to_sse(&snap)),
+                // Lag is normal for slow clients — skip dropped frames
+                // silently; the next one will catch them up.
+                Err(_lagged) => continue,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
+    match serde_json::to_string(snap) {
+        Ok(data) => SseEvent::default().event("snapshot").data(data),
+        Err(e) => SseEvent::default()
+            .event("error")
+            .data(format!("{{\"message\":\"serialize failed: {e}\"}}")),
+    }
 }
 
 #[cfg(test)]
