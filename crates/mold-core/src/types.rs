@@ -784,6 +784,79 @@ pub enum GpuWorkerState {
     Degraded,
 }
 
+// ── Device placement (Agent C: model-ui-overhaul §3) ─────────────────────────
+
+/// A user-facing request for where a component should run.
+///
+/// - `Auto` preserves the existing VRAM-aware auto-placement logic.
+/// - `Cpu` pins the component to CPU regardless of available VRAM.
+/// - `Gpu { ordinal }` pins to GPU ordinal `n` (CUDA-specific ordinal,
+///   or `0` on Metal/unified memory).
+///
+/// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
+/// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
+/// field deserializes to `Auto`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeviceRef {
+    Auto,
+    Cpu,
+    Gpu { ordinal: usize },
+}
+
+impl Default for DeviceRef {
+    fn default() -> Self {
+        DeviceRef::Auto
+    }
+}
+
+impl DeviceRef {
+    /// Helper constructor mirroring the compact `Gpu(n)` form used in tests.
+    pub const fn gpu(ordinal: usize) -> Self {
+        DeviceRef::Gpu { ordinal }
+    }
+}
+
+/// Top-level placement request attached to `GenerateRequest` and persisted
+/// under `[models."name:tag".placement]` in config.
+///
+/// - `text_encoders` is the Tier 1 "group knob" — a single override applied
+///   to all text-encoder components (T5 plus CLIP-L, Qwen3, Qwen2.5-VL, etc.).
+/// - `advanced` is Tier 2, available only for families listed in spec §3.2
+///   (FLUX, Flux.2, Z-Image, Qwen-Image; SD3.5 stretch). When `Some`, each
+///   populated field overrides the Tier 1 group knob for that specific
+///   component. When `None`, only the group knob is honored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevicePlacement {
+    #[serde(default)]
+    pub text_encoders: DeviceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<AdvancedPlacement>,
+}
+
+/// Per-component placement overrides available only for Tier 2 families.
+///
+/// `transformer` and `vae` are required fields (default `Auto`). The
+/// per-encoder fields are `Option<DeviceRef>` because not every family has
+/// every encoder — FLUX has T5 plus CLIP-L, Flux.2 and Z-Image have Qwen3,
+/// Qwen-Image has Qwen2.5-VL. `None` means "follow the Tier 1 group knob";
+/// `Some(DeviceRef::Auto)` means "follow the engine's own auto logic".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedPlacement {
+    #[serde(default)]
+    pub transformer: DeviceRef,
+    #[serde(default)]
+    pub vae: DeviceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_l: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_g: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t5: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qwen: Option<DeviceRef>,
+}
+
 // ── SSE streaming wire types ─────────────────────────────────────────────────
 
 /// Progress event for SSE streaming. Mirrors `mold_inference::ProgressEvent`
@@ -2153,3 +2226,7 @@ pub fn default_output_filename(
         format!("mold-{safe_model}-{timestamp}-{index}.{ext}")
     }
 }
+
+#[cfg(test)]
+#[path = "placement_test.rs"]
+mod placement_test;
