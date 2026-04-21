@@ -14,5 +14,8 @@ mod runtime;
 mod sampler;
 mod text;
 
-pub use chain::{extract_tail_latents, tail_latent_frame_count, ChainTail};
+pub use chain::{
+    extract_tail_latents, tail_latent_frame_count, ChainRunOutput, ChainStageRenderer, ChainTail,
+    Ltx2ChainOrchestrator, StageOutcome, StageProgressEvent,
+};
 pub use pipeline::Ltx2Engine;
