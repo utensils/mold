@@ -55,7 +55,26 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
     // GPU info from remote server
     if let Some(ref status) = ri.server_status {
-        if let Some(ref gpu) = status.gpu_info {
+        if let Some(ref gpus) = status.gpus {
+            for gpu in gpus {
+                let vram_free = gpu.vram_total_bytes.saturating_sub(gpu.vram_used_bytes);
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "GPU {} {}: {:.1} GB free",
+                        gpu.ordinal,
+                        gpu.name,
+                        vram_free as f64 / 1_073_741_824.0
+                    ),
+                    theme.dim(),
+                )));
+            }
+            if let (Some(depth), Some(capacity)) = (status.queue_depth, status.queue_capacity) {
+                lines.push(Line::from(Span::styled(
+                    format!("Queue: {depth}/{capacity}"),
+                    theme.dim(),
+                )));
+            }
+        } else if let Some(ref gpu) = status.gpu_info {
             let vram_free = gpu.vram_total_mb.saturating_sub(gpu.vram_used_mb);
             lines.push(Line::from(Span::styled(
                 format!("{}: {:.1} GB free", gpu.name, vram_free as f64 / 1024.0),
