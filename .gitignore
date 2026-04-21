@@ -6,6 +6,7 @@
 # Claude Code
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.worktrees/
 .playwright-mcp/
 .direnv/
 
