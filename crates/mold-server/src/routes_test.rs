@@ -12,7 +12,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, RwLock,
     };
     use std::time::Duration;
     use tower::ServiceExt;
@@ -277,6 +277,34 @@ mod tests {
         ))
     }
 
+    fn gpu_worker_stub(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel(1);
+        Arc::new(crate::gpu_pool::GpuWorker {
+            gpu: mold_inference::device::DiscoveredGpu {
+                ordinal,
+                name: format!("gpu{ordinal}"),
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        })
+    }
+
+    fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
+        let mut state = AppState::with_engine(engine);
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: ordinals.iter().copied().map(gpu_worker_stub).collect(),
+        });
+        create_router(state)
+    }
+
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
         // Use "mock-model" to match MockEngine::model_name() — avoids hot-swap path.
         format!(
@@ -379,6 +407,41 @@ mod tests {
         assert_eq!(status["models_loaded"], serde_json::json!([]));
         assert_eq!(status["busy"], serde_json::json!(false));
         assert_eq!(status["current_generation"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn status_multi_gpu_current_generation_includes_prompt_hash_and_timestamp() {
+        let worker = gpu_worker_stub(1);
+        *worker.active_generation.write().unwrap() = Some(crate::gpu_pool::ActiveGeneration {
+            model: "flux-dev:q4".to_string(),
+            prompt_sha256: "abc123".to_string(),
+            started_at_unix_ms: 1_700_000_000_000,
+            started_at: std::time::Instant::now(),
+        });
+
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        let app = app_with_state(state);
+
+        let resp = app
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["current_generation"]["model"], "flux-dev:q4");
+        assert_eq!(status["current_generation"]["prompt_sha256"], "abc123");
+        assert_eq!(
+            status["current_generation"]["started_at_unix_ms"],
+            serde_json::json!(1_700_000_000_000_u64)
+        );
+        assert_eq!(status["gpus"][0]["ordinal"], serde_json::json!(1));
     }
 
     #[tokio::test]
@@ -2262,6 +2325,77 @@ mod tests {
             "got status {}",
             resp.status()
         );
+    }
+
+    #[tokio::test]
+    async fn put_model_placement_rejects_gpu_outside_worker_pool() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub(1)],
+        });
+        let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
+        let app = crate::routes::create_router(state);
+
+        let body = serde_json::json!({
+            "text_encoders": { "kind": "auto" },
+            "advanced": {
+                "transformer": { "kind": "gpu", "ordinal": 0 },
+                "vae": { "kind": "auto" }
+            }
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert!(body["error"].as_str().unwrap().contains("gpu:0"));
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_gpu_outside_worker_pool() {
+        let app = app_with_worker_pool(MockEngine::ready(), &[1]);
+        let body = serde_json::json!({
+            "prompt": "a cat",
+            "model": "mock-model",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "batch_size": 1,
+            "output_format": "png",
+            "placement": {
+                "text_encoders": { "kind": "auto" },
+                "advanced": {
+                    "transformer": { "kind": "gpu", "ordinal": 0 },
+                    "vae": { "kind": "auto" }
+                }
+            }
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert!(body["error"].as_str().unwrap().contains("gpu:0"));
     }
     // ─── Downloads UI (Agent A) ─────────────────────────────────────────────
 

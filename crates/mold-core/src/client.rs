@@ -544,14 +544,27 @@ impl MoldClient {
     }
 
     pub async fn unload_model(&self) -> Result<String> {
-        let resp = self
+        self.unload_model_target(None, None).await
+    }
+
+    pub async fn unload_model_target(
+        &self,
+        model: Option<&str>,
+        gpu: Option<usize>,
+    ) -> Result<String> {
+        let req = serde_json::json!({
+            "model": model,
+            "gpu": gpu,
+        });
+        let builder = self
             .client
-            .delete(format!("{}/api/models/unload", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+            .delete(format!("{}/api/models/unload", self.base_url));
+        let builder = if model.is_some() || gpu.is_some() {
+            builder.json(&req)
+        } else {
+            builder
+        };
+        let resp = builder.send().await?.error_for_status()?.text().await?;
         Ok(resp)
     }
 

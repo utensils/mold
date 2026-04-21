@@ -238,11 +238,35 @@ pub fn select_expand_device(
     threshold: u64,
     is_metal: bool,
 ) -> ExpandPlacement {
+    select_expand_device_with_preference(gpus, threshold, is_metal, None)
+}
+
+/// Same as [`select_expand_device`], but prefers `preferred_ordinal` when it
+/// is in the allowed GPU set and has enough free VRAM.
+pub fn select_expand_device_with_preference(
+    gpus: &[DiscoveredGpu],
+    threshold: u64,
+    is_metal: bool,
+    preferred_ordinal: Option<usize>,
+) -> ExpandPlacement {
     if is_metal {
+        if let Some(ordinal) = preferred_ordinal {
+            if let Some(g) = gpus.iter().find(|g| g.ordinal == ordinal) {
+                return ExpandPlacement::Gpu(g.ordinal);
+            }
+        }
         if let Some(g) = gpus.first() {
             return ExpandPlacement::Gpu(g.ordinal);
         }
         return ExpandPlacement::Cpu;
+    }
+    if let Some(ordinal) = preferred_ordinal {
+        if let Some(g) = gpus
+            .iter()
+            .find(|g| g.ordinal == ordinal && g.free_vram_bytes > threshold)
+        {
+            return ExpandPlacement::Gpu(g.ordinal);
+        }
     }
     for g in gpus {
         if g.free_vram_bytes > threshold {
@@ -287,12 +311,14 @@ where
 
 #[cfg(feature = "cuda")]
 fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "resolve_device");
     candle_core::Device::new_cuda(ordinal)
         .map_err(|e| anyhow::anyhow!("failed to open CUDA device {ordinal}: {e}"))
 }
 
 #[cfg(all(not(feature = "cuda"), feature = "metal"))]
 fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "resolve_device");
     candle_core::Device::new_metal(ordinal)
         .map_err(|e| anyhow::anyhow!("failed to open Metal device {ordinal}: {e}"))
 }
@@ -1305,6 +1331,24 @@ mod tests {
         assert_eq!(
             select_expand_device(&gpus, 3 * GB, false),
             ExpandPlacement::Cpu,
+        );
+    }
+
+    #[test]
+    fn expand_prefers_requested_gpu_when_it_fits() {
+        let gpus = vec![gpu(0, 20), gpu(1, 20)];
+        assert_eq!(
+            select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
+            ExpandPlacement::Gpu(1),
+        );
+    }
+
+    #[test]
+    fn expand_preference_falls_back_when_requested_gpu_cannot_fit() {
+        let gpus = vec![gpu(0, 20), gpu(1, 1)];
+        assert_eq!(
+            select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
+            ExpandPlacement::Gpu(0),
         );
     }
 }

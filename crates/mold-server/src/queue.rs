@@ -574,6 +574,33 @@ pub async fn run_queue_dispatcher(
 
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
+        let preferred_gpu = match state
+            .gpu_pool
+            .resolve_explicit_placement_gpu(job.request.placement.as_ref())
+        {
+            Ok(ordinal) => ordinal,
+            Err(err_msg) => {
+                tracing::warn!(model = %model_name, "{err_msg}");
+                if let Some(tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: err_msg.clone(),
+                    }));
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                state.queue.decrement();
+                #[cfg(feature = "metrics")]
+                crate::metrics::record_queue_depth(state.queue.pending());
+                continue;
+            }
+        };
+
+        if job.result_tx.is_closed() {
+            tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
+            state.queue.decrement();
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_queue_depth(state.queue.pending());
+            continue;
+        }
 
         // Build the GpuJob once; the retry loop moves it between attempts.
         let mut gpu_job = Some(GpuJob {
@@ -588,18 +615,50 @@ pub async fn run_queue_dispatcher(
         });
 
         let mut skip: Vec<usize> = Vec::new();
-        let max_attempts = state.gpu_pool.worker_count().max(1);
         let mut dispatched = false;
 
-        for _ in 0..max_attempts {
-            let worker =
-                match state
+        while !dispatched {
+            if gpu_job
+                .as_ref()
+                .is_some_and(|pending| pending.result_tx.is_closed())
+            {
+                tracing::debug!(
+                    model = %model_name,
+                    "dropping queued multi-GPU job before dispatch — client disconnected"
+                );
+                state.queue.decrement();
+                break;
+            }
+
+            let worker = if let Some(ordinal) = preferred_gpu {
+                state.gpu_pool.worker_by_ordinal(ordinal)
+            } else {
+                state
                     .gpu_pool
                     .select_worker_excluding(&model_name, estimated_vram, &skip)
-                {
-                    Some(w) => w,
-                    None => break,
+            };
+
+            let Some(worker) = worker else {
+                let rejected = gpu_job
+                    .take()
+                    .expect("gpu_job retained after failed dispatch");
+                let err_msg = if state.gpu_pool.worker_count() == 0 {
+                    format!("no GPU available for model {model_name}")
+                } else if let Some(ordinal) = preferred_gpu {
+                    format!("gpu:{ordinal} is not available for model {model_name}")
+                } else {
+                    format!("no GPU worker available for model {model_name}")
                 };
+                tracing::error!(model = %model_name, "{err_msg}");
+                if let Some(tx) = rejected.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                        message: err_msg.clone(),
+                    }));
+                }
+                let _ = rejected.result_tx.send(Err(err_msg));
+                state.queue.decrement();
+                break;
+            };
 
             // Increment in-flight BEFORE sending to reserve the slot.
             worker.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -607,40 +666,46 @@ pub async fn run_queue_dispatcher(
             match worker.job_tx.try_send(pending) {
                 Ok(()) => {
                     dispatched = true;
-                    break;
                 }
-                Err(std::sync::mpsc::TrySendError::Full(j))
-                | Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
+                Err(std::sync::mpsc::TrySendError::Full(j)) => {
+                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    gpu_job = Some(j);
+                    if preferred_gpu.is_none() {
+                        skip.push(worker.gpu.ordinal);
+                        if skip.len() >= state.gpu_pool.worker_count().max(1) {
+                            skip.clear();
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
                     worker.in_flight.fetch_sub(1, Ordering::SeqCst);
                     tracing::warn!(
                         gpu = worker.gpu.ordinal,
-                        "GPU worker channel full — retrying on another worker"
+                        "GPU worker disconnected — retrying dispatch"
                     );
-                    skip.push(worker.gpu.ordinal);
                     gpu_job = Some(j);
+                    if preferred_gpu.is_none() {
+                        skip.push(worker.gpu.ordinal);
+                    } else {
+                        let rejected = gpu_job.take().expect("gpu_job retained after disconnect");
+                        let err_msg = format!(
+                            "gpu:{} disconnected while dispatching model {model_name}",
+                            worker.gpu.ordinal
+                        );
+                        if let Some(tx) = rejected.progress_tx {
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                message: err_msg.clone(),
+                            }));
+                        }
+                        let _ = rejected.result_tx.send(Err(err_msg));
+                        state.queue.decrement();
+                        break;
+                    }
                 }
             }
-        }
-
-        if !dispatched {
-            // Either no workers are eligible or every candidate's channel is full.
-            let rejected = gpu_job.expect("gpu_job retained after failed dispatch");
-            let err_msg = if state.gpu_pool.worker_count() == 0 {
-                format!("no GPU available for model {model_name}")
-            } else {
-                format!("all GPU workers are busy for model {model_name} — queue is full")
-            };
-            tracing::error!(model = %model_name, "{err_msg}");
-            if let Some(tx) = rejected.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
-            }
-            let _ = rejected.result_tx.send(Err(err_msg));
-            // Job was rejected before the worker could observe it, so we must
-            // release the global queue slot here — the worker-side decrement
-            // won't run.
-            state.queue.decrement();
         }
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
@@ -670,8 +735,15 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_pool::{GpuPool, GpuWorker};
+    use crate::model_cache::ModelCache;
+    use crate::state::QueueHandle;
     use mold_core::{GenerateRequest, ImageData, OutputFormat};
     use mold_db::MetadataDb;
+    use mold_inference::device::DiscoveredGpu;
+    use mold_inference::shared_pool::SharedPool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex, RwLock};
     use tempfile::TempDir;
 
     /// A `GenerateRequest` with the bare minimum fields populated — enough to
@@ -727,6 +799,33 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    fn test_worker(
+        ordinal: usize,
+        channel_size: usize,
+    ) -> (
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuJob>,
+    ) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(channel_size);
+        let worker = Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal,
+                name: format!("gpu{ordinal}"),
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        (worker, job_rx)
     }
 
     #[test]
@@ -1049,5 +1148,106 @@ mod tests {
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
         assert!(event.video_duration_ms.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_waits_for_worker_capacity_instead_of_rejecting() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            }),
+            8,
+        );
+
+        let (filler_result_tx, _filler_result_rx) = tokio::sync::oneshot::channel();
+        let filler_job = crate::gpu_pool::GpuJob {
+            model: "busy-model".to_string(),
+            request: fake_request("busy-model"),
+            progress_tx: None,
+            result_tx: filler_result_tx,
+            output_dir: None,
+            config: state.config.clone(),
+            metadata_db: state.metadata_db.clone(),
+            queue: state.queue.clone(),
+        };
+        worker.job_tx.send(filler_job).unwrap();
+
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            request: fake_request("flux-dev:q4"),
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        let _position = queue.submit(job, 8).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            result_rx.try_recv().is_err(),
+            "dispatcher should keep the job pending while all worker channels are full"
+        );
+
+        let _filler = worker_rx
+            .recv()
+            .expect("filler job should occupy the local channel");
+        let dispatched = worker_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("queued job should dispatch once capacity is available");
+        assert_eq!(dispatched.model, "flux-dev:q4");
+
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_honors_explicit_placement_gpu() {
+        let (worker0, rx0) = test_worker(0, 1);
+        let (worker1, rx1) = test_worker(1, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0, worker1],
+            }),
+            8,
+        );
+
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state));
+
+        let mut request = fake_request("flux-dev:q4");
+        request.placement = Some(mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Auto,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::types::DeviceRef::gpu(1),
+                ..mold_core::types::AdvancedPlacement::default()
+            }),
+        });
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            request,
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        let _position = queue.submit(job, 8).await.unwrap();
+
+        let dispatched = rx1
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("explicit placement should route to gpu 1");
+        assert_eq!(dispatched.model, "flux-dev:q4");
+        assert!(rx0.try_recv().is_err(), "gpu 0 should not receive the job");
+
+        drop(job_tx);
+        dispatcher.abort();
     }
 }

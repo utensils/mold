@@ -116,12 +116,12 @@ pub async fn run_server(
     }
 
     // ── Create generation queue ────────────────────────────────────────────
-    let (job_tx, job_rx) = tokio::sync::mpsc::channel(16);
+    let (job_tx, job_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
     let queue_handle = QueueHandle::new(job_tx);
 
     // ── Create AppState ────────────────────────────────────────────────────
-    let mut state = match ModelPaths::resolve(&model_name, &config) {
-        Some(paths) => {
+    let mut state = if gpu_pool.worker_count() > 0 {
+        if let Some(paths) = ModelPaths::resolve(&model_name, &config) {
             info!(model = %model_name, "configured model");
             info!(transformer = %paths.transformer.display());
             info!(vae = %paths.vae.display());
@@ -152,25 +152,71 @@ pub async fn run_server(
             if let Some(text_tok) = &paths.text_tokenizer {
                 info!(text_tok = %text_tok.display());
             }
-
-            let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-            let engine = mold_inference::create_engine_with_pool(
-                model_name,
-                paths,
-                &config,
-                mold_inference::LoadStrategy::Eager,
-                0,
-                offload,
-                Some(shared_pool.clone()),
-            )?;
-            let mut state =
-                state::AppState::new(engine, config, queue_handle, gpu_pool.clone(), queue_size);
-            state.shared_pool = shared_pool;
-            state
-        }
-        None => {
+            info!("multi-GPU mode defers model loading to per-GPU workers");
+        } else {
             info!("no default model configured — models will be pulled on first request");
-            state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size)
+        }
+        let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
+        state.shared_pool = shared_pool;
+        state
+    } else {
+        match ModelPaths::resolve(&model_name, &config) {
+            Some(paths) => {
+                info!(model = %model_name, "configured model");
+                info!(transformer = %paths.transformer.display());
+                info!(vae = %paths.vae.display());
+                if let Some(spatial_upscaler) = &paths.spatial_upscaler {
+                    info!(spatial_upscaler = %spatial_upscaler.display());
+                }
+                if let Some(t5) = &paths.t5_encoder {
+                    info!(t5 = %t5.display());
+                }
+                if let Some(clip) = &paths.clip_encoder {
+                    info!(clip = %clip.display());
+                }
+                if let Some(t5_tok) = &paths.t5_tokenizer {
+                    info!(t5_tok = %t5_tok.display());
+                }
+                if let Some(clip_tok) = &paths.clip_tokenizer {
+                    info!(clip_tok = %clip_tok.display());
+                }
+                if let Some(clip2) = &paths.clip_encoder_2 {
+                    info!(clip2 = %clip2.display());
+                }
+                if let Some(clip2_tok) = &paths.clip_tokenizer_2 {
+                    info!(clip2_tok = %clip2_tok.display());
+                }
+                for (i, te) in paths.text_encoder_files.iter().enumerate() {
+                    info!(text_encoder_shard = i, path = %te.display());
+                }
+                if let Some(text_tok) = &paths.text_tokenizer {
+                    info!(text_tok = %text_tok.display());
+                }
+
+                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                let engine = mold_inference::create_engine_with_pool(
+                    model_name,
+                    paths,
+                    &config,
+                    mold_inference::LoadStrategy::Eager,
+                    0,
+                    offload,
+                    Some(shared_pool.clone()),
+                )?;
+                let mut state = state::AppState::new(
+                    engine,
+                    config,
+                    queue_handle,
+                    gpu_pool.clone(),
+                    queue_size,
+                );
+                state.shared_pool = shared_pool;
+                state
+            }
+            None => {
+                info!("no default model configured — models will be pulled on first request");
+                state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size)
+            }
         }
     };
 
