@@ -1647,6 +1647,270 @@ button.spec-value:hover {
   cursor: not-allowed;
 }
 
+.gen {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 1024px) {
+  .gen {
+    grid-template-columns: 1fr;
+  }
+}
+.gen-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.gen-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-self: flex-start;
+  position: sticky;
+  top: 82px;
+}
+@media (max-width: 1024px) {
+  .gen-side {
+    position: static;
+  }
+}
+
+.gen-model-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.gen-model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  transition: all 0.15s;
+  text-align: left;
+  min-width: 0;
+}
+.dir-lab .gen-model {
+  border-radius: 2px;
+}
+.gen-model:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--line-strong);
+}
+.gen-model.on {
+  background: var(--accent-soft);
+  color: var(--fg);
+  border-color: var(--accent-line);
+}
+.gen-model:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.gen-model-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.gen-model-tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+  flex-shrink: 0;
+}
+.gen-model.on .gen-model-tag {
+  color: var(--accent);
+}
+
+.gen-dims {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px;
+}
+.gen-dim {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  transition: all 0.15s;
+}
+.dir-lab .gen-dim {
+  border-radius: 2px;
+}
+.gen-dim-box {
+  background: color-mix(in oklab, var(--fg) 10%, transparent);
+  border-radius: 2px;
+}
+.gen-dim.on {
+  background: var(--accent-soft);
+  color: var(--fg);
+  border-color: var(--accent-line);
+}
+.gen-dim.on .gen-dim-box {
+  background: var(--accent);
+}
+.gen-dim:hover:not(.on) {
+  color: var(--fg);
+  border-color: var(--line-strong);
+}
+
+.slider {
+  margin-bottom: 10px;
+}
+.slider:last-child {
+  margin-bottom: 0;
+}
+.slider-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.slider-label {
+  color: var(--fg-2);
+}
+.slider-value {
+  color: var(--fg);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.slider input[type="range"] {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+.slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  background: color-mix(in oklab, var(--fg) 10%, transparent);
+  border-radius: 2px;
+}
+.slider input[type="range"]::-moz-range-track {
+  height: 3px;
+  background: color-mix(in oklab, var(--fg) 10%, transparent);
+  border-radius: 2px;
+}
+.slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  margin-top: -5.5px;
+  cursor: pointer;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+.slider input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.gen-seed-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.gen-seed-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  outline: 0;
+}
+.dir-lab .gen-seed-input {
+  border-radius: 2px;
+}
+.gen-seed-input:focus {
+  border-color: var(--accent-line);
+}
+.gen-seed-dice,
+.gen-seed-clear {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.dir-lab .gen-seed-dice,
+.dir-lab .gen-seed-clear {
+  border-radius: 2px;
+}
+.gen-seed-dice {
+  padding: 8px;
+  display: grid;
+  place-items: center;
+}
+.gen-seed-dice:hover,
+.gen-seed-clear:hover {
+  color: var(--fg);
+}
+
+.gen-go-full {
+  width: 100%;
+  padding: 14px 18px;
+  font-size: 14px;
+  border-radius: 14px;
+}
+.dir-lab .gen-go-full {
+  border-radius: 2px;
+}
+
+.gen-progress {
+  height: 3px;
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.gen-progress-fill {
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    var(--accent-2, var(--accent))
+  );
+  transition: width 0.2s linear;
+}
+
+.gen-running-stage {
+  font-size: 12px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .gen-side-block {
   background: var(--bg-1);
   border: 1px solid var(--line);

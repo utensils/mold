@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import Composer from "../components/Composer.vue";
+import ComposerSidebar from "../components/ComposerSidebar.vue";
 import ResourceStrip from "../components/ResourceStrip.vue";
 import SettingsModal from "../components/SettingsModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
@@ -165,6 +166,40 @@ const gpuListForPlacement = computed(
     })) ?? [],
 );
 
+/*
+ * Latest running job. We surface its progress to the sidebar so the big
+ * Generate button can show a percentage, the progress bar underneath
+ * can animate, and a short stage string can describe what the server
+ * is doing. RunningStrip still shows the full queue.
+ */
+const latestJob = computed<Job | null>(() => {
+  const js = stream.jobs.value;
+  return js.find((j) => j.state === "running") ?? null;
+});
+
+const latestProgressPct = computed<number | null>(() => {
+  const j = latestJob.value;
+  if (!j) return null;
+  const p = j.progress;
+  if (p.totalSteps && p.step !== null) {
+    return Math.round((p.step / p.totalSteps) * 100);
+  }
+  if (p.weightBytesTotal && p.weightBytesLoaded !== null) {
+    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
+  }
+  return null;
+});
+
+const latestStage = computed<string | null>(
+  () => latestJob.value?.progress.stage ?? null,
+);
+
+const canSubmit = computed(
+  () =>
+    form.state.value.prompt.trim().length > 0 &&
+    form.state.value.model.length > 0,
+);
+
 const settingsDirty = computed(() => {
   const s = form.state.value;
   const m = currentModel.value;
@@ -304,44 +339,91 @@ onMounted(async () => {
       @refresh="refreshGallery"
     />
 
-    <div class="mt-4 sm:mt-6">
-      <Composer
-        v-model="form.state.value"
-        :queue-depth="status?.queue_depth ?? null"
-        :queue-capacity="status?.queue_capacity ?? null"
-        :gpus="gpus"
-        :expand-active="form.state.value.expand.enabled"
-        :settings-dirty="settingsDirty"
-        :family="currentModel?.family ?? ''"
-        :placement-gpus="gpuListForPlacement"
-        @submit="onSubmit"
-        @open-settings="showSettings = true"
-        @open-expand="showExpand = true"
-        @open-image-picker="showPicker = true"
-        @clear-source="onClearSource"
-      />
+    <div class="gen mt-4 sm:mt-6">
+      <div class="gen-main">
+        <header class="gen-header">
+          <div>
+            <div class="gen-eyebrow">Compose</div>
+            <h1 class="gen-title">New generation</h1>
+          </div>
+          <div class="gen-status">
+            <span
+              v-if="status?.queue_depth !== undefined"
+              class="gen-queue"
+              :title="`queue ${status.queue_depth} / ${status.queue_capacity}`"
+            >
+              queue {{ status.queue_depth }}/{{ status.queue_capacity }}
+            </span>
+            <span
+              v-for="g in gpus ?? []"
+              :key="g.ordinal"
+              class="gen-gpu"
+              :title="`GPU ${g.ordinal} · ${g.state}`"
+            >
+              <span
+                style="
+                  width: 6px;
+                  height: 6px;
+                  border-radius: 999px;
+                  background: var(--accent);
+                "
+                :style="{
+                  opacity: g.state === 'idle' ? 0.3 : 1,
+                }"
+              />
+              GPU {{ g.ordinal }} {{ g.state }}
+            </span>
+          </div>
+        </header>
 
-      <!-- Agent B: always-visible VRAM + RAM telemetry -->
-      <ResourceStrip class="mt-3 hidden lg:block" variant="full" />
+        <Composer
+          v-model="form.state.value"
+          :queue-depth="status?.queue_depth ?? null"
+          :queue-capacity="status?.queue_capacity ?? null"
+          :gpus="gpus"
+          :expand-active="form.state.value.expand.enabled"
+          :settings-dirty="settingsDirty"
+          :family="currentModel?.family ?? ''"
+          :placement-gpus="gpuListForPlacement"
+          @submit="onSubmit"
+          @open-settings="showSettings = true"
+          @open-expand="showExpand = true"
+          @open-image-picker="showPicker = true"
+          @clear-source="onClearSource"
+        />
 
-      <RunningStrip
-        :jobs="stream.jobs.value"
-        @cancel="stream.cancel"
-        @open="openJob"
-      />
+        <!-- Agent B: always-visible VRAM + RAM telemetry -->
+        <ResourceStrip class="hidden lg:block" variant="full" />
 
-      <div class="mt-6">
-        <GalleryFeed
-          :entries="galleryEntries"
-          :loading="false"
-          :view="view"
-          :muted="muted"
-          :starred="starred"
-          @open="openItem"
-          @star="(i: GalleryImage) => toggleStar(i.filename)"
-          @rerun="rerunItem"
+        <RunningStrip
+          :jobs="stream.jobs.value"
+          @cancel="stream.cancel"
+          @open="openJob"
         />
       </div>
+
+      <ComposerSidebar
+        v-model="form.state.value"
+        :models="models"
+        :running="latestJob !== null"
+        :progress-pct="latestProgressPct"
+        :progress-stage="latestStage"
+        :can-submit="canSubmit"
+        @submit="onSubmit"
+      />
+    </div>
+
+    <div class="mt-6">
+      <GalleryFeed
+        :entries="galleryEntries"
+        :loading="false"
+        :view="view"
+        :muted="muted"
+        :starred="starred"
+        @open="openItem"
+        @star="(i: GalleryImage) => toggleStar(i.filename)"
+        @rerun="rerunItem"
+      />
     </div>
 
     <SettingsModal
