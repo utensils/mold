@@ -458,9 +458,16 @@ impl Ltx2Engine {
             plan.prompt_tokens.unconditional.valid_len()
         ));
         let create_runtime_start = Instant::now();
+        // Reuse a persisted runtime only if it can serve this plan. An LTX-2
+        // session consumes its prompt encoder on first `prepare()` (see
+        // runtime.rs `prepare()` — the take+drop frees VRAM for the
+        // transformer); a stale session left behind by a prior chain run
+        // survives intact for same-prompt continuations via the session-
+        // level encoding cache, but we must rebuild from scratch when the
+        // prompt changes so `prepare()` doesn't error on a consumed encoder.
         let mut runtime = match self.native_runtime.take() {
-            Some(runtime) => runtime,
-            None => self.create_runtime_session(&plan)?,
+            Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
+            _ => self.create_runtime_session(&plan)?,
         };
         Self::log_timing("pipeline.create_runtime", create_runtime_start);
 
@@ -601,12 +608,15 @@ impl Ltx2Engine {
             });
         }
 
-        // Reuse an existing runtime session if we have one; otherwise
-        // build one. Arm the tail-capture slot on the session before
-        // render.
+        // Reuse an existing runtime session if we have one AND it can
+        // serve this plan. Between stages of a same-prompt chain the
+        // session-level encoding cache handles the consumed-encoder
+        // invariant; if the prompt shifts (or a stale session leaked in
+        // from a prior run) we drop the runtime and rebuild so
+        // `prepare()` doesn't error on a missing encoder.
         let mut runtime = match self.native_runtime.take() {
-            Some(runtime) => runtime,
-            None => self.create_runtime_session(&plan)?,
+            Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
+            _ => self.create_runtime_session(&plan)?,
         };
         let slot = runtime.arm_tail_capture();
 

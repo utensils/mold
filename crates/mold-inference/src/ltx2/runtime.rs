@@ -291,6 +291,15 @@ impl Ltx2VaeLatentStats {
 pub struct Ltx2RuntimeSession {
     device: Option<candle_core::Device>,
     prompt_encoder: Option<NativePromptEncoder>,
+    /// Cached output of the last successful `encode_prompt_pair_with_unconditional`
+    /// call. The prompt encoder is intentionally consumed during the first
+    /// `prepare()` so its VRAM can be freed for the transformer (see the
+    /// `take()` + drop pattern below); that leaves subsequent `prepare()`
+    /// calls on the same session with no encoder. For the render-chain
+    /// path every stage shares the same prompt tokens, so we cache the
+    /// encoding after the first encode and reuse it on follow-up stages —
+    /// no re-encode, no encoder re-load, no VRAM re-hit.
+    cached_prompt_encoding: Option<CachedPromptEncoding>,
     /// Optional slot wired into `render_real_distilled_av` so
     /// `Ltx2Engine::render_chain_stage` can snapshot the pre-VAE-decode
     /// final latents and forward them to the next chain stage as a
@@ -299,6 +308,17 @@ pub struct Ltx2RuntimeSession {
     /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
     /// device creation in `prepare()` and for post-OOM context reset.
     gpu_ordinal: usize,
+}
+
+/// Remembers the last `encode_prompt_pair_with_unconditional` call so
+/// successive `prepare()` calls with the same prompt can skip the encoder
+/// entirely — used by the render-chain path where stages share a prompt.
+struct CachedPromptEncoding {
+    token_pair: super::text::gemma::EncodedPromptPair,
+    encode_unconditional: bool,
+    encoding: NativePromptEncoding,
+    prompt_device_is_cuda: bool,
+    prepared_device: candle_core::Device,
 }
 
 impl Ltx2RuntimeSession {
@@ -310,6 +330,7 @@ impl Ltx2RuntimeSession {
         Self {
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
+            cached_prompt_encoding: None,
             tail_capture: None,
             gpu_ordinal,
         }
@@ -319,6 +340,7 @@ impl Ltx2RuntimeSession {
         Self {
             device: None,
             prompt_encoder: Some(prompt_encoder),
+            cached_prompt_encoding: None,
             tail_capture: None,
             gpu_ordinal,
         }
@@ -332,6 +354,31 @@ impl Ltx2RuntimeSession {
 
     pub(crate) fn clear_tail_capture(&mut self) {
         self.tail_capture = None;
+    }
+
+    /// Whether this session can serve `plan` without a rebuild. Returns
+    /// `true` if the encoder is still available OR the cached encoding
+    /// matches the plan's prompt tokens. Callers use this to decide
+    /// whether to reuse a persisted runtime (fast path — keeps transformer
+    /// and VAE warm) or drop it and build a fresh one (the only way to
+    /// recover when the encoder has been consumed on a prior `prepare()`
+    /// and a different prompt arrives).
+    pub fn can_reuse_for(&self, plan: &Ltx2GeneratePlan) -> bool {
+        if self.prompt_encoder.is_some() {
+            return true;
+        }
+        let Ok(encode_unconditional) = prompt_requires_unconditional_context(plan) else {
+            return false;
+        };
+        // Alt-prompt debug mode requires the live encoder; cache alone
+        // isn't sufficient.
+        if ltx_debug_alt_prompt().is_some() {
+            return false;
+        }
+        self.cached_prompt_encoding.as_ref().is_some_and(|cached| {
+            cached.encode_unconditional == encode_unconditional
+                && cached.token_pair == plan.prompt_tokens
+        })
     }
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
@@ -360,7 +407,31 @@ impl Ltx2RuntimeSession {
             stage1_shape.width = implicit_x2_shape.width;
             stage1_shape.height = implicit_x2_shape.height;
         }
-        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = {
+        let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
+        let alt_prompt_env = ltx_debug_alt_prompt();
+        // Chain path fast-path: if a previous `prepare()` already encoded
+        // the exact same prompt+unconditional combo, reuse those embeddings
+        // instead of demanding the encoder back. Disabled when the
+        // `MOLD_LTX_ALT_PROMPT` debug hook is active because that branch
+        // still needs the live encoder.
+        let cache_hit = alt_prompt_env.is_none()
+            && self.cached_prompt_encoding.as_ref().is_some_and(|cached| {
+                cached.encode_unconditional == encode_unconditional_prompt
+                    && cached.token_pair == plan.prompt_tokens
+            });
+        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if cache_hit {
+            let cached = self
+                .cached_prompt_encoding
+                .as_ref()
+                .expect("cache_hit implies cached_prompt_encoding is Some");
+            log_timing("prepare.prompt_pair", Instant::now());
+            (
+                cached.prompt_device_is_cuda,
+                cached.prepared_device.clone(),
+                cached.encoding.clone(),
+                None,
+            )
+        } else {
             let mut prompt_encoder = self
                 .prompt_encoder
                 .take()
@@ -372,7 +443,6 @@ impl Ltx2RuntimeSession {
                 prompt_encoder.device().clone()
             };
             let prompt_encode_start = Instant::now();
-            let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
             let prompt = move_prompt_encoding_to_device(
                 prompt_encoder.encode_prompt_pair_with_unconditional(
                     &plan.prompt_tokens,
@@ -382,7 +452,7 @@ impl Ltx2RuntimeSession {
             )?;
             log_timing("prepare.prompt_pair", prompt_encode_start);
             let alt_prompt_start = Instant::now();
-            let debug_alt_prompt = match ltx_debug_alt_prompt() {
+            let debug_alt_prompt = match alt_prompt_env.clone() {
                 Some(alt_prompt) => {
                     let assets =
                         super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
@@ -413,6 +483,18 @@ impl Ltx2RuntimeSession {
                 }
             }
             log_timing("prepare.prompt_debug", prompt_debug_start);
+            // Cache the encoding for the next chain stage. Dropping the
+            // encoder here (end of the else branch) still happens — we're
+            // only holding on to the `NativePromptEncoding` output, not the
+            // encoder itself, so the VRAM-free property of the original
+            // take() pattern is preserved.
+            self.cached_prompt_encoding = Some(CachedPromptEncoding {
+                token_pair: plan.prompt_tokens.clone(),
+                encode_unconditional: encode_unconditional_prompt,
+                encoding: prompt.clone(),
+                prompt_device_is_cuda,
+                prepared_device: prepared_device.clone(),
+            });
             (
                 prompt_device_is_cuda,
                 prepared_device,
@@ -5504,6 +5586,11 @@ mod tests {
 
     #[test]
     fn runtime_session_prepare_consumes_prompt_encoder() {
+        // The encoder is still consumed on first prepare() — the encoder
+        // slot moves out to free VRAM for the transformer. But same-prompt
+        // follow-up calls now short-circuit through `cached_prompt_encoding`
+        // so chain stages that replicate the prompt can reuse the session
+        // instead of erroring on a consumed encoder.
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -5513,7 +5600,39 @@ mod tests {
         let mut session = runtime_session();
         session.prepare(&plan).unwrap();
 
-        assert!(session.prepare(&plan).is_err());
+        // Encoder slot is empty post-take.
+        assert!(session.prompt_encoder.is_none());
+        // But `can_reuse_for` reports true because the cached encoding
+        // matches the incoming plan's prompt tokens.
+        assert!(session.can_reuse_for(&plan));
+        // Same-prompt re-prepare succeeds from the cache.
+        session
+            .prepare(&plan)
+            .expect("same-prompt cache hit must succeed");
+    }
+
+    #[test]
+    fn runtime_session_prepare_rejects_encoder_reuse_with_different_prompt() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        session.prepare(&plan).unwrap();
+
+        // Mutate the plan's prompt tokens so the cache key misses.
+        let mut plan_alt = plan.clone();
+        plan_alt.prompt_tokens.conditional.input_ids[0] =
+            plan_alt.prompt_tokens.conditional.input_ids[0].wrapping_add(1);
+
+        // can_reuse_for must report false for a fresh prompt because the
+        // encoder has already been consumed.
+        assert!(!session.can_reuse_for(&plan_alt));
+        // And prepare() with the new plan fails explicitly so the caller
+        // knows to drop the session and rebuild.
+        assert!(session.prepare(&plan_alt).is_err());
     }
 
     #[test]

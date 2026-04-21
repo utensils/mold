@@ -138,6 +138,14 @@ pub struct AppState {
     pub model_load_lock: Arc<Mutex<()>>,
     /// Guards concurrent pulls — only one download at a time.
     pub pull_lock: Arc<Mutex<()>>,
+    /// Serializes chained video renders. The chain handler removes the
+    /// engine from `model_cache` and runs blocking work outside that
+    /// lock for the full multi-minute chain; without a dedicated lock two
+    /// concurrent chain requests race on `cache.take()` and the loser
+    /// surfaces "engine vanished from cache after ensure_model_ready".
+    /// Held for the entire chain (load + all stages + restore); other
+    /// single-clip requests continue to queue normally on `queue`.
+    pub chain_lock: Arc<Mutex<()>>,
     /// Generation request queue.
     pub queue: QueueHandle,
     /// Shared tokenizer pool for cross-engine caching.
@@ -188,6 +196,7 @@ impl AppState {
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
+            chain_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -215,6 +224,7 @@ impl AppState {
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
+            chain_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -264,6 +274,7 @@ impl AppState {
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
+            chain_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -300,6 +311,7 @@ impl AppState {
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
+            chain_lock: Arc::new(Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),

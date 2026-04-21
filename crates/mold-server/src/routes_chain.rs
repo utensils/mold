@@ -284,6 +284,17 @@ async fn run_chain(
     req: ChainRequest,
     progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
 ) -> Result<(ChainResponse, u64), ChainRunError> {
+    // Serialize concurrent chain requests. The chain handler deliberately
+    // takes the engine out of `model_cache` for the full multi-minute run
+    // (see below) — without this lock a second chain request arriving
+    // mid-run calls `ensure_model_ready`, sees an empty cache, tries to
+    // load a second copy of the model, and the subsequent `cache.take()`
+    // reports "engine vanished from cache after ensure_model_ready".
+    // Holding for the whole chain is intentional: single-clip requests
+    // keep flowing through the normal generation queue; only chains wait
+    // on each other.
+    let _chain_guard = state.chain_lock.lock().await;
+
     // Ensure the model is loaded. Progress forwarding is not plumbed yet —
     // load-time events go through the model manager's own tracing. Chain
     // stage events (StageStart/DenoiseStep/StageDone/Stitching) come from

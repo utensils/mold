@@ -1259,6 +1259,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -1312,6 +1313,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -1568,6 +1570,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
+            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
