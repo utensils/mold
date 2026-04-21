@@ -89,11 +89,11 @@ export interface UseGenerateStream {
  * keys, so a non-cryptographic fallback is fine.
  */
 function makeJobId(): string {
-  if (
-    typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-  ) {
-    return crypto.randomUUID();
+  try {
+    const g = (globalThis as { crypto?: Crypto }).crypto;
+    if (g && typeof g.randomUUID === "function") return g.randomUUID();
+  } catch {
+    /* fall through to Math.random fallback */
   }
   return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
