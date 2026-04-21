@@ -83,18 +83,16 @@ impl ClipWithTokenizer {
                 .ok_or_else(|| anyhow::anyhow!("Failed to tokenize CLIP end-of-text"))?,
         };
 
-        let mut tokens = self
+        let raw_tokens = self
             .tokenizer
             .encode(prompt, true)
             .map_err(|e| anyhow::anyhow!("CLIP tokenization failed: {e}"))?
             .get_ids()
             .to_vec();
 
-        let eos_position = tokens.len() - 1;
+        let (tokens, eos_position) =
+            prepare_clip_tokens(raw_tokens, self.max_position_embeddings, pad_id);
 
-        while tokens.len() < self.max_position_embeddings {
-            tokens.push(pad_id);
-        }
         let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
         let (_text_embeddings, text_embeddings_penultimate) =
             clip.forward_until_encoder_layer(&tokens, usize::MAX, -2)?;
@@ -291,5 +289,103 @@ impl SD3TripleEncoder {
     /// Check if encoder weights are currently loaded.
     pub fn is_loaded(&self) -> bool {
         self.clip_l.model.is_some() && self.clip_g.model.is_some() && self.t5.model.is_some()
+    }
+}
+
+/// Prepare a CLIP token sequence for the fixed position-embedding window.
+///
+/// CLIP's position-embedding table holds exactly `max_len` entries, so a token
+/// tensor longer than that fails inside candle's `broadcast_add` when the
+/// position embeddings are applied. This helper:
+///
+/// - Truncates overlong sequences to `max_len`, copying the trailing token
+///   (the tokenizer's EOS, assuming `add_special_tokens=true`) into the last
+///   slot so the pooled-output path still reads an EOS-position hidden state.
+/// - Pads short sequences up to `max_len` with `pad_id`.
+/// - Returns the final `tokens` vector and the `eos_position` index the caller
+///   uses to slice the pooled output.
+fn prepare_clip_tokens(mut raw_tokens: Vec<u32>, max_len: usize, pad_id: u32) -> (Vec<u32>, usize) {
+    let original_len = raw_tokens.len();
+
+    if original_len > max_len {
+        let eos_id = *raw_tokens
+            .last()
+            .expect("original_len > max_len implies non-empty");
+        raw_tokens.truncate(max_len);
+        if let Some(last) = raw_tokens.last_mut() {
+            *last = eos_id;
+        }
+        tracing::debug!(
+            "SD3 CLIP prompt exceeded {} tokens ({} raw); truncated with EOS preserved",
+            max_len,
+            original_len,
+        );
+    }
+
+    let eos_position = raw_tokens.len().saturating_sub(1);
+
+    while raw_tokens.len() < max_len {
+        raw_tokens.push(pad_id);
+    }
+
+    (raw_tokens, eos_position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_clip_tokens;
+
+    const MAX_LEN: usize = 77;
+    const PAD_ID: u32 = 0;
+    const EOS_ID: u32 = 49407;
+
+    #[test]
+    fn pads_short_prompt_to_max_len() {
+        let raw = vec![49406, 10, 20, 30, EOS_ID]; // 5 tokens, last is EOS
+        let (tokens, eos) = prepare_clip_tokens(raw, MAX_LEN, PAD_ID);
+        assert_eq!(tokens.len(), MAX_LEN, "must pad up to max_len");
+        assert_eq!(eos, 4, "eos_position tracks the raw EOS slot");
+        assert_eq!(tokens[4], EOS_ID, "EOS preserved at original position");
+        assert_eq!(tokens[5], PAD_ID, "pads follow the real tokens");
+        assert_eq!(*tokens.last().unwrap(), PAD_ID);
+    }
+
+    #[test]
+    fn leaves_exact_length_untouched() {
+        let mut raw: Vec<u32> = (1..MAX_LEN as u32).collect();
+        raw.push(EOS_ID);
+        assert_eq!(raw.len(), MAX_LEN);
+        let (tokens, eos) = prepare_clip_tokens(raw.clone(), MAX_LEN, PAD_ID);
+        assert_eq!(tokens.len(), MAX_LEN);
+        assert_eq!(eos, MAX_LEN - 1);
+        assert_eq!(tokens, raw);
+    }
+
+    #[test]
+    fn truncates_overlong_prompt_preserving_eos() {
+        // 132-token sequence — matches the shapes in the original bug report
+        // ([1, 132, 768] vs [1, 77, 768]).
+        let mut raw: Vec<u32> = (1..=131).collect();
+        raw.push(EOS_ID);
+        assert_eq!(raw.len(), 132);
+
+        let (tokens, eos) = prepare_clip_tokens(raw, MAX_LEN, PAD_ID);
+
+        assert_eq!(tokens.len(), MAX_LEN, "overlong sequence must be truncated");
+        assert_eq!(eos, MAX_LEN - 1, "eos_position must land on the last slot");
+        assert_eq!(
+            tokens[MAX_LEN - 1],
+            EOS_ID,
+            "EOS must be preserved in the final slot so pooled output reads EOS hidden state",
+        );
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        // Degenerate case: tokenizer somehow returns no ids. Shouldn't panic.
+        let (tokens, eos) = prepare_clip_tokens(Vec::new(), MAX_LEN, PAD_ID);
+        assert_eq!(tokens.len(), MAX_LEN);
+        assert_eq!(eos, 0);
+        assert!(tokens.iter().all(|t| *t == PAD_ID));
     }
 }
