@@ -218,19 +218,20 @@ nix develop github:utensils/mold
 
 The devshell includes Rust toolchain, CUDA toolkit, and convenience commands:
 
-| Command         | Description                        |
-| --------------- | ---------------------------------- |
-| `build`         | `cargo build` (debug)              |
-| `build-release` | `cargo build --release`            |
-| `build-server`  | Build with GPU + preview + discord |
-| `serve`         | Start the mold server              |
-| `generate`      | Generate an image                  |
-| `mold`          | Run any mold CLI command           |
-| `check`         | `cargo check`                      |
-| `clippy`        | `cargo clippy`                     |
-| `fmt`           | `cargo fmt`                        |
-| `run-tests`     | `cargo test`                       |
-| `coverage`      | Test coverage report               |
-| `docs-dev`      | Start VitePress docs dev server    |
-| `docs-build`    | Build the documentation site       |
-| `docs-fmt`      | Format docs with prettier          |
+| Command           | Description                                               |
+| ----------------- | --------------------------------------------------------- |
+| `build`           | Fast local `mold` build (`dev-fast`) with embedded web UI |
+| `build-workspace` | `cargo build` (debug, all crates)                         |
+| `build-release`   | Shipping release build with the full feature set          |
+| `build-server`    | Fast local server build with GPU + preview + expand       |
+| `serve`           | Start the mold server                                     |
+| `generate`        | Generate an image                                         |
+| `mold`            | Run any mold CLI command                                  |
+| `check`           | `cargo check`                                             |
+| `clippy`          | `cargo clippy`                                            |
+| `fmt`             | `cargo fmt`                                               |
+| `run-tests`       | `cargo test`                                              |
+| `coverage`        | Test coverage report                                      |
+| `docs-dev`        | Start VitePress docs dev server                           |
+| `docs-build`      | Build the documentation site                              |
+| `docs-fmt`        | Format docs with prettier                                 |

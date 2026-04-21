@@ -109,6 +109,7 @@
               pkgs.llvmPackages.libclang.lib
             ]
             ++ lib.optionals isLinux [
+              pkgs.lld
               pkgs.cudaPackages.cuda_nvcc
             ];
             buildInputs = [
@@ -136,8 +137,6 @@
           opensslLibDir = "${pkgs.lib.getLib pkgs.openssl}/lib";
           opensslIncludeDir = "${pkgs.openssl.dev}/include";
 
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
           gpuFeature =
             if isLinux then
               "cuda"
@@ -146,12 +145,34 @@
             else
               "";
 
-          # Features string for devshell commands: GPU + preview + discord + expand + tui + video formats
+          devProfile = "dev-fast";
+
+          # Fast local iteration defaults: GPU backend + preview + prompt expansion.
           devFeatures =
             if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui,webp,mp4"
+              "${gpuFeature},preview,expand"
             else
-              "preview,discord,expand,tui,webp,mp4";
+              "preview,expand";
+
+          # Full shipping feature set used for release builds and feature coverage.
+          releaseFeatures =
+            if gpuFeature != "" then
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics"
+            else
+              "preview,discord,expand,tui,webp,mp4,metrics";
+
+          cargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs
+            // {
+              cargoExtraArgs = "-p mold-ai --features ${releaseFeatures}";
+            }
+          );
+
+          webEmbedSetup = ''
+            export SCCACHE_DIR="''${MOLD_SCCACHE_DIR:-$PWD/.cache/sccache}"
+            export MOLD_WEB_DIST="$PWD/web/dist"
+            ./scripts/ensure-web-dist.sh
+          '';
 
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
@@ -215,9 +236,7 @@
               // {
                 inherit cargoArtifacts meta;
                 MOLD_WEB_DIST = "${mold-web}";
-                cargoExtraArgs =
-                  "-p mold-ai --features preview,discord,expand,tui,webp,mp4,metrics"
-                  + lib.optionalString (gpuFeature != "") ",${gpuFeature}";
+                cargoExtraArgs = "-p mold-ai --features ${releaseFeatures}";
                 postInstall = ''
                   installShellCompletion --cmd mold \
                     --bash <($out/bin/mold completions bash) \
@@ -278,6 +297,7 @@
               pkgs.pkg-config
               pkgs.openssl
               pkgs.nasm
+              pkgs.sccache
               pkgs.git
               pkgs.gh
               pkgs.jq
@@ -296,6 +316,7 @@
               pkgs.llvmPackages.libcxxClang
             ]
             ++ lib.optionals isLinux [
+              pkgs.lld
               pkgs.cudaPackages.cuda_nvcc
               pkgs.cudaPackages.cuda_cudart
               pkgs.cudaPackages.libcublas.lib
@@ -312,6 +333,14 @@
               {
                 name = "MOLD_LTX_DEBUG";
                 value = "1";
+              }
+              {
+                name = "CARGO_INCREMENTAL";
+                value = "1";
+              }
+              {
+                name = "RUSTC_WRAPPER";
+                value = "sccache";
               }
               {
                 name = "PKG_CONFIG_PATH";
@@ -386,26 +415,44 @@
               {
                 category = "build";
                 name = "build";
-                help = "cargo build (debug, all crates)";
+                help = "fast local mold build with the web bundle embedded";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo build --profile ${devProfile} -p mold-ai --features ${devFeatures} "$@"
+                '';
+              }
+              {
+                category = "build";
+                name = "build-workspace";
+                help = "cargo build the full workspace in debug mode";
                 command = "cargo build \"$@\"";
               }
               {
                 category = "build";
                 name = "build-release";
-                help = "cargo build --release -p mold-ai --features ${devFeatures}";
-                command = "cargo build --release -p mold-ai --features ${devFeatures} \"$@\"";
+                help = "shipping mold build with the full feature set and embedded web UI";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo build --release -p mold-ai --features ${releaseFeatures} "$@"
+                '';
               }
               {
                 category = "build";
                 name = "build-server";
-                help = "cargo build -p mold-ai --features ${devFeatures} (single binary with GPU + preview)";
-                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+                help = "fast local server build with GPU + preview + expand and embedded web UI";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo build --profile ${devProfile} -p mold-ai --features ${devFeatures} "$@"
+                '';
               }
               {
                 category = "build";
                 name = "build-discord";
-                help = "cargo build -p mold-ai --features discord";
-                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+                help = "fast local Discord-bot build";
+                command = "cargo build --profile ${devProfile} -p mold-ai --features discord \"$@\"";
               }
               {
                 category = "build";
@@ -434,8 +481,8 @@
               {
                 category = "check";
                 name = "clippy";
-                help = "cargo clippy --workspace -- -D warnings (matches CI)";
-                command = "cargo clippy --workspace \"$@\" -- -D warnings";
+                help = "cargo clippy --workspace --all-targets -- -D warnings (matches CI)";
+                command = "cargo clippy --workspace --all-targets \"$@\" -- -D warnings";
               }
               {
                 category = "check";
@@ -451,7 +498,7 @@
                   set -euo pipefail
                   cargo fmt --all -- --check
                   cargo check --workspace
-                  cargo clippy --workspace -- -D warnings
+                  cargo clippy --workspace --all-targets -- -D warnings
                   cargo test --workspace
                   cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
                 '';
@@ -493,26 +540,38 @@
               {
                 category = "run";
                 name = "mold";
-                help = "run mold CLI (e.g. mold list, mold ps, mold pull)";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- \"$@\"";
+                help = "run mold CLI with the fast local feature set";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo run --profile ${devProfile} -p mold-ai --features ${devFeatures} -- "$@"
+                '';
               }
               {
                 category = "run";
                 name = "serve";
                 help = "start the mold server";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- serve \"$@\"";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo run --profile ${devProfile} -p mold-ai --features ${devFeatures} -- serve "$@"
+                '';
               }
               {
                 category = "run";
                 name = "generate";
                 help = "generate an image from a prompt";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- run \"$@\"";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo run --profile ${devProfile} -p mold-ai --features ${devFeatures} -- run "$@"
+                '';
               }
               {
                 category = "run";
                 name = "discord-bot";
                 help = "start the mold Discord bot";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- discord \"$@\"";
+                command = "cargo run --profile ${devProfile} -p mold-ai --features discord -- discord \"$@\"";
               }
               {
                 category = "runpod";
@@ -548,13 +607,21 @@
                 category = "run";
                 name = "build-ltx2";
                 help = "build mold with the full feature set for LTX-2 work";
-                command = "cargo build -p mold-ai --features ${devFeatures} \"$@\"";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo build --profile ${devProfile} -p mold-ai --features ${releaseFeatures} "$@"
+                '';
               }
               {
                 category = "run";
                 name = "smoke-ltx2";
                 help = "run a local LTX-2 / LTX-2.3 smoke inference";
-                command = "cargo run -p mold-ai --features ${devFeatures} -- run --local \"$@\"";
+                command = ''
+                  set -euo pipefail
+                  ${webEmbedSetup}
+                  cargo run --profile ${devProfile} -p mold-ai --features ${releaseFeatures} -- run --local "$@"
+                '';
               }
               {
                 category = "run";
